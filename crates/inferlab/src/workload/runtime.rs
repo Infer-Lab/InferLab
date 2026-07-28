@@ -225,7 +225,7 @@ fn run_eval_operation(
             ..
         } => {
             let request = EvalClientRequest {
-                protocol_version: ProtocolVersion::V6,
+                protocol_version: ProtocolVersion::V7,
                 workspace_root: workspace_root.to_path_buf(),
                 workspace_source_exclusions: plan.workspace_source_exclusions.clone(),
                 endpoint: wire::endpoint_input(&plan.endpoint),
@@ -338,7 +338,7 @@ fn prepare_bench_request_source(
                     .log(session.absolute(&paths.stderr)),
             )?;
             let request = BenchDatasetPreparationRequest {
-                protocol_version: ProtocolVersion::V6,
+                protocol_version: ProtocolVersion::V7,
                 model: wire::model_input(&plan.client.model),
                 request_source: wire::bench_request_source_input(
                     &plan.client.effective_definition.request_source,
@@ -1123,7 +1123,7 @@ fn run_bench_client(
     bound: &OperationBound,
 ) -> Result<AcceptedClient<BenchClientResult>, InferlabError> {
     let request = BenchClientRequest {
-        protocol_version: ProtocolVersion::V6,
+        protocol_version: ProtocolVersion::V7,
         endpoint: wire::endpoint_input(&plan.client.endpoint),
         model: wire::model_input(&plan.client.model),
         definition: wire::bench_definition_input(&plan.client.effective_definition),

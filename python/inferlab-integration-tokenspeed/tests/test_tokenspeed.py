@@ -13,12 +13,12 @@ from inferlab_adapter_sdk import (
     ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
     RenderServeInput,
+    RenderSource,
     ServeModelInput,
     ServeProcessAllocation,
     ServeRoleInput,
     ServeRoleKind,
     ServeRoleLinkKvTransfer,
-    ServeRoleResult,
     ServeTopology,
     SettingValue,
 )
@@ -66,7 +66,8 @@ def _plan_input(**overrides: object) -> PlanServeInput:
     base: dict[str, object] = {
         "model": ServeModelInput(id="dsv4", served_name="dsv4-flash"),
         "topology": ServeTopology.single,
-        "routing_backend": None,
+        "gateway_backend": None,
+        "pd_router_backend": None,
         "kv_transfer": None,
         "roles": roles,
         "profiling": False,
@@ -88,11 +89,13 @@ def test_plan_dsv4_dp_ep_shape_and_endpoint_contract() -> None:
     readiness = replica.primary_readiness.root
     assert isinstance(readiness, ReadinessProbeHttp)
     assert readiness.path == "/readiness"
-    assert result.endpoint.completions_path == "/v1/completions"
-    assert result.endpoint.chat_completions_path == "/v1/chat/completions"
-    assert result.endpoint.prefix_cache_reset is not None
-    assert result.endpoint.prefix_cache_reset.path == "/flush_cache"
     role = result.roles[0]
+    endpoint = role.public_endpoint
+    assert endpoint is not None
+    assert endpoint.completions_path == "/v1/completions"
+    assert endpoint.chat_completions_path == "/v1/chat/completions"
+    assert endpoint.prefix_cache_reset is not None
+    assert endpoint.prefix_cache_reset.path == "/flush_cache"
     assert role.effective_settings["enable_prefix_caching"].root is True
 
     outer = role.effective_parallelism.outer
@@ -143,7 +146,7 @@ def test_plan_tp_only_shape_fills_every_component() -> None:
 
 def _prefill_decode_plan_input(
     *,
-    routing_backend: str = "tokenspeed-smg",
+    frontend_backend: str = "tokenspeed-smg",
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
     extra_args: list[str] | None = None,
     prefill_replicas: int = 2,
@@ -158,7 +161,8 @@ def _prefill_decode_plan_input(
         settings["extra_args"] = SettingValue.model_validate(extra_args)
     return _plan_input(
         topology=ServeTopology.prefill_decode,
-        routing_backend=routing_backend,
+        gateway_backend=frontend_backend,
+        pd_router_backend=frontend_backend,
         kv_transfer=transport,
         parallelism=parallelism,
         settings=settings,
@@ -187,16 +191,14 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
     assert [role.kind for role in result.roles] == [
         ServeRoleKind.prefill,
         ServeRoleKind.decode,
-        ServeRoleKind.router,
     ]
-    assert [role.effective_replica_count for role in result.roles] == [2, 3, 1]
+    assert [role.effective_replica_count for role in result.roles] == [2, 3]
     assert [replica.id for replica in result.replicas] == [
         "prefill-000",
         "prefill-001",
         "decode-000",
         "decode-001",
         "decode-002",
-        "router",
     ]
     assert [replica.ports for replica in result.replicas] == [
         ["dist_init", "bootstrap"],
@@ -204,18 +206,20 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
         ["dist_init"],
         ["dist_init"],
         ["dist_init"],
-        ["prometheus"],
     ]
     assert [link.root.kind for link in result.links] == [
+        "request_routing",
         "request_routing",
         "kv_transfer",
         "bootstrap",
     ]
-    transfer = result.links[1].root
+    transfer = result.links[2].root
     assert isinstance(transfer, ServeRoleLinkKvTransfer)
     assert transfer.mechanism == KvTransferMechanism.mooncake
 
-    readiness = result.replicas[-1].primary_readiness.root
+    assert result.gateway is not None
+    assert result.pd_router is not None
+    readiness = result.pd_router.readiness.root
     assert isinstance(readiness, ReadinessProbeHttpTargetRegistry)
     assert readiness.model_dump() == {
         "kind": "http_target_registry",
@@ -231,20 +235,21 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
     }
-    assert result.routing.root.owner == "integration_native"
-    assert result.routing.root.role == "router"
-    assert result.routing.root.replica == 0
-    assert result.endpoint.completions_path == "/v1/completions"
-    assert result.endpoint.chat_completions_path == "/v1/chat/completions"
-    assert result.endpoint.prefix_cache_reset is not None
-    assert result.endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert result.gateway.backend == "tokenspeed-smg"
+    assert result.gateway.render_source == RenderSource.integration
+    assert result.gateway.endpoint.completions_path == "/v1/completions"
+    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
+    assert result.gateway.endpoint.prefix_cache_reset is not None
+    assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert result.pd_router.backend == "tokenspeed-smg"
+    assert result.pd_router.ports == ["prometheus"]
 
 
 def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
     with pytest.raises(AdapterOperationError):
         plan_serve(_prefill_decode_plan_input(transport=KvTransferMechanism.nixl))
     with pytest.raises(AdapterOperationError):
-        plan_serve(_prefill_decode_plan_input(routing_backend="builtin"))
+        plan_serve(_prefill_decode_plan_input(frontend_backend="builtin"))
     with pytest.raises(AdapterOperationError):
         plan_serve(_plan_input(profiling=True))
 
@@ -293,24 +298,20 @@ def _render_input(**overrides: object) -> RenderServeInput:
         dict[str, SettingValue],
         overrides.pop("settings", plan.roles[0].effective_settings),
     )
-    roles = list(cast(list[ServeRoleResult], overrides.pop("roles", plan.roles)))
-    roles[0] = roles[0].model_copy(
-        update={"effective_parallelism": parallelism, "effective_settings": settings}
-    )
     base: dict[str, object] = {
         "model": ServeModelInput(id="dsv4", served_name="dsv4-flash"),
         "topology": ServeTopology.single,
-        "routing_backend": None,
+        "gateway_backend": None,
+        "pd_router_backend": None,
         "kv_transfer": None,
-        "roles": roles,
-        "links": [],
-        "routing": plan.routing,
         "profiling": False,
         "allocations": [
             ServeProcessAllocation.model_validate(
                 {
+                    "kind": "model_rank",
                     "process": "server",
                     "role": "serve",
+                    "role_kind": "serve",
                     "replica": 0,
                     "rank": 0,
                     "rank_count": 1,
@@ -324,7 +325,11 @@ def _render_input(**overrides: object) -> RenderServeInput:
                     },
                     "cache": "/cache/server",
                     "launch": {"kind": "local"},
+                    "effective_settings": settings,
+                    "effective_parallelism": parallelism,
+                    "links": [],
                     "dependencies": [],
+                    "render_inputs": [],
                 }
             )
         ],
@@ -347,9 +352,10 @@ def _prefill_decode_render_input() -> RenderServeInput:
         ]
     )
     plan = plan_serve(plan_input)
-    allocations = []
+    roles = {role.id: role for role in plan.roles}
+    allocations: list[ServeProcessAllocation] = []
     for index, replica in enumerate(plan.replicas):
-        is_router = replica.role_id == "router"
+        role = roles[replica.role_id]
         ports: dict[str, dict[str, object]] = {}
         if "dist_init" in replica.ports:
             ports["dist_init"] = {
@@ -361,44 +367,65 @@ def _prefill_decode_render_input() -> RenderServeInput:
                 "host": f"node-{index}.example",
                 "port": 9000 + index,
             }
-        if "prometheus" in replica.ports:
-            ports["prometheus"] = {
-                "host": "router.example",
-                "port": 30001,
-            }
         allocations.append(
             ServeProcessAllocation.model_validate(
                 {
+                    "kind": "model_rank",
                     "process": replica.id,
                     "role": replica.role_id,
+                    "role_kind": role.kind,
                     "replica": replica.replica_index,
                     "rank": 0,
                     "rank_count": 1,
-                    "machine": "router" if is_router else f"node-{index}",
-                    "model_locator": None if is_router else "/models/dsv4",
-                    "devices": [] if is_router else [index * 2, index * 2 + 1],
+                    "machine": f"node-{index}",
+                    "model_locator": "/models/dsv4",
+                    "devices": [index * 2, index * 2 + 1],
                     "endpoint": {
-                        "host": "router.example" if is_router else f"node-{index}.example",
-                        "port": 30000 if is_router else 8000,
+                        "host": f"node-{index}.example",
+                        "port": 8000,
                     },
                     "ports": ports,
                     "cache": f"/cache/{replica.id}",
                     "launch": {"kind": "local"},
+                    "effective_settings": role.effective_settings,
+                    "effective_parallelism": role.effective_parallelism,
+                    "links": plan.links,
                     "dependencies": [],
+                    "render_inputs": [],
                 }
             )
         )
+    assert plan.gateway is not None
+    assert plan.pd_router is not None
+    allocations.append(
+        ServeProcessAllocation.model_validate(
+            {
+                "kind": "frontend",
+                "process": "gateway",
+                "process_role": "gateway",
+                "components": ["gateway", "pd_router"],
+                "machine": "gateway",
+                "devices": [],
+                "endpoint": {"host": "gateway.example", "port": 30000},
+                "ports": {"prometheus": {"host": "gateway.example", "port": 30001}},
+                "cache": "/cache/gateway",
+                "launch": {"kind": "local"},
+                "gateway": plan.gateway,
+                "pd_router": plan.pd_router,
+                "links": plan.links,
+                "dependencies": [allocation.root.process for allocation in allocations],
+                "render_inputs": [],
+            }
+        )
+    )
     return RenderServeInput(
         model=plan_input.model,
         topology=plan_input.topology,
-        routing_backend=plan_input.routing_backend,
+        gateway_backend=plan_input.gateway_backend,
+        pd_router_backend=plan_input.pd_router_backend,
         kv_transfer=plan_input.kv_transfer,
-        roles=plan.roles,
-        links=plan.links,
-        routing=plan.routing,
         profiling=False,
         allocations=allocations,
-        render_inputs=[],
     )
 
 
@@ -406,7 +433,7 @@ def test_render_launches_tokenspeed_with_the_effective_dsv4_shape() -> None:
     result = render_serve(_render_input())
 
     assert len(result.processes) == 1
-    argv = result.processes[0].command.argv
+    argv = result.processes[0].root.command.argv
     assert argv[:5] == ["python3", "-m", "tokenspeed.cli", "serve", "/models/dsv4"]
     expected_options = {
         "--host": "127.0.0.1",
@@ -438,7 +465,7 @@ def test_render_launches_tokenspeed_with_the_effective_dsv4_shape() -> None:
     assert "--disable-kvstore" in argv
     assert "--trust-remote-code" in argv
 
-    env = result.processes[0].command.env
+    env = result.processes[0].root.command.env
     assert env["DG_JIT_CACHE_DIR"] == "/cache/server/deep_gemm_jit"
     assert env["TRITON_CACHE_DIR"] == "/cache/server/triton"
     assert env["TORCHINDUCTOR_CACHE_DIR"] == "/cache/server/torchinductor"
@@ -468,10 +495,8 @@ def test_render_merges_extra_args_without_yielding_inferlab_owned_values() -> No
         ]
     )
     plan = plan_serve(_plan_input(settings=settings))
-    result = render_serve(
-        _render_input(settings=plan.roles[0].effective_settings, roles=plan.roles)
-    )
-    argv = result.processes[0].command.argv
+    result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
+    argv = result.processes[0].root.command.argv
 
     assert "/models/shadow" not in argv
     assert argv[argv.index("--port") + 1] == "8000"
@@ -489,10 +514,8 @@ def test_render_can_explicitly_disable_prefix_caching() -> None:
     settings["enable_prefix_caching"] = SettingValue(root=False)
     plan = plan_serve(_plan_input(settings=settings))
 
-    result = render_serve(
-        _render_input(settings=plan.roles[0].effective_settings, roles=plan.roles)
-    )
-    argv = result.processes[0].command.argv
+    result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
+    argv = result.processes[0].root.command.argv
 
     assert "--no-enable-prefix-caching" in argv
     assert "--enable-prefix-caching" not in argv
@@ -502,15 +525,16 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
     render_input = _prefill_decode_render_input()
     result = render_serve(render_input)
 
-    assert [process.process for process in result.processes] == [
+    assert [process.root.process for process in result.processes] == [
         "prefill-000",
         "prefill-001",
         "decode-000",
         "decode-001",
         "decode-002",
-        "router",
+        "gateway",
     ]
-    for process in result.processes[:2]:
+    for wrapped in result.processes[:2]:
+        process = wrapped.root
         argv = process.command.argv
         assert argv[:3] == ["python3", "-m", "smg_grpc_servicer.tokenspeed"]
         assert argv[argv.index("--disaggregation-mode") + 1] == "prefill"
@@ -523,7 +547,7 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
         assert "http://shadow" not in argv
         assert "--control-port" not in argv
         assert process.command.env["TOKENSPEED_SKIP_GRPC_WARMUP"] == "1"
-    prefill = result.processes[0].command.argv
+    prefill = result.processes[0].root.command.argv
     expected_options = {
         "--model": "/models/dsv4",
         "--host": "node-0.example",
@@ -540,7 +564,8 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
     for option, value in expected_options.items():
         assert prefill[prefill.index(option) + 1] == value
 
-    for process in result.processes[2:5]:
+    for wrapped in result.processes[2:5]:
+        process = wrapped.root
         argv = process.command.argv
         assert argv[:3] == ["python3", "-m", "smg_grpc_servicer.tokenspeed"]
         assert argv[argv.index("--disaggregation-mode") + 1] == "decode"
@@ -548,54 +573,49 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
         assert "--disaggregation-bootstrap-port" not in argv
         assert process.command.env["TOKENSPEED_SKIP_GRPC_WARMUP"] == "1"
 
-    router = result.processes[-1].command.argv
-    assert router[:4] == ["python3", "-m", "smg", "launch"]
-    assert router[router.index("--host") + 1] == "0.0.0.0"
-    assert [router[index + 1] for index, arg in enumerate(router) if arg == "--prefill"] == [
+    gateway = result.processes[-1].root.command.argv
+    assert gateway[:4] == ["python3", "-m", "smg", "launch"]
+    assert gateway[gateway.index("--host") + 1] == "0.0.0.0"
+    assert [gateway[index + 1] for index, arg in enumerate(gateway) if arg == "--prefill"] == [
         "grpc://node-0.example:8000",
         "grpc://node-1.example:8000",
     ]
-    assert [router[index + 2] for index, arg in enumerate(router) if arg == "--prefill"] == [
+    assert [gateway[index + 2] for index, arg in enumerate(gateway) if arg == "--prefill"] == [
         "9000",
         "9001",
     ]
-    assert [router[index + 1] for index, arg in enumerate(router) if arg == "--decode"] == [
+    assert [gateway[index + 1] for index, arg in enumerate(gateway) if arg == "--decode"] == [
         "grpc://node-2.example:8000",
         "grpc://node-3.example:8000",
         "grpc://node-4.example:8000",
     ]
-    assert router[router.index("--policy") + 1] == "round_robin"
-    assert router[router.index("--prefill-policy") + 1] == "round_robin"
-    assert router[router.index("--decode-policy") + 1] == "round_robin"
-    assert router[router.index("--prometheus-port") + 1] == "30001"
-    assert router[router.index("--worker-startup-timeout-secs") + 1] == "2147483647"
+    assert gateway[gateway.index("--policy") + 1] == "round_robin"
+    assert gateway[gateway.index("--prefill-policy") + 1] == "round_robin"
+    assert gateway[gateway.index("--decode-policy") + 1] == "round_robin"
+    assert gateway[gateway.index("--prometheus-port") + 1] == "30001"
+    assert gateway[gateway.index("--worker-startup-timeout-secs") + 1] == "2147483647"
 
 
 def test_render_requires_allocated_control_and_dist_init_ports_and_one_process() -> None:
-    allocation = _render_input().allocations[0].model_copy(update={"ports": {}})
+    base = _render_input().allocations[0].model_dump()
+    allocation = ServeProcessAllocation.model_validate({**base, "ports": {}})
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[allocation]))
 
-    allocation = (
-        _render_input()
-        .allocations[0]
-        .model_copy(update={"ports": {"control": _render_input().allocations[0].ports["control"]}})
-    )
+    control = cast(dict[str, object], base["ports"])["control"]
+    allocation = ServeProcessAllocation.model_validate({**base, "ports": {"control": control}})
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[allocation]))
 
-    second = (
-        _render_input()
-        .allocations[0]
-        .model_copy(
-            update={
-                "process": "server-rank-001",
-                "rank": 1,
-                "rank_count": 2,
-                "machine": "node-b",
-            }
-        )
+    second = ServeProcessAllocation.model_validate(
+        {
+            **base,
+            "process": "server-rank-001",
+            "rank": 1,
+            "rank_count": 2,
+            "machine": "node-b",
+        }
     )
-    first = _render_input().allocations[0].model_copy(update={"rank_count": 2})
+    first = ServeProcessAllocation.model_validate({**base, "rank_count": 2})
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[first, second]))

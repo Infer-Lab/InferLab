@@ -1,12 +1,12 @@
 {
   "status": "ok",
-  "protocol_version": "6",
+  "protocol_version": "7",
   "result": {
     "operation": "plan_serve",
     "output": {
       "integration": {
         "adapter_id": "inferlab-vllm",
-        "adapter_version": "0.4.0",
+        "adapter_version": "0.5.0",
         "framework": "vllm",
         "framework_version": "0.10.2"
       },
@@ -21,7 +21,8 @@
             "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
             "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
             "experts": {"tensor_parallel_size": 2, "data_parallel_size": 1, "expert_parallel_size": 1, "dense_tensor_parallel_size": 1}
-          }
+          },
+          "render_inputs": []
         },
         {
           "id": "decode",
@@ -33,7 +34,8 @@
             "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
             "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
             "experts": {"tensor_parallel_size": 2, "data_parallel_size": 1, "expert_parallel_size": 1, "dense_tensor_parallel_size": 1}
-          }
+          },
+          "render_inputs": []
         }
       ],
       "replicas": [
@@ -47,7 +49,11 @@
           "primary_readiness": {"kind": "http", "path": "/v1/models"},
           "worker_readiness": {"kind": "process_alive"},
           "capture_target": {
-            "control": {"start_path": "/start_profile", "stop_path": "/stop_profile"}
+            "window_control": {
+              "endpoint": "replica_entry",
+              "start": {"method": "post", "path": "/start_profile"},
+              "stop": {"method": "post", "path": "/stop_profile"}
+            }
           }
         },
         {
@@ -60,28 +66,52 @@
           "primary_readiness": {"kind": "http", "path": "/v1/models"},
           "worker_readiness": {"kind": "process_alive"},
           "capture_target": {
-            "control": {"start_path": "/start_profile", "stop_path": "/stop_profile"}
+            "window_control": {
+              "endpoint": "replica_entry",
+              "start": {"method": "post", "path": "/start_profile"},
+              "stop": {"method": "post", "path": "/stop_profile"}
+            }
           }
         }
       ],
       "links": [
-        {"kind": "request_routing", "source": "router", "targets": ["prefill", "decode"]},
+        {"kind": "request_routing", "source": "gateway", "targets": ["pd_router"]},
+        {"kind": "request_routing", "source": "pd_router", "targets": ["prefill", "decode"]},
         {"kind": "kv_transfer", "source": "prefill", "target": "decode", "mechanism": "mooncake"},
-        {"kind": "bootstrap", "source": "router", "target": "prefill", "port": "bootstrap"}
+        {"kind": "bootstrap", "source": "pd_router", "target": "prefill", "port": "bootstrap"}
       ],
-      "routing": {
-        "owner": "inferlab_builtin",
-        "implementation": "vllm_mooncake",
-        "policy": "round_robin",
+      "gateway": {
+        "backend": "vllm-router",
+        "implementation": "vllm-router",
+        "implementation_version": "0.5.0",
+        "effective_settings": {},
+        "endpoint": {
+          "protocol": "http",
+          "completions_path": "/v1/completions",
+          "chat_completions_path": "/v1/chat/completions"
+        },
+        "readiness": {"kind": "http", "path": "/v1/models"},
+        "ports": [],
+        "targets": [{"kind": "pd_router"}],
+        "render_inputs": [],
+        "render_source": "integration",
+        "co_rendering": {"process_role": "gateway"}
+      },
+      "pd_router": {
+        "backend": "vllm-router",
+        "implementation": "vllm-router",
+        "implementation_version": "0.5.0",
+        "effective_settings": {},
+        "policies": {"prefill": "round_robin", "decode": "round_robin"},
         "prefill_role": "prefill",
         "decode_role": "decode",
+        "target_scheme": "http",
         "ports": [],
-        "readiness": {"kind": "http", "path": "/healthcheck"}
-      },
-      "endpoint": {
-        "protocol": "http",
-        "completions_path": "/v1/completions",
-        "chat_completions_path": "/v1/chat/completions"
+        "readiness": {"kind": "http", "path": "/v1/models"},
+        "handoff": "in_process",
+        "render_inputs": [],
+        "render_source": "integration",
+        "co_rendering": {"process_role": "gateway"}
       }
     }
   }

@@ -278,10 +278,9 @@ pub fn resolve_manual_bench(
         .server
         .roles
         .iter()
-        .filter(|role| role.id != "router")
         .flat_map(|role| &role.replicas)
         .flat_map(|replica| &replica.ranks)
-        .filter(|rank| rank.rank == 0)
+        .filter(|rank| rank.rank() == Some(0))
         .find_map(|rank| rank.allocation.model_locator.clone())
         .ok_or_else(|| InferlabError::InvalidConfig {
             message: format!(

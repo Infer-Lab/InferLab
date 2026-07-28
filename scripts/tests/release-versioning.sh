@@ -34,6 +34,7 @@ python/inferlab-adapter-sdk/pyproject.toml
 python/inferlab-bench-runner/pyproject.toml
 python/inferlab-eval-runner/pyproject.toml
 python/inferlab-integration-sglang/pyproject.toml
+python/inferlab-integration-specialized-engine/pyproject.toml
 python/inferlab-integration-tensorrt-llm/pyproject.toml
 python/inferlab-integration-tokenspeed/pyproject.toml
 python/inferlab-integration-vllm/pyproject.toml
@@ -56,6 +57,7 @@ chmod +x "${fixture}/bin/pixi"
 workspace_projects=(
   "${fixture}/python/inferlab-adapter-sdk/pyproject.toml"
   "${fixture}/python/inferlab-integration-sglang/pyproject.toml"
+  "${fixture}/python/inferlab-integration-specialized-engine/pyproject.toml"
   "${fixture}/python/inferlab-integration-tensorrt-llm/pyproject.toml"
   "${fixture}/python/inferlab-integration-tokenspeed/pyproject.toml"
   "${fixture}/python/inferlab-integration-vllm/pyproject.toml"

@@ -63,7 +63,7 @@ def probe_tokenization() -> ProbeTokenization:
 def lm_eval_request(tmp_path: Path) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
-            "protocol_version": "6",
+            "protocol_version": "7",
             "workspace_root": str(tmp_path),
             "workspace_source_exclusions": [],
             "endpoint": {
@@ -101,7 +101,7 @@ def lm_eval_request(tmp_path: Path) -> EvalClientRequest:
 def openai_smoke_request(tmp_path: Path) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
-            "protocol_version": "6",
+            "protocol_version": "7",
             "workspace_root": str(tmp_path),
             "workspace_source_exclusions": [],
             "endpoint": {

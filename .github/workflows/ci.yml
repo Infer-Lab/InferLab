@@ -30,7 +30,12 @@ jobs:
       - run: cargo build --workspace
       - run: cargo test --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test -p inferlab-fake-engine --all-targets --features smg-transport
+      - run: cargo clippy -p inferlab-fake-engine --all-targets --features smg-transport -- -D warnings
       - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo doc -p inferlab-fake-engine --features smg-transport --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 

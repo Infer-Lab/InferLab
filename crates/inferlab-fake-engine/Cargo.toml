@@ -1,0 +1,43 @@
+[package]
+name = "inferlab-fake-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+smg-transport = [
+    "dep:clap",
+    "dep:futures-util",
+    "dep:smg-grpc-client",
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:tonic",
+    "dep:tonic-health",
+]
+
+[dependencies]
+clap = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+smg-grpc-client = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+tonic-health = { workspace = true, optional = true }
+
+[[bin]]
+name = "inferlab-token-engine"
+path = "src/main.rs"
+required-features = ["smg-transport"]
+
+[[test]]
+name = "smg_transport"
+path = "tests/smg_transport.rs"
+required-features = ["smg-transport"]
+
+[lints]
+workspace = true

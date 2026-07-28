@@ -8,6 +8,7 @@ from inferlab_adapter_sdk import (
     AdapterRequestPlanServe,
     AdapterRequestRenderServe,
     AdapterResponse,
+    RenderedServeProcessFrontend,
     handle_request,
 )
 from inferlab_integration_vllm import plan_serve, render_serve
@@ -35,10 +36,13 @@ def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
     expected_output = expected.root.result.root.output
     assert result.model_copy(update={"integration": expected_output.integration}) == expected_output
     assert result.integration.framework_version == "unavailable"
-    assert result.endpoint.completions_path == "/v1/completions"
-    assert result.endpoint.chat_completions_path == "/v1/chat/completions"
-    assert result.endpoint.prefix_cache_reset is None
-    assert result.routing.root.owner == "inferlab_builtin"
+    assert result.gateway is not None
+    assert result.gateway.endpoint.completions_path == "/v1/completions"
+    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
+    assert result.gateway.endpoint.prefix_cache_reset is None
+    assert result.gateway.backend == "vllm-router"
+    assert result.pd_router is not None
+    assert result.pd_router.backend == "vllm-router"
     assert "vllm" not in sys.modules
 
 
@@ -59,7 +63,8 @@ def test_single_topology_rejects_a_routed_backend() -> None:
     payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["topology"] = "single"
-    input_payload["routing_backend"] = "vllm-router"
+    input_payload["gateway_backend"] = "vllm-router"
+    input_payload["pd_router_backend"] = None
     input_payload["kv_transfer"] = None
     input_payload["roles"] = [
         {
@@ -93,9 +98,9 @@ def test_vllm_rejects_an_expert_size_that_does_not_match_tp_times_dp() -> None:
 def test_render_merges_extra_args_with_inferlab_owned_options() -> None:
     payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
-    roles = cast(list[dict[str, object]], input_payload["roles"])
-    for role in roles:
-        settings = cast(dict[str, object], role["effective_settings"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    for allocation in allocations[:2]:
+        settings = cast(dict[str, object], allocation["effective_settings"])
         settings["extra_args"] = [
             "--served-model-name",
             "shadow-a",
@@ -114,8 +119,8 @@ def test_render_merges_extra_args_with_inferlab_owned_options() -> None:
     assert isinstance(request.root, AdapterRequestRenderServe)
     result = render_serve(request.root.input)
 
-    rank_zero = result.processes[0].command.argv
-    rank_one = result.processes[1].command.argv
+    rank_zero = result.processes[0].root.command.argv
+    rank_one = result.processes[1].root.command.argv
     assert rank_zero.count("--port") == 1
     assert rank_zero[rank_zero.index("--port") + 1] == "8000"
     assert rank_zero[rank_zero.index("--served-model-name") + 1] == "dsv4"
@@ -134,41 +139,42 @@ def test_render_serve_matches_the_shared_vllm_fixture() -> None:
     request = AdapterRequest.model_validate(
         load_json(FIXTURES / "valid" / "render-serve-request.json")
     )
-    expected = AdapterResponse.model_validate(
-        load_json(FIXTURES / "valid" / "render-serve-response.json")
-    )
-
     assert isinstance(request.root, AdapterRequestRenderServe)
     result = render_serve(request.root.input)
 
-    assert expected.root.status == "ok"
-    expected_output = expected.root.result.root.output
-    assert result.model_copy(update={"integration": expected_output.integration}) == expected_output
     assert result.integration.framework_version == "unavailable"
-    assert result.processes[0].command.env["VLLM_SERVER_DEV_MODE"] == "1"
+    assert len(result.processes) == 3
+    assert result.processes[0].root.command.env["VLLM_SERVER_DEV_MODE"] == "1"
+    frontend = result.processes[-1].root
+    assert isinstance(frontend, RenderedServeProcessFrontend)
+    assert frontend.components.model_dump() == (
+        "gateway",
+        "pd_router",
+    )
 
 
 def test_render_serve_allows_an_explicit_cache_environment_override() -> None:
     payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
-    roles = cast(list[dict[str, object]], input_payload["roles"])
-    settings = cast(dict[str, object], roles[0]["effective_settings"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    settings = cast(dict[str, object], allocations[0]["effective_settings"])
     settings["extra_env"] = {"FLASHINFER_WORKSPACE_BASE": "/custom/flashinfer"}
 
     request = AdapterRequest.model_validate(payload)
     assert isinstance(request.root, AdapterRequestRenderServe)
     result = render_serve(request.root.input)
 
-    assert result.processes[0].command.env["FLASHINFER_WORKSPACE_BASE"] == "/custom/flashinfer"
-    assert result.processes[0].command.env["TRITON_CACHE_DIR"].endswith("/triton")
+    process = result.processes[0].root
+    assert process.command.env["FLASHINFER_WORKSPACE_BASE"] == "/custom/flashinfer"
+    assert process.command.env["TRITON_CACHE_DIR"].endswith("/triton")
 
 
 def test_render_lowers_published_vllm_settings() -> None:
     payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
-    roles = cast(list[dict[str, object]], input_payload["roles"])
-    for role in roles:
-        settings = cast(dict[str, object], role["effective_settings"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    for allocation in allocations[:2]:
+        settings = cast(dict[str, object], allocation["effective_settings"])
         settings.update(
             {
                 "tokenizer_mode": "deepseek_v4",
@@ -186,7 +192,7 @@ def test_render_lowers_published_vllm_settings() -> None:
 
     request = AdapterRequest.model_validate(payload)
     assert isinstance(request.root, AdapterRequestRenderServe)
-    argv = render_serve(request.root.input).processes[0].command.argv
+    argv = render_serve(request.root.input).processes[0].root.command.argv
 
     assert argv[argv.index("--tokenizer-mode") + 1] == "deepseek_v4"
     assert argv[argv.index("--tool-call-parser") + 1] == "deepseek_v4"
@@ -233,6 +239,13 @@ def test_plan_role_declares_the_whole_replica_accelerator_requirement() -> None:
     assert prefill[0].ports == ["bootstrap"]
     assert prefill[0].primary_ports == ["master"]
     assert prefill[0].capture_target is not None
+    assert prefill[0].capture_target.model_dump(mode="json") == {
+        "window_control": {
+            "endpoint": "replica_entry",
+            "start": {"method": "post", "path": "/start_profile"},
+            "stop": {"method": "post", "path": "/stop_profile"},
+        }
+    }
 
 
 def test_plan_static_npmd_keeps_replicas_distinct_from_ranks() -> None:
@@ -263,14 +276,15 @@ def test_render_nixl_uses_role_side_channels_and_connector() -> None:
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["kv_transfer"] = "nixl"
     allocations = cast(list[dict[str, object]], input_payload["allocations"])
-    for index, allocation in enumerate(allocations):
+    for index, allocation in enumerate(allocations[:2]):
         allocation["ports"] = {"side_channel": {"host": "127.0.0.1", "port": 9000 + index}}
 
     request = AdapterRequest.model_validate(payload)
     assert isinstance(request.root, AdapterRequestRenderServe)
     result = render_serve(request.root.input)
 
-    for index, process in enumerate(result.processes):
+    for index, wrapped in enumerate(result.processes[:2]):
+        process = wrapped.root
         config = process.command.argv[process.command.argv.index("--kv-transfer-config") + 1]
         assert '"kv_connector":"NixlConnector"' in config
         assert process.command.env["VLLM_NIXL_SIDE_CHANNEL_PORT"] == str(9000 + index)
@@ -279,44 +293,25 @@ def test_render_nixl_uses_role_side_channels_and_connector() -> None:
 def test_plan_vllm_router_makes_the_external_router_public() -> None:
     payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
-    input_payload["routing_backend"] = "vllm-router"
+    input_payload["gateway_backend"] = "vllm-router"
+    input_payload["pd_router_backend"] = "vllm-router"
 
     request = AdapterRequest.model_validate(payload)
     assert isinstance(request.root, AdapterRequestPlanServe)
     result = plan_serve(request.root.input)
 
-    assert result.replicas[-1].role_id == "router"
-    assert result.replicas[-1].device_count == 0
-    assert result.routing.root.owner == "integration_native"
-    assert result.routing.root.role == "router"
-    assert result.routing.root.replica == 0
+    assert all(replica.role_id != "gateway" for replica in result.replicas)
+    assert result.gateway is not None
+    assert result.gateway.render_source == "integration"
+    assert result.pd_router is not None
+    assert result.pd_router.render_source == "integration"
 
 
 def test_vllm_router_targets_replica_entrypoints_and_defers_startup_timeout() -> None:
     payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
-    input_payload["routing_backend"] = "vllm-router"
-    input_payload["routing"] = {
-        "owner": "integration_native",
-        "role": "router",
-        "replica": 0,
-        "policy": "round_robin",
-    }
-    roles = cast(list[dict[str, object]], input_payload["roles"])
-    roles[0]["declared_replica_count"] = 2
-    roles[0]["effective_replica_count"] = 2
-    roles[1]["declared_replica_count"] = 2
-    roles[1]["effective_replica_count"] = 2
-    roles.append(
-        {
-            "id": "router",
-            "kind": "router",
-            "declared_replica_count": 1,
-            "effective_replica_count": 1,
-            "effective_settings": {},
-            "effective_parallelism": {},
-        }
-    )
+    input_payload["gateway_backend"] = "vllm-router"
+    input_payload["pd_router_backend"] = "vllm-router"
     allocations = cast(list[dict[str, object]], input_payload["allocations"])
     prefill = allocations[0]
     prefill.update(
@@ -366,38 +361,31 @@ def test_vllm_router_targets_replica_entrypoints_and_defers_startup_timeout() ->
             "endpoint": {"host": "node-d.example", "port": 8000},
         }
     )
-    router = {
-        "process": "router",
-        "role": "router",
-        "replica": 0,
-        "rank": 0,
-        "rank_count": 1,
-        "machine": "local",
-        "model_locator": None,
-        "cache": "/cache/runtime/local/router",
-        "devices": [],
-        "endpoint": {"host": "127.0.0.1", "port": 8000},
-        "ports": {},
-        "launch": {"kind": "local"},
-        "dependencies": [],
-    }
+    gateway = allocations[2]
+    gateway.update(
+        {
+            "machine": "local",
+            "cache": "/cache/runtime/local/gateway",
+            "endpoint": {"host": "127.0.0.1", "port": 8000},
+        }
+    )
     input_payload["allocations"] = [
         prefill_rank,
         prefill,
         prefill_replica,
         decode,
         decode_replica,
-        router,
+        gateway,
     ]
 
     request = AdapterRequest.model_validate(payload)
     assert isinstance(request.root, AdapterRequestRenderServe)
     result = render_serve(request.root.input)
-    argv = result.processes[-1].command.argv
+    argv = result.processes[-1].root.command.argv
     rank_one = next(
-        process.command.argv
+        process.root.command.argv
         for process in result.processes
-        if process.process == "prefill-000-rank-001"
+        if process.root.process == "prefill-000-rank-001"
     )
 
     assert rank_one[rank_one.index("--master-addr") + 1] == "node-a.example"

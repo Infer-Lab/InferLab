@@ -133,7 +133,7 @@ pub struct ServerRecord {
 }
 
 impl ServerRecord {
-    pub const SCHEMA_VERSION: u32 = 3;
+    pub const SCHEMA_VERSION: u32 = 4;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -360,7 +360,21 @@ pub(super) fn load_record(root: &Path, id: &str) -> Result<ServerRecord, Inferla
         path: path.clone(),
         source,
     })?;
-    serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode { path, source })
+    let record: ServerRecord =
+        serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode {
+            path: path.clone(),
+            source,
+        })?;
+    if record.schema_version != ServerRecord::SCHEMA_VERSION {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "server record {id:?} has unsupported schema version {}; expected {}",
+                record.schema_version,
+                ServerRecord::SCHEMA_VERSION
+            ),
+        });
+    }
+    Ok(record)
 }
 
 fn write_record(root: &Path, record: &ServerRecord) -> Result<(), InferlabError> {

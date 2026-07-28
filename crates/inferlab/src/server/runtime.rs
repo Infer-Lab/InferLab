@@ -4,7 +4,7 @@ pub(crate) use crate::process_group::process_start_time;
 use crate::process_group::{LocalProcessGroup, VerifiedStatus};
 pub use crate::process_group::{SignalEvidence, TerminationSignal};
 use crate::resolve::{
-    CommandPlan, EndpointPlan, LaunchFilePlan, LaunchPlan, ProcessPlan, ReadinessPlan,
+    CommandPlan, LaunchFilePlan, LaunchPlan, ProcessEndpointPlan, ProcessPlan, ReadinessPlan,
     RemoteWorkspacePlan, TargetRegistryExpectedTarget,
 };
 use crate::shell::{shell_quote, shell_quote_path};
@@ -405,7 +405,7 @@ pub(super) trait ReadinessObserver {
     fn wait_ready(
         &self,
         handle: &ProcessHandle,
-        endpoint: &EndpointPlan,
+        endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
         on_probe_failure: &mut dyn FnMut(&str),
     ) -> Result<ReadinessEvidence, ReadinessFailure>;
@@ -518,7 +518,7 @@ impl ReadinessObserver for SystemProcessRuntime {
     fn wait_ready(
         &self,
         handle: &ProcessHandle,
-        endpoint: &EndpointPlan,
+        endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
         on_probe_failure: &mut dyn FnMut(&str),
     ) -> Result<ReadinessEvidence, ReadinessFailure> {
@@ -1536,7 +1536,7 @@ fn timed_readiness_failure(
 fn wait_http_ready<R: ProcessObserver>(
     runtime: &R,
     handle: &ProcessHandle,
-    endpoint: &EndpointPlan,
+    endpoint: &ProcessEndpointPlan,
     path: &str,
     timeout_seconds: Option<u64>,
     on_probe_failure: &mut dyn FnMut(&str),
@@ -1730,7 +1730,7 @@ fn attempt_remaining(attempt: &AttemptBound) -> Result<Duration, String> {
 
 fn wait_http_target_registry_ready(
     status: impl Fn(&OperationBound) -> ProcessStatus,
-    endpoint: &EndpointPlan,
+    endpoint: &ProcessEndpointPlan,
     probe: HttpTargetRegistryProbe<'_>,
     timeout_seconds: Option<u64>,
     on_probe_failure: &mut dyn FnMut(&str),
@@ -2985,7 +2985,6 @@ fn unix_time_millis() -> Result<u64, ReadinessFailure> {
 mod tests {
     use super::*;
     use crate::resolve::LaunchFilePlan;
-    use inferlab_protocol::EndpointProtocol;
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -3159,7 +3158,7 @@ mod tests {
 
     fn target_registry_endpoint(
         registry_body: String,
-    ) -> Result<(EndpointPlan, thread::JoinHandle<Result<(), String>>), String> {
+    ) -> Result<(ProcessEndpointPlan, thread::JoinHandle<Result<(), String>>), String> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
         let port = listener
             .local_addr()
@@ -3201,13 +3200,9 @@ mod tests {
             Ok(())
         });
         Ok((
-            EndpointPlan {
+            ProcessEndpointPlan {
                 host: "127.0.0.1".to_owned(),
                 port,
-                protocol: EndpointProtocol::Http,
-                completions_path: "/v1/completions".to_owned(),
-                chat_completions_path: "/v1/chat/completions".to_owned(),
-                prefix_cache_reset: None,
             },
             server,
         ))

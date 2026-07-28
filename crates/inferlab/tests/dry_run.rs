@@ -146,6 +146,7 @@ input = request["input"]
 operation = request["operation"]
 if operation == "plan_serve":
     role = input["roles"][0]
+    gateway_backend = input.get("gateway_backend")
     settings = role["settings"]
     declared = role["parallelism"]
     outer = declared.get("outer") or {}
@@ -187,6 +188,19 @@ if operation == "plan_serve":
             "effective_replica_count": role["replica_count"],
             "effective_settings": effective_settings,
             "effective_parallelism": effective_parallelism,
+            **({
+                "public_endpoint": {
+                    "protocol": "http",
+                    "completions_path": "/v1/completions",
+                    "chat_completions_path": "/v1/chat/completions",
+                    "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
+                }
+            } if not gateway_backend else {}),
+            "render_inputs": (
+                [{"source_path": "operator-config.yaml"}]
+                if settings.get("fixture_mode") == "launch-file"
+                else []
+            ),
         }],
         "replicas": [{
             "id": "server",
@@ -199,36 +213,73 @@ if operation == "plan_serve":
             "worker_readiness": {"kind": "process_alive"},
             **({
                 "capture_target": {
-                    "control": {
-                        "start_path": "/start_profile",
-                        "stop_path": "/stop_profile",
+                    "window_control": {
+                        "endpoint": (
+                            "gateway"
+                            if gateway_backend or settings.get("fixture_capture_gateway")
+                            else "replica_entry"
+                        ),
+                        "start": {
+                            "method": "post",
+                            "path": "/start_profile",
+                        },
+                        "stop": {
+                            "method": "post",
+                            "path": "/stop_profile",
+                        },
                     }
                 }
             } if input["profiling"] else {}),
         }],
-        "links": [],
-        "routing": {"owner": "direct", "role": role["id"], "replica": 0},
-        "endpoint": {
-            "protocol": "http",
-            "completions_path": "/v1/completions",
-            "chat_completions_path": "/v1/chat/completions",
-            "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
-        },
-        "render_inputs": (
-            [{"source_path": "operator-config.yaml"}]
-            if settings.get("fixture_mode") == "launch-file"
-            else []
+        "links": (
+            [{"kind": "request_routing", "source": "gateway", "targets": [role["id"]]}]
+            if gateway_backend else []
         ),
+        **({
+            "gateway": {
+                "backend": gateway_backend,
+                "implementation": "fixture-gateway",
+                "implementation_version": "1",
+                "effective_settings": {},
+                "endpoint": {
+                    "protocol": "http",
+                    "completions_path": "/v1/completions",
+                    "chat_completions_path": "/v1/chat/completions",
+                    "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
+                },
+                "readiness": {"kind": "http", "path": "/healthcheck"},
+                "ports": [],
+                "targets": [{"kind": "engine", "role": role["id"]}],
+                "render_inputs": [],
+                "render_source": "integration",
+                "co_rendering": {"process_role": "gateway"},
+            }
+        } if gateway_backend else {}),
     }
 elif operation == "render_serve":
     allocations = input["allocations"]
-    roles = {role["id"]: role for role in input["roles"]}
     master = allocations[0]["ports"].get("master")
     processes = []
     for allocation in allocations:
-        role = roles[allocation["role"]]
-        parallelism = role["effective_parallelism"]
-        settings = role["effective_settings"]
+        if allocation["kind"] == "frontend":
+            processes.append({
+                "kind": "frontend",
+                "process": allocation["process"],
+                "process_role": allocation["process_role"],
+                "components": allocation["components"],
+                "launch_files": [],
+                "command": {
+                    "argv": [
+                        "fixture-gateway",
+                        allocation["endpoint"]["host"],
+                        str(allocation["endpoint"]["port"]),
+                    ],
+                    "env": {},
+                },
+            })
+            continue
+        parallelism = allocation["effective_parallelism"]
+        settings = allocation["effective_settings"]
         tp = parallelism["outer"]["tensor_parallel_size"]
         dp = parallelism["attention"]["data_parallel_size"]
         ep = parallelism["experts"]["expert_parallel_size"]
@@ -255,7 +306,7 @@ elif operation == "render_serve":
                 argv.append("--headless")
         launch_files = []
         if settings.get("fixture_mode") == "launch-file":
-            text = input["render_inputs"][0]["text"]
+            text = allocation["render_inputs"][0]["text"]
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             relative_path = f"launch-files/{digest}/fixture.yaml"
             resolved_path = f"{cache_root}/{relative_path}"
@@ -266,6 +317,7 @@ elif operation == "render_serve":
                 "sha256": digest,
             })
         processes.append({
+            "kind": "model_rank",
             "process": allocation["process"],
             "role": allocation["role"],
             "replica": allocation["replica"],
@@ -293,7 +345,7 @@ else:
     raise ValueError(f"unexpected operation {operation}")
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "6",
+    "protocol_version": "7",
     "result": {
         "operation": operation,
         "output": output,
@@ -550,6 +602,7 @@ if operation == "plan_serve":
             "effective_replica_count": role["replica_count"],
             "effective_settings": settings,
             "effective_parallelism": parallelism,
+            "render_inputs": [],
         })
         tp = parallelism["outer"]["tensor_parallel_size"]
         ports = ["bootstrap"] if role["kind"] == "prefill" else []
@@ -565,6 +618,14 @@ if operation == "plan_serve":
                 "primary_readiness": {"kind": "http", "path": "/v1/models"},
                 "worker_readiness": {"kind": "process_alive"},
             })
+    implementation = {
+        "vllm": "vllm_mooncake",
+        "sglang": "sglang",
+        "tensorrt-llm": "trtllm",
+    }[framework]
+    implementation_version = "2" if framework == "tensorrt-llm" else "1"
+    co_rendering = {"process_role": "gateway"}
+    readiness = {"kind": "http", "path": "/healthcheck"}
     output = {
         "integration": {
             "adapter_id": "fixture",
@@ -575,27 +636,43 @@ if operation == "plan_serve":
         "roles": roles,
         "replicas": replicas,
         "links": [
-            {"kind": "request_routing", "source": "router", "targets": ["prefill", "decode"]},
+            {"kind": "request_routing", "source": "gateway", "targets": ["pd_router"]},
+            {"kind": "request_routing", "source": "pd_router", "targets": ["prefill", "decode"]},
             {"kind": "kv_transfer", "source": "prefill", "target": "decode", "mechanism": "mooncake"},
-            {"kind": "bootstrap", "source": "router", "target": "prefill", "port": "bootstrap"},
+            {"kind": "bootstrap", "source": "pd_router", "target": "prefill", "port": "bootstrap"},
         ],
-        "routing": {
-            "owner": "inferlab_builtin",
-            "implementation": {
-                "vllm": "vllm_mooncake",
-                "sglang": "sglang",
-                "tensorrt-llm": "trtllm",
-            }[framework],
-            "policy": "round_robin",
+        "gateway": {
+            "backend": input["gateway_backend"],
+            "implementation": implementation,
+            "implementation_version": implementation_version,
+            "effective_settings": {},
+            "endpoint": {
+                "protocol": "http",
+                "completions_path": "/v1/completions",
+                "chat_completions_path": "/v1/chat/completions",
+            },
+            "readiness": readiness,
+            "ports": [],
+            "targets": [{"kind": "pd_router"}],
+            "render_inputs": [],
+            "render_source": "control_plane",
+            "co_rendering": co_rendering,
+        },
+        "pd_router": {
+            "backend": input["pd_router_backend"],
+            "implementation": implementation,
+            "implementation_version": implementation_version,
+            "effective_settings": {},
+            "policies": {"prefill": "round_robin", "decode": "round_robin"},
             "prefill_role": "prefill",
             "decode_role": "decode",
+            "target_scheme": "http",
             "ports": [],
-            "readiness": {"kind": "http", "path": "/healthcheck"},
-        },
-        "endpoint": {
-            "protocol": "http",
-            "completions_path": "/v1/completions",
-            "chat_completions_path": "/v1/chat/completions",
+            "readiness": readiness,
+            "handoff": "in_process",
+            "render_inputs": [],
+            "render_source": "control_plane",
+            "co_rendering": co_rendering,
         },
     }
 elif operation == "render_serve":
@@ -608,6 +685,7 @@ elif operation == "render_serve":
         },
         "processes": [
             {
+                "kind": "model_rank",
                 "process": allocation["process"],
                 "role": allocation["role"],
                 "replica": allocation["replica"],
@@ -622,7 +700,7 @@ elif operation == "render_serve":
 else:
     raise ValueError(operation)
 
-print(json.dumps({"status": "ok", "protocol_version": "6", "result": {"operation": operation, "output": output}}))
+print(json.dumps({"status": "ok", "protocol_version": "7", "result": {"operation": operation, "output": output}}))
 "#;
 
 fn prefill_decode_workspace(integration: &str, transport: &str) -> String {
@@ -636,6 +714,8 @@ fn prefill_decode_workspace(integration: &str, transport: &str) -> String {
             "topology = \"single\"",
             &format!(
                 "topology = \"prefill_decode\"\n\
+                 gateway_backend = \"builtin\"\n\
+                 pd_router_backend = \"builtin\"\n\
                  kv_transfer = {transport:?}"
             ),
             1,
@@ -942,6 +1022,143 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn gateway_single_uses_one_process_only_frontend_without_model_coordinates()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "topology = \"single\"\n",
+        "topology = \"single\"\nprofiling = true\ngateway_backend = \"fixture-gateway\"\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings =
+        fs::read_to_string(&bindings_path)?.replacen("ports = [8000]", "ports = [8000, 8001]", 1);
+    fs::write(bindings_path, bindings)?;
+
+    let plan = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let server = &plan["server"];
+    let engines = resolved_ranks(server)?;
+    let frontend = support::resolved_frontend(server)?;
+    let frontend_json = server["frontend"]["processes"][0]
+        .as_object()
+        .ok_or("routed single did not contain a frontend process")?;
+
+    assert_eq!(engines.len(), 1);
+    assert_eq!(engines[0].role_id, "serve");
+    assert_eq!(engines[0].rank.endpoint.port, 8000);
+    assert_eq!(server["frontend"]["gateway"]["backend"], "fixture-gateway");
+    assert_eq!(
+        server["frontend"]["gateway"]["targets"][0]["kind"],
+        "engine"
+    );
+    assert_eq!(server["frontend"]["gateway"]["targets"][0]["role"], "serve");
+    assert_eq!(server["frontend"]["gateway"]["process_id"], "gateway");
+    assert!(server["frontend"]["pd_router"].is_null());
+    assert_eq!(server["links"][0]["source"], "gateway");
+    assert_eq!(server["links"][0]["targets"], serde_json::json!(["serve"]));
+
+    assert_eq!(frontend.id, "gateway");
+    assert_eq!(frontend.process_role, "gateway");
+    assert_eq!(frontend.components, ["gateway"]);
+    assert_eq!(frontend.dependencies, ["server"]);
+    assert!(frontend.devices.is_empty());
+    assert_eq!(frontend.endpoint.port, 8001);
+    assert_eq!(server["endpoint"]["port"], frontend.endpoint.port);
+    assert!(
+        frontend
+            .command
+            .argv
+            .iter()
+            .any(|arg| arg == "fixture-gateway")
+    );
+    assert_eq!(
+        frontend_json.get("kind"),
+        Some(&serde_json::json!("frontend"))
+    );
+    assert!(!frontend_json.contains_key("model_locator"));
+    assert!(!frontend_json.contains_key("replica"));
+    assert!(!frontend_json.contains_key("rank"));
+    assert!(!frontend_json.contains_key("rank_count"));
+    assert_eq!(
+        engines[0]
+            .rank
+            .capture_target
+            .as_ref()
+            .ok_or("missing capture target")?,
+        &support::CaptureTargetProjection {
+            window_control_endpoint: "gateway".to_owned(),
+            control_process_id: "gateway".to_owned(),
+            start: support::HttpActionProjection {
+                method: "post".to_owned(),
+                path: "/start_profile".to_owned(),
+                effective_url: "http://127.0.0.1:8001/start_profile".to_owned(),
+            },
+            stop: support::HttpActionProjection {
+                method: "post".to_owned(),
+                path: "/stop_profile".to_owned(),
+                effective_url: "http://127.0.0.1:8001/stop_profile".to_owned(),
+            },
+            escapes: support::NsysEscapesProjection::default(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn capture_rejects_a_gateway_control_binding_without_a_gateway() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "[servers.dsv4-qualify.settings]\n",
+        "[servers.dsv4-qualify.settings]\nfixture_capture_gateway = true\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+
+    let output = workspace.run(&[
+        "recipe",
+        "run",
+        "dsv4-qualify",
+        "--capture",
+        "c8k1k",
+        "--dry-run",
+    ])?;
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("selected Gateway profiling window control without planning a Gateway"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn invocation_cannot_add_a_gateway_absent_from_the_server_base() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--set",
+        "server.gateway_backend=\"fixture-gateway\"",
+        "--dry-run",
+    ])?;
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "cannot add gateway_backend because server \"dsv4-qualify\" does not declare a Gateway"
+        ),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn schema_one_workspace_is_rejected() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     fs::write(
@@ -1008,11 +1225,22 @@ fn recipe_capture_selects_one_workload_and_prepares_the_server() -> Result<(), B
     assert_eq!(plan["server"]["profiling"], true);
     let process = resolved_rank(&plan["server"], "server")?;
     let capture_target = process.capture_target.ok_or("missing capture target")?;
+    assert_eq!(capture_target.window_control_endpoint, "replica_entry");
     assert_eq!(capture_target.control_process_id, "server");
     // Capturing this server prepares the adapter-declared profiling control
     // endpoints; pin them so a break in the start/stop wiring is caught.
-    assert_eq!(capture_target.start_path, "/start_profile");
-    assert_eq!(capture_target.stop_path, "/stop_profile");
+    assert_eq!(capture_target.start.method, "post");
+    assert_eq!(capture_target.start.path, "/start_profile");
+    assert_eq!(
+        capture_target.start.effective_url,
+        "http://127.0.0.1:8000/start_profile"
+    );
+    assert_eq!(capture_target.stop.method, "post");
+    assert_eq!(capture_target.stop.path, "/stop_profile");
+    assert_eq!(
+        capture_target.stop.effective_url,
+        "http://127.0.0.1:8000/stop_profile"
+    );
     Ok(())
 }
 
@@ -1203,10 +1431,30 @@ fn static_npmd_on_one_machine_allocates_disjoint_replicas_and_a_public_proxy()
         "--dry-run",
     ])?;
     let processes = resolved_ranks(&plan["server"])?;
+    let frontend = support::resolved_frontend(&plan["server"])?;
 
     assert_eq!(plan["server"]["topology"], "prefill_decode");
-    assert_eq!(plan["server"]["routing"]["backend"], "builtin");
-    assert_eq!(plan["server"]["routing"]["kv_transfer"], "mooncake");
+    assert_eq!(plan["server"]["kv_transfer"], "mooncake");
+    assert!(plan["server"].get("routing").is_none());
+    assert_eq!(plan["server"]["frontend"]["gateway"]["backend"], "builtin");
+    assert_eq!(
+        plan["server"]["frontend"]["pd_router"]["backend"],
+        "builtin"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["gateway"]["process_id"],
+        "gateway"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["pd_router"]["process_id"],
+        "gateway"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["processes"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
     assert_eq!(
         plan["server"]["explicit_overrides"],
         serde_json::json!([
@@ -1214,16 +1462,23 @@ fn static_npmd_on_one_machine_allocates_disjoint_replicas_and_a_public_proxy()
             "server.roles.decode.replicas=2"
         ])
     );
-    assert_eq!(plan["server"]["routing"]["policy"], "round_robin");
     assert_eq!(
-        plan["server"]["routing"]["implementation"],
-        serde_json::json!({
-            "owner": "inferlab",
-            "id": "inferlab-vllm-mooncake-proxy",
-            "version": 1
-        })
+        plan["server"]["frontend"]["pd_router"]["policies"]["prefill"],
+        "round_robin"
     );
-    assert_eq!(processes.len(), 5);
+    assert_eq!(
+        plan["server"]["frontend"]["pd_router"]["policies"]["decode"],
+        "round_robin"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["gateway"]["implementation"],
+        "vllm_mooncake"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["pd_router"]["implementation"],
+        "vllm_mooncake"
+    );
+    assert_eq!(processes.len(), 4);
     assert_eq!(
         plan["server"]["declarations"][0]["common"]["kv_transfer"],
         "mooncake"
@@ -1245,24 +1500,25 @@ fn static_npmd_on_one_machine_allocates_disjoint_replicas_and_a_public_proxy()
     assert_eq!(processes[1].rank.endpoint.port, 8102);
     assert_eq!(processes[2].replica_id, "decode-000");
     assert_eq!(processes[3].replica_id, "decode-001");
-    assert_eq!(processes[4].role_id, "router");
     assert_eq!(
-        processes[4].rank.dependencies,
+        frontend.dependencies,
         ["prefill-000", "prefill-001", "decode-000", "decode-001"]
     );
-    assert!(processes[4].rank.devices.is_empty());
-    assert_eq!(processes[4].rank.command.env["CUDA_VISIBLE_DEVICES"], "");
+    assert_eq!(frontend.id, "gateway");
+    assert_eq!(frontend.process_role, "gateway");
+    assert_eq!(frontend.components, ["gateway", "pd_router"]);
+    assert!(frontend.devices.is_empty());
+    assert_eq!(frontend.command.env["CUDA_VISIBLE_DEVICES"], "");
     assert!(
-        processes[4]
-            .rank
+        frontend
             .command
             .explicit_env
             .iter()
             .any(|name| name == "CUDA_VISIBLE_DEVICES")
     );
-    assert_eq!(processes[4].rank.endpoint.port, 8000);
-    assert_eq!(processes[4].rank.command.argv[1], "__internal");
-    let proxy_argv = &processes[4].rank.command.argv;
+    assert_eq!(frontend.endpoint.port, 8000);
+    assert_eq!(frontend.command.argv[1], "__internal");
+    let proxy_argv = &frontend.command.argv;
     assert_eq!(
         proxy_argv.iter().filter(|arg| *arg == "--prefill").count(),
         2
@@ -1303,7 +1559,9 @@ fn static_npmd_on_one_machine_allocates_disjoint_replicas_and_a_public_proxy()
         plan["measurements"]["evals"][0]["endpoint"]["chat_completions_path"],
         plan["server"]["endpoint"]["chat_completions_path"]
     );
-    assert_eq!(plan["server"]["links"][1]["kind"], "kv_transfer");
+    assert_eq!(plan["server"]["links"][0]["source"], "gateway");
+    assert_eq!(plan["server"]["links"][1]["source"], "pd_router");
+    assert_eq!(plan["server"]["links"][2]["kind"], "kv_transfer");
     assert!(!workspace.root.path().join(".inferlab/records").exists());
     Ok(())
 }
@@ -1343,7 +1601,7 @@ fn heterogeneous_pd_parallelism_places_one_prefill_replica_across_nodes()
              ports = [8200, 8201]\n\
              devices = [4, 5]\n\
              \n\
-             [machines.router]\n\
+             [machines.gateway]\n\
              host = \"127.0.0.1\"\n\
              ports = [8000]\n\
              devices = []\n\
@@ -1358,8 +1616,8 @@ fn heterogeneous_pd_parallelism_places_one_prefill_replica_across_nodes()
              machine = \"decode\"\n\
              devices = [4, 5]\n\
              \n\
-             [placements.heterogeneous.roles.router]\n\
-             machine = \"router\"\n\
+             [placements.heterogeneous.roles.gateway]\n\
+             machine = \"gateway\"\n\
              devices = []\n\
              endpoint_port = 8000\n",
             workspace.private_weight,
@@ -1377,6 +1635,7 @@ fn heterogeneous_pd_parallelism_places_one_prefill_replica_across_nodes()
         "--dry-run",
     ])?;
     let processes = resolved_ranks(&plan["server"])?;
+    let frontend = support::resolved_frontend(&plan["server"])?;
     let prefill = &plan["server"]["roles"][0];
     let decode = &plan["server"]["roles"][1];
 
@@ -1406,15 +1665,15 @@ fn heterogeneous_pd_parallelism_places_one_prefill_replica_across_nodes()
         decode["replicas"][0]["ranks"].as_array().map(Vec::len),
         Some(1)
     );
-    assert_eq!(processes.len(), 4);
+    assert_eq!(processes.len(), 3);
     assert_eq!(processes[0].rank.machine, "prefill-a");
     assert_eq!(processes[0].rank.devices, [0, 1]);
     assert_eq!(processes[1].rank.machine, "prefill-b");
     assert_eq!(processes[1].rank.devices, [2, 3]);
     assert_eq!(processes[2].rank.machine, "decode");
     assert_eq!(processes[2].rank.devices, [4, 5]);
-    assert_eq!(processes[3].role_id, "router");
-    assert!(processes[3].rank.devices.is_empty());
+    assert_eq!(frontend.machine, "gateway");
+    assert!(frontend.devices.is_empty());
     Ok(())
 }
 
@@ -1510,11 +1769,8 @@ fn sglang_builtin_proxy_dry_run_preserves_prefill_bootstrap_triples() -> Result<
             "--dry-run",
         ])?;
         let processes = resolved_ranks(&plan["server"])?;
-        let proxy = processes
-            .iter()
-            .find(|process| process.role_id == "router")
-            .ok_or("missing proxy process")?;
-        let proxy_argv = &proxy.rank.command.argv;
+        let frontend = support::resolved_frontend(&plan["server"])?;
+        let proxy_argv = &frontend.command.argv;
         assert_eq!(proxy_argv[3], "sglang");
 
         let actual = proxy_argv
@@ -1556,7 +1812,7 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
         )
         .replace("\"mechanism\": \"mooncake\"", "\"mechanism\": \"nixl\"")
         .replace(
-            "            {\"kind\": \"bootstrap\", \"source\": \"router\", \"target\": \"prefill\", \"port\": \"bootstrap\"},\n",
+            "            {\"kind\": \"bootstrap\", \"source\": \"pd_router\", \"target\": \"prefill\", \"port\": \"bootstrap\"},\n",
             "",
         );
     write_executable(
@@ -1612,7 +1868,7 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
                {{ machine = \"local\", devices = [7] }},\n\
              ]\n\
              \n\
-             [placements.local.roles.router]\n\
+             [placements.local.roles.gateway]\n\
              machine = \"local\"\n\
              devices = []\n\
              endpoint_port = 8000\n",
@@ -1631,25 +1887,29 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
         "--dry-run",
     ])?;
     let processes = resolved_ranks(&plan["server"])?;
-    let proxy = processes
-        .iter()
-        .find(|process| process.rank.id == "router")
-        .ok_or("missing TensorRT-LLM proxy")?;
-    let proxy_argv = &proxy.rank.command.argv;
+    let frontend = support::resolved_frontend(&plan["server"])?;
+    let proxy_argv = &frontend.command.argv;
 
-    assert_eq!(plan["server"]["routing"]["backend"], "builtin");
-    assert_eq!(plan["server"]["routing"]["policy"], "round_robin");
+    assert_eq!(plan["server"]["frontend"]["gateway"]["backend"], "builtin");
     assert_eq!(
-        plan["server"]["routing"]["implementation"],
-        serde_json::json!({
-            "owner": "inferlab",
-            "id": "inferlab-trtllm-proxy",
-            "version": 2
-        })
+        plan["server"]["frontend"]["pd_router"]["backend"],
+        "builtin"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["pd_router"]["policies"]["prefill"],
+        "round_robin"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["gateway"]["implementation"],
+        "trtllm"
+    );
+    assert_eq!(
+        plan["server"]["frontend"]["gateway"]["implementation_version"],
+        "2"
     );
     assert_eq!(plan["server"]["endpoint"]["port"], 8000);
-    assert_eq!(proxy.rank.endpoint.host, plan["server"]["endpoint"]["host"]);
-    assert_eq!(proxy.rank.endpoint.port, 8000);
+    assert_eq!(frontend.endpoint.host, plan["server"]["endpoint"]["host"]);
+    assert_eq!(frontend.endpoint.port, 8000);
     assert_eq!(proxy_argv[3], "trtllm");
 
     for role in ["prefill", "decode"] {
@@ -1680,13 +1940,7 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
                 .any(|process| process.role_id == role && process.rank.rank == 1)
         );
     }
-    assert_eq!(
-        processes
-            .iter()
-            .filter(|process| process.role_id == "router")
-            .count(),
-        1
-    );
+    assert_eq!(frontend.components, ["gateway", "pd_router"]);
     assert!(processes.iter().all(|process| {
         !process
             .rank
@@ -1704,6 +1958,7 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
             .as_array()
             .map(|links| links.iter().map(|link| &link["kind"]).collect::<Vec<_>>()),
         Some(vec![
+            &serde_json::json!("request_routing"),
             &serde_json::json!("request_routing"),
             &serde_json::json!("kv_transfer")
         ])
@@ -1753,12 +2008,12 @@ fn built_in_proxy_prefers_the_local_machine_in_a_remote_first_placement()
 
     let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
     let processes = resolved_ranks(&plan["server"])?;
+    let frontend = support::resolved_frontend(&plan["server"])?;
 
     assert_eq!(processes[0].rank.machine, "remote");
     assert_eq!(processes[1].rank.machine, "local");
-    assert_eq!(processes[2].role_id, "router");
-    assert_eq!(processes[2].rank.machine, "local");
-    assert_eq!(processes[2].rank.launch, LaunchProjection::Local);
+    assert_eq!(frontend.machine, "local");
+    assert_eq!(frontend.launch, LaunchProjection::Local);
     Ok(())
 }
 
@@ -3476,10 +3731,10 @@ import sys
 json.load(sys.stdin)
 print(json.dumps({
     "status": "error",
-    "protocol_version": "6",
+    "protocol_version": "7",
     "error": {
         "code": "unsupported_protocol_version",
-        "message": "received protocol version 6; this integration supports protocol version 4",
+        "message": "received protocol version 7; this integration supports protocol version 6",
     },
 }))
 "#;
@@ -3501,7 +3756,7 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 2") && stderr.contains("protocol version 6"),
+        stderr.contains("protocol version 2") && stderr.contains("protocol version 7"),
         "the mismatch names both versions: {stderr}"
     );
     assert!(
@@ -3523,7 +3778,7 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 6") && stderr.contains("protocol version 4"),
+        stderr.contains("protocol version 7") && stderr.contains("protocol version 6"),
         "the structured rejection names both versions: {stderr}"
     );
     assert!(

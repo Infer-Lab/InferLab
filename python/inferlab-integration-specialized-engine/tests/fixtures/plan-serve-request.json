@@ -1,0 +1,24 @@
+{
+  "operation": "plan_serve",
+  "protocol_version": "7",
+  "input": {
+    "gateway_backend": "smg",
+    "model": {
+      "id": "fixture-model",
+      "served_name": "fixture-model"
+    },
+    "profiling": false,
+    "roles": [
+      {
+        "id": "serve",
+        "kind": "serve",
+        "parallelism": {},
+        "replica_count": 1,
+        "settings": {
+          "default_max_output_tokens": 3
+        }
+      }
+    ],
+    "topology": "single"
+  }
+}

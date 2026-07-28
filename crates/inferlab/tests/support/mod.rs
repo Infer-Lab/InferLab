@@ -156,7 +156,7 @@ pub struct ResolvedRankProjection {
     pub command: CommandProjection,
     pub launch_files: Vec<LaunchFileProjection>,
     pub readiness: ReadinessProjection,
-    pub endpoint: EndpointProjection,
+    pub endpoint: EndpointAssignmentProjection,
     pub capture_target: Option<CaptureTargetProjection>,
 }
 
@@ -246,13 +246,21 @@ pub struct EndpointProjection {
     pub chat_completions_path: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct CaptureTargetProjection {
+    pub window_control_endpoint: String,
     pub control_process_id: String,
-    pub start_path: String,
-    pub stop_path: String,
+    pub start: HttpActionProjection,
+    pub stop: HttpActionProjection,
     #[serde(default)]
     pub escapes: NsysEscapesProjection,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct HttpActionProjection {
+    pub method: String,
+    pub path: String,
+    pub effective_url: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -272,6 +280,23 @@ pub struct ResolvedProcessProjection {
     pub role_id: String,
     pub replica_id: String,
     pub rank: ResolvedRankProjection,
+}
+
+/// Narrow projection of the independently allocated frontend process. It is
+/// intentionally not represented as a synthetic role replica or model rank.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ResolvedFrontendProjection {
+    pub id: String,
+    pub process_role: String,
+    pub components: Vec<String>,
+    pub machine: String,
+    pub launch: LaunchProjection,
+    pub dependencies: Vec<String>,
+    pub devices: Vec<u32>,
+    pub ports: BTreeMap<String, EndpointAssignmentProjection>,
+    pub command: CommandProjection,
+    pub readiness: ReadinessProjection,
+    pub endpoint: EndpointAssignmentProjection,
 }
 
 pub fn resolved_processes(value: &Value) -> Result<Vec<ResolvedProcessProjection>, Box<dyn Error>> {
@@ -302,6 +327,30 @@ pub fn resolved_process(value: &Value, id: &str) -> Result<ResolvedRankProjectio
         .find(|process| process.rank.id == id)
         .map(|process| process.rank)
         .ok_or_else(|| format!("missing resolved process {id:?}").into())
+}
+
+pub fn resolved_frontend(value: &Value) -> Result<ResolvedFrontendProjection, Box<dyn Error>> {
+    #[derive(Deserialize)]
+    struct ServerProjection {
+        frontend: Option<FrontendProjection>,
+    }
+
+    #[derive(Deserialize)]
+    struct FrontendProjection {
+        processes: Vec<ResolvedFrontendProjection>,
+    }
+
+    let frontend = serde_json::from_value::<ServerProjection>(value.clone())?
+        .frontend
+        .ok_or("missing resolved frontend")?;
+    let [process] = frontend.processes.as_slice() else {
+        return Err(format!(
+            "expected one resolved frontend process, found {}",
+            frontend.processes.len()
+        )
+        .into());
+    };
+    Ok(process.clone())
 }
 
 /// Environment variables carrying the registration channel to fixture shims.

@@ -1066,6 +1066,12 @@ if operation == "plan_serve":
             "effective_replica_count": role["replica_count"],
             "effective_settings": effective,
             "effective_parallelism": effective_parallelism,
+            "public_endpoint": {
+                "protocol": "http",
+                "completions_path": "/v1/completions",
+                "chat_completions_path": "/v1/chat/completions",
+            },
+            "render_inputs": [],
         }],
         "replicas": [{
             "id": "server",
@@ -1078,17 +1084,10 @@ if operation == "plan_serve":
             "worker_readiness": {"kind": "process_alive"},
         }],
         "links": [],
-        "routing": {"owner": "direct", "role": role["id"], "replica": 0},
-        "endpoint": {
-            "protocol": "http",
-            "completions_path": "/v1/completions",
-            "chat_completions_path": "/v1/chat/completions",
-        },
     }
 elif operation == "render_serve":
     allocations = input["allocations"]
-    roles = {role["id"]: role for role in input["roles"]}
-    settings = roles[allocations[0]["role"]]["effective_settings"]
+    settings = allocations[0]["effective_settings"]
     mode = settings.get("fixture_mode", "ready")
     processes = []
     for allocation in allocations:
@@ -1113,6 +1112,7 @@ elif operation == "render_serve":
                     "sha256": digest,
                 })
         processes.append({
+            "kind": "model_rank",
             "process": allocation["process"],
             "role": allocation["role"],
             "replica": allocation["replica"],
@@ -1141,7 +1141,7 @@ else:
     raise ValueError(operation)
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "6",
+    "protocol_version": "7",
     "result": {"operation": operation, "output": output}
 }))
 "#;

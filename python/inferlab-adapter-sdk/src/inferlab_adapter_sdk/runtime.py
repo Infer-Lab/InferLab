@@ -25,23 +25,46 @@ from ._generated import (
     AdapterResultPlanServe,
     AdapterResultRenderServe,
     ClientEndpointInput,
+    EndpointRequirement,
+    FrontendCoRendering,
+    FrontendHandoff,
+    FrontendProcessRole,
+    GatewayPdRouterFrontendBinding,
+    GatewayPlan,
+    GatewayTarget,
+    GatewayTargetPdRouter,
     IntegrationIdentity,
+    LaunchFileDeclaration,
+    PdRouterPlan,
+    PdRoutingPolicies,
     PlanServeInput,
     PlanServeResult,
+    ProcessSpec,
     ProtocolVersion,
+    ReadinessProbe,
+    RenderedServeProcess,
+    RenderedServeProcessFrontend,
+    RenderedServeProcessModelRank,
+    RenderInputDeclaration,
     RenderServeInput,
     RenderServeResult,
+    RenderSource,
+    ServeProcessAllocation,
+    ServeProcessAllocationFrontend,
+    ServeProcessAllocationModelRank,
     ServeRoleInput,
     ServeRoleKind,
     SettingValue,
+    TargetEndpointScheme,
 )
 
 type PlanServeHandler = Callable[[PlanServeInput], PlanServeResult]
 type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
+type ServeAllocation = ServeProcessAllocationModelRank | ServeProcessAllocationFrontend
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, object]
-PROTOCOL_V6 = ProtocolVersion()
+PROTOCOL_V7 = ProtocolVersion()
 
 
 class CaseBudgetExpired(TimeoutError):
@@ -136,6 +159,170 @@ def replica_id(role: ServeRoleInput, replica_index: int) -> str:
     return f"{base}-{replica_index:03d}"
 
 
+def fused_pd_frontend_plans(
+    *,
+    gateway_backend: str,
+    pd_router_backend: str,
+    implementation: str,
+    implementation_version: str,
+    render_source: RenderSource,
+    endpoint: EndpointRequirement,
+    gateway_readiness: ReadinessProbe,
+    pd_router_readiness: ReadinessProbe,
+    policies: PdRoutingPolicies,
+    prefill_role: str,
+    decode_role: str,
+    target_scheme: TargetEndpointScheme,
+    gateway_settings: dict[str, SettingValue] | None = None,
+    pd_router_settings: dict[str, SettingValue] | None = None,
+    gateway_ports: list[str] | None = None,
+    pd_router_ports: list[str] | None = None,
+    gateway_render_inputs: list[RenderInputDeclaration] | None = None,
+    pd_router_render_inputs: list[RenderInputDeclaration] | None = None,
+) -> tuple[GatewayPlan, PdRouterPlan]:
+    """Build the two logical component plans for one fused P/D frontend."""
+    co_rendering = FrontendCoRendering(process_role=FrontendProcessRole())
+    gateway = GatewayPlan(
+        backend=gateway_backend,
+        implementation=implementation,
+        implementation_version=implementation_version,
+        render_source=render_source,
+        effective_settings=dict(gateway_settings or {}),
+        ports=list(gateway_ports or []),
+        endpoint=endpoint,
+        readiness=gateway_readiness,
+        targets=[GatewayTarget(root=GatewayTargetPdRouter())],
+        co_rendering=co_rendering,
+        render_inputs=list(gateway_render_inputs or []),
+    )
+    pd_router = PdRouterPlan(
+        backend=pd_router_backend,
+        implementation=implementation,
+        implementation_version=implementation_version,
+        render_source=render_source,
+        effective_settings=dict(pd_router_settings or {}),
+        ports=list(pd_router_ports or []),
+        readiness=pd_router_readiness,
+        policies=policies,
+        prefill_role=prefill_role,
+        decode_role=decode_role,
+        target_scheme=target_scheme,
+        handoff=FrontendHandoff(),
+        co_rendering=co_rendering,
+        render_inputs=list(pd_router_render_inputs or []),
+    )
+    return gateway, pd_router
+
+
+def split_serve_allocations(
+    allocations: list[ServeProcessAllocation],
+) -> tuple[list[ServeAllocation], list[ServeProcessAllocationModelRank]]:
+    """Unwrap allocations once and retain the ordered model-rank subset."""
+    unwrapped: list[ServeAllocation] = [allocation.root for allocation in allocations]
+    model_allocations = [
+        allocation
+        for allocation in unwrapped
+        if isinstance(allocation, ServeProcessAllocationModelRank)
+    ]
+    return unwrapped, model_allocations
+
+
+def require_integration_fused_frontend(
+    allocation: ServeAllocation,
+    *,
+    gateway_backend: str,
+    pd_router_backend: str,
+) -> PdRouterPlan:
+    """Validate the protocol invariants shared by integration-rendered P/D frontends."""
+    if not isinstance(allocation, ServeProcessAllocationFrontend):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "integration-rendered P/D serving requires one frontend allocation",
+        )
+    if allocation.gateway.backend != gateway_backend:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"frontend Gateway backend must be {gateway_backend}",
+        )
+    pd_router = allocation.pd_router
+    if pd_router is None or pd_router.backend != pd_router_backend:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"frontend P/D Router backend must be {pd_router_backend}",
+        )
+    if (
+        allocation.gateway.render_source != RenderSource.integration
+        or pd_router.render_source != RenderSource.integration
+    ):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "integration-rendered frontend components must use render_source=integration",
+        )
+    if not isinstance(allocation.components.root, GatewayPdRouterFrontendBinding):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "P/D frontend allocation must bind [gateway, pd_router]",
+        )
+    if (
+        allocation.process_role != allocation.gateway.co_rendering.process_role
+        or allocation.process_role != pd_router.co_rendering.process_role
+    ):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "frontend components must co-render in the allocated Gateway process",
+        )
+    targets = allocation.gateway.targets
+    if len(targets) != 1 or not isinstance(targets[0].root, GatewayTargetPdRouter):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "P/D Gateway must target its co-rendered P/D Router",
+        )
+    return pd_router
+
+
+def rendered_model_rank(
+    allocation: ServeProcessAllocationModelRank,
+    command: ProcessSpec,
+    *,
+    launch_files: list[LaunchFileDeclaration] | None = None,
+) -> RenderedServeProcess:
+    """Preserve a model-rank allocation identity in an adapter render result."""
+    return RenderedServeProcess(
+        root=RenderedServeProcessModelRank(
+            process=allocation.process,
+            role=allocation.role,
+            replica=allocation.replica,
+            rank=allocation.rank,
+            rank_count=allocation.rank_count,
+            command=command,
+            launch_files=list(launch_files or []),
+        )
+    )
+
+
+def rendered_frontend(
+    allocation: ServeAllocation,
+    command: ProcessSpec,
+    *,
+    launch_files: list[LaunchFileDeclaration] | None = None,
+) -> RenderedServeProcess:
+    """Preserve a process-only frontend allocation identity in a render result."""
+    if not isinstance(allocation, ServeProcessAllocationFrontend):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "a frontend render result requires a frontend allocation",
+        )
+    return RenderedServeProcess(
+        root=RenderedServeProcessFrontend(
+            process=allocation.process,
+            process_role=allocation.process_role,
+            components=allocation.components,
+            command=command,
+            launch_files=list(launch_files or []),
+        )
+    )
+
+
 def append_option(argv: list[str], name: str, value: str | int | float | None) -> None:
     if value is not None:
         argv.extend([name, str(value)])
@@ -208,13 +395,13 @@ class AdapterOperationError(Exception):
 def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     return AdapterResponse(
         root=AdapterResponseError(
-            protocol_version=PROTOCOL_V6,
+            protocol_version=PROTOCOL_V7,
             error=AdapterError(code=code, message=message),
         )
     )
 
 
-SUPPORTED_PROTOCOL_VERSION = "6"
+SUPPORTED_PROTOCOL_VERSION = "7"
 
 
 def handle_request(
@@ -265,7 +452,7 @@ def handle_request(
 
     return AdapterResponse(
         root=AdapterResponseOk(
-            protocol_version=PROTOCOL_V6,
+            protocol_version=PROTOCOL_V7,
             result=AdapterResult(root=result),
         )
     )

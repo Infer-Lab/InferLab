@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-27
+
+### Added
+
+- A reusable Specialized Engine integration runs one token-only Engine process
+  behind a TokenSpeed SMG Gateway. The Engine owns an arbitrary nonzero
+  single-process pure-TP device set and request-shaped batched-token capacity,
+  while SMG retains HTTP, tokenizer, chat-template, detokenization, and response
+  formatting responsibilities.
+
+### Changed
+
+- Adapter protocol version 7 replaces the combined routing-ownership result
+  with separate Engine, Gateway, and P/D Router plans. Frontend allocations
+  use stable named schema bindings for `[gateway]` and
+  `[gateway, pd_router]`, carry no model or rank coordinates, and keep
+  `render_source` limited to command lowering while InferLab retains runtime
+  authority.
+- Protocol-v7 profiling targets now bind typed capture-window actions to either
+  their Engine replica entry or the separately planned Gateway. This lets a
+  Specialized Engine keep a token-only process surface while InferLab captures
+  its process tree and TokenSpeed SMG controls the profiling window. Managed
+  capture defaults to CUDA and NVTX tracing; OS runtime tracing remains
+  available through the typed trace override.
+- Workspace serving configuration replaces `routing_backend` with independent
+  `gateway_backend` and `pd_router_backend` facts. A direct `single` has no
+  frontend, a routed `single` derives a Gateway-only process when a supported
+  backend is selected, and prefill/decode derives one fused frontend process.
+  Resolved plans and server-record schema 4 now close component facts and
+  concrete allocations under `frontend`, bind each component by `process_id`,
+  and own frontend allocations as a process collection so a future split
+  Gateway/P/D Router implementation does not require another hierarchy change.
+- The shared adapter SDK now owns protocol-v7 frontend-plan construction,
+  allocation dispatch, and rendered-identity checks reused by all four
+  maintained integrations.
+- The protocol-v7 release set uses `inferlab-adapter-sdk==0.5.0`, version
+  `0.5.0` of the vLLM, SGLang, TensorRT-LLM, and TokenSpeed integrations, and
+  `inferlab-integration-specialized-engine==0.2.0`. Workspaces using
+  protocol-v6 packages must update their exact package pins, replace
+  `routing_backend` with the topology-appropriate Gateway and P/D Router
+  fields, and relock before running InferLab 0.6.0.
+
+### Fixed
+
+- The GitHub Pages site follows the repository's canonical `InferLab` path
+  without changing local preview routing.
+
 ## [0.5.0] - 2026-07-18
 
 ### Added

@@ -149,7 +149,9 @@ pub struct ServerDefinition {
     #[serde(default)]
     pub capture_control_deadline_seconds: Option<u64>,
     #[serde(default)]
-    pub routing_backend: Option<String>,
+    pub gateway_backend: Option<String>,
+    #[serde(default)]
+    pub pd_router_backend: Option<String>,
     #[serde(default)]
     pub kv_transfer: Option<KvTransferMechanism>,
     #[serde(default)]
@@ -679,7 +681,8 @@ pub struct RecipeDefinition {
 #[serde(default, deny_unknown_fields)]
 pub struct ServerCaseDefinition {
     pub readiness_timeout_seconds: Option<u64>,
-    pub routing_backend: Option<String>,
+    pub gateway_backend: Option<String>,
+    pub pd_router_backend: Option<String>,
     pub kv_transfer: Option<KvTransferMechanism>,
     pub profiling: Option<bool>,
     pub parallelism: Parallelism,
@@ -1467,14 +1470,24 @@ fn validate_workspace(root: &Path, config: &WorkspaceConfig) -> Result<(), Infer
             ));
         }
         if server.topology == ServeTopology::Single
-            && (server.routing_backend.is_some() || server.kv_transfer.is_some())
+            && (server.pd_router_backend.is_some() || server.kv_transfer.is_some())
         {
             return invalid(format!(
-                "single-topology server {id:?} must not declare routing_backend or kv_transfer"
+                "single-topology server {id:?} must not declare pd_router_backend or kv_transfer"
             ));
         }
-        if let Some(backend) = &server.routing_backend {
-            require_nonempty("server routing backend", id, backend)?;
+        if server.topology == ServeTopology::PrefillDecode
+            && (server.gateway_backend.is_none() || server.pd_router_backend.is_none())
+        {
+            return invalid(format!(
+                "prefill_decode server {id:?} must declare both gateway_backend and pd_router_backend"
+            ));
+        }
+        if let Some(backend) = &server.gateway_backend {
+            require_nonempty("server Gateway backend", id, backend)?;
+        }
+        if let Some(backend) = &server.pd_router_backend {
+            require_nonempty("server P/D Router backend", id, backend)?;
         }
         validate_parallelism("server", id, &server.parallelism)?;
         validate_profiler_escapes(&format!("server {id:?}"), &server.profiler)?;
@@ -1503,8 +1516,28 @@ fn validate_workspace(root: &Path, config: &WorkspaceConfig) -> Result<(), Infer
                     "server case {case_id:?} readiness_timeout_seconds must be nonzero"
                 ));
             }
-            if let Some(backend) = &case.routing_backend {
-                require_nonempty("server case routing backend", case_id, backend)?;
+            if server.topology == ServeTopology::Single
+                && (case.pd_router_backend.is_some() || case.kv_transfer.is_some())
+            {
+                return invalid(format!(
+                    "single-topology server case {case_id:?} must not declare pd_router_backend or kv_transfer"
+                ));
+            }
+            if case.gateway_backend.is_some() && server.gateway_backend.is_none() {
+                return invalid(format!(
+                    "server case {case_id:?} cannot add gateway_backend because the server base does not declare a Gateway"
+                ));
+            }
+            if case.pd_router_backend.is_some() && server.pd_router_backend.is_none() {
+                return invalid(format!(
+                    "server case {case_id:?} cannot add pd_router_backend because the server base does not declare a P/D Router"
+                ));
+            }
+            if let Some(backend) = &case.gateway_backend {
+                require_nonempty("server case Gateway backend", case_id, backend)?;
+            }
+            if let Some(backend) = &case.pd_router_backend {
+                require_nonempty("server case P/D Router backend", case_id, backend)?;
             }
             validate_parallelism("server case", case_id, &case.parallelism)?;
             for (role_id, role) in &case.roles {
@@ -2419,14 +2452,14 @@ fn validate_local_bindings(local: &LocalBindings) -> Result<(), InferlabError> {
                 }
                 continue;
             }
-            if !matches!(role.as_str(), "serve" | "prefill" | "decode" | "router") {
+            if !matches!(role.as_str(), "serve" | "prefill" | "decode" | "gateway") {
                 return invalid(format!(
                     "placement binding {id:?} contains non-canonical role {role:?}"
                 ));
             }
-            if role == "router" && !role_placement.is_direct_single_replica() {
+            if role == "gateway" && !role_placement.is_direct_single_replica() {
                 return invalid(format!(
-                    "placement binding {id:?} router must contain exactly one direct replica"
+                    "placement binding {id:?} Gateway must contain exactly one direct replica"
                 ));
             }
             let replica_count =
@@ -2477,12 +2510,12 @@ fn validate_local_bindings(local: &LocalBindings) -> Result<(), InferlabError> {
                             ),
                         }
                     })?;
-                    if role == "router" && !rank.devices.is_empty() {
+                    if role == "gateway" && !rank.devices.is_empty() {
                         return invalid(format!(
-                            "placement binding {id:?} router must use no devices"
+                            "placement binding {id:?} Gateway must use no devices"
                         ));
                     }
-                    if role != "router" && rank.devices.is_empty() {
+                    if role != "gateway" && rank.devices.is_empty() {
                         return invalid(format!(
                             "placement binding {id:?} rank ({role:?}, {replica_index}, {rank_index}) must bind at least one device"
                         ));
@@ -3604,6 +3637,94 @@ fn symlink_guard(absolute: &Path, described: &str) -> Result<(), InferlabError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn validate_manifest(manifest: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let config = toml::from_str::<WorkspaceConfig>(manifest)?;
+        validate_workspace(root.path(), &config)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prefill_decode_requires_both_frontend_components_on_the_server_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = validate_manifest(
+            r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "prefill_decode"
+readiness_timeout_seconds = 60
+
+[servers.server.cases.add-frontend]
+gateway_backend = "gateway"
+pd_router_backend = "router"
+"#,
+        );
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "a P/D case must not add frontend components absent from the server base",
+            )
+            .into());
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("prefill_decode server \"server\" must declare both gateway_backend and pd_router_backend"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn single_case_cannot_add_a_gateway_absent_from_the_server_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = validate_manifest(
+            r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "single"
+readiness_timeout_seconds = 60
+
+[servers.server.cases.add-gateway]
+gateway_backend = "gateway"
+"#,
+        );
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "a single case must not add a Gateway absent from the server base",
+            )
+            .into());
+        };
+
+        assert!(
+            error.to_string().contains(
+                "cannot add gateway_backend because the server base does not declare a Gateway"
+            ),
+            "{error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn explicitly_declared_aggregate_slos_must_be_nonempty()

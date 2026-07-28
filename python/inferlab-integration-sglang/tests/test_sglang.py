@@ -13,12 +13,12 @@ from inferlab_adapter_sdk import (
     ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
     RenderServeInput,
+    RenderSource,
     ServeModelInput,
     ServeProcessAllocation,
     ServeRoleInput,
     ServeRoleKind,
     ServeRoleLinkKvTransfer,
-    ServeRoleResult,
     ServeTopology,
     SettingValue,
 )
@@ -52,7 +52,8 @@ def _plan_input(**overrides: object) -> PlanServeInput:
     base: dict[str, object] = {
         "model": ServeModelInput(id="example", served_name="example"),
         "topology": ServeTopology.single,
-        "routing_backend": None,
+        "gateway_backend": None,
+        "pd_router_backend": None,
         "kv_transfer": None,
         "roles": roles,
         "profiling": False,
@@ -69,11 +70,14 @@ def test_plan_single_topology() -> None:
     assert result.replicas[0].device_count == 2
     probe = result.replicas[0].primary_readiness.root
     assert isinstance(probe, ReadinessProbeHttp) and probe.path == "/v1/models"
-    assert result.endpoint.completions_path == "/v1/completions"
-    assert result.endpoint.chat_completions_path == "/v1/chat/completions"
-    assert result.endpoint.prefix_cache_reset is not None
-    assert result.endpoint.prefix_cache_reset.path == "/flush_cache"
-    assert result.routing.root.owner == "direct"
+    endpoint = result.roles[0].public_endpoint
+    assert endpoint is not None
+    assert endpoint.completions_path == "/v1/completions"
+    assert endpoint.chat_completions_path == "/v1/chat/completions"
+    assert endpoint.prefix_cache_reset is not None
+    assert endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert result.gateway is None
+    assert result.pd_router is None
     outer = result.roles[0].effective_parallelism.outer
     assert outer is not None and outer.tensor_parallel_size == 2
 
@@ -125,14 +129,15 @@ def _prefill_decode_roles(
 
 def _prefill_decode_plan_input(
     *,
-    routing_backend: str = "builtin",
+    frontend_backend: str = "builtin",
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
     prefill_replicas: int = 2,
     decode_replicas: int = 3,
 ) -> PlanServeInput:
     return _plan_input(
         topology=ServeTopology.prefill_decode,
-        routing_backend=routing_backend,
+        gateway_backend=frontend_backend,
+        pd_router_backend=frontend_backend,
         kv_transfer=transport,
         roles=_prefill_decode_roles(prefill_replicas, decode_replicas),
     )
@@ -161,31 +166,39 @@ def test_plan_prefill_decode_uses_the_shared_bootstrap_shape(
     ]
     assert [link.root.kind for link in result.links] == [
         "request_routing",
+        "request_routing",
         "kv_transfer",
         "bootstrap",
     ]
-    transfer = result.links[1].root
+    transfer = result.links[2].root
     assert isinstance(transfer, ServeRoleLinkKvTransfer)
     assert transfer.mechanism == transport
-    assert result.routing.root.owner == "inferlab_builtin"
-    assert result.endpoint.completions_path == "/v1/completions"
-    assert result.endpoint.chat_completions_path == "/v1/chat/completions"
-    assert result.endpoint.prefix_cache_reset is not None
-    assert result.endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert result.gateway is not None
+    assert result.gateway.backend == "builtin"
+    assert result.gateway.render_source == RenderSource.control_plane
+    assert result.gateway.endpoint.completions_path == "/v1/completions"
+    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
+    assert result.gateway.endpoint.prefix_cache_reset is not None
+    assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert result.pd_router is not None
+    assert result.pd_router.backend == "builtin"
 
 
 def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
     result = plan_serve(
         _prefill_decode_plan_input(
-            routing_backend="sglang-router", prefill_replicas=1, decode_replicas=1
+            frontend_backend="sglang-router", prefill_replicas=1, decode_replicas=1
         )
     )
 
-    router = result.replicas[-1]
-    assert result.roles[-1].kind == ServeRoleKind.router
-    assert router.id == "router"
-    assert router.device_count == 0
-    readiness = router.primary_readiness.root
+    assert [role.kind for role in result.roles] == [
+        ServeRoleKind.prefill,
+        ServeRoleKind.decode,
+    ]
+    assert result.gateway is not None
+    assert result.gateway.backend == "sglang-router"
+    assert result.pd_router is not None
+    readiness = result.pd_router.readiness.root
     assert isinstance(readiness, ReadinessProbeHttpTargetRegistry)
     assert readiness.model_dump() == {
         "kind": "http_target_registry",
@@ -201,14 +214,13 @@ def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
     }
-    assert result.routing.root.owner == "integration_native"
-    assert result.routing.root.role == "router"
-    assert result.routing.root.replica == 0
+    assert result.gateway.render_source == RenderSource.integration
+    assert result.pd_router.render_source == RenderSource.integration
 
 
 def test_plan_prefill_decode_rejects_an_unknown_router() -> None:
     with pytest.raises(AdapterOperationError):
-        plan_serve(_prefill_decode_plan_input(routing_backend="unknown"))
+        plan_serve(_prefill_decode_plan_input(frontend_backend="unknown"))
 
 
 def test_plan_expert_parallel_mapping() -> None:
@@ -357,10 +369,9 @@ def test_render_lowers_dp_attention_and_expert_parallelism() -> None:
         _render_input(
             parallelism=plan.roles[0].effective_parallelism,
             settings=plan.roles[0].effective_settings,
-            roles=plan.roles,
         )
     )
-    argv = result.processes[0].command.argv
+    argv = result.processes[0].root.command.argv
     assert argv[argv.index("--tensor-parallel-size") + 1] == "4"
     assert argv[argv.index("--data-parallel-size") + 1] == "2"
     assert "--enable-dp-attention" in argv
@@ -392,10 +403,9 @@ def test_render_lowers_pipeline_parallelism() -> None:
         _render_input(
             parallelism=plan.roles[0].effective_parallelism,
             settings=plan.roles[0].effective_settings,
-            roles=plan.roles,
         )
     )
-    argv = result.processes[0].command.argv
+    argv = result.processes[0].root.command.argv
     assert argv[argv.index("--pipeline-parallel-size") + 1] == "2"
     assert "--enable-dp-attention" not in argv
 
@@ -410,24 +420,20 @@ def _render_input(**overrides: object) -> RenderServeInput:
         dict[str, SettingValue],
         overrides.pop("settings", plan.roles[0].effective_settings),
     )
-    roles = list(cast(list[ServeRoleResult], overrides.pop("roles", plan.roles)))
-    roles[0] = roles[0].model_copy(
-        update={"effective_parallelism": parallelism, "effective_settings": settings}
-    )
     base: dict[str, object] = {
         "model": ServeModelInput(id="example", served_name="example"),
         "topology": ServeTopology.single,
-        "routing_backend": None,
+        "gateway_backend": None,
+        "pd_router_backend": None,
         "kv_transfer": None,
-        "roles": roles,
-        "links": [],
-        "routing": plan.routing,
         "profiling": False,
         "allocations": [
             ServeProcessAllocation.model_validate(
                 {
+                    "kind": "model_rank",
                     "process": "server-rank-000",
                     "role": "serve",
+                    "role_kind": "serve",
                     "replica": 0,
                     "rank": 0,
                     "rank_count": 1,
@@ -438,7 +444,11 @@ def _render_input(**overrides: object) -> RenderServeInput:
                     "ports": {},
                     "cache": "/cache/server",
                     "launch": {"kind": "local"},
+                    "effective_settings": settings,
+                    "effective_parallelism": parallelism,
+                    "links": [],
                     "dependencies": [],
+                    "render_inputs": [],
                 }
             )
         ],
@@ -449,12 +459,12 @@ def _render_input(**overrides: object) -> RenderServeInput:
 
 def _prefill_decode_render_input(
     *,
-    routing_backend: str = "builtin",
+    frontend_backend: str = "builtin",
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
 ) -> RenderServeInput:
     plan = plan_serve(
         _prefill_decode_plan_input(
-            routing_backend=routing_backend,
+            frontend_backend=frontend_backend,
             transport=transport,
             prefill_replicas=2,
             decode_replicas=2,
@@ -464,8 +474,8 @@ def _prefill_decode_render_input(
     allocations: list[ServeProcessAllocation] = []
     for index, replica in enumerate(plan.replicas):
         role = roles[replica.role_id]
-        host = "127.0.0.1" if role.kind == ServeRoleKind.router else f"node-{index}.example"
-        port = 7000 if role.kind == ServeRoleKind.router else 8000
+        host = f"node-{index}.example"
+        port = 8000
         ports = (
             {"bootstrap": {"host": host, "port": 9000 + index}}
             if "bootstrap" in replica.ports
@@ -474,32 +484,57 @@ def _prefill_decode_render_input(
         allocations.append(
             ServeProcessAllocation.model_validate(
                 {
+                    "kind": "model_rank",
                     "process": replica.id,
                     "role": replica.role_id,
+                    "role_kind": role.kind,
                     "replica": replica.replica_index,
                     "rank": 0,
                     "rank_count": 1,
                     "machine": f"machine-{index}",
-                    "model_locator": (
-                        None if role.kind == ServeRoleKind.router else "/models/example"
-                    ),
+                    "model_locator": "/models/example",
                     "devices": list(range(replica.device_count)),
                     "endpoint": {"host": host, "port": port},
                     "ports": ports,
                     "cache": f"/cache/{replica.id}",
                     "launch": {"kind": "local"},
+                    "effective_settings": role.effective_settings,
+                    "effective_parallelism": role.effective_parallelism,
+                    "links": plan.links,
                     "dependencies": [],
+                    "render_inputs": [],
+                }
+            )
+        )
+    if plan.gateway is not None and plan.gateway.render_source == RenderSource.integration:
+        assert plan.pd_router is not None
+        allocations.append(
+            ServeProcessAllocation.model_validate(
+                {
+                    "kind": "frontend",
+                    "process": "gateway",
+                    "process_role": "gateway",
+                    "components": ["gateway", "pd_router"],
+                    "machine": "gateway-machine",
+                    "devices": [],
+                    "endpoint": {"host": "127.0.0.1", "port": 7000},
+                    "ports": {},
+                    "cache": "/cache/gateway",
+                    "launch": {"kind": "local"},
+                    "gateway": plan.gateway,
+                    "pd_router": plan.pd_router,
+                    "links": plan.links,
+                    "dependencies": [allocation.root.process for allocation in allocations],
+                    "render_inputs": [],
                 }
             )
         )
     return RenderServeInput(
         model=ServeModelInput(id="example", served_name="example"),
         topology=ServeTopology.prefill_decode,
-        routing_backend=routing_backend,
+        gateway_backend=frontend_backend,
+        pd_router_backend=frontend_backend,
         kv_transfer=transport,
-        roles=plan.roles,
-        links=plan.links,
-        routing=plan.routing,
         profiling=False,
         allocations=allocations,
     )
@@ -509,7 +544,7 @@ def test_render_launches_sglang_server() -> None:
     result = render_serve(_render_input())
 
     assert len(result.processes) == 1
-    process = result.processes[0]
+    process = result.processes[0].root
     argv = process.command.argv
     assert argv[:5] == [
         "python3",
@@ -541,10 +576,8 @@ def test_render_merges_extra_args_with_inferlab_precedence() -> None:
             }
         )
     )
-    result = render_serve(
-        _render_input(settings=plan.roles[0].effective_settings, roles=plan.roles)
-    )
-    argv = result.processes[0].command.argv
+    result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
+    argv = result.processes[0].root.command.argv
     assert argv[argv.index("--port") + 1] == "8000", "inferlab owns the endpoint"
     assert argv[argv.index("--mem-fraction-static") + 1] == "0.8"
     assert "--log-level" in argv, "unrecognized extra args pass through"
@@ -559,10 +592,8 @@ def test_render_lowers_published_sglang_settings() -> None:
             }
         )
     )
-    result = render_serve(
-        _render_input(settings=plan.roles[0].effective_settings, roles=plan.roles)
-    )
-    argv = result.processes[0].command.argv
+    result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
+    argv = result.processes[0].root.command.argv
 
     assert argv[argv.index("--cuda-graph-max-bs-decode") + 1] == "32"
     assert argv[argv.index("--moe-runner-backend") + 1] == "flashinfer_mxfp4"
@@ -574,12 +605,14 @@ def test_render_prefill_decode_lowers_transport_independently_from_routing(
 ) -> None:
     result = render_serve(_prefill_decode_render_input(transport=transport))
 
-    for process in result.processes[:2]:
+    for wrapped in result.processes[:2]:
+        process = wrapped.root
         argv = process.command.argv
         assert argv[argv.index("--disaggregation-mode") + 1] == "prefill"
         assert argv[argv.index("--disaggregation-transfer-backend") + 1] == transport.value
         assert argv[argv.index("--disaggregation-bootstrap-port") + 1] in {"9000", "9001"}
-    for process in result.processes[2:]:
+    for wrapped in result.processes[2:]:
+        process = wrapped.root
         argv = process.command.argv
         assert argv[argv.index("--disaggregation-mode") + 1] == "decode"
         assert argv[argv.index("--disaggregation-transfer-backend") + 1] == transport.value
@@ -587,9 +620,9 @@ def test_render_prefill_decode_lowers_transport_independently_from_routing(
 
 
 def test_render_sglang_router_targets_every_replica_entrypoint() -> None:
-    result = render_serve(_prefill_decode_render_input(routing_backend="sglang-router"))
+    result = render_serve(_prefill_decode_render_input(frontend_backend="sglang-router"))
 
-    argv = result.processes[-1].command.argv
+    argv = result.processes[-1].root.command.argv
     assert argv[:3] == ["python3", "-m", "sglang_router.launch_router"]
     assert "--pd-disaggregation" in argv
     assert "--mini-lb" not in argv
@@ -610,20 +643,22 @@ def test_render_sglang_router_targets_every_replica_entrypoint() -> None:
 
 
 def test_render_rejects_multi_node() -> None:
-    allocation = (
-        _render_input()
-        .allocations[0]
-        .model_copy(
-            update={
-                "process": "server-rank-000",
-                "rank_count": 2,
-                "machine": "node-a",
-                "devices": [0],
-            }
-        )
+    allocation_payload = _render_input().allocations[0].model_dump()
+    allocation_payload.update(
+        {
+            "process": "server-rank-000",
+            "rank_count": 2,
+            "machine": "node-a",
+            "devices": [0],
+        }
     )
-    second = allocation.model_copy(
-        update={"process": "server-rank-001", "rank": 1, "machine": "node-b"}
-    )
+    second_payload = {
+        **allocation_payload,
+        "process": "server-rank-001",
+        "rank": 1,
+        "machine": "node-b",
+    }
+    allocation = ServeProcessAllocation.model_validate(allocation_payload)
+    second = ServeProcessAllocation.model_validate(second_payload)
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[allocation, second]))

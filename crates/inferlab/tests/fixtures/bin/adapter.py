@@ -24,7 +24,7 @@ if fault.get("adapter_reject"):
         json.dumps(
             {
                 "status": "error",
-                "protocol_version": "6",
+                "protocol_version": "7",
                 "error": {"code": "invalid_settings", "message": "fixture rejection"},
             }
         )
@@ -66,6 +66,16 @@ if operation == "plan_serve":
                 "effective_replica_count": role["replica_count"],
                 "effective_settings": settings,
                 "effective_parallelism": parallelism,
+                "public_endpoint": {
+                    "protocol": "http",
+                    "completions_path": "/v1/completions",
+                    "chat_completions_path": "/v1/chat/completions",
+                },
+                "render_inputs": (
+                    [{"source_path": "operator-config.yaml"}]
+                    if settings.get("fixture_mode") == "launch-file"
+                    else []
+                ),
             }
         ],
         "replicas": [
@@ -81,9 +91,16 @@ if operation == "plan_serve":
                 **(
                     {
                         "capture_target": {
-                            "control": {
-                                "start_path": "/start_profile",
-                                "stop_path": "/stop_profile",
+                            "window_control": {
+                                "endpoint": "replica_entry",
+                                "start": {
+                                    "method": "post",
+                                    "path": "/start_profile",
+                                },
+                                "stop": {
+                                    "method": "post",
+                                    "path": "/stop_profile",
+                                },
                             }
                         }
                     }
@@ -94,26 +111,14 @@ if operation == "plan_serve":
             for index in range(role["replica_count"])
         ],
         "links": [],
-        "routing": {"owner": "direct", "role": role["id"], "replica": 0},
-        "endpoint": {
-            "protocol": "http",
-            "completions_path": "/v1/completions",
-            "chat_completions_path": "/v1/chat/completions",
-        },
-        "render_inputs": (
-            [{"source_path": "operator-config.yaml"}]
-            if settings.get("fixture_mode") == "launch-file"
-            else []
-        ),
     }
 elif operation == "render_serve":
     allocations = input["allocations"]
-    roles = {role["id"]: role for role in input["roles"]}
     with_launch_file = (
         bool(allocations)
-        and roles[allocations[0]["role"]]["effective_settings"].get("fixture_mode") == "launch-file"
+        and allocations[0]["effective_settings"].get("fixture_mode") == "launch-file"
     )
-    launch_text = input["render_inputs"][0]["text"] if with_launch_file else ""
+    launch_text = allocations[0]["render_inputs"][0]["text"] if with_launch_file else ""
     launch_digest = hashlib.sha256(launch_text.encode("utf-8")).hexdigest()
     processes = []
     for allocation in allocations:
@@ -136,6 +141,7 @@ elif operation == "render_serve":
             )
         processes.append(
             {
+                "kind": "model_rank",
                 "process": allocation["process"],
                 "role": allocation["role"],
                 "replica": allocation["replica"],
@@ -164,7 +170,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "6",
+            "protocol_version": "7",
             "result": {"operation": operation, "output": output},
         }
     )

@@ -12,6 +12,22 @@ It does not read local bindings or inspect a stack realization. Use
 `inferlab workspace show --json` when another tool needs the canonical merged
 definition.
 
+## Upgrading to 0.6
+
+InferLab 0.6 uses adapter protocol version 7 and does not interpret
+protocol-version-6 requests or responses. Existing workspaces must update their
+exact package pins to `inferlab-adapter-sdk==0.5.0` and version `0.5.0` of the
+selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration. A Specialized
+Engine workspace uses `inferlab-integration-specialized-engine==0.2.0`. Run
+`inferlab workspace lock` after changing the selected packages so the committed
+Pixi lock becomes the new workspace authority.
+
+Serving definitions must also replace the former `routing_backend` field.
+A direct `single` server declares neither frontend backend; a routed `single`
+declares `gateway_backend`; and a `prefill_decode` server declares both
+`gateway_backend` and `pd_router_backend`. The protocol-v7 control plane rejects
+the old combined field rather than guessing how to divide its ownership.
+
 ## Minimal workspace
 
 The root file owns the schema version. Definitions may live there or in
@@ -67,15 +83,25 @@ case or invocation patch.
 
 ## Prefill/decode servers
 
-A P/D server uses the canonical `prefill` and `decode` roles. The router is
-derived from `routing_backend`; do not declare a `router` role in the public
-workspace.
+A P/D server uses the canonical Engine roles `prefill` and `decode`. It selects
+Gateway and P/D Router backends as two independent facts. Gateway owns the
+public API boundary; P/D Router owns prefill/decode target selection and phase
+orchestration. The currently supported pairs derive one fused, zero-device
+`gateway` process for the two components, while InferLab retains placement,
+lifecycle, cleanup, and record authority. Resolved evidence does not encode
+that current implementation choice as a permanent limit: its closed
+`frontend` section owns a `processes` collection, and each component names its
+realizing process through `process_id`. A future qualified split pair can
+therefore bind Gateway and P/D Router to distinct processes. Do not declare
+`gateway`, `pd_router`, or `router` under public `roles`.
 
 ```toml
 [servers.example-pd]
 stack = "vllm"
 model = "example"
 topology = "prefill_decode"
+gateway_backend = "builtin"
+pd_router_backend = "builtin"
 readiness_timeout_seconds = 1800
 default_case = "builtin-nixl"
 
@@ -92,12 +118,12 @@ replicas = 2
 tensor_parallel_size = 2
 
 [servers.example-pd.cases.builtin-nixl]
-routing_backend = "builtin"
 kv_transfer = "nixl"
 
 [servers.example-pd.cases.native-mooncake]
 readiness_timeout_seconds = 900
-routing_backend = "vllm-router"
+gateway_backend = "vllm-router"
+pd_router_backend = "vllm-router"
 kv_transfer = "mooncake"
 
 [servers.example-pd.cases.native-mooncake.roles.prefill.settings]
@@ -106,7 +132,15 @@ kv_transfer_protocol = "rdma"
 
 Common settings apply to every model-serving role. Role settings apply after
 the common layer. A selected case may patch common or role settings,
-parallelism, replica counts, routing, transfer, profiling, and readiness.
+parallelism, replica counts, either frontend-backend identity, transfer,
+profiling, and readiness. A P/D server base must declare both backend fields;
+cases may replace either value but may not add or remove a component. Each
+integration validates the selected Gateway/P/D Router pair, so independently
+recorded fields do not imply that every cross-provider pair is supported.
+Frontend component presence is fixed by the server base for every topology: a
+direct `single` server cannot acquire a Gateway from a case or invocation
+patch, while a routed `single` server declares `gateway_backend` on its base
+and may replace only that identity later.
 
 ## Local bindings
 
@@ -134,14 +168,14 @@ replace the generic values.
 Use explicit rank placement when replicas span machines, roles use different
 device counts, or the same model has different locators on each machine. This
 example places two TP4 prefill replicas across pairs of machines, two TP2
-decode replicas on individual machines, and a zero-device router on the
-controller:
+decode replicas on individual machines, and a zero-device fused frontend on
+the controller. The frontend is placed as `gateway` even though the same process
+also realizes P/D Router, and it has no model locator, replica index, or rank:
 
 ```toml
 default_placement = "cluster"
 
 [model_weights.example.machine_locators]
-controller = "/models/example"
 prefill-a = "/models/example-a"
 prefill-b = "/models/example-b"
 prefill-c = "/models/example-c"
@@ -214,15 +248,17 @@ replicas = [
   { machine = "decode-b", devices = [0, 1] },
 ]
 
-[placements.cluster.roles.router]
+[placements.cluster.roles.gateway]
 machine = "controller"
 devices = []
 ```
 
-The role-level `machine` and `devices` form is one replica at rank 0. Use a
-`ranks` list only when that one replica spans two or more machines; use a
-`replicas` list only when the role has two or more replicas. Replica and rank
-numbers are derived from list order.
+For model-serving roles, the role-level `machine` and `devices` form is one
+replica at rank 0. Use a `ranks` list only when that one Engine replica spans
+two or more machines; use a `replicas` list only when the role has two or more
+replicas. Replica and rank numbers are derived from list order. The derived
+`gateway` placement is instead one process-only binding and accepts only one
+direct `machine`, an empty `devices` list, and an optional `endpoint_port`.
 
 ## Invocation patches
 

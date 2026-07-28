@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v6",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v7",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root aggregating every wire type. It exists to generate one\ncommitted JSON schema (and the Python SDK models); its optional client\nfields are never all populated in a single message.",
@@ -72,6 +72,7 @@
       "$ref": "#/$defs/AdapterResponse"
     }
   },
+  "$comment": "Generated from crates/inferlab-protocol/src/wire.rs; do not edit.",
   "additionalProperties": false,
   "required": [
     "request",
@@ -982,44 +983,53 @@
         "mean"
       ]
     },
-    "BuiltinRouterKind": {
-      "description": "An Inferlab-owned routing implementation with stable target semantics.",
-      "type": "string",
-      "enum": [
-        "vllm_mooncake",
-        "vllm_nixl",
-        "sglang",
-        "trtllm"
-      ]
-    },
-    "CaptureControlRequirement": {
-      "description": "The HTTP paths a capture target exposes to open and close a capture window.",
-      "type": "object",
-      "properties": {
-        "start_path": {
-          "type": "string"
-        },
-        "stop_path": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "start_path",
-        "stop_path"
-      ]
-    },
     "CaptureTargetRequirement": {
       "description": "Marks a replica as a profiling capture target and carries its window\ncontrol ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
       "type": "object",
       "properties": {
-        "control": {
-          "$ref": "#/$defs/CaptureControlRequirement"
+        "window_control": {
+          "$ref": "#/$defs/CaptureWindowControlRequirement"
         }
       },
       "additionalProperties": false,
       "required": [
-        "control"
+        "window_control"
+      ]
+    },
+    "CaptureWindowControlEndpoint": {
+      "description": "The logical workload endpoint exposing a capture target's window-control\nactions.",
+      "oneOf": [
+        {
+          "description": "The entry process of the capture target's Engine replica.",
+          "type": "string",
+          "const": "replica_entry"
+        },
+        {
+          "description": "The separately planned Gateway process.",
+          "type": "string",
+          "const": "gateway"
+        }
+      ]
+    },
+    "CaptureWindowControlRequirement": {
+      "description": "The logical workload endpoint and typed actions that open and close a\ncapture window.",
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/CaptureWindowControlEndpoint"
+        },
+        "start": {
+          "$ref": "#/$defs/HttpActionSpec"
+        },
+        "stop": {
+          "$ref": "#/$defs/HttpActionSpec"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "start",
+        "stop"
       ]
     },
     "ClientEndpointInput": {
@@ -1648,6 +1658,183 @@
         "higher_is_better"
       ]
     },
+    "FrontendCoRendering": {
+      "description": "The fixed co-rendering requirement shared by compatible frontend plans.",
+      "type": "object",
+      "properties": {
+        "process_role": {
+          "$ref": "#/$defs/FrontendProcessRole"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "process_role"
+      ]
+    },
+    "FrontendComponents": {
+      "description": "The only two frontend bindings protocol v7 accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GatewayFrontendBinding"
+        },
+        {
+          "$ref": "#/$defs/GatewayPdRouterFrontendBinding"
+        }
+      ]
+    },
+    "FrontendGatewayComponent": {
+      "description": "The literal first member of every closed frontend component binding.",
+      "type": "string",
+      "enum": [
+        "gateway"
+      ]
+    },
+    "FrontendHandoff": {
+      "description": "The currently demonstrated Gateway-to-P/D Router handoff is internal to\none fused frontend process.",
+      "type": "string",
+      "enum": [
+        "in_process"
+      ]
+    },
+    "FrontendPdRouterComponent": {
+      "description": "The literal second member of the fused P/D frontend component binding.",
+      "type": "string",
+      "enum": [
+        "pd_router"
+      ]
+    },
+    "FrontendProcessRole": {
+      "description": "The one canonical process role available to a protocol-v7 frontend.",
+      "type": "string",
+      "enum": [
+        "gateway"
+      ]
+    },
+    "GatewayFrontendBinding": {
+      "description": "The stable schema branch for a Gateway-only frontend binding.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FrontendGatewayComponent"
+      },
+      "maxItems": 1,
+      "minItems": 1
+    },
+    "GatewayPdRouterFrontendBinding": {
+      "description": "The stable schema branch for a fused Gateway and P/D Router binding.",
+      "type": "array",
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/FrontendGatewayComponent"
+        },
+        {
+          "$ref": "#/$defs/FrontendPdRouterComponent"
+        }
+      ]
+    },
+    "GatewayPlan": {
+      "description": "The public frontend component plan returned independently from Engine and\nP/D Router planning.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "co_rendering": {
+          "$ref": "#/$defs/FrontendCoRendering"
+        },
+        "effective_settings": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
+        "endpoint": {
+          "$ref": "#/$defs/EndpointRequirement"
+        },
+        "implementation": {
+          "type": "string"
+        },
+        "implementation_version": {
+          "type": "string"
+        },
+        "ports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "readiness": {
+          "$ref": "#/$defs/ReadinessProbe"
+        },
+        "render_inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RenderInputDeclaration"
+          }
+        },
+        "render_source": {
+          "$ref": "#/$defs/RenderSource"
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GatewayTarget"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "implementation",
+        "implementation_version",
+        "effective_settings",
+        "endpoint",
+        "readiness",
+        "targets",
+        "render_source",
+        "co_rendering"
+      ]
+    },
+    "GatewayTarget": {
+      "description": "The target a Gateway forwards accepted public requests to.",
+      "oneOf": [
+        {
+          "description": "A routed-single Gateway targets the sole Engine role entry point.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "engine"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "role"
+          ]
+        },
+        {
+          "description": "A P/D Gateway hands requests to its co-rendered P/D Router component.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pd_router"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
     "HttpActionSpec": {
       "description": "An HTTP action (method and path) invoked against the workload endpoint.",
       "type": "object",
@@ -1886,10 +2073,107 @@
       },
       "additionalProperties": false
     },
+    "PdRouterPlan": {
+      "description": "The P/D orchestration component plan, kept separate even when the same\nprocess and provider also realize Gateway.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "co_rendering": {
+          "$ref": "#/$defs/FrontendCoRendering"
+        },
+        "decode_role": {
+          "type": "string"
+        },
+        "effective_settings": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
+        "handoff": {
+          "$ref": "#/$defs/FrontendHandoff"
+        },
+        "implementation": {
+          "type": "string"
+        },
+        "implementation_version": {
+          "type": "string"
+        },
+        "policies": {
+          "$ref": "#/$defs/PdRoutingPolicies"
+        },
+        "ports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "prefill_role": {
+          "type": "string"
+        },
+        "readiness": {
+          "$ref": "#/$defs/ReadinessProbe"
+        },
+        "render_inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RenderInputDeclaration"
+          }
+        },
+        "render_source": {
+          "$ref": "#/$defs/RenderSource"
+        },
+        "target_scheme": {
+          "$ref": "#/$defs/TargetEndpointScheme"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "implementation",
+        "implementation_version",
+        "effective_settings",
+        "policies",
+        "prefill_role",
+        "decode_role",
+        "target_scheme",
+        "readiness",
+        "handoff",
+        "render_source",
+        "co_rendering"
+      ]
+    },
+    "PdRoutingPolicies": {
+      "description": "Independent policies for choosing prefill and decode targets.",
+      "type": "object",
+      "properties": {
+        "decode": {
+          "type": "string"
+        },
+        "prefill": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "prefill",
+        "decode"
+      ]
+    },
     "PlanServeInput": {
       "description": "The requested serve shape a `PlanServe` operation lowers into a topology.",
       "type": "object",
       "properties": {
+        "gateway_backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kv_transfer": {
           "anyOf": [
             {
@@ -1903,6 +2187,12 @@
         "model": {
           "$ref": "#/$defs/ServeModelInput"
         },
+        "pd_router_backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "profiling": {
           "type": "boolean",
           "default": false
@@ -1912,12 +2202,6 @@
           "items": {
             "$ref": "#/$defs/ServeRoleInput"
           }
-        },
-        "routing_backend": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "topology": {
           "$ref": "#/$defs/ServeTopology"
@@ -1931,11 +2215,18 @@
       ]
     },
     "PlanServeResult": {
-      "description": "The lowered topology returned by a `PlanServe`: the effective server-level\nshape, per-role resolution, whole-replica requirements, role links, and the\npublic and per-role endpoint requirements the control plane then allocates.",
+      "description": "The lowered topology returned by a `PlanServe`: effective Engine roles,\nwhole-replica requirements, logical links, and separate optional Gateway\nand P/D Router component plans.",
       "type": "object",
       "properties": {
-        "endpoint": {
-          "$ref": "#/$defs/EndpointRequirement"
+        "gateway": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GatewayPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "integration": {
           "$ref": "#/$defs/IntegrationIdentity"
@@ -1946,12 +2237,15 @@
             "$ref": "#/$defs/ServeRoleLink"
           }
         },
-        "render_inputs": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/RenderInputDeclaration"
-          }
+        "pd_router": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PdRouterPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "replicas": {
           "type": "array",
@@ -1964,9 +2258,6 @@
           "items": {
             "$ref": "#/$defs/ServeRoleResult"
           }
-        },
-        "routing": {
-          "$ref": "#/$defs/RoutingResult"
         }
       },
       "additionalProperties": false,
@@ -1974,9 +2265,7 @@
         "integration",
         "roles",
         "replicas",
-        "links",
-        "routing",
-        "endpoint"
+        "links"
       ]
     },
     "ProcessSpec": {
@@ -2003,12 +2292,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `6` (serialized as the\nstring `\"6\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `7` (serialized as the\nstring `\"7\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 6.",
+          "description": "Protocol version 7.",
           "type": "string",
-          "const": "6"
+          "const": "7"
         }
       ]
     },
@@ -2151,6 +2440,12 @@
             "$ref": "#/$defs/ServeProcessAllocation"
           }
         },
+        "gateway_backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kv_transfer": {
           "anyOf": [
             {
@@ -2161,40 +2456,18 @@
             }
           ]
         },
-        "links": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ServeRoleLink"
-          }
-        },
         "model": {
           "$ref": "#/$defs/ServeModelInput"
         },
-        "profiling": {
-          "type": "boolean",
-          "default": false
-        },
-        "render_inputs": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/SuppliedRenderInput"
-          }
-        },
-        "roles": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ServeRoleResult"
-          }
-        },
-        "routing": {
-          "$ref": "#/$defs/RoutingResult"
-        },
-        "routing_backend": {
+        "pd_router_backend": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "profiling": {
+          "type": "boolean",
+          "default": false
         },
         "topology": {
           "$ref": "#/$defs/ServeTopology"
@@ -2204,9 +2477,6 @@
       "required": [
         "model",
         "topology",
-        "roles",
-        "routing",
-        "links",
         "allocations"
       ]
     },
@@ -2230,127 +2500,45 @@
         "processes"
       ]
     },
-    "RenderedServeProcess": {
-      "description": "A rendered process bound to the allocation `id` it was produced for.",
-      "type": "object",
-      "properties": {
-        "command": {
-          "$ref": "#/$defs/ProcessSpec"
-        },
-        "launch_files": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/LaunchFileDeclaration"
-          }
-        },
-        "process": {
-          "type": "string"
-        },
-        "rank": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "rank_count": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "replica": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "role": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "process",
-        "role",
-        "replica",
-        "rank",
-        "rank_count",
-        "launch_files",
-        "command"
+    "RenderSource": {
+      "description": "Which bounded implementation renders an accepted concrete frontend\nallocation. This is a lowering boundary only; the control plane always\nowns placement, lifecycle, cleanup, endpoints, and records.",
+      "type": "string",
+      "enum": [
+        "control_plane",
+        "integration"
       ]
     },
-    "RoutingResult": {
-      "description": "The closed routing owner selected during integration planning.",
+    "RenderedServeProcess": {
+      "description": "A rendered process bound to the model-rank or frontend allocation identity\nit was produced for.",
       "oneOf": [
         {
           "type": "object",
           "properties": {
-            "owner": {
+            "command": {
+              "$ref": "#/$defs/ProcessSpec"
+            },
+            "kind": {
               "type": "string",
-              "const": "direct"
+              "const": "model_rank"
             },
-            "replica": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "role": {
-              "type": "string"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "owner",
-            "role",
-            "replica"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "decode_role": {
-              "type": "string"
-            },
-            "implementation": {
-              "$ref": "#/$defs/BuiltinRouterKind"
-            },
-            "owner": {
-              "type": "string",
-              "const": "inferlab_builtin"
-            },
-            "policy": {
-              "type": "string"
-            },
-            "ports": {
+            "launch_files": {
               "type": "array",
-              "default": [],
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/LaunchFileDeclaration"
               }
             },
-            "prefill_role": {
+            "process": {
               "type": "string"
             },
-            "readiness": {
-              "$ref": "#/$defs/ReadinessProbe"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "owner",
-            "implementation",
-            "policy",
-            "prefill_role",
-            "decode_role",
-            "readiness"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "owner": {
-              "type": "string",
-              "const": "integration_native"
+            "rank": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
             },
-            "policy": {
-              "type": "string"
+            "rank_count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
             },
             "replica": {
               "type": "integer",
@@ -2363,10 +2551,50 @@
           },
           "additionalProperties": false,
           "required": [
-            "owner",
+            "kind",
+            "process",
             "role",
             "replica",
-            "policy"
+            "rank",
+            "rank_count",
+            "launch_files",
+            "command"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "$ref": "#/$defs/ProcessSpec"
+            },
+            "components": {
+              "$ref": "#/$defs/FrontendComponents"
+            },
+            "kind": {
+              "type": "string",
+              "const": "frontend"
+            },
+            "launch_files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LaunchFileDeclaration"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "process_role": {
+              "$ref": "#/$defs/FrontendProcessRole"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "process_role",
+            "components",
+            "launch_files",
+            "command"
           ]
         }
       ]
@@ -2389,89 +2617,217 @@
       ]
     },
     "ServeProcessAllocation": {
-      "description": "One concrete process the control plane placed, supplied to `RenderServe`:\nits identity, rank, machine, devices, model locator, and allocated\nendpoints and named ports.",
-      "type": "object",
-      "properties": {
-        "cache": {
-          "type": "string"
+      "description": "One concrete process allocation supplied to `RenderServe`. Model-rank and\nprocess-only frontend identities are distinct so a frontend cannot acquire\nmodel coordinates or a model locator by construction.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cache": {
+              "type": "string"
+            },
+            "dependencies": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "effective_parallelism": {
+              "$ref": "#/$defs/Parallelism"
+            },
+            "effective_settings": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              }
+            },
+            "endpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EndpointAssignment"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "model_rank"
+            },
+            "launch": {
+              "$ref": "#/$defs/AllocationLaunch"
+            },
+            "links": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ServeRoleLink"
+              }
+            },
+            "machine": {
+              "type": "string"
+            },
+            "model_locator": {
+              "type": "string"
+            },
+            "ports": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/EndpointAssignment"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "rank": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "rank_count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "render_inputs": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SuppliedRenderInput"
+              }
+            },
+            "replica": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "role": {
+              "type": "string"
+            },
+            "role_kind": {
+              "$ref": "#/$defs/ServeRoleKind"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "role",
+            "role_kind",
+            "replica",
+            "rank",
+            "rank_count",
+            "machine",
+            "devices",
+            "model_locator",
+            "ports",
+            "cache",
+            "launch",
+            "effective_settings",
+            "effective_parallelism"
+          ]
         },
-        "dependencies": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
-        "devices": {
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "uint32",
-            "minimum": 0
-          }
-        },
-        "endpoint": {
-          "anyOf": [
-            {
+        {
+          "type": "object",
+          "properties": {
+            "cache": {
+              "type": "string"
+            },
+            "components": {
+              "$ref": "#/$defs/FrontendComponents"
+            },
+            "dependencies": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "endpoint": {
               "$ref": "#/$defs/EndpointAssignment"
             },
-            {
-              "type": "null"
+            "gateway": {
+              "$ref": "#/$defs/GatewayPlan"
+            },
+            "kind": {
+              "type": "string",
+              "const": "frontend"
+            },
+            "launch": {
+              "$ref": "#/$defs/AllocationLaunch"
+            },
+            "links": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ServeRoleLink"
+              }
+            },
+            "machine": {
+              "type": "string"
+            },
+            "pd_router": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PdRouterPlan"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ports": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/EndpointAssignment"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "process_role": {
+              "$ref": "#/$defs/FrontendProcessRole"
+            },
+            "render_inputs": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SuppliedRenderInput"
+              }
             }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "process_role",
+            "components",
+            "machine",
+            "devices",
+            "endpoint",
+            "ports",
+            "cache",
+            "launch",
+            "gateway"
           ]
-        },
-        "launch": {
-          "$ref": "#/$defs/AllocationLaunch"
-        },
-        "machine": {
-          "type": "string"
-        },
-        "model_locator": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "ports": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/EndpointAssignment"
-          }
-        },
-        "process": {
-          "type": "string"
-        },
-        "rank": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "rank_count": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "replica": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "role": {
-          "type": "string"
         }
-      },
-      "additionalProperties": false,
-      "required": [
-        "process",
-        "role",
-        "replica",
-        "rank",
-        "rank_count",
-        "machine",
-        "devices",
-        "ports",
-        "cache",
-        "launch"
       ]
     },
     "ServeReplicaRequirement": {
@@ -2586,11 +2942,6 @@
           "description": "Decode role of a disaggregated topology.",
           "type": "string",
           "const": "decode"
-        },
-        {
-          "description": "Request-routing role that does not execute model inference.",
-          "type": "string",
-          "const": "router"
         }
       ]
     },
@@ -2730,6 +3081,24 @@
         },
         "kind": {
           "$ref": "#/$defs/ServeRoleKind"
+        },
+        "public_endpoint": {
+          "description": "The public endpoint contract for a direct `single` Engine. Gateway-\nbacked shapes leave this absent and carry the contract on Gateway.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EndpointRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "render_inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RenderInputDeclaration"
+          }
         }
       },
       "additionalProperties": false,

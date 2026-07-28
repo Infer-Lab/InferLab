@@ -33,10 +33,14 @@ done
 for package in "${workspace_packages[@]}"; do
   [[ "${package}" == inferlab-integration-* ]] || continue
   adapter="inferlab-adapter-${package#inferlab-integration-}"
+  fixture_root="${root}/python/${package}/tests/fixtures"
+  if [[ ! -f "${fixture_root}/plan-serve-request.json" ]]; then
+    fixture_root="${root}/protocol/fixtures/valid"
+  fi
   for operation in plan-serve render-serve
   do
     "${temporary}/venv/bin/${adapter}" \
-      < "${root}/protocol/fixtures/valid/${operation}-request.json" \
+      < "${fixture_root}/${operation}-request.json" \
       > "${temporary}/${operation}-response.json"
     "${temporary}/venv/bin/python" -c \
       'import pathlib, sys; from inferlab_adapter_sdk import AdapterResponse; AdapterResponse.model_validate_json(pathlib.Path(sys.argv[1]).read_text())' \

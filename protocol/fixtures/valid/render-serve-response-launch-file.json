@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "6",
+  "protocol_version": "7",
   "result": {
     "operation": "render_serve",
     "output": {
@@ -12,6 +12,7 @@
       },
       "processes": [
         {
+          "kind": "model_rank",
           "process": "server",
           "role": "serve",
           "replica": 0,

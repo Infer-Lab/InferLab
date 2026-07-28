@@ -199,7 +199,7 @@ impl TestWorkspace {
             .replacen(
                 "topology = \"single\"",
                 &format!(
-                    "topology = \"prefill_decode\"\nrouting_backend = \"builtin\"\nkv_transfer = {transport:?}"
+                    "topology = \"prefill_decode\"\ngateway_backend = \"builtin\"\npd_router_backend = \"builtin\"\nkv_transfer = {transport:?}"
                 ),
                 1,
             )
@@ -641,6 +641,20 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
     assert_eq!(
         server_evidence["profiler"]["control"]["deadline_seconds"],
         60
+    );
+    let control = &server_evidence["profiler"]["control"];
+    let endpoint = &server_ranks[0].rank.endpoint;
+    assert_eq!(control["window_control_endpoint"], "replica_entry");
+    assert_eq!(control["process_id"], "server");
+    assert_eq!(control["start"]["method"], "post");
+    assert_eq!(
+        control["start"]["effective_url"],
+        format!("http://{}:{}/start_profile", endpoint.host, endpoint.port)
+    );
+    assert_eq!(control["stop"]["method"], "post");
+    assert_eq!(
+        control["stop"]["effective_url"],
+        format!("http://{}:{}/stop_profile", endpoint.host, endpoint.port)
     );
     assert_eq!(
         server_evidence["profiler_finalization"]["operation"],
@@ -1231,24 +1245,27 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
         .ok_or("recipe has no server record id")?;
     let server = workspace.load_record(server_id)?;
     let processes = resolved_ranks(&server["resolved"]["server"])?;
+    let frontend = support::resolved_frontend(&server["resolved"]["server"])?;
     let process_evidence = server["process_evidence"]
         .as_object()
         .ok_or("server has no process evidence")?;
     assert_eq!(server["resolved"]["server"]["topology"], "prefill_decode");
-    assert_eq!(processes.len(), 5);
+    assert_eq!(processes.len(), 4);
     assert_eq!(process_evidence.len(), 5);
     assert_eq!(processes[0].replica_id, "prefill-000");
     assert_eq!(processes[1].replica_id, "prefill-001");
     assert_eq!(processes[2].replica_id, "decode-000");
     assert_eq!(processes[3].replica_id, "decode-001");
-    assert_eq!(processes[4].role_id, "router");
+    assert_eq!(frontend.id, "gateway");
+    assert_eq!(frontend.components, ["gateway", "pd_router"]);
+    assert!(process_evidence.contains_key("gateway"));
 
     // The resolved plan wires the KV transfer for exactly the selected
     // transport: a mooncake break fails only the mooncake case and a nixl
     // break fails only the nixl case ([[RFC-0003:C-SERVE-TOPOLOGY]]). The
     // discriminating facts are the kv_transfer mechanism, the transport-
-    // specific side link, the per-transport process port names, and the proxy
-    // the router launches.
+    // specific side link, the per-transport process port names, and the
+    // concrete frontend command.
     let links = server["resolved"]["server"]["links"]
         .as_array()
         .ok_or("resolved plan has no links")?;
@@ -1262,8 +1279,8 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
         "the kv_transfer link records the {transport} mechanism: {links:?}"
     );
     // The rendered command and port allocation live on the resolved hierarchy,
-    // ordered prefill, decode, then router.
-    let router_argv = &processes[4].rank.command.argv;
+    // ordered prefill and decode, plus the independently stored frontend.
+    let frontend_argv = &frontend.command.argv;
     let prefill_ports = |replica_index: usize| {
         processes[replica_index]
             .rank
@@ -1274,7 +1291,7 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
     };
     match transport {
         "mooncake" => {
-            // Mooncake bootstraps prefill replicas through the router.
+            // Mooncake bootstraps prefill replicas through the P/D Router.
             assert!(
                 links
                     .iter()
@@ -1291,8 +1308,8 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
                 prefill_ports(0)
             );
             assert!(
-                router_argv.iter().any(|arg| arg == "vllm-mooncake"),
-                "the router launches the mooncake proxy: {router_argv:?}"
+                frontend_argv.iter().any(|arg| arg == "vllm-mooncake"),
+                "the frontend launches the mooncake implementation: {frontend_argv:?}"
             );
         }
         "nixl" => {
@@ -1313,8 +1330,8 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
                 prefill_ports(0)
             );
             assert!(
-                router_argv.iter().any(|arg| arg == "vllm-nixl"),
-                "the router launches the nixl proxy: {router_argv:?}"
+                frontend_argv.iter().any(|arg| arg == "vllm-nixl"),
+                "the frontend launches the nixl implementation: {frontend_argv:?}"
             );
         }
         other => return Err(format!("unhandled transport {other}").into()),
@@ -2212,20 +2229,28 @@ if operation == "plan_serve":
                 "primary_readiness": {"kind": "http", "path": "/v1/models"},
                 "worker_readiness": {"kind": "process_alive"},
                 **({
-                    "capture_target": {
-                        "control": {
-                            "start_path": "/start_profile",
-                            "stop_path": "/stop_profile",
-                        }
+                "capture_target": {
+                    "window_control": {
+                        "endpoint": "replica_entry",
+                        "start": {
+                            "method": "post",
+                            "path": "/start_profile",
+                        },
+                        "stop": {
+                            "method": "post",
+                            "path": "/stop_profile",
+                        },
                     }
+                }
                 } if input["profiling"] else {}),
             })
     links = [] if not transport else [
-        {"kind": "request_routing", "source": "router", "targets": ["prefill", "decode"]},
+        {"kind": "request_routing", "source": "gateway", "targets": ["pd_router"]},
+        {"kind": "request_routing", "source": "pd_router", "targets": ["prefill", "decode"]},
         {"kind": "kv_transfer", "source": "prefill", "target": "decode", "mechanism": transport},
     ]
     if transport == "mooncake":
-        links.append({"kind": "bootstrap", "source": "router", "target": "prefill", "port": "bootstrap"})
+        links.append({"kind": "bootstrap", "source": "pd_router", "target": "prefill", "port": "bootstrap"})
     elif transport == "nixl":
         links.append({"kind": "side_channel", "source": "prefill", "target": "decode", "port": "side_channel"})
     output = {
@@ -2242,27 +2267,53 @@ if operation == "plan_serve":
             "effective_replica_count": selected_role["replica_count"],
             "effective_settings": effective,
             "effective_parallelism": effective_parallelism,
+            **({
+                "public_endpoint": {
+                    "protocol": "http",
+                    "completions_path": "/v1/completions",
+                    "chat_completions_path": "/v1/chat/completions",
+                    "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
+                }
+            } if not transport else {}),
+            "render_inputs": [],
         } for selected_role in roles],
         "replicas": replicas,
         "links": links,
-        "routing": (
-            {
-                "owner": "inferlab_builtin",
+        **({
+            "gateway": {
+                "backend": input["gateway_backend"],
                 "implementation": "vllm_mooncake" if transport == "mooncake" else "vllm_nixl",
-                "policy": "round_robin",
+                "implementation_version": "1",
+                "effective_settings": {},
+                "endpoint": {
+                    "protocol": "http",
+                    "completions_path": "/v1/completions",
+                    "chat_completions_path": "/v1/chat/completions",
+                },
+                "readiness": {"kind": "http", "path": "/healthcheck"},
+                "ports": [],
+                "targets": [{"kind": "pd_router"}],
+                "render_inputs": [],
+                "render_source": "control_plane",
+                "co_rendering": {"process_role": "gateway"},
+            },
+            "pd_router": {
+                "backend": input["pd_router_backend"],
+                "implementation": "vllm_mooncake" if transport == "mooncake" else "vllm_nixl",
+                "implementation_version": "1",
+                "effective_settings": {},
+                "policies": {"prefill": "round_robin", "decode": "round_robin"},
                 "prefill_role": "prefill",
                 "decode_role": "decode",
+                "target_scheme": "http",
                 "ports": [],
                 "readiness": {"kind": "http", "path": "/healthcheck"},
-            }
-            if transport else {"owner": "direct", "role": role["id"], "replica": 0}
-        ),
-        "endpoint": {
-            "protocol": "http",
-            "completions_path": "/v1/completions",
-            "chat_completions_path": "/v1/chat/completions",
-            "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
-        },
+                "handoff": "in_process",
+                "render_inputs": [],
+                "render_source": "control_plane",
+                "co_rendering": {"process_role": "gateway"},
+            },
+        } if transport else {}),
     }
 elif operation == "render_serve":
     server = "fixture-missing-server" if os.environ.get("FIXTURE_SERVER_START_FAIL") == "1" else "fixture-server"
@@ -2275,6 +2326,7 @@ elif operation == "render_serve":
             "framework_version": "test",
         },
         "processes": [{
+            "kind": "model_rank",
             "process": allocation["process"],
             "role": allocation["role"],
             "replica": allocation["replica"],
@@ -2297,7 +2349,7 @@ elif operation == "render_serve":
     }
 else:
     raise ValueError(operation)
-print(json.dumps({"status": "ok", "protocol_version": "6", "result": {"operation": operation, "output": output}}))
+print(json.dumps({"status": "ok", "protocol_version": "7", "result": {"operation": operation, "output": output}}))
 "#;
 
 const FIXTURE_SERVER: &str = r#"#!/usr/bin/env python3

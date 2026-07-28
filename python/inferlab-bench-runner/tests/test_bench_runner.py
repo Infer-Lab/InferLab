@@ -61,7 +61,7 @@ def request(
 ) -> BenchClientRequest:
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "6",
+            "protocol_version": "7",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -104,7 +104,7 @@ def preparation_request(
 ) -> BenchDatasetPreparationRequest:
     return BenchDatasetPreparationRequest.model_validate(
         {
-            "protocol_version": "6",
+            "protocol_version": "7",
             "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
             "request_source": {
                 "kind": "dataset",

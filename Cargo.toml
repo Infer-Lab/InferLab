@@ -1,13 +1,14 @@
 [workspace]
 members = [
     "crates/inferlab",
+    "crates/inferlab-fake-engine",
     "crates/inferlab-proxy",
     "crates/inferlab-protocol",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -27,6 +28,7 @@ fs2 = "0.4"
 futures-util = "0.3"
 insta = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+smg-grpc-client = "1"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 rustix = { version = "1", features = ["process", "system"] }
 schemars = "1"
@@ -38,7 +40,10 @@ tempfile = "3"
 thiserror = "2"
 time = "0.3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 toml = "1"
+tonic = "0.14"
+tonic-health = "0.14"
 humantime = "2"
 unicode-segmentation = "1"
 unicode-width = "0.2"

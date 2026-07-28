@@ -70,8 +70,58 @@ const VALID_EVAL_CLIENT_RESULT_NORMALIZED_METRIC: &str = include_str!(concat!(
 ));
 const GENERATED_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v6.schema.json"
+    "/../../protocol/schema/adapter-protocol-v7.schema.json"
 ));
+
+#[test]
+fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
+    let request = r#"{
+        "operation": "plan_serve",
+        "protocol_version": "6",
+        "input": {
+            "model": {"id": "model", "served_name": "model"},
+            "topology": "single",
+            "roles": [],
+            "profiling": false
+        }
+    }"#;
+
+    assert!(serde_json::from_str::<AdapterRequest>(request).is_err());
+}
+
+#[test]
+fn protocol_v7_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
+    let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
+    let capture_target = response
+        .pointer_mut("/result/output/replicas/0/capture_target")
+        .ok_or("plan fixture did not contain a capture target")?;
+    *capture_target = serde_json::json!({
+        "control": {
+            "start_path": "/start_profile",
+            "stop_path": "/stop_profile"
+        }
+    });
+
+    let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
+        return Err("protocol v7 accepted the pre-binding capture-control shape".into());
+    };
+    assert!(error.to_string().contains("unknown field `control`"));
+    Ok(())
+}
+
+#[test]
+fn frontend_component_schema_uses_stable_binding_names() -> Result<(), Box<dyn Error>> {
+    let schema: serde_json::Value = serde_json::from_str(GENERATED_SCHEMA)?;
+    let definitions = schema["$defs"]
+        .as_object()
+        .ok_or("protocol schema did not contain definitions")?;
+
+    assert!(definitions.contains_key("GatewayFrontendBinding"));
+    assert!(definitions.contains_key("GatewayPdRouterFrontendBinding"));
+    assert!(!definitions.contains_key("FrontendComponents1"));
+    assert!(!definitions.contains_key("FrontendComponents2"));
+    Ok(())
+}
 
 #[test]
 fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
@@ -82,11 +132,11 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let launch_file_response: AdapterResponse = serde_json::from_str(VALID_LAUNCH_FILE_RESPONSE)?;
     let error_response: AdapterResponse = serde_json::from_str(VALID_ERROR_RESPONSE)?;
 
-    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V6);
-    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V6);
-    assert_eq!(render_request.protocol_version(), ProtocolVersion::V6);
-    assert_eq!(render_response.protocol_version(), ProtocolVersion::V6);
-    assert_eq!(error_response.protocol_version(), ProtocolVersion::V6);
+    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V7);
+    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V7);
+    assert_eq!(render_request.protocol_version(), ProtocolVersion::V7);
+    assert_eq!(render_response.protocol_version(), ProtocolVersion::V7);
+    assert_eq!(error_response.protocol_version(), ProtocolVersion::V7);
 
     let AdapterResponse::Ok { result, .. } = &plan_response else {
         return Err("plan fixture did not contain a successful response".into());
@@ -94,23 +144,42 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let AdapterResult::PlanServe { output } = result.as_ref() else {
         return Err("plan fixture did not contain plan output".into());
     };
-    assert!(output.render_inputs.is_empty());
-    assert_eq!(output.endpoint.completions_path, "/v1/completions");
+    let gateway = output
+        .gateway
+        .as_ref()
+        .ok_or("plan fixture did not contain Gateway")?;
+    assert_eq!(gateway.backend, "vllm-router");
+    assert_eq!(gateway.endpoint.completions_path, "/v1/completions");
     assert_eq!(
-        output.endpoint.chat_completions_path,
+        gateway.endpoint.chat_completions_path,
         "/v1/chat/completions"
     );
+    let pd_router = output
+        .pd_router
+        .as_ref()
+        .ok_or("plan fixture did not contain P/D Router")?;
+    assert_eq!(pd_router.backend, "vllm-router");
+    assert_eq!(pd_router.policies.prefill, "round_robin");
 
     let AdapterRequest::RenderServe { input, .. } = &render_request else {
         return Err("render fixture did not contain a render request".into());
     };
-    assert!(input.render_inputs.is_empty());
     let render_json = serde_json::to_value(input)?;
     let allocation = render_json["allocations"][0]
         .as_object()
         .ok_or("render fixture did not contain an allocation object")?;
-    assert!(!allocation.contains_key("effective_settings"));
-    assert!(!allocation.contains_key("effective_parallelism"));
+    assert!(allocation.contains_key("effective_settings"));
+    assert!(allocation.contains_key("effective_parallelism"));
+    let frontend = render_json["allocations"][2]
+        .as_object()
+        .ok_or("render fixture did not contain a frontend allocation")?;
+    assert_eq!(
+        frontend.get("components"),
+        Some(&serde_json::json!(["gateway", "pd_router"]))
+    );
+    assert!(!frontend.contains_key("model_locator"));
+    assert!(!frontend.contains_key("replica"));
+    assert!(!frontend.contains_key("rank"));
 
     let AdapterResponse::Ok { result, .. } = &launch_file_response else {
         return Err("launch-file fixture did not contain a successful response".into());
@@ -118,8 +187,12 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let AdapterResult::RenderServe { output } = result.as_ref() else {
         return Err("render fixture did not contain render output".into());
     };
-    let launch_file = output.processes[0]
-        .launch_files
+    let inferlab_protocol::RenderedServeProcess::ModelRank { launch_files, .. } =
+        &output.processes[0]
+    else {
+        return Err("launch-file fixture did not contain a model-rank process".into());
+    };
+    let launch_file = launch_files
         .first()
         .ok_or("render fixture did not contain a launch file")?;
     assert_eq!(
@@ -246,7 +319,7 @@ fn eval_client_fixture_preserves_workspace_yaml_task_source() -> Result<(), Box<
         return Err("fixture did not contain a workspace YAML task source".into());
     };
 
-    assert_eq!(request.protocol_version, ProtocolVersion::V6);
+    assert_eq!(request.protocol_version, ProtocolVersion::V7);
     assert_eq!(request.endpoint.completions_path, "/v1/completions");
     assert_eq!(
         request.endpoint.chat_completions_path,
@@ -366,8 +439,15 @@ fn generated_schema_is_current_and_versioned() -> Result<(), Box<dyn Error>> {
     assert!(!GENERATED_SCHEMA.contains("lower_bench"));
     assert!(GENERATED_SCHEMA.contains("prefix_cache_reset"));
     assert!(GENERATED_SCHEMA.contains("prefill_decode"));
-    assert!(GENERATED_SCHEMA.contains("inferlab_builtin"));
+    assert!(!GENERATED_SCHEMA.contains("inferlab_builtin"));
+    assert!(!GENERATED_SCHEMA.contains("integration_native"));
+    assert!(GENERATED_SCHEMA.contains("gateway_backend"));
+    assert!(GENERATED_SCHEMA.contains("pd_router_backend"));
+    assert!(GENERATED_SCHEMA.contains("render_source"));
+    assert!(GENERATED_SCHEMA.contains("frontend"));
     assert!(GENERATED_SCHEMA.contains("capture_target"));
+    assert!(GENERATED_SCHEMA.contains("window_control"));
+    assert!(GENERATED_SCHEMA.contains("replica_entry"));
     assert!(GENERATED_SCHEMA.contains("http_target_registry"));
     assert!(GENERATED_SCHEMA.contains("launch_files"));
     assert!(GENERATED_SCHEMA.contains("render_inputs"));

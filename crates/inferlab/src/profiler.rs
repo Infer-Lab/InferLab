@@ -1,5 +1,8 @@
 use crate::InferlabError;
-use crate::resolve::{CommandPlan, LaunchPlan, ProcessPlan};
+use crate::resolve::{
+    CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan,
+    CommandPlan, LaunchPlan, ProcessPlan,
+};
 use crate::time_bound::{
     OperationBound, OperationTerminalCause, OperationTimingEvidence, Remaining,
 };
@@ -14,7 +17,7 @@ use std::process::Output;
 use std::thread;
 use std::time::Duration;
 
-const DEFAULT_TRACE: [&str; 3] = ["cuda", "nvtx", "osrt"];
+const DEFAULT_TRACE: [&str; 2] = ["cuda", "nvtx"];
 const PROFILER_ARM_COMMAND_DEADLINE: Duration = Duration::from_secs(60);
 const PROFILER_FINALIZATION_DEADLINE: Duration = Duration::from_secs(300);
 const PROFILER_REPORT_VERIFICATION_DEADLINE: Duration = Duration::from_secs(30);
@@ -70,10 +73,11 @@ pub(crate) enum ProfilerLaunch {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum ProfilerControl {
     Http {
+        window_control_endpoint: CaptureWindowControlEndpointPlan,
         process_id: String,
         endpoint: EndpointAssignment,
-        start_path: String,
-        stop_path: String,
+        start: CaptureWindowActionPlan,
+        stop: CaptureWindowActionPlan,
         /// Response deadline for window-control actions
         /// ([[RFC-0004:C-WORKLOAD-PROFILING]]); defaulted on deserialization
         /// so a capture can attach to a server record written before the
@@ -107,6 +111,12 @@ pub(crate) fn prepare_process<'a>(
             target: None,
         });
     };
+    let rank = process.rank().ok_or_else(|| InferlabError::Profiling {
+        message: format!(
+            "profiling target {:?} is not a model-rank process",
+            process.id
+        ),
+    })?;
     let session = session_name(record_id, &process.id);
     let escapes = requirement.escapes.clone();
     let executable = escapes
@@ -145,13 +155,14 @@ pub(crate) fn prepare_process<'a>(
             ),
         })?;
     let control = ProfilerControl::Http {
+        window_control_endpoint: requirement.window_control_endpoint,
         process_id: requirement.control_process_id.clone(),
         endpoint: EndpointAssignment {
             host: control_process.endpoint.host.clone(),
             port: control_process.endpoint.port,
         },
-        start_path: requirement.start_path.clone(),
-        stop_path: requirement.stop_path.clone(),
+        start: requirement.start.clone(),
+        stop: requirement.stop.clone(),
         deadline_seconds: control_deadline_seconds,
     };
     Ok(PreparedProcess {
@@ -167,7 +178,7 @@ pub(crate) fn prepare_process<'a>(
             role_id: role_id.to_owned(),
             replica_id: replica_id.to_owned(),
             replica_index,
-            rank: process.rank,
+            rank,
             session,
             executable,
             launch: match &process.launch {
@@ -924,15 +935,17 @@ fn http_actions_for(
             ProfilerControl::Http {
                 process_id,
                 endpoint,
-                start_path,
-                stop_path,
+                start: start_action,
+                stop: stop_action,
                 deadline_seconds,
+                ..
             } if process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone()) => {
+                let action = if start { start_action } else { stop_action };
                 Some(http_action(
                     process_id,
                     endpoint,
                     if start { "start-range" } else { "stop-range" },
-                    if start { start_path } else { stop_path },
+                    action,
                     *deadline_seconds,
                 ))
             }
@@ -945,12 +958,16 @@ fn http_action(
     process_id: &str,
     endpoint: &EndpointAssignment,
     operation: &str,
-    path: &str,
+    action: &CaptureWindowActionPlan,
     deadline_seconds: u64,
 ) -> CaptureActionRecord {
-    let url = format!("http://{}:{}{path}", endpoint.host, endpoint.port);
+    let url = action.effective_url.clone();
     let bound = OperationBound::finite(Duration::from_secs(deadline_seconds));
-    let result = post(&endpoint.host, endpoint.port, path, &bound);
+    let result = match action.method {
+        CaptureWindowHttpMethodPlan::Post => {
+            post(&endpoint.host, endpoint.port, &action.path, &bound)
+        }
+    };
     match result {
         Ok(status) => CaptureActionRecord::Http {
             process_id: process_id.to_owned(),
@@ -1360,10 +1377,9 @@ fn duration_ms(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use crate::resolve::{
-        AllocationPlan, CaptureTargetPlan, EndpointPlan, ReadinessPlan, RuntimeCacheNamespacePlan,
-        RuntimeCachePlan, RuntimeCacheRootSource,
+        AllocationPlan, CaptureTargetPlan, ProcessEndpointPlan, ProcessIdentityPlan, ReadinessPlan,
+        RuntimeCacheNamespacePlan, RuntimeCachePlan, RuntimeCacheRootSource,
     };
-    use inferlab_protocol::EndpointProtocol;
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::io::Read;
@@ -1460,8 +1476,10 @@ mod tests {
     fn process() -> ProcessPlan {
         ProcessPlan {
             id: "prefill-0".to_owned(),
-            rank: 0,
-            rank_count: 1,
+            identity: ProcessIdentityPlan::ModelRank {
+                rank: 0,
+                rank_count: 1,
+            },
             machine: "local".to_owned(),
             launch: LaunchPlan::Local,
             launch_dependencies: Vec::new(),
@@ -1496,19 +1514,24 @@ mod tests {
                 path: "/v1/models".to_owned(),
                 timeout_seconds: Some(60),
             },
-            endpoint: EndpointPlan {
+            endpoint: ProcessEndpointPlan {
                 host: "127.0.0.1".to_owned(),
                 port: 8000,
-                protocol: EndpointProtocol::Http,
-                completions_path: "/v1/completions".to_owned(),
-                chat_completions_path: "/v1/chat/completions".to_owned(),
-                prefix_cache_reset: None,
             },
             container: None,
             capture_target: Some(CaptureTargetPlan {
+                window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
                 control_process_id: "prefill-0".to_owned(),
-                start_path: "/start_profile".to_owned(),
-                stop_path: "/stop_profile".to_owned(),
+                start: CaptureWindowActionPlan {
+                    method: CaptureWindowHttpMethodPlan::Post,
+                    path: "/start_profile".to_owned(),
+                    effective_url: "http://127.0.0.1:8000/start_profile".to_owned(),
+                },
+                stop: CaptureWindowActionPlan {
+                    method: CaptureWindowHttpMethodPlan::Post,
+                    path: "/stop_profile".to_owned(),
+                    effective_url: "http://127.0.0.1:8000/stop_profile".to_owned(),
+                },
                 escapes: NsysEscapes::default(),
             }),
         }
@@ -1539,6 +1562,24 @@ mod tests {
             target.runtime_root,
             PathBuf::from("/workspace/.inferlab/runtime/20260701-120000-serve/prefill-0/profiles")
         );
+        let ProfilerControl::Http {
+            window_control_endpoint,
+            process_id,
+            start,
+            stop,
+            ..
+        } = &target.control;
+        assert_eq!(
+            *window_control_endpoint,
+            CaptureWindowControlEndpointPlan::ReplicaEntry
+        );
+        assert_eq!(process_id, "prefill-0");
+        assert_eq!(start.method, CaptureWindowHttpMethodPlan::Post);
+        assert_eq!(start.path, "/start_profile");
+        assert_eq!(start.effective_url, "http://127.0.0.1:8000/start_profile");
+        assert_eq!(stop.method, CaptureWindowHttpMethodPlan::Post);
+        assert_eq!(stop.path, "/stop_profile");
+        assert_eq!(stop.effective_url, "http://127.0.0.1:8000/stop_profile");
         Ok(())
     }
 
@@ -1699,13 +1740,22 @@ mod tests {
             launch: ProfilerLaunch::Local,
             finalization: ProfilerFinalization::NsysStop,
             control: ProfilerControl::Http {
+                window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
                 process_id: "serve".to_owned(),
                 endpoint: EndpointAssignment {
                     host: "127.0.0.1".to_owned(),
                     port: 1,
                 },
-                start_path: "/start_profile".to_owned(),
-                stop_path: "/stop_profile".to_owned(),
+                start: CaptureWindowActionPlan {
+                    method: CaptureWindowHttpMethodPlan::Post,
+                    path: "/start_profile".to_owned(),
+                    effective_url: "http://127.0.0.1:1/start_profile".to_owned(),
+                },
+                stop: CaptureWindowActionPlan {
+                    method: CaptureWindowHttpMethodPlan::Post,
+                    path: "/stop_profile".to_owned(),
+                    effective_url: "http://127.0.0.1:1/stop_profile".to_owned(),
+                },
                 deadline_seconds: 60,
             },
             supported_window_controls: vec![WindowControlKind::FrameworkRange],

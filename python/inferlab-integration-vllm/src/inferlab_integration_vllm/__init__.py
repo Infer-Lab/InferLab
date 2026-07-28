@@ -4,9 +4,9 @@ from pathlib import Path
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
-    BuiltinRouterKind,
-    CaptureControlRequirement,
     CaptureTargetRequirement,
+    CaptureWindowControlEndpoint,
+    CaptureWindowControlRequirement,
     EndpointProtocol,
     EndpointRequirement,
     HttpActionSpec,
@@ -17,6 +17,7 @@ from inferlab_adapter_sdk import (
     ParallelismAttention,
     ParallelismExperts,
     ParallelismOuter,
+    PdRoutingPolicies,
     PlanServeInput,
     PlanServeResult,
     ProcessSpec,
@@ -26,11 +27,9 @@ from inferlab_adapter_sdk import (
     RenderedServeProcess,
     RenderServeInput,
     RenderServeResult,
-    RoutingResult,
-    RoutingResultDirect,
-    RoutingResultInferlabBuiltin,
-    RoutingResultIntegrationNative,
-    ServeProcessAllocation,
+    RenderSource,
+    ServeProcessAllocationFrontend,
+    ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
     ServeRoleInput,
     ServeRoleKind,
@@ -42,12 +41,18 @@ from inferlab_adapter_sdk import (
     ServeRoleResult,
     ServeTopology,
     SettingValue,
+    TargetEndpointScheme,
     append_option,
     effective_settings,
+    fused_pd_frontend_plans,
     integration_identity,
     merge_serve_args,
+    rendered_frontend,
+    rendered_model_rank,
     replica_id,
+    require_integration_fused_frontend,
     require_role,
+    split_serve_allocations,
     validate_settings,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -249,9 +254,10 @@ def _plan_role(
         planned_replica_id = replica_id(role, replica_index)
         capture_target = (
             CaptureTargetRequirement(
-                control=CaptureControlRequirement(
-                    start_path="/start_profile",
-                    stop_path="/stop_profile",
+                window_control=CaptureWindowControlRequirement(
+                    endpoint=CaptureWindowControlEndpoint.replica_entry,
+                    start=HttpActionSpec(method=HttpMethod(), path="/start_profile"),
+                    stop=HttpActionSpec(method=HttpMethod(), path="/stop_profile"),
                 )
             )
             if input.profiling
@@ -289,28 +295,27 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "single topology does not use a KV-transfer mechanism",
         )
-    if input.routing_backend is not None:
+    if input.gateway_backend is not None or input.pd_router_backend is not None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            f"vLLM single topology does not support routing backend {input.routing_backend!r}",
+            "vLLM single topology does not have a qualified Gateway backend",
         )
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas = _plan_role(input, role, [])
+    role_result.public_endpoint = EndpointRequirement(
+        protocol=EndpointProtocol(),
+        completions_path="/v1/completions",
+        chat_completions_path="/v1/chat/completions",
+        prefix_cache_reset=HttpActionSpec(
+            method=HttpMethod(),
+            path="/reset_prefix_cache",
+        ),
+    )
     return PlanServeResult(
         integration=_identity(),
         roles=[role_result],
         replicas=replicas,
         links=[],
-        routing=RoutingResult(root=RoutingResultDirect(role=role.id, replica=0)),
-        endpoint=EndpointRequirement(
-            protocol=EndpointProtocol(),
-            completions_path="/v1/completions",
-            chat_completions_path="/v1/chat/completions",
-            prefix_cache_reset=HttpActionSpec(
-                method=HttpMethod(),
-                path="/reset_prefix_cache",
-            ),
-        ),
     )
 
 
@@ -321,11 +326,21 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "prefill_decode topology requires a KV-transfer mechanism",
         )
-    routing_backend = input.routing_backend or "builtin"
-    if routing_backend not in {"builtin", "vllm-router"}:
+    backend_pair = (input.gateway_backend, input.pd_router_backend)
+    if backend_pair not in {
+        ("builtin", "builtin"),
+        ("vllm-router", "vllm-router"),
+    }:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            f"vLLM does not support routing backend {input.routing_backend!r}",
+            f"vLLM does not support Gateway/P/D Router pair {backend_pair!r}",
+        )
+    gateway_backend = input.gateway_backend
+    pd_router_backend = input.pd_router_backend
+    if gateway_backend is None or pd_router_backend is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "vLLM prefill_decode requires both frontend backends",
         )
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
@@ -338,7 +353,13 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     links = [
         ServeRoleLink(
             root=ServeRoleLinkRequestRouting(
-                source="router",
+                source="gateway",
+                targets=["pd_router"],
+            )
+        ),
+        ServeRoleLink(
+            root=ServeRoleLinkRequestRouting(
+                source="pd_router",
                 targets=[prefill.id, decode.id],
             )
         ),
@@ -354,7 +375,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         links.append(
             ServeRoleLink(
                 root=ServeRoleLinkBootstrap(
-                    source="router",
+                    source="pd_router",
                     target=prefill.id,
                     port="bootstrap",
                 )
@@ -371,59 +392,45 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             )
         )
 
-    if routing_backend == "builtin":
-        routing = RoutingResult(
-            root=RoutingResultInferlabBuiltin(
-                implementation=(
-                    BuiltinRouterKind.vllm_mooncake
-                    if transport == KvTransferMechanism.mooncake
-                    else BuiltinRouterKind.vllm_nixl
-                ),
-                policy="round_robin",
-                prefill_role=prefill.id,
-                decode_role=decode.id,
-                ports=[],
-                readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/healthcheck")),
-            )
+    if backend_pair == ("builtin", "builtin"):
+        implementation = (
+            "vllm_mooncake" if transport == KvTransferMechanism.mooncake else "vllm_nixl"
         )
+        implementation_version = "1"
+        render_source = RenderSource.control_plane
+        frontend_readiness = ReadinessProbe(root=ReadinessProbeHttp(path="/healthcheck"))
     else:
-        roles.append(
-            ServeRoleResult(
-                id="router",
-                kind=ServeRoleKind.router,
-                declared_replica_count=1,
-                effective_replica_count=1,
-                effective_settings={},
-                effective_parallelism=Parallelism(),
-            )
-        )
-        replicas.append(
-            ServeReplicaRequirement(
-                id="router",
-                role_id="router",
-                replica_index=0,
-                device_count=0,
-                ports=[],
-                primary_ports=[],
-                primary_readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/v1/models")),
-                worker_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
-            )
-        )
-        routing = RoutingResult(
-            root=RoutingResultIntegrationNative(role="router", replica=0, policy="round_robin")
-        )
+        implementation = "vllm-router"
+        implementation_version = _identity().adapter_version
+        render_source = RenderSource.integration
+        frontend_readiness = ReadinessProbe(root=ReadinessProbeHttp(path="/v1/models"))
+
+    gateway, pd_router = fused_pd_frontend_plans(
+        gateway_backend=gateway_backend,
+        pd_router_backend=pd_router_backend,
+        implementation=implementation,
+        implementation_version=implementation_version,
+        render_source=render_source,
+        endpoint=EndpointRequirement(
+            protocol=EndpointProtocol(),
+            completions_path="/v1/completions",
+            chat_completions_path="/v1/chat/completions",
+        ),
+        gateway_readiness=frontend_readiness,
+        pd_router_readiness=frontend_readiness,
+        policies=PdRoutingPolicies(prefill="round_robin", decode="round_robin"),
+        prefill_role=prefill.id,
+        decode_role=decode.id,
+        target_scheme=TargetEndpointScheme.http,
+    )
 
     return PlanServeResult(
         integration=_identity(),
         roles=roles,
         replicas=replicas,
         links=links,
-        routing=routing,
-        endpoint=EndpointRequirement(
-            protocol=EndpointProtocol(),
-            completions_path="/v1/completions",
-            chat_completions_path="/v1/chat/completions",
-        ),
+        gateway=gateway,
+        pd_router=pd_router,
     )
 
 
@@ -435,19 +442,18 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
 
 def _render_process(
     input: RenderServeInput,
-    role: ServeRoleResult,
-    settings: VllmServeSettings,
-    role_allocations: list[ServeProcessAllocation],
-    allocation: ServeProcessAllocation,
+    role_allocations: list[ServeProcessAllocationModelRank],
+    allocation: ServeProcessAllocationModelRank,
     rank: int,
 ) -> RenderedServeProcess:
-    outer = role.effective_parallelism.outer or ParallelismOuter()
-    attention = role.effective_parallelism.attention or ParallelismAttention()
-    experts = role.effective_parallelism.experts or ParallelismExperts()
-    if allocation.model_locator is None or allocation.endpoint is None:
+    settings = _settings(allocation.effective_settings)
+    outer = allocation.effective_parallelism.outer or ParallelismOuter()
+    attention = allocation.effective_parallelism.attention or ParallelismAttention()
+    experts = allocation.effective_parallelism.experts or ParallelismExperts()
+    if allocation.endpoint is None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
-            f"serving allocation {allocation.process!r} is missing its model or endpoint",
+            f"serving allocation {allocation.process!r} is missing its endpoint",
         )
     endpoint = allocation.endpoint
     argv = [
@@ -520,7 +526,9 @@ def _render_process(
         inferlab_args.extend(["--profiler-config", '{"profiler":"cuda"}'])
 
     if input.topology == ServeTopology.prefill_decode:
-        role_name = "kv_producer" if role.kind == ServeRoleKind.prefill else "kv_consumer"
+        role_name = (
+            "kv_producer" if allocation.role_kind == ServeRoleKind.prefill else "kv_consumer"
+        )
         inferlab_args.extend(_kv_transfer_args(input.kv_transfer, role_name, settings))
 
     process_env = {
@@ -530,7 +538,10 @@ def _render_process(
     process_env.update(settings.extra_env or {})
     if input.topology == ServeTopology.prefill_decode:
         process_env.update(_kv_transfer_env(input.kv_transfer, settings))
-        if input.kv_transfer == KvTransferMechanism.mooncake and role.kind == ServeRoleKind.prefill:
+        if (
+            input.kv_transfer == KvTransferMechanism.mooncake
+            and allocation.role_kind == ServeRoleKind.prefill
+        ):
             bootstrap = allocation.ports.get("bootstrap")
             if bootstrap is None:
                 raise AdapterOperationError(
@@ -571,14 +582,9 @@ def _render_process(
         if rank != 0:
             inferlab_args.append("--headless")
     argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OPTION_ARITY))
-    return RenderedServeProcess(
-        process=allocation.process,
-        role=allocation.role,
-        replica=allocation.replica,
-        rank=allocation.rank,
-        rank_count=allocation.rank_count,
-        launch_files=[],
-        command=ProcessSpec(argv=argv, env=process_env),
+    return rendered_model_rank(
+        allocation,
+        ProcessSpec(argv=argv, env=process_env),
     )
 
 
@@ -640,17 +646,20 @@ def _kv_transfer_env(
 
 def _render_router(
     input: RenderServeInput,
-    allocation: ServeProcessAllocation,
+    allocation: ServeProcessAllocationFrontend,
+    model_allocations: list[ServeProcessAllocationModelRank],
 ) -> RenderedServeProcess:
-    prefill_roles = {role.id for role in input.roles if role.kind == ServeRoleKind.prefill}
-    decode_roles = {role.id for role in input.roles if role.kind == ServeRoleKind.decode}
-    prefill = [item for item in input.allocations if item.role in prefill_roles and item.rank == 0]
-    decode_allocations = [
-        item for item in input.allocations if item.role in decode_roles and item.rank == 0
+    prefill = [
+        item
+        for item in model_allocations
+        if item.role_kind == ServeRoleKind.prefill and item.rank == 0
     ]
-    if allocation.endpoint is None or any(
-        item.endpoint is None for item in [*prefill, *decode_allocations]
-    ):
+    decode_allocations = [
+        item
+        for item in model_allocations
+        if item.role_kind == ServeRoleKind.decode and item.rank == 0
+    ]
+    if any(item.endpoint is None for item in [*prefill, *decode_allocations]):
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
             "vLLM Router allocations require public endpoints",
@@ -702,15 +711,7 @@ def _render_router(
             "round_robin",
         ]
     )
-    return RenderedServeProcess(
-        process=allocation.process,
-        role=allocation.role,
-        replica=allocation.replica,
-        rank=allocation.rank,
-        rank_count=allocation.rank_count,
-        launch_files=[],
-        command=ProcessSpec(argv=argv, env={}),
-    )
+    return rendered_frontend(allocation, ProcessSpec(argv=argv, env={}))
 
 
 def render_serve(input: RenderServeInput) -> RenderServeResult:
@@ -718,37 +719,34 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request, "serve allocation must not be empty"
         )
-    roles = {role.id: role for role in input.roles}
+    allocations, model_allocations = split_serve_allocations(input.allocations)
     allocations_by_replica = {
         (allocation.role, allocation.replica): [
             candidate
-            for candidate in input.allocations
+            for candidate in model_allocations
             if candidate.role == allocation.role and candidate.replica == allocation.replica
         ]
-        for allocation in input.allocations
+        for allocation in model_allocations
     }
-    processes = []
-    for allocation in input.allocations:
-        role = roles.get(allocation.role)
-        if role is None:
-            raise AdapterOperationError(
-                AdapterErrorCode.invalid_request,
-                f"allocation references unknown role {allocation.role!r}",
+    processes: list[RenderedServeProcess] = []
+    for allocation in allocations:
+        if isinstance(allocation, ServeProcessAllocationModelRank):
+            role_allocations = allocations_by_replica[(allocation.role, allocation.replica)]
+            processes.append(
+                _render_process(
+                    input,
+                    role_allocations,
+                    allocation,
+                    allocation.rank,
+                )
             )
-        if role.kind == ServeRoleKind.router:
-            processes.append(_render_router(input, allocation))
-            continue
-        role_allocations = allocations_by_replica[(allocation.role, allocation.replica)]
-        processes.append(
-            _render_process(
-                input,
-                role,
-                _settings(role.effective_settings),
-                role_allocations,
+        elif isinstance(allocation, ServeProcessAllocationFrontend):
+            require_integration_fused_frontend(
                 allocation,
-                allocation.rank,
+                gateway_backend="vllm-router",
+                pd_router_backend="vllm-router",
             )
-        )
+            processes.append(_render_router(input, allocation, model_allocations))
     return RenderServeResult(integration=_identity(), processes=processes)
 
 

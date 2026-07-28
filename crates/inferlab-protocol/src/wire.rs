@@ -11,13 +11,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `6` (serialized as the
-/// string `"6"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `7` (serialized as the
+/// string `"7"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 6.
-    #[serde(rename = "6")]
-    V6,
+    /// Protocol version 7.
+    #[serde(rename = "7")]
+    V7,
 }
 
 /// The one JSON request an integration reads from stdin, tagged by the
@@ -61,7 +61,9 @@ pub struct PlanServeInput {
     pub model: ServeModelInput,
     pub topology: ServeTopology,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_backend: Option<String>,
+    pub gateway_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_router_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
     pub roles: Vec<ServeRoleInput>,
@@ -77,15 +79,12 @@ pub struct RenderServeInput {
     pub model: ServeModelInput,
     pub topology: ServeTopology,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_backend: Option<String>,
+    pub gateway_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_router_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
-    pub roles: Vec<ServeRoleResult>,
-    pub routing: RoutingResult,
-    pub links: Vec<ServeRoleLink>,
     pub allocations: Vec<ServeProcessAllocation>,
-    #[serde(default)]
-    pub render_inputs: Vec<SuppliedRenderInput>,
     #[serde(default)]
     pub profiling: bool,
 }
@@ -110,8 +109,6 @@ pub enum ServeRoleKind {
     Prefill,
     /// Decode role of a disaggregated topology.
     Decode,
-    /// Request-routing role that does not execute model inference.
-    Router,
 }
 
 /// The KV-transfer mechanism connecting prefill and decode.
@@ -147,6 +144,12 @@ pub struct ServeRoleResult {
     pub effective_replica_count: u32,
     pub effective_settings: BTreeMap<String, SettingValue>,
     pub effective_parallelism: Parallelism,
+    /// The public endpoint contract for a direct `single` Engine. Gateway-
+    /// backed shapes leave this absent and carry the contract on Gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_endpoint: Option<EndpointRequirement>,
+    #[serde(default)]
+    pub render_inputs: Vec<RenderInputDeclaration>,
 }
 
 /// Framework-neutral component-aware parallelism ([[RFC-0003:C-SERVE-PARALLELISM]]).
@@ -552,9 +555,9 @@ pub enum AdapterResult {
     RenderServe { output: Box<RenderServeResult> },
 }
 
-/// The lowered topology returned by a `PlanServe`: the effective server-level
-/// shape, per-role resolution, whole-replica requirements, role links, and the
-/// public and per-role endpoint requirements the control plane then allocates.
+/// The lowered topology returned by a `PlanServe`: effective Engine roles,
+/// whole-replica requirements, logical links, and separate optional Gateway
+/// and P/D Router component plans.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanServeResult {
@@ -562,10 +565,159 @@ pub struct PlanServeResult {
     pub roles: Vec<ServeRoleResult>,
     pub replicas: Vec<ServeReplicaRequirement>,
     pub links: Vec<ServeRoleLink>,
-    pub routing: RoutingResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_router: Option<PdRouterPlan>,
+}
+
+/// Which bounded implementation renders an accepted concrete frontend
+/// allocation. This is a lowering boundary only; the control plane always
+/// owns placement, lifecycle, cleanup, endpoints, and records.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderSource {
+    ControlPlane,
+    Integration,
+}
+
+/// The one canonical process role available to a protocol-v7 frontend.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendProcessRole {
+    Gateway,
+}
+
+/// The fixed co-rendering requirement shared by compatible frontend plans.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrontendCoRendering {
+    pub process_role: FrontendProcessRole,
+}
+
+/// The literal first member of every closed frontend component binding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendGatewayComponent {
+    Gateway,
+}
+
+/// The literal second member of the fused P/D frontend component binding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendPdRouterComponent {
+    PdRouter,
+}
+
+/// The stable schema branch for a Gateway-only frontend binding.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct GatewayFrontendBinding(pub [FrontendGatewayComponent; 1]);
+
+/// The stable schema branch for a fused Gateway and P/D Router binding.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct GatewayPdRouterFrontendBinding(
+    pub (FrontendGatewayComponent, FrontendPdRouterComponent),
+);
+
+/// The only two frontend bindings protocol v7 accepts. Tuple representation
+/// deliberately serializes as the closed ordered arrays `["gateway"]` and
+/// `["gateway", "pd_router"]` rather than as an open component list.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum FrontendComponents {
+    Gateway(GatewayFrontendBinding),
+    GatewayPdRouter(GatewayPdRouterFrontendBinding),
+}
+
+impl FrontendComponents {
+    #[must_use]
+    pub const fn gateway() -> Self {
+        Self::Gateway(GatewayFrontendBinding([FrontendGatewayComponent::Gateway]))
+    }
+
+    #[must_use]
+    pub const fn gateway_pd_router() -> Self {
+        Self::GatewayPdRouter(GatewayPdRouterFrontendBinding((
+            FrontendGatewayComponent::Gateway,
+            FrontendPdRouterComponent::PdRouter,
+        )))
+    }
+
+    #[must_use]
+    pub const fn includes_pd_router(&self) -> bool {
+        matches!(self, Self::GatewayPdRouter(_))
+    }
+}
+
+/// The target a Gateway forwards accepted public requests to.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GatewayTarget {
+    /// A routed-single Gateway targets the sole Engine role entry point.
+    Engine { role: String },
+    /// A P/D Gateway hands requests to its co-rendered P/D Router component.
+    PdRouter,
+}
+
+/// The public frontend component plan returned independently from Engine and
+/// P/D Router planning.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPlan {
+    pub backend: String,
+    pub implementation: String,
+    pub implementation_version: String,
+    pub effective_settings: BTreeMap<String, SettingValue>,
     pub endpoint: EndpointRequirement,
+    pub readiness: ReadinessProbe,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    pub targets: Vec<GatewayTarget>,
     #[serde(default)]
     pub render_inputs: Vec<RenderInputDeclaration>,
+    pub render_source: RenderSource,
+    pub co_rendering: FrontendCoRendering,
+}
+
+/// Independent policies for choosing prefill and decode targets.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdRoutingPolicies {
+    pub prefill: String,
+    pub decode: String,
+}
+
+/// The currently demonstrated Gateway-to-P/D Router handoff is internal to
+/// one fused frontend process.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendHandoff {
+    InProcess,
+}
+
+/// The P/D orchestration component plan, kept separate even when the same
+/// process and provider also realize Gateway.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdRouterPlan {
+    pub backend: String,
+    pub implementation: String,
+    pub implementation_version: String,
+    pub effective_settings: BTreeMap<String, SettingValue>,
+    pub policies: PdRoutingPolicies,
+    pub prefill_role: String,
+    pub decode_role: String,
+    pub target_scheme: TargetEndpointScheme,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    pub readiness: ReadinessProbe,
+    pub handoff: FrontendHandoff,
+    #[serde(default)]
+    pub render_inputs: Vec<RenderInputDeclaration>,
+    pub render_source: RenderSource,
+    pub co_rendering: FrontendCoRendering,
 }
 
 /// One workspace-authored UTF-8 source file an integration declares during
@@ -603,28 +755,56 @@ pub struct ServeReplicaRequirement {
     pub capture_target: Option<CaptureTargetRequirement>,
 }
 
-/// One concrete process the control plane placed, supplied to `RenderServe`:
-/// its identity, rank, machine, devices, model locator, and allocated
-/// endpoints and named ports.
+/// One concrete process allocation supplied to `RenderServe`. Model-rank and
+/// process-only frontend identities are distinct so a frontend cannot acquire
+/// model coordinates or a model locator by construction.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServeProcessAllocation {
-    pub process: String,
-    pub role: String,
-    pub replica: u32,
-    pub rank: u32,
-    pub rank_count: u32,
-    pub machine: String,
-    pub devices: Vec<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_locator: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<EndpointAssignment>,
-    pub ports: BTreeMap<String, EndpointAssignment>,
-    pub cache: String,
-    pub launch: AllocationLaunch,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServeProcessAllocation {
+    ModelRank {
+        process: String,
+        role: String,
+        role_kind: ServeRoleKind,
+        replica: u32,
+        rank: u32,
+        rank_count: u32,
+        machine: String,
+        devices: Vec<u32>,
+        model_locator: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<EndpointAssignment>,
+        ports: BTreeMap<String, EndpointAssignment>,
+        cache: String,
+        launch: AllocationLaunch,
+        effective_settings: BTreeMap<String, SettingValue>,
+        effective_parallelism: Parallelism,
+        #[serde(default)]
+        links: Vec<ServeRoleLink>,
+        #[serde(default)]
+        dependencies: Vec<String>,
+        #[serde(default)]
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
+    Frontend {
+        process: String,
+        process_role: FrontendProcessRole,
+        components: FrontendComponents,
+        machine: String,
+        devices: Vec<u32>,
+        endpoint: EndpointAssignment,
+        ports: BTreeMap<String, EndpointAssignment>,
+        cache: String,
+        launch: AllocationLaunch,
+        gateway: Box<GatewayPlan>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pd_router: Option<Box<PdRouterPlan>>,
+        #[serde(default)]
+        links: Vec<ServeRoleLink>,
+        #[serde(default)]
+        dependencies: Vec<String>,
+        #[serde(default)]
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
 }
 
 /// The machine-local launch channel selected by the control plane.
@@ -665,54 +845,33 @@ pub enum ServeRoleLink {
     },
 }
 
-/// The closed routing owner selected during integration planning.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "owner", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RoutingResult {
-    Direct {
-        role: String,
-        replica: u32,
-    },
-    InferlabBuiltin {
-        implementation: BuiltinRouterKind,
-        policy: String,
-        prefill_role: String,
-        decode_role: String,
-        #[serde(default)]
-        ports: Vec<String>,
-        readiness: ReadinessProbe,
-    },
-    IntegrationNative {
-        role: String,
-        replica: u32,
-        policy: String,
-    },
-}
-
-/// An Inferlab-owned routing implementation with stable target semantics.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuiltinRouterKind {
-    VllmMooncake,
-    VllmNixl,
-    Sglang,
-    Trtllm,
-}
-
 /// Marks a replica as a profiling capture target and carries its window
 /// control ([[RFC-0004:C-WORKLOAD-PROFILING]]).
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureTargetRequirement {
-    pub control: CaptureControlRequirement,
+    pub window_control: CaptureWindowControlRequirement,
 }
 
-/// The HTTP paths a capture target exposes to open and close a capture window.
+/// The logical workload endpoint and typed actions that open and close a
+/// capture window.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CaptureControlRequirement {
-    pub start_path: String,
-    pub stop_path: String,
+pub struct CaptureWindowControlRequirement {
+    pub endpoint: CaptureWindowControlEndpoint,
+    pub start: HttpActionSpec,
+    pub stop: HttpActionSpec,
+}
+
+/// The logical workload endpoint exposing a capture target's window-control
+/// actions.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureWindowControlEndpoint {
+    /// The entry process of the capture target's Engine replica.
+    ReplicaEntry,
+    /// The separately planned Gateway process.
+    Gateway,
 }
 
 /// The final process invocations returned by a `RenderServe`, one per supplied
@@ -724,17 +883,27 @@ pub struct RenderServeResult {
     pub processes: Vec<RenderedServeProcess>,
 }
 
-/// A rendered process bound to the allocation `id` it was produced for.
+/// A rendered process bound to the model-rank or frontend allocation identity
+/// it was produced for.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RenderedServeProcess {
-    pub process: String,
-    pub role: String,
-    pub replica: u32,
-    pub rank: u32,
-    pub rank_count: u32,
-    pub launch_files: Vec<LaunchFileDeclaration>,
-    pub command: ProcessSpec,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RenderedServeProcess {
+    ModelRank {
+        process: String,
+        role: String,
+        replica: u32,
+        rank: u32,
+        rank_count: u32,
+        launch_files: Vec<LaunchFileDeclaration>,
+        command: ProcessSpec,
+    },
+    Frontend {
+        process: String,
+        process_role: FrontendProcessRole,
+        components: FrontendComponents,
+        launch_files: Vec<LaunchFileDeclaration>,
+        command: ProcessSpec,
+    },
 }
 
 /// One immutable text input a rendered process requires before it can launch.

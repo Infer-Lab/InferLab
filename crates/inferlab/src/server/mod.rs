@@ -903,8 +903,8 @@ mod tests {
     use crate::resolve::{
         AllocationPlan, CasePlan, CaseSelectionSource, CommandPlan, EndpointPlan, IntegrationPlan,
         LaunchPlan, ModelLocatorSource, ModelPlan, PlacementPlan, PlacementSelectionSource,
-        ProcessPlan, ReadinessPlan, ResourcePlan, RolePlan, RoleReplicaPlan,
-        RoutingImplementationPlan, RoutingPlan, RuntimeCacheNamespacePlan, RuntimeCachePlan,
+        ProcessEndpointPlan, ProcessIdentityPlan, ProcessPlan, ReadinessPlan, ResourcePlan,
+        RolePlan, RoleReplicaPlan, RuntimeCacheNamespacePlan, RuntimeCachePlan,
         RuntimeCacheRootSource, ServerPlan, StackPlan, Workflow,
     };
     use crate::workspace::WorkspaceSnapshot;
@@ -1002,7 +1002,7 @@ mod tests {
         fn wait_ready(
             &self,
             _handle: &runtime::ProcessHandle,
-            _endpoint: &EndpointPlan,
+            _endpoint: &ProcessEndpointPlan,
             _readiness: &ReadinessPlan,
             _on_probe_failure: &mut dyn FnMut(&str),
         ) -> Result<runtime::ReadinessEvidence, runtime::ReadinessFailure> {
@@ -1100,7 +1100,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1126,6 +1126,35 @@ mod tests {
         assert!(first.get("machine").is_none());
         assert!(first["stdout"].as_str().is_some());
         assert!(first["stderr"].as_str().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn server_record_loader_rejects_an_incompatible_schema_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let record = ServerRecordSession::begin(root.path(), &resolved(), Some("schema-test"))?
+            .into_record();
+        let path = root
+            .path()
+            .join(".inferlab/records/schema-test/record.json");
+        let mut value = serde_json::to_value(record)?;
+        value["schema_version"] = serde_json::json!(3);
+        std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+
+        let Err(error) = load_record(root.path(), "schema-test") else {
+            return Err(std::io::Error::other(
+                "schema 3 must not be read as the current server-record shape",
+            )
+            .into());
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported schema version 3; expected 4"),
+            "{error}"
+        );
         Ok(())
     }
 
@@ -1212,8 +1241,10 @@ mod tests {
     fn process(index: usize) -> ProcessPlan {
         ProcessPlan {
             id: format!("rank-{index:03}"),
-            rank: 0,
-            rank_count: 1,
+            identity: ProcessIdentityPlan::ModelRank {
+                rank: 0,
+                rank_count: 1,
+            },
             machine: format!("node-{index}"),
             launch: LaunchPlan::Local,
             launch_dependencies: Vec::new(),
@@ -1247,13 +1278,9 @@ mod tests {
             },
             launch_files: Vec::new(),
             readiness: ReadinessPlan::ProcessAlive,
-            endpoint: EndpointPlan {
+            endpoint: ProcessEndpointPlan {
                 host: "127.0.0.1".to_owned(),
                 port: 8000 + index as u16,
-                protocol: EndpointProtocol::Http,
-                completions_path: "/v1/completions".to_owned(),
-                chat_completions_path: "/v1/chat/completions".to_owned(),
-                prefix_cache_reset: None,
             },
             container: None,
             capture_target: None,
@@ -1293,13 +1320,8 @@ mod tests {
                 readiness_timeout_seconds: 60,
                 profiling: false,
                 capture_control_deadline_seconds: 60,
-                routing: RoutingPlan {
-                    backend: Some("builtin".to_owned()),
-                    kv_transfer: None,
-                    public_process: "rank-000".to_owned(),
-                    policy: "direct".to_owned(),
-                    implementation: RoutingImplementationPlan::Direct,
-                },
+                kv_transfer: None,
+                frontend: None,
                 profiler_escapes: None,
                 model: ModelPlan {
                     id: "model".to_owned(),
@@ -1314,7 +1336,7 @@ mod tests {
                     framework: "fixture".to_owned(),
                     framework_version: "test".to_owned(),
                     executable: "fixture".to_owned(),
-                    protocol_version: ProtocolVersion::V6,
+                    protocol_version: ProtocolVersion::V7,
                     plan_request_sha256: "request".to_owned(),
                     plan_response_sha256: "response".to_owned(),
                     render_request_sha256: "request".to_owned(),
@@ -1357,6 +1379,8 @@ mod tests {
                         effective_parallelism: Parallelism::default(),
                         declared_settings: BTreeMap::new(),
                         effective_settings: BTreeMap::new(),
+                        public_endpoint: None,
+                        render_inputs: Vec::new(),
                         replicas: vec![RoleReplicaPlan {
                             id: "prefill".to_owned(),
                             index: 0,
@@ -1379,6 +1403,8 @@ mod tests {
                         effective_parallelism: Parallelism::default(),
                         declared_settings: BTreeMap::new(),
                         effective_settings: BTreeMap::new(),
+                        public_endpoint: None,
+                        render_inputs: Vec::new(),
                         replicas: vec![RoleReplicaPlan {
                             id: "decode".to_owned(),
                             index: 0,

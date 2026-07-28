@@ -9,11 +9,12 @@ use crate::workspace::{
     WorkspaceSnapshot,
 };
 use inferlab_protocol::{
-    AllocationLaunch, BuiltinRouterKind, CaptureTargetRequirement, EndpointAssignment,
-    EndpointProtocol, KvTransferMechanism, LaunchFileDeclaration, Parallelism, PlanServeInput,
-    PlanServeResult, ProcessSpec, ProtocolVersion, ReadinessProbe, RenderInputDeclaration,
-    RenderServeInput, RenderedServeProcess, RoutingResult, ServeModelInput, ServeProcessAllocation,
-    ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeRoleResult,
+    AllocationLaunch, CaptureTargetRequirement, CaptureWindowControlEndpoint, EndpointAssignment,
+    EndpointProtocol, EndpointRequirement, FrontendComponents, FrontendProcessRole, GatewayPlan,
+    GatewayTarget, KvTransferMechanism, LaunchFileDeclaration, Parallelism, PdRouterPlan,
+    PlanServeInput, PlanServeResult, ProcessSpec, ProtocolVersion, ReadinessProbe,
+    RenderInputDeclaration, RenderServeInput, RenderSource, RenderedServeProcess, ServeModelInput,
+    ServeProcessAllocation, ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink,
     ServeTopology, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
 };
 use serde::{Deserialize, Serialize};
@@ -133,7 +134,14 @@ pub struct ServerPlan {
     pub profiling: bool,
     pub readiness_timeout_seconds: u64,
     pub capture_control_deadline_seconds: u64,
-    pub routing: RoutingPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer: Option<KvTransferMechanism>,
+    /// The closed frontend boundary: logical components, their explicit
+    /// process bindings, and every concrete process realizing those
+    /// components. A routed topology has this section; a direct Engine does
+    /// not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontend: Option<FrontendPlan>,
     /// The raw profiler escape declaration as written on the server and
     /// its roles ([[RFC-0004:C-WORKLOAD-PROFILING]]); the merged, effective
     /// inputs ride each capture target.
@@ -157,6 +165,32 @@ pub struct ServerPlan {
     pub roles: Vec<RolePlan>,
     pub links: Vec<ServeRoleLink>,
     pub endpoint: EndpointPlan,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FrontendPlan {
+    pub gateway: GatewayComponentPlan,
+    /// Explicit `null` records the absence of a P/D Router for routed-single
+    /// serving instead of making consumers infer it from a missing field.
+    pub pd_router: Option<PdRouterComponentPlan>,
+    /// Concrete frontend processes are owned exactly once here. Components
+    /// refer to them by `process_id`, allowing fused components to share one
+    /// process and split components to bind independent processes.
+    pub processes: Vec<ProcessPlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayComponentPlan {
+    #[serde(flatten)]
+    pub plan: GatewayPlan,
+    pub process_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PdRouterComponentPlan {
+    #[serde(flatten)]
+    pub plan: PdRouterPlan,
+    pub process_id: String,
 }
 
 /// One ordered behavior declaration consumed while resolving a server.
@@ -183,7 +217,9 @@ pub struct CommonDeclarationPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub routing_backend: Option<String>,
+    pub gateway_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pd_router_backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,6 +252,11 @@ impl ServerPlan {
             .iter()
             .flat_map(|role| &role.replicas)
             .flat_map(|replica| &replica.ranks)
+            .chain(
+                self.frontend
+                    .iter()
+                    .flat_map(|frontend| &frontend.processes),
+            )
     }
 
     pub fn process_count(&self) -> usize {
@@ -223,7 +264,7 @@ impl ServerPlan {
     }
 
     pub fn process_contexts(&self) -> impl Iterator<Item = ProcessContext<'_>> {
-        self.roles.iter().flat_map(|role| {
+        let model_ranks = self.roles.iter().flat_map(|role| {
             role.replicas.iter().flat_map(move |replica| {
                 replica.ranks.iter().map(move |process| ProcessContext {
                     role_id: &role.id,
@@ -232,7 +273,16 @@ impl ServerPlan {
                     process,
                 })
             })
-        })
+        });
+        let frontend = self.frontend.iter().flat_map(|frontend| {
+            frontend.processes.iter().map(|process| ProcessContext {
+                role_id: process.id.as_str(),
+                replica_id: process.id.as_str(),
+                replica_index: 0,
+                process,
+            })
+        });
+        model_ranks.chain(frontend)
     }
 }
 
@@ -245,25 +295,6 @@ pub struct ProcessContext<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RoutingPlan {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_transfer: Option<KvTransferMechanism>,
-    pub public_process: String,
-    pub policy: String,
-    pub implementation: RoutingImplementationPlan,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "owner", rename_all = "kebab-case")]
-pub enum RoutingImplementationPlan {
-    Direct,
-    Inferlab { id: String, version: u32 },
-    Integration { id: String, adapter_version: String },
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RolePlan {
     pub id: String,
     pub kind: ServeRoleKind,
@@ -273,6 +304,10 @@ pub struct RolePlan {
     pub effective_parallelism: Parallelism,
     pub declared_settings: BTreeMap<String, SettingValue>,
     pub effective_settings: BTreeMap<String, SettingValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_endpoint: Option<EndpointRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_inputs: Vec<RenderInputDeclaration>,
     pub replicas: Vec<RoleReplicaPlan>,
 }
 
@@ -296,7 +331,8 @@ pub struct RoleReplicaPlan {
 struct ServerOverridePatch {
     topology: Option<ServeTopology>,
     readiness_timeout_seconds: Option<u64>,
-    routing_backend: Option<String>,
+    gateway_backend: Option<String>,
+    pd_router_backend: Option<String>,
     kv_transfer: Option<KvTransferMechanism>,
     profiling: Option<bool>,
     parallelism: Parallelism,
@@ -347,7 +383,8 @@ struct WorkflowSelection<'a> {
 struct EffectiveServerInput {
     topology: ServeTopology,
     readiness_timeout_seconds: u64,
-    routing_backend: Option<String>,
+    gateway_backend: Option<String>,
+    pd_router_backend: Option<String>,
     kv_transfer: Option<KvTransferMechanism>,
     profiling: bool,
     capture_control_deadline_seconds: u64,
@@ -367,7 +404,7 @@ struct PlannedServeStage {
     planned: PlanServeResult,
     evidence: LoweringEvidence,
     requirements: Vec<ProcessRequirement>,
-    integration_process_count: usize,
+    integration_rendered_process_ids: BTreeSet<String>,
     public_process: String,
 }
 
@@ -523,8 +560,8 @@ pub struct ActiveRdmaInterfacePlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProcessPlan {
     pub id: String,
-    pub rank: u32,
-    pub rank_count: u32,
+    #[serde(flatten)]
+    pub identity: ProcessIdentityPlan,
     pub machine: String,
     pub launch: LaunchPlan,
     #[serde(rename = "dependencies")]
@@ -534,11 +571,36 @@ pub struct ProcessPlan {
     pub command: CommandPlan,
     pub launch_files: Vec<LaunchFilePlan>,
     pub readiness: ReadinessPlan,
-    pub endpoint: EndpointPlan,
+    /// The endpoint allocation owned by this process. Public workload-route
+    /// semantics live only on `ServerPlan::endpoint`.
+    pub endpoint: ProcessEndpointPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_target: Option<CaptureTargetPlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProcessIdentityPlan {
+    ModelRank {
+        rank: u32,
+        rank_count: u32,
+    },
+    Frontend {
+        process_role: FrontendProcessRole,
+        components: FrontendComponents,
+    },
+}
+
+impl ProcessPlan {
+    #[must_use]
+    pub const fn rank(&self) -> Option<u32> {
+        match &self.identity {
+            ProcessIdentityPlan::ModelRank { rank, .. } => Some(*rank),
+            ProcessIdentityPlan::Frontend { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -565,14 +627,35 @@ pub struct ProfilerEscapesPlan {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CaptureTargetPlan {
+    pub window_control_endpoint: CaptureWindowControlEndpointPlan,
     pub control_process_id: String,
-    pub start_path: String,
-    pub stop_path: String,
+    pub start: CaptureWindowActionPlan,
+    pub stop: CaptureWindowActionPlan,
     /// The merged escape inputs for this target's role
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]); the raw common and role
     /// declarations live on the server plan.
     #[serde(default, skip_serializing_if = "NsysEscapes::is_empty")]
     pub escapes: NsysEscapes,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureWindowControlEndpointPlan {
+    ReplicaEntry,
+    Gateway,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureWindowActionPlan {
+    pub method: CaptureWindowHttpMethodPlan,
+    pub path: String,
+    pub effective_url: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureWindowHttpMethodPlan {
+    Post,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -650,19 +733,107 @@ struct ResolvedProcessAllocation {
     model_locator_source: Option<ModelLocatorSource>,
 }
 
+impl ResolvedProcessAllocation {
+    fn process(&self) -> &str {
+        match &self.wire {
+            ServeProcessAllocation::ModelRank { process, .. }
+            | ServeProcessAllocation::Frontend { process, .. } => process,
+        }
+    }
+
+    fn machine(&self) -> &str {
+        match &self.wire {
+            ServeProcessAllocation::ModelRank { machine, .. }
+            | ServeProcessAllocation::Frontend { machine, .. } => machine,
+        }
+    }
+
+    fn devices(&self) -> &[u32] {
+        match &self.wire {
+            ServeProcessAllocation::ModelRank { devices, .. }
+            | ServeProcessAllocation::Frontend { devices, .. } => devices,
+        }
+    }
+
+    fn endpoint(&self) -> Option<&EndpointAssignment> {
+        match &self.wire {
+            ServeProcessAllocation::ModelRank { endpoint, .. } => endpoint.as_ref(),
+            ServeProcessAllocation::Frontend { endpoint, .. } => Some(endpoint),
+        }
+    }
+
+    fn ports(&self) -> &BTreeMap<String, EndpointAssignment> {
+        match &self.wire {
+            ServeProcessAllocation::ModelRank { ports, .. }
+            | ServeProcessAllocation::Frontend { ports, .. } => ports,
+        }
+    }
+
+    fn model_locator(&self) -> Option<&str> {
+        match &self.wire {
+            ServeProcessAllocation::ModelRank { model_locator, .. } => Some(model_locator),
+            ServeProcessAllocation::Frontend { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ProcessRequirement {
     id: String,
-    role_id: String,
-    replica_id: String,
-    replica_index: u32,
-    rank: u32,
+    identity: ProcessRequirementIdentity,
     device_count: u32,
     ports: Vec<String>,
     readiness: ReadinessProbe,
     launch_dependencies: Vec<String>,
-    capture_target: Option<CaptureTargetPlan>,
+    capture_target: Option<PendingCaptureTargetPlan>,
     fixed_devices: Option<FixedDeviceAssignment>,
+}
+
+#[derive(Clone)]
+struct PendingCaptureTargetPlan {
+    window_control_endpoint: CaptureWindowControlEndpointPlan,
+    replica_entry_process_id: String,
+    start: PendingCaptureWindowActionPlan,
+    stop: PendingCaptureWindowActionPlan,
+    escapes: NsysEscapes,
+}
+
+#[derive(Clone)]
+struct PendingCaptureWindowActionPlan {
+    method: CaptureWindowHttpMethodPlan,
+    path: String,
+}
+
+#[derive(Clone)]
+enum ProcessRequirementIdentity {
+    ModelRank {
+        role_id: String,
+        role_kind: ServeRoleKind,
+        replica_id: String,
+        replica_index: u32,
+        rank: u32,
+        effective_settings: BTreeMap<String, SettingValue>,
+        effective_parallelism: Parallelism,
+        links: Vec<ServeRoleLink>,
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
+    Frontend {
+        process_role: FrontendProcessRole,
+        components: FrontendComponents,
+        gateway: Box<GatewayPlan>,
+        pd_router: Option<Box<PdRouterPlan>>,
+        links: Vec<ServeRoleLink>,
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
+}
+
+impl ProcessRequirement {
+    fn placement_role(&self) -> &str {
+        match &self.identity {
+            ProcessRequirementIdentity::ModelRank { role_id, .. } => role_id,
+            ProcessRequirementIdentity::Frontend { .. } => "gateway",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -705,6 +876,12 @@ pub struct EndpointPlan {
     pub prefix_cache_reset: Option<inferlab_protocol::HttpActionSpec>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProcessEndpointPlan {
+    pub host: String,
+    pub port: u16,
+}
+
 fn role_declarations(
     server: &ServerDefinition,
     topology: ServeTopology,
@@ -734,7 +911,6 @@ const fn kind_name(kind: ServeRoleKind) -> &'static str {
         ServeRoleKind::Serve => "serve",
         ServeRoleKind::Prefill => "prefill",
         ServeRoleKind::Decode => "decode",
-        ServeRoleKind::Router => "router",
     }
 }
 
@@ -858,7 +1034,8 @@ fn server_declarations(
         },
         common: CommonDeclarationPlan {
             readiness_timeout_seconds: Some(server.readiness_timeout_seconds),
-            routing_backend: server.routing_backend.clone(),
+            gateway_backend: server.gateway_backend.clone(),
+            pd_router_backend: server.pd_router_backend.clone(),
             kv_transfer: server.kv_transfer,
             profiling: server.profiling,
             capture_control_deadline_seconds: server.capture_control_deadline_seconds,
@@ -894,7 +1071,8 @@ fn server_declarations(
             },
             common: CommonDeclarationPlan {
                 readiness_timeout_seconds: case.readiness_timeout_seconds,
-                routing_backend: case.routing_backend.clone(),
+                gateway_backend: case.gateway_backend.clone(),
+                pd_router_backend: case.pd_router_backend.clone(),
                 kv_transfer: case.kv_transfer,
                 profiling: case.profiling,
                 capture_control_deadline_seconds: None,
@@ -928,7 +1106,8 @@ fn server_declarations(
             source: DeclarationSource::Invocation { index },
             common: CommonDeclarationPlan {
                 readiness_timeout_seconds: patch.readiness_timeout_seconds,
-                routing_backend: patch.routing_backend.clone(),
+                gateway_backend: patch.gateway_backend.clone(),
+                pd_router_backend: patch.pd_router_backend.clone(),
                 kv_transfer: patch.kv_transfer,
                 profiling: patch.profiling,
                 capture_control_deadline_seconds: None,
@@ -978,15 +1157,6 @@ enum BuiltinProxyKind {
 }
 
 impl BuiltinProxyKind {
-    fn meta(self) -> inferlab_proxy::core::ProxyMeta {
-        match self {
-            Self::VllmMooncake => inferlab_proxy::vllm_mooncake::meta(),
-            Self::VllmNixl => inferlab_proxy::vllm_nixl::meta(),
-            Self::Sglang => inferlab_proxy::sglang::meta(),
-            Self::Trtllm => inferlab_proxy::trtllm::meta(),
-        }
-    }
-
     const fn command_name(self) -> &'static str {
         match self {
             Self::VllmMooncake => "vllm-mooncake",
@@ -1019,37 +1189,46 @@ fn builtin_proxy_kind(
     }
 }
 
-fn render_builtin_proxy(
-    requirement: &RoutingResult,
+fn render_builtin_frontend(
+    gateway: &GatewayPlan,
+    pd_router: &PdRouterPlan,
     framework: &str,
     transport: Option<KvTransferMechanism>,
     allocations: &[ResolvedProcessAllocation],
 ) -> Result<RenderedServeProcess, InferlabError> {
-    let RoutingResult::InferlabBuiltin {
-        implementation,
-        prefill_role,
-        decode_role,
-        ..
-    } = requirement
-    else {
+    if gateway.render_source != RenderSource::ControlPlane
+        || pd_router.render_source != RenderSource::ControlPlane
+    {
         return Err(InferlabError::InvalidConfig {
-            message: "expected an Inferlab-owned routing result".to_owned(),
+            message: "expected control-plane-rendered frontend component plans".to_owned(),
         });
-    };
-    let process_id = "router";
+    }
+    let process_id = "gateway";
     let proxy = allocations
         .iter()
-        .find(|allocation| allocation.wire.process == process_id)
+        .find(|allocation| allocation.process() == process_id)
         .ok_or_else(|| InferlabError::InvalidConfig {
-            message: format!("built-in proxy process {process_id:?} was not allocated"),
+            message: format!("built-in frontend process {process_id:?} was not allocated"),
         })?;
     let prefill = allocations
         .iter()
-        .filter(|allocation| allocation.wire.role == *prefill_role && allocation.wire.rank == 0)
+        .filter(|allocation| {
+            matches!(
+                &allocation.wire,
+                ServeProcessAllocation::ModelRank { role, rank: 0, .. }
+                    if role == &pd_router.prefill_role
+            )
+        })
         .collect::<Vec<_>>();
     let decode = allocations
         .iter()
-        .filter(|allocation| allocation.wire.role == *decode_role && allocation.wire.rank == 0)
+        .filter(|allocation| {
+            matches!(
+                &allocation.wire,
+                ServeProcessAllocation::ModelRank { role, rank: 0, .. }
+                    if role == &pd_router.decode_role
+            )
+        })
         .collect::<Vec<_>>();
     if prefill.is_empty() || decode.is_empty() {
         return Err(InferlabError::InvalidConfig {
@@ -1057,27 +1236,32 @@ fn render_builtin_proxy(
         });
     }
     let proxy_kind = builtin_proxy_kind(framework, transport)?;
-    let declared_kind = match implementation {
-        BuiltinRouterKind::VllmMooncake => BuiltinProxyKind::VllmMooncake,
-        BuiltinRouterKind::VllmNixl => BuiltinProxyKind::VllmNixl,
-        BuiltinRouterKind::Sglang => BuiltinProxyKind::Sglang,
-        BuiltinRouterKind::Trtllm => BuiltinProxyKind::Trtllm,
+    let declared_kind = match gateway.implementation.as_str() {
+        "vllm_mooncake" => BuiltinProxyKind::VllmMooncake,
+        "vllm_nixl" => BuiltinProxyKind::VllmNixl,
+        "sglang" => BuiltinProxyKind::Sglang,
+        "trtllm" => BuiltinProxyKind::Trtllm,
+        implementation => {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration returned unknown control-plane frontend implementation {implementation:?}"
+                ),
+            });
+        }
     };
-    if proxy_kind != declared_kind {
+    if proxy_kind != declared_kind || pd_router.implementation != gateway.implementation {
         return Err(InferlabError::InvalidConfig {
             message: format!(
-                "integration returned built-in router {implementation:?}, which is incompatible with framework {framework:?} and transport {transport:?}"
+                "integration returned control-plane frontend implementation {:?}, which is incompatible with framework {framework:?} and transport {transport:?}",
+                gateway.implementation
             ),
         });
     }
-    let proxy_endpoint =
-        proxy
-            .wire
-            .endpoint
-            .as_ref()
-            .ok_or_else(|| InferlabError::InvalidConfig {
-                message: "built-in router allocation has no endpoint".to_owned(),
-            })?;
+    let proxy_endpoint = proxy
+        .endpoint()
+        .ok_or_else(|| InferlabError::InvalidConfig {
+            message: "built-in frontend allocation has no endpoint".to_owned(),
+        })?;
     let executable = std::env::current_exe().map_err(|source| InferlabError::Read {
         path: PathBuf::from("/proc/self/exe"),
         source,
@@ -1093,30 +1277,26 @@ fn render_builtin_proxy(
         proxy_endpoint.port.to_string(),
     ];
     for replica in prefill {
-        let endpoint =
-            replica
-                .wire
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| InferlabError::InvalidConfig {
-                    message: format!(
-                        "prefill allocation {:?} has no endpoint",
-                        replica.wire.process
-                    ),
-                })?;
+        let endpoint = replica
+            .endpoint()
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!("prefill allocation {:?} has no endpoint", replica.process()),
+            })?;
         argv.extend(["--prefill".to_owned(), endpoint_url(endpoint)]);
         if matches!(
             proxy_kind,
             BuiltinProxyKind::VllmMooncake | BuiltinProxyKind::Sglang
         ) {
-            let bootstrap = replica.wire.ports.get("bootstrap").ok_or_else(|| {
-                InferlabError::InvalidConfig {
-                    message: format!(
-                        "prefill replica {:?} has no bootstrap endpoint",
-                        replica.wire.replica
-                    ),
-                }
-            })?;
+            let bootstrap =
+                replica
+                    .ports()
+                    .get("bootstrap")
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: format!(
+                            "prefill allocation {:?} has no bootstrap endpoint",
+                            replica.process()
+                        ),
+                    })?;
             match proxy_kind {
                 BuiltinProxyKind::VllmMooncake => argv.push(endpoint_url(bootstrap)),
                 BuiltinProxyKind::Sglang => {
@@ -1127,25 +1307,17 @@ fn render_builtin_proxy(
         }
     }
     for replica in decode {
-        let endpoint =
-            replica
-                .wire
-                .endpoint
-                .as_ref()
-                .ok_or_else(|| InferlabError::InvalidConfig {
-                    message: format!(
-                        "decode allocation {:?} has no endpoint",
-                        replica.wire.process
-                    ),
-                })?;
+        let endpoint = replica
+            .endpoint()
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!("decode allocation {:?} has no endpoint", replica.process()),
+            })?;
         argv.extend(["--decode".to_owned(), endpoint_url(endpoint)]);
     }
-    Ok(RenderedServeProcess {
+    Ok(RenderedServeProcess::Frontend {
         process: process_id.to_owned(),
-        role: "router".to_owned(),
-        replica: 0,
-        rank: 0,
-        rank_count: 1,
+        process_role: FrontendProcessRole::Gateway,
+        components: FrontendComponents::gateway_pd_router(),
         command: ProcessSpec {
             argv,
             env: BTreeMap::new(),
@@ -1442,7 +1614,8 @@ fn resolve_effective_server_input(
     let case = selection.case;
     let topology = server.topology;
     let mut readiness_timeout_seconds = server.readiness_timeout_seconds;
-    let mut routing_backend = server.routing_backend.clone();
+    let mut gateway_backend = server.gateway_backend.clone();
+    let mut pd_router_backend = server.pd_router_backend.clone();
     let mut kv_transfer = server.kv_transfer;
     let mut profiling = server.profiling.unwrap_or(false);
     let capture_control_deadline_seconds = server
@@ -1451,8 +1624,11 @@ fn resolve_effective_server_input(
     if let Some(value) = case.and_then(|case| case.readiness_timeout_seconds) {
         readiness_timeout_seconds = value;
     }
-    if let Some(value) = case.and_then(|case| case.routing_backend.as_ref()) {
-        routing_backend = Some(value.clone());
+    if let Some(value) = case.and_then(|case| case.gateway_backend.as_ref()) {
+        gateway_backend = Some(value.clone());
+    }
+    if let Some(value) = case.and_then(|case| case.pd_router_backend.as_ref()) {
+        pd_router_backend = Some(value.clone());
     }
     if let Some(value) = case.and_then(|case| case.kv_transfer) {
         kv_transfer = Some(value);
@@ -1475,8 +1651,27 @@ fn resolve_effective_server_input(
                 message: "invocation overrides must not change server topology".to_owned(),
             });
         }
-        if let Some(value) = &patch.routing_backend {
-            routing_backend = Some(value.clone());
+        if patch.gateway_backend.is_some() && server.gateway_backend.is_none() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "cannot add gateway_backend because server {:?} does not declare a Gateway",
+                    selection.server_id
+                ),
+            });
+        }
+        if patch.pd_router_backend.is_some() && server.pd_router_backend.is_none() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "cannot add pd_router_backend because server {:?} does not declare a P/D Router",
+                    selection.server_id
+                ),
+            });
+        }
+        if let Some(value) = &patch.gateway_backend {
+            gateway_backend = Some(value.clone());
+        }
+        if let Some(value) = &patch.pd_router_backend {
+            pd_router_backend = Some(value.clone());
         }
         if let Some(value) = patch.kv_transfer {
             kv_transfer = Some(value);
@@ -1501,6 +1696,24 @@ fn resolve_effective_server_input(
     if !request.captures.is_empty() {
         profiling = true;
     }
+    match topology {
+        ServeTopology::Single if pd_router_backend.is_some() || kv_transfer.is_some() => {
+            return Err(InferlabError::InvalidConfig {
+                message: "single topology does not accept pd_router_backend or kv_transfer"
+                    .to_owned(),
+            });
+        }
+        ServeTopology::PrefillDecode
+            if gateway_backend.is_none() || pd_router_backend.is_none() =>
+        {
+            return Err(InferlabError::InvalidConfig {
+                message:
+                    "prefill_decode topology requires both gateway_backend and pd_router_backend"
+                        .to_owned(),
+            });
+        }
+        ServeTopology::Single | ServeTopology::PrefillDecode => {}
+    }
 
     let case_id = selection.case_id.as_deref();
     let role_resolutions = resolve_role_inputs(server, case_id, case, &override_patches, topology)?;
@@ -1518,7 +1731,8 @@ fn resolve_effective_server_input(
     Ok(EffectiveServerInput {
         topology,
         readiness_timeout_seconds,
-        routing_backend,
+        gateway_backend,
+        pd_router_backend,
         kv_transfer,
         profiling,
         capture_control_deadline_seconds,
@@ -1558,7 +1772,8 @@ fn plan_integration<C: AdapterClient>(
                 served_name,
             },
             topology: effective.topology,
-            routing_backend: effective.routing_backend.clone(),
+            gateway_backend: effective.gateway_backend.clone(),
+            pd_router_backend: effective.pd_router_backend.clone(),
             kv_transfer: effective.kv_transfer,
             roles: effective.role_inputs.clone(),
             profiling: effective.profiling,
@@ -1566,18 +1781,14 @@ fn plan_integration<C: AdapterClient>(
     )?;
     let (planned, evidence) = split_lowering(lowering);
     validate_integration_identity(&stack.integration, &planned.integration.framework)?;
-    validate_workload_endpoint(&stack.integration, &planned.endpoint)?;
     validate_serve_graph(
         &stack.integration,
         effective.topology,
         &effective.role_inputs,
+        effective.gateway_backend.as_deref(),
+        effective.pd_router_backend.as_deref(),
         effective.kv_transfer,
         &planned,
-    )?;
-    effective.routing_backend = resolve_routing_backend(
-        effective.topology,
-        effective.routing_backend.take(),
-        &planned.routing,
     )?;
     for resolution in &effective.role_resolutions {
         let role = planned
@@ -1586,7 +1797,7 @@ fn plan_integration<C: AdapterClient>(
             .find(|role| role.id == resolution.input.id)
             .ok_or_else(|| InferlabError::InvalidConfig {
                 message: format!(
-                    "integration {:?} omitted role {:?}",
+                    "integration {:?} omitted Engine role {:?}",
                     stack.integration, resolution.input.id
                 ),
             })?;
@@ -1597,79 +1808,163 @@ fn plan_integration<C: AdapterClient>(
             &role.effective_parallelism,
         )?;
     }
-    validate_capture_targets(&stack.integration, effective.profiling, &planned.replicas)?;
+    validate_capture_targets(
+        &stack.integration,
+        effective.profiling,
+        planned.gateway.is_some(),
+        &planned.replicas,
+    )?;
+
+    let role_render_inputs = planned
+        .roles
+        .iter()
+        .map(|role| {
+            load_render_inputs(&workspace.root, &stack.integration, &role.render_inputs)
+                .map(|inputs| (role.id.clone(), inputs))
+        })
+        .collect::<Result<BTreeMap<_, _>, InferlabError>>()?;
     let mut requirements = expand_replica_requirements(
         &stack.integration,
-        effective.topology,
-        &planned.replicas,
-        &planned.routing,
+        &planned,
         selection.placement,
         selection.server,
+        &role_render_inputs,
     )?;
-    let integration_process_count = requirements.len();
-    let public_process = match &planned.routing {
-        RoutingResult::Direct { role, replica }
-        | RoutingResult::IntegrationNative { role, replica, .. } => requirements
-            .iter()
-            .find(|process| {
-                process.role_id == *role && process.replica_index == *replica && process.rank == 0
+    let mut integration_rendered_process_ids = requirements
+        .iter()
+        .map(|requirement| requirement.id.clone())
+        .collect::<BTreeSet<_>>();
+
+    let public_process = if let Some(gateway) = &planned.gateway {
+        let fixed_gateway = if uses_explicit_replica_placement(selection.placement) {
+            let rank = selection
+                .placement
+                .roles
+                .get("gateway")
+                .and_then(|role| role.ranks_for_replica(0))
+                .and_then(|ranks| ranks.first())
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: "explicit routed placement must bind Gateway process".to_owned(),
+                })?;
+            Some(FixedDeviceAssignment {
+                machine: rank.machine.clone(),
+                devices: Vec::new(),
+                endpoint_port: rank.endpoint_port,
             })
-            .map(|process| process.id.clone())
+        } else {
+            None
+        };
+        let mut ports = gateway.ports.clone();
+        if let Some(pd_router) = &planned.pd_router {
+            for port in &pd_router.ports {
+                if !ports.contains(port) {
+                    ports.push(port.clone());
+                }
+            }
+        }
+        let mut render_inputs =
+            load_render_inputs(&workspace.root, &stack.integration, &gateway.render_inputs)?;
+        if let Some(pd_router) = &planned.pd_router {
+            for supplied in load_render_inputs(
+                &workspace.root,
+                &stack.integration,
+                &pd_router.render_inputs,
+            )? {
+                if !render_inputs
+                    .iter()
+                    .any(|current| current.source_path == supplied.source_path)
+                {
+                    render_inputs.push(supplied);
+                }
+            }
+        }
+        let components = if planned.pd_router.is_some() {
+            FrontendComponents::gateway_pd_router()
+        } else {
+            FrontendComponents::gateway()
+        };
+        let readiness = planned.pd_router.as_ref().map_or_else(
+            || gateway.readiness.clone(),
+            |router| router.readiness.clone(),
+        );
+        let dependencies = requirements
+            .iter()
+            .map(|requirement| requirement.id.clone())
+            .collect();
+        let mut links = links_for_node(&planned.links, "gateway");
+        for link in links_for_node(&planned.links, "pd_router") {
+            if !links.contains(&link) {
+                links.push(link);
+            }
+        }
+        requirements.push(ProcessRequirement {
+            id: "gateway".to_owned(),
+            identity: ProcessRequirementIdentity::Frontend {
+                process_role: FrontendProcessRole::Gateway,
+                components,
+                gateway: Box::new(gateway.clone()),
+                pd_router: planned.pd_router.clone().map(Box::new),
+                links,
+                render_inputs,
+            },
+            device_count: 0,
+            ports,
+            readiness,
+            launch_dependencies: dependencies,
+            capture_target: None,
+            fixed_devices: fixed_gateway,
+        });
+        if gateway.render_source == RenderSource::Integration {
+            integration_rendered_process_ids.insert("gateway".to_owned());
+        }
+        "gateway".to_owned()
+    } else {
+        let role = planned
+            .roles
+            .iter()
+            .find(|role| role.public_endpoint.is_some())
             .ok_or_else(|| InferlabError::InvalidConfig {
                 message: format!(
-                    "integration {:?} selected unknown public role {role:?} replica {replica}",
+                    "integration {:?} did not select a direct public Engine",
                     stack.integration
                 ),
-            })?,
-        RoutingResult::InferlabBuiltin {
-            ports, readiness, ..
-        } => {
-            let fixed_router = if !uses_explicit_replica_placement(selection.placement) {
-                None
-            } else {
-                let rank = selection
-                    .placement
-                    .roles
-                    .get("router")
-                    .and_then(|role| role.ranks_for_replica(0))
-                    .and_then(|ranks| ranks.first())
-                    .ok_or_else(|| InferlabError::InvalidConfig {
-                        message: "explicit routed placement must bind router replica 0 rank 0"
-                            .to_owned(),
-                    })?;
-                Some(FixedDeviceAssignment {
-                    machine: rank.machine.clone(),
-                    devices: Vec::new(),
-                    endpoint_port: rank.endpoint_port,
-                })
-            };
-            requirements.push(ProcessRequirement {
-                id: "router".to_owned(),
-                role_id: "router".to_owned(),
-                replica_id: "router".to_owned(),
-                replica_index: 0,
-                rank: 0,
-                device_count: 0,
-                ports: ports.clone(),
-                readiness: readiness.clone(),
-                launch_dependencies: requirements
-                    .iter()
-                    .map(|process| process.id.clone())
-                    .collect(),
-                capture_target: None,
-                fixed_devices: fixed_router,
-            });
-            "router".to_owned()
-        }
+            })?;
+        requirements
+            .iter()
+            .find(|requirement| {
+                matches!(
+                    &requirement.identity,
+                    ProcessRequirementIdentity::ModelRank {
+                        role_id,
+                        replica_index: 0,
+                        rank: 0,
+                        ..
+                    } if role_id == &role.id
+                )
+            })
+            .map(|requirement| requirement.id.clone())
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {:?} selected unknown direct public Engine role {:?}",
+                    stack.integration, role.id
+                ),
+            })?
     };
     validate_launch_dependencies(&stack.integration, &requirements)?;
     Ok(PlannedServeStage {
         planned,
         evidence,
         requirements,
-        integration_process_count,
+        integration_rendered_process_ids,
         public_process,
     })
+}
+
+fn rendered_process_id(process: &RenderedServeProcess) -> &str {
+    match process {
+        RenderedServeProcess::ModelRank { process, .. }
+        | RenderedServeProcess::Frontend { process, .. } => process,
+    }
 }
 
 fn render_integration<C: AdapterClient>(
@@ -1682,7 +1977,10 @@ fn render_integration<C: AdapterClient>(
 ) -> Result<RenderedServeStage, InferlabError> {
     let stack = selection.stack;
     let planned = &planned_stage.planned;
-    let builtin_proxy = matches!(planned.routing, RoutingResult::InferlabBuiltin { .. });
+    let control_plane_frontend = planned
+        .gateway
+        .as_ref()
+        .is_some_and(|gateway| gateway.render_source == RenderSource::ControlPlane);
     let allocations = allocate_processes(
         workspace,
         &selection.placement_id,
@@ -1694,10 +1992,17 @@ fn render_integration<C: AdapterClient>(
             .map(|image| image.image_id.as_str())
             .or_else(|| request.external.map(|external| external.digest.as_str())),
         &planned_stage.requirements,
-        builtin_proxy.then_some(planned_stage.public_process.as_str()),
+        control_plane_frontend.then_some(planned_stage.public_process.as_str()),
     )?;
-    let render_inputs =
-        load_render_inputs(&workspace.root, &stack.integration, &planned.render_inputs)?;
+    let render_allocations = allocations
+        .iter()
+        .filter(|allocation| {
+            planned_stage
+                .integration_rendered_process_ids
+                .contains(allocation.process())
+        })
+        .map(|allocation| allocation.wire.clone())
+        .collect::<Vec<_>>();
     let lowering = adapter.render_serve(
         &workspace.root,
         &stack.integration,
@@ -1708,16 +2013,10 @@ fn render_integration<C: AdapterClient>(
                 served_name: selection.model.served_name.clone(),
             },
             topology: effective.topology,
-            routing_backend: effective.routing_backend.clone(),
+            gateway_backend: effective.gateway_backend.clone(),
+            pd_router_backend: effective.pd_router_backend.clone(),
             kv_transfer: effective.kv_transfer,
-            roles: planned.roles.clone(),
-            routing: planned.routing.clone(),
-            links: planned.links.clone(),
-            allocations: allocations[..planned_stage.integration_process_count]
-                .iter()
-                .map(|allocation| allocation.wire.clone())
-                .collect(),
-            render_inputs,
+            allocations: render_allocations,
             profiling: effective.profiling,
         },
     )?;
@@ -1730,28 +2029,74 @@ fn render_integration<C: AdapterClient>(
             ),
         });
     }
-    if rendered.processes.len() != planned_stage.integration_process_count {
+    if rendered.processes.len() != planned_stage.integration_rendered_process_ids.len() {
         return Err(InferlabError::InvalidConfig {
             message: format!(
-                "integration {:?} rendered {} processes for {} planned processes",
+                "integration {:?} rendered {} processes for {} integration-rendered allocations",
                 stack.integration,
                 rendered.processes.len(),
-                planned_stage.integration_process_count
+                planned_stage.integration_rendered_process_ids.len()
             ),
         });
     }
-    let mut rendered_processes = rendered.processes;
-    if builtin_proxy {
-        rendered_processes.push(render_builtin_proxy(
-            &planned.routing,
+    let mut rendered_by_id = BTreeMap::new();
+    for process in rendered.processes {
+        let id = rendered_process_id(&process).to_owned();
+        if !planned_stage.integration_rendered_process_ids.contains(&id)
+            || rendered_by_id.insert(id.clone(), process).is_some()
+        {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {:?} returned duplicate or unknown process {id:?}",
+                    stack.integration
+                ),
+            });
+        }
+    }
+    if control_plane_frontend {
+        let gateway = planned
+            .gateway
+            .as_ref()
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: "control-plane frontend lost its Gateway plan".to_owned(),
+            })?;
+        let pd_router = planned
+            .pd_router
+            .as_ref()
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: "control-plane frontend requires a P/D Router plan".to_owned(),
+            })?;
+        let process = render_builtin_frontend(
+            gateway,
+            pd_router,
             &planned.integration.framework,
             effective.kv_transfer,
             &allocations,
-        )?);
+        )?;
+        let id = rendered_process_id(&process).to_owned();
+        if rendered_by_id.insert(id.clone(), process).is_some() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!("frontend renderer duplicated process {id:?}"),
+            });
+        }
     }
-    if rendered_processes.len() != planned_stage.requirements.len() {
+    let rendered_processes = planned_stage
+        .requirements
+        .iter()
+        .map(|requirement| {
+            rendered_by_id
+                .remove(&requirement.id)
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "resolved topology has no rendered process for allocation {:?}",
+                        requirement.id
+                    ),
+                })
+        })
+        .collect::<Result<Vec<_>, InferlabError>>()?;
+    if !rendered_by_id.is_empty() {
         return Err(InferlabError::InvalidConfig {
-            message: "resolved topology process count changed during rendering".to_owned(),
+            message: "rendering returned processes outside the resolved topology".to_owned(),
         });
     }
     Ok(RenderedServeStage {
@@ -1773,39 +2118,115 @@ fn realize_runtime(
     let requirements = &planned_stage.requirements;
     let public_process = &planned_stage.public_process;
     let allocations = &rendered_stage.allocations;
-    let builtin_proxy = matches!(planned.routing, RoutingResult::InferlabBuiltin { .. });
+    let endpoint_requirement =
+        public_endpoint_requirement(&selection.stack.integration, effective.topology, planned)?;
     let mut processes = Vec::with_capacity(requirements.len());
     let mut public_endpoint = None;
     let mut device_count = 0_u32;
+    let gateway_process_id = resolved_gateway_process_id(requirements)?;
     for ((requirement, allocation), rendered_process) in requirements
         .iter()
         .zip(allocations)
         .zip(&rendered_stage.rendered_processes)
     {
-        let expected_rank_count = u32::try_from(
-            requirements
-                .iter()
-                .filter(|candidate| candidate.replica_id == requirement.replica_id)
-                .count(),
-        )
-        .map_err(|_| InferlabError::InvalidConfig {
-            message: format!("replica {:?} has too many ranks", requirement.replica_id),
-        })?;
-        if rendered_process.process != requirement.id
-            || rendered_process.role != requirement.role_id
-            || rendered_process.replica != requirement.replica_index
-            || rendered_process.rank != requirement.rank
-            || rendered_process.rank_count != expected_rank_count
-            || allocation.wire.process != requirement.id
-        {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "integration {:?} rendered process {:?} where {:?} was planned",
-                    selection.stack.integration, rendered_process.process, requirement.id
-                ),
-            });
-        }
-        if rendered_process.command.argv.is_empty() {
+        let (identity, command, launch_file_declarations, integration_rendered) = match (
+            &requirement.identity,
+            &allocation.wire,
+            rendered_process,
+        ) {
+            (
+                ProcessRequirementIdentity::ModelRank {
+                    role_id,
+                    replica_index,
+                    rank,
+                    ..
+                },
+                ServeProcessAllocation::ModelRank {
+                    process,
+                    role,
+                    replica,
+                    rank: allocated_rank,
+                    rank_count,
+                    ..
+                },
+                RenderedServeProcess::ModelRank {
+                    process: rendered_id,
+                    role: rendered_role,
+                    replica: rendered_replica,
+                    rank: rendered_rank,
+                    rank_count: rendered_rank_count,
+                    command,
+                    launch_files,
+                },
+            ) if process == &requirement.id
+                && rendered_id == &requirement.id
+                && role == role_id
+                && rendered_role == role_id
+                && replica == replica_index
+                && rendered_replica == replica_index
+                && allocated_rank == rank
+                && rendered_rank == rank
+                && rank_count == rendered_rank_count =>
+            {
+                (
+                    ProcessIdentityPlan::ModelRank {
+                        rank: *rank,
+                        rank_count: *rank_count,
+                    },
+                    command,
+                    launch_files,
+                    true,
+                )
+            }
+            (
+                ProcessRequirementIdentity::Frontend {
+                    process_role,
+                    components,
+                    gateway,
+                    ..
+                },
+                ServeProcessAllocation::Frontend {
+                    process,
+                    process_role: allocated_role,
+                    components: allocated_components,
+                    ..
+                },
+                RenderedServeProcess::Frontend {
+                    process: rendered_id,
+                    process_role: rendered_role,
+                    components: rendered_components,
+                    command,
+                    launch_files,
+                },
+            ) if process == &requirement.id
+                && rendered_id == &requirement.id
+                && allocated_role == process_role
+                && rendered_role == process_role
+                && allocated_components == components
+                && rendered_components == components =>
+            {
+                (
+                    ProcessIdentityPlan::Frontend {
+                        process_role: *process_role,
+                        components: components.clone(),
+                    },
+                    command,
+                    launch_files,
+                    gateway.render_source == RenderSource::Integration,
+                )
+            }
+            _ => {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {:?} rendered process {:?} with an identity different from allocation {:?}",
+                        selection.stack.integration,
+                        rendered_process_id(rendered_process),
+                        requirement.id
+                    ),
+                });
+            }
+        };
+        if command.argv.is_empty() {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
                     "integration {:?} rendered an empty argv for process {:?}",
@@ -1813,11 +2234,7 @@ fn realize_runtime(
                 ),
             });
         }
-        if rendered_process
-            .command
-            .env
-            .contains_key("CUDA_VISIBLE_DEVICES")
-        {
+        if command.env.contains_key("CUDA_VISIBLE_DEVICES") {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
                     "integration {:?} attempted to select devices for process {:?}",
@@ -1829,21 +2246,19 @@ fn realize_runtime(
             &selection.stack.integration,
             &requirement.id,
             &allocation.runtime_cache.path,
-            &rendered_process.command,
-            &rendered_process.launch_files,
+            command,
+            launch_file_declarations,
         )?;
-        let machine_id = &allocation.wire.machine;
+        let machine_id = allocation.machine();
         let machine = workspace.local.machines.get(machine_id).ok_or_else(|| {
             InferlabError::InvalidConfig {
                 message: format!("unknown machine {machine_id:?}"),
             }
         })?;
-        if builtin_proxy
-            && requirement.id == *public_process
-            && !matches!(machine.launch, LaunchBinding::Local)
-        {
+        if !integration_rendered && !matches!(machine.launch, LaunchBinding::Local) {
             return Err(InferlabError::InvalidConfig {
-                message: "the built-in proxy must be placed on a local machine binding".to_owned(),
+                message: "a control-plane-rendered frontend must use a local machine binding"
+                    .to_owned(),
             });
         }
         let workspace_root = machine
@@ -1855,13 +2270,12 @@ fn realize_runtime(
             LaunchBinding::Local => current_environment()?,
             LaunchBinding::Ssh { .. } => BTreeMap::new(),
         };
-        let mut explicit_env: Vec<String> = rendered_process.command.env.keys().cloned().collect();
-        env.extend(rendered_process.command.env.clone());
+        let mut explicit_env = command.env.keys().cloned().collect::<Vec<_>>();
+        env.extend(command.env.clone());
         env.insert(
             "CUDA_VISIBLE_DEVICES".to_owned(),
             allocation
-                .wire
-                .devices
+                .devices()
                 .iter()
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
@@ -1874,49 +2288,44 @@ fn realize_runtime(
         explicit_env.dedup();
         let allocation_endpoint =
             allocation
-                .wire
-                .endpoint
-                .as_ref()
+                .endpoint()
                 .ok_or_else(|| InferlabError::InvalidConfig {
-                    message: format!("allocation {:?} has no endpoint", allocation.wire.process),
+                    message: format!("allocation {:?} has no endpoint", allocation.process()),
                 })?;
-        let endpoint = EndpointPlan {
+        let endpoint = ProcessEndpointPlan {
             host: allocation_endpoint.host.clone(),
             port: allocation_endpoint.port,
-            protocol: planned.endpoint.protocol,
-            completions_path: planned.endpoint.completions_path.clone(),
-            chat_completions_path: planned.endpoint.chat_completions_path.clone(),
-            prefix_cache_reset: (requirement.id == *public_process)
-                .then(|| planned.endpoint.prefix_cache_reset.clone())
-                .flatten(),
         };
         if requirement.id == *public_process {
-            public_endpoint = Some(endpoint.clone());
+            public_endpoint = Some(EndpointPlan {
+                host: endpoint.host.clone(),
+                port: endpoint.port,
+                protocol: endpoint_requirement.protocol,
+                completions_path: endpoint_requirement.completions_path.clone(),
+                chat_completions_path: endpoint_requirement.chat_completions_path.clone(),
+                prefix_cache_reset: endpoint_requirement.prefix_cache_reset.clone(),
+            });
         }
         device_count += requirement.device_count;
         processes.push(ProcessPlan {
             id: requirement.id.clone(),
-            rank: requirement.rank,
-            rank_count: expected_rank_count,
-            machine: machine_id.clone(),
+            identity,
+            machine: machine_id.to_owned(),
             launch: launch_plan(&machine.launch),
             launch_dependencies: requirement.launch_dependencies.clone(),
             allocation: AllocationPlan {
-                devices: allocation.wire.devices.clone(),
-                model_locator: allocation.wire.model_locator.clone(),
+                devices: allocation.devices().to_vec(),
+                model_locator: allocation.model_locator().map(str::to_owned),
                 model_locator_source: allocation.model_locator_source,
-                ports: allocation.wire.ports.clone(),
+                ports: allocation.ports().clone(),
                 runtime_cache: allocation.runtime_cache.clone(),
                 communication_interface: None,
             },
             command: CommandPlan {
-                argv: if builtin_proxy && requirement.id == *public_process {
-                    rendered_process.command.argv.clone()
+                argv: if integration_rendered {
+                    pixi_command(&selection.stack.pixi_environment, command.argv.clone())
                 } else {
-                    pixi_command(
-                        &selection.stack.pixi_environment,
-                        rendered_process.command.argv.clone(),
-                    )
+                    command.argv.clone()
                 },
                 env,
                 explicit_env,
@@ -1928,12 +2337,11 @@ fn realize_runtime(
                 &requirement.readiness,
                 effective.readiness_timeout_seconds,
                 effective.profiling,
-                &planned.roles,
                 allocations,
             )?,
             endpoint,
             container: None,
-            capture_target: requirement.capture_target.clone(),
+            capture_target: resolve_capture_target(requirement, gateway_process_id, allocations)?,
         });
     }
     let public_endpoint = public_endpoint.ok_or_else(|| InferlabError::InvalidConfig {
@@ -1986,7 +2394,7 @@ fn realize_runtime(
         device_count,
         selected_machines: allocations
             .iter()
-            .map(|allocation| allocation.wire.machine.clone())
+            .map(|allocation| allocation.machine().to_owned())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
@@ -2020,8 +2428,13 @@ fn compose_measurements(
         .or_else(|| {
             allocations
                 .iter()
-                .find(|allocation| allocation.wire.role != "router" && allocation.wire.rank == 0)
-                .and_then(|allocation| allocation.wire.model_locator.clone())
+                .find(|allocation| {
+                    matches!(
+                        &allocation.wire,
+                        ServeProcessAllocation::ModelRank { rank: 0, .. }
+                    )
+                })
+                .and_then(|allocation| allocation.model_locator().map(str::to_owned))
         })
         .ok_or_else(|| InferlabError::InvalidConfig {
             message: format!(
@@ -2068,15 +2481,14 @@ fn compose_measurements(
     .map(Some)
 }
 
-fn assemble_role_plans(
+fn assemble_process_hierarchy(
     integration: &str,
     effective: &EffectiveServerInput,
     planned_stage: &PlannedServeStage,
     processes: Vec<ProcessPlan>,
-) -> Result<Vec<RolePlan>, InferlabError> {
+) -> Result<(Vec<RolePlan>, Option<FrontendPlan>), InferlabError> {
     let planned = &planned_stage.planned;
     let requirements = &planned_stage.requirements;
-    let public_process = &planned_stage.public_process;
     let process_count = processes.len();
     let mut processes_by_id = processes
         .into_iter()
@@ -2087,7 +2499,7 @@ fn assemble_role_plans(
             message: "resolved topology contains duplicate process identities".to_owned(),
         });
     }
-    let mut role_plans = planned
+    let role_plans = planned
         .roles
         .iter()
         .map(|role| {
@@ -2109,21 +2521,30 @@ fn assemble_role_plans(
                 .map(|replica| {
                     let mut ranks = requirements
                         .iter()
-                        .filter(|process| {
-                            process.role_id == role.id
-                                && process.replica_index == replica.replica_index
+                        .filter_map(|requirement| {
+                            let ProcessRequirementIdentity::ModelRank {
+                                role_id,
+                                replica_index,
+                                rank,
+                                ..
+                            } = &requirement.identity
+                            else {
+                                return None;
+                            };
+                            (role_id == &role.id && replica_index == &replica.replica_index)
+                                .then_some((requirement, *rank))
                         })
                         .collect::<Vec<_>>();
-                    ranks.sort_by_key(|process| process.rank);
+                    ranks.sort_by_key(|(_, rank)| *rank);
                     let entry_process = ranks
                         .first()
-                        .map(|process| process.id.clone())
+                        .map(|(requirement, _)| requirement.id.clone())
                         .ok_or_else(|| InferlabError::InvalidConfig {
                             message: format!("resolved replica {:?} contains no ranks", replica.id),
                         })?;
                     let ranks = ranks
                         .into_iter()
-                        .map(|requirement| {
+                        .map(|(requirement, _)| {
                             processes_by_id.remove(&requirement.id).ok_or_else(|| {
                                 InferlabError::InvalidConfig {
                                     message: format!(
@@ -2161,104 +2582,70 @@ fn assemble_role_plans(
                     .map(|resolution| resolution.input.settings.clone())
                     .unwrap_or_default(),
                 effective_settings: role.effective_settings.clone(),
+                public_endpoint: role.public_endpoint.clone(),
+                render_inputs: role.render_inputs.clone(),
                 replicas,
             })
         })
         .collect::<Result<Vec<_>, InferlabError>>()?;
-    if matches!(planned.routing, RoutingResult::InferlabBuiltin { .. }) {
-        role_plans.push(RolePlan {
-            id: "router".to_owned(),
-            kind: ServeRoleKind::Router,
-            declared_replica_count: 1,
-            effective_replica_count: 1,
-            declared_parallelism: Parallelism::default(),
-            effective_parallelism: Parallelism::default(),
-            declared_settings: BTreeMap::new(),
-            effective_settings: BTreeMap::new(),
-            replicas: vec![RoleReplicaPlan {
-                id: "router".to_owned(),
-                index: 0,
-                device_count: 0,
-                ports: requirements
-                    .iter()
-                    .find(|process| process.id == *public_process)
-                    .map_or_else(Vec::new, |process| process.ports.clone()),
-                primary_ports: Vec::new(),
-                primary_readiness: requirements
-                    .iter()
-                    .find(|process| process.id == *public_process)
-                    .map_or(ReadinessProbe::ProcessAlive, |process| {
-                        process.readiness.clone()
-                    }),
-                worker_readiness: ReadinessProbe::ProcessAlive,
-                capture_target: None,
-                entry_process: public_process.clone(),
-                ranks: vec![
-                    processes_by_id
-                        .remove(public_process.as_str())
-                        .ok_or_else(|| InferlabError::InvalidConfig {
-                            message: format!(
-                                "resolved router references missing process {public_process:?}"
-                            ),
-                        })?,
-                ],
-            }],
-        });
-    }
+    let frontend_process_ids = requirements
+        .iter()
+        .filter_map(|requirement| {
+            matches!(
+                requirement.identity,
+                ProcessRequirementIdentity::Frontend { .. }
+            )
+            .then_some(requirement.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    let frontend_processes = frontend_process_ids
+        .iter()
+        .map(|id| {
+            processes_by_id
+                .remove(*id)
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "resolved frontend component references missing process {id:?}"
+                    ),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let frontend = match &planned.gateway {
+        Some(gateway) => {
+            let [process] = frontend_processes.as_slice() else {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "current protocol requires one frontend process, resolved {}",
+                        frontend_processes.len()
+                    ),
+                });
+            };
+            let process_id = process.id.clone();
+            Some(FrontendPlan {
+                gateway: GatewayComponentPlan {
+                    plan: gateway.clone(),
+                    process_id: process_id.clone(),
+                },
+                pd_router: planned
+                    .pd_router
+                    .clone()
+                    .map(|plan| PdRouterComponentPlan { plan, process_id }),
+                processes: frontend_processes,
+            })
+        }
+        None if frontend_processes.is_empty() => None,
+        None => {
+            return Err(InferlabError::InvalidConfig {
+                message: "resolved frontend processes without a Gateway component".to_owned(),
+            });
+        }
+    };
     if !processes_by_id.is_empty() {
         return Err(InferlabError::InvalidConfig {
-            message: "resolved topology contains a process outside its role hierarchy".to_owned(),
+            message: "resolved topology contains a process outside its owning hierarchy".to_owned(),
         });
     }
-    Ok(role_plans)
-}
-
-fn resolve_routing_plan(
-    effective: &EffectiveServerInput,
-    planned_stage: &PlannedServeStage,
-) -> Result<RoutingPlan, InferlabError> {
-    let planned = &planned_stage.planned;
-    let (implementation, policy) = match &planned.routing {
-        RoutingResult::InferlabBuiltin {
-            implementation,
-            policy,
-            ..
-        } => {
-            let kind = match implementation {
-                BuiltinRouterKind::VllmMooncake => BuiltinProxyKind::VllmMooncake,
-                BuiltinRouterKind::VllmNixl => BuiltinProxyKind::VllmNixl,
-                BuiltinRouterKind::Sglang => BuiltinProxyKind::Sglang,
-                BuiltinRouterKind::Trtllm => BuiltinProxyKind::Trtllm,
-            };
-            let meta = kind.meta();
-            (
-                RoutingImplementationPlan::Inferlab {
-                    id: meta.id.to_owned(),
-                    version: meta.version,
-                },
-                policy.clone(),
-            )
-        }
-        RoutingResult::IntegrationNative { policy, .. } => (
-            RoutingImplementationPlan::Integration {
-                id: effective.routing_backend.clone().ok_or_else(|| {
-                    InferlabError::InvalidConfig {
-                        message: "native routing requires a selected routing backend".to_owned(),
-                    }
-                })?,
-                adapter_version: planned.integration.adapter_version.clone(),
-            },
-            policy.clone(),
-        ),
-        RoutingResult::Direct { .. } => (RoutingImplementationPlan::Direct, "direct".to_owned()),
-    };
-    Ok(RoutingPlan {
-        backend: effective.routing_backend.clone(),
-        kv_transfer: effective.kv_transfer,
-        public_process: planned_stage.public_process.clone(),
-        policy,
-        implementation,
-    })
+    Ok((role_plans, frontend))
 }
 
 pub fn resolve<C: AdapterClient>(
@@ -2309,9 +2696,8 @@ pub fn resolve<C: AdapterClient>(
         &public_endpoint,
         &rendered_stage.allocations,
     )?;
-    let role_plans =
-        assemble_role_plans(&stack.integration, &effective, &planned_stage, processes)?;
-    let routing = resolve_routing_plan(&effective, &planned_stage)?;
+    let (role_plans, frontend) =
+        assemble_process_hierarchy(&stack.integration, &effective, &planned_stage, processes)?;
     let mut execution = ResolvedExecution {
         workflow: request.workflow,
         workspace: workspace.snapshot.clone(),
@@ -2348,7 +2734,8 @@ pub fn resolve<C: AdapterClient>(
             profiling,
             readiness_timeout_seconds: effective.readiness_timeout_seconds,
             capture_control_deadline_seconds: effective.capture_control_deadline_seconds,
-            routing,
+            kv_transfer: effective.kv_transfer,
+            frontend,
             profiler_escapes: profiler_escapes_plan(server),
             model: ModelPlan {
                 id: server.model.clone(),
@@ -2363,7 +2750,7 @@ pub fn resolve<C: AdapterClient>(
                 framework: planned.integration.framework.clone(),
                 framework_version: planned.integration.framework_version.clone(),
                 executable: executable_name(&stack.integration),
-                protocol_version: ProtocolVersion::V6,
+                protocol_version: ProtocolVersion::V7,
                 plan_request_sha256: planned_stage.evidence.request_sha256,
                 plan_response_sha256: planned_stage.evidence.response_sha256,
                 render_request_sha256: rendered_stage.evidence.request_sha256,
@@ -2428,12 +2815,22 @@ fn validate_workload_endpoint(
 fn validate_capture_targets(
     integration: &str,
     profiling: bool,
+    has_gateway: bool,
     replicas: &[ServeReplicaRequirement],
 ) -> Result<(), InferlabError> {
-    if !profiling {
-        return Ok(());
-    }
     for replica in replicas {
+        if replica.capture_target.as_ref().is_some_and(|target| {
+            target.window_control.endpoint == CaptureWindowControlEndpoint::Gateway && !has_gateway
+        }) {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {integration:?} selected Gateway profiling window control without planning a Gateway"
+                ),
+            });
+        }
+        if !profiling {
+            continue;
+        }
         if replica.capture_target.is_none() {
             if replica.device_count == 0 {
                 continue;
@@ -2447,6 +2844,102 @@ fn validate_capture_targets(
         }
     }
     Ok(())
+}
+
+fn resolve_capture_target(
+    requirement: &ProcessRequirement,
+    gateway_process_id: Option<&str>,
+    allocations: &[ResolvedProcessAllocation],
+) -> Result<Option<CaptureTargetPlan>, InferlabError> {
+    requirement
+        .capture_target
+        .as_ref()
+        .map(|target| {
+            let control_process_id = match target.window_control_endpoint {
+                CaptureWindowControlEndpointPlan::ReplicaEntry => {
+                    target.replica_entry_process_id.clone()
+                }
+                CaptureWindowControlEndpointPlan::Gateway => gateway_process_id
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: "Gateway profiling window control has no resolved Gateway process"
+                            .to_owned(),
+                    })?
+                    .to_owned(),
+            };
+            let control_endpoint = allocations
+                .iter()
+                .find(|allocation| allocation.process() == control_process_id)
+                .and_then(ResolvedProcessAllocation::endpoint)
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "profiling window-control process {control_process_id:?} has no resolved endpoint"
+                    ),
+                })?;
+            Ok(CaptureTargetPlan {
+                window_control_endpoint: target.window_control_endpoint,
+                control_process_id,
+                start: resolve_capture_window_action(&target.start, control_endpoint),
+                stop: resolve_capture_window_action(&target.stop, control_endpoint),
+                escapes: target.escapes.clone(),
+            })
+        })
+        .transpose()
+}
+
+const fn capture_window_control_endpoint_plan(
+    endpoint: CaptureWindowControlEndpoint,
+) -> CaptureWindowControlEndpointPlan {
+    match endpoint {
+        CaptureWindowControlEndpoint::ReplicaEntry => {
+            CaptureWindowControlEndpointPlan::ReplicaEntry
+        }
+        CaptureWindowControlEndpoint::Gateway => CaptureWindowControlEndpointPlan::Gateway,
+    }
+}
+
+fn capture_window_action_plan(
+    action: &inferlab_protocol::HttpActionSpec,
+) -> PendingCaptureWindowActionPlan {
+    PendingCaptureWindowActionPlan {
+        method: match action.method {
+            inferlab_protocol::HttpMethod::Post => CaptureWindowHttpMethodPlan::Post,
+        },
+        path: action.path.clone(),
+    }
+}
+
+fn resolve_capture_window_action(
+    action: &PendingCaptureWindowActionPlan,
+    endpoint: &EndpointAssignment,
+) -> CaptureWindowActionPlan {
+    CaptureWindowActionPlan {
+        method: action.method,
+        path: action.path.clone(),
+        effective_url: format!("{}{}", endpoint_url(endpoint), action.path),
+    }
+}
+
+fn resolved_gateway_process_id(
+    requirements: &[ProcessRequirement],
+) -> Result<Option<&str>, InferlabError> {
+    let mut gateway_process_ids = requirements.iter().filter_map(|requirement| {
+        let ProcessRequirementIdentity::Frontend { components, .. } = &requirement.identity else {
+            return None;
+        };
+        match components {
+            FrontendComponents::Gateway(_) | FrontendComponents::GatewayPdRouter(_) => {
+                Some(requirement.id.as_str())
+            }
+        }
+    });
+    let gateway_process_id = gateway_process_ids.next();
+    if gateway_process_ids.next().is_some() {
+        return Err(InferlabError::InvalidConfig {
+            message: "resolved topology binds the Gateway component to multiple processes"
+                .to_owned(),
+        });
+    }
+    Ok(gateway_process_id)
 }
 
 fn profiler_escapes_plan(server: &ServerDefinition) -> Option<ProfilerEscapesPlan> {
@@ -2472,28 +2965,45 @@ fn uses_explicit_replica_placement(placement: &PlacementBinding) -> bool {
         .any(PlacementRoleBinding::uses_explicit_replicas)
 }
 
+fn links_for_node(links: &[ServeRoleLink], node: &str) -> Vec<ServeRoleLink> {
+    links
+        .iter()
+        .filter(|link| match link {
+            ServeRoleLink::RequestRouting { source, targets } => {
+                source == node || targets.iter().any(|target| target == node)
+            }
+            ServeRoleLink::KvTransfer { source, target, .. }
+            | ServeRoleLink::Bootstrap { source, target, .. }
+            | ServeRoleLink::SideChannel { source, target, .. } => source == node || target == node,
+        })
+        .cloned()
+        .collect()
+}
+
 fn expand_replica_requirements(
     integration: &str,
-    topology: ServeTopology,
-    replicas: &[ServeReplicaRequirement],
-    routing: &RoutingResult,
+    plan: &PlanServeResult,
     placement: &PlacementBinding,
     server: &ServerDefinition,
+    role_render_inputs: &BTreeMap<String, Vec<SuppliedRenderInput>>,
 ) -> Result<Vec<ProcessRequirement>, InferlabError> {
     let uses_explicit_replicas = uses_explicit_replica_placement(placement);
-    let role_replica_counts = replicas
+    let role_replica_counts = plan
+        .replicas
         .iter()
         .fold(BTreeMap::new(), |mut counts, replica| {
             counts
                 .entry(replica.role_id.as_str())
-                .and_modify(|count: &mut u32| *count = (*count).max(replica.replica_index + 1))
+                .and_modify(|count: &mut u32| {
+                    *count = (*count).max(replica.replica_index + 1);
+                })
                 .or_insert(replica.replica_index + 1);
             counts
         });
     for role in placement.roles.keys() {
-        if !(role_replica_counts.contains_key(role.as_str())
-            || role == "router" && matches!(routing, RoutingResult::InferlabBuiltin { .. }))
-        {
+        let valid = role_replica_counts.contains_key(role.as_str())
+            || role == "gateway" && plan.gateway.is_some();
+        if !valid {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
                     "placement references role {role:?}, which is not part of the resolved topology"
@@ -2520,10 +3030,32 @@ fn expand_replica_requirements(
                 });
             }
         }
+        if plan.gateway.is_some()
+            && placement
+                .roles
+                .get("gateway")
+                .and_then(PlacementRoleBinding::replica_count)
+                != Some(1)
+        {
+            return Err(InferlabError::InvalidConfig {
+                message: "explicit routed placement must bind exactly one Gateway process"
+                    .to_owned(),
+            });
+        }
     }
 
     let mut processes = Vec::new();
-    for replica in replicas {
+    for replica in &plan.replicas {
+        let role = plan
+            .roles
+            .iter()
+            .find(|role| role.id == replica.role_id)
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {integration:?} replica {:?} has no owning Engine role",
+                    replica.id
+                ),
+            })?;
         let explicit_ranks = if uses_explicit_replicas {
             let replica_index = usize::try_from(replica.replica_index).map_err(|_| {
                 InferlabError::InvalidConfig {
@@ -2584,24 +3116,38 @@ fn expand_replica_requirements(
             if rank == 0 && rank_count > 1 {
                 ports.extend(replica.primary_ports.iter().cloned());
             }
-            let capture_target = replica
-                .capture_target
-                .as_ref()
-                .map(|target| CaptureTargetPlan {
-                    control_process_id: primary_id.clone(),
-                    start_path: target.control.start_path.clone(),
-                    stop_path: target.control.stop_path.clone(),
-                    escapes: server.roles.get(&replica.role_id).map_or_else(
-                        || server.profiler.nsys.clone(),
-                        |role| server.profiler.nsys.merged_with(&role.profiler.nsys),
-                    ),
-                });
+            let capture_target =
+                replica
+                    .capture_target
+                    .as_ref()
+                    .map(|target| PendingCaptureTargetPlan {
+                        window_control_endpoint: capture_window_control_endpoint_plan(
+                            target.window_control.endpoint,
+                        ),
+                        replica_entry_process_id: primary_id.clone(),
+                        start: capture_window_action_plan(&target.window_control.start),
+                        stop: capture_window_action_plan(&target.window_control.stop),
+                        escapes: server.roles.get(&replica.role_id).map_or_else(
+                            || server.profiler.nsys.clone(),
+                            |role| server.profiler.nsys.merged_with(&role.profiler.nsys),
+                        ),
+                    });
             processes.push(ProcessRequirement {
                 id: process_id(&replica.id, rank_index, rank_count),
-                role_id: replica.role_id.clone(),
-                replica_id: replica.id.clone(),
-                replica_index: replica.replica_index,
-                rank: rank_index,
+                identity: ProcessRequirementIdentity::ModelRank {
+                    role_id: replica.role_id.clone(),
+                    role_kind: role.kind,
+                    replica_id: replica.id.clone(),
+                    replica_index: replica.replica_index,
+                    rank: rank_index,
+                    effective_settings: role.effective_settings.clone(),
+                    effective_parallelism: role.effective_parallelism.clone(),
+                    links: links_for_node(&plan.links, &replica.role_id),
+                    render_inputs: role_render_inputs
+                        .get(&replica.role_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                },
                 device_count,
                 ports,
                 readiness: if rank == 0 {
@@ -2619,32 +3165,6 @@ fn expand_replica_requirements(
             });
         }
     }
-    if topology == ServeTopology::PrefillDecode
-        && let RoutingResult::IntegrationNative { role, replica, .. } = routing
-    {
-        let public_index = processes
-            .iter()
-            .position(|process| {
-                process.role_id == *role
-                    && process.replica_index == *replica
-                    && process.rank == 0
-            })
-            .ok_or_else(|| InferlabError::InvalidConfig {
-                message: format!(
-                    "integration {integration:?} selected unknown native router {role:?} replica {replica}"
-                ),
-            })?;
-        let dependencies = processes
-            .iter()
-            .enumerate()
-            .filter(|(index, process)| {
-                *index != public_index
-                    && !(process.role_id == *role && process.replica_index == *replica)
-            })
-            .map(|(_, process)| process.id.clone())
-            .collect();
-        processes[public_index].launch_dependencies = dependencies;
-    }
     Ok(processes)
 }
 
@@ -2656,10 +3176,36 @@ fn process_id(replica_id: &str, rank: u32, rank_count: usize) -> String {
     }
 }
 
+fn public_endpoint_requirement<'a>(
+    integration: &str,
+    topology: ServeTopology,
+    plan: &'a PlanServeResult,
+) -> Result<&'a EndpointRequirement, InferlabError> {
+    if let Some(gateway) = &plan.gateway {
+        return Ok(&gateway.endpoint);
+    }
+    if topology == ServeTopology::Single {
+        return plan
+            .roles
+            .iter()
+            .find_map(|role| role.public_endpoint.as_ref())
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {integration:?} did not declare a direct Engine public endpoint"
+                ),
+            });
+    }
+    Err(InferlabError::InvalidConfig {
+        message: format!("integration {integration:?} did not declare a Gateway public endpoint"),
+    })
+}
+
 fn validate_serve_graph(
     integration: &str,
     topology: ServeTopology,
     requested_roles: &[ServeRoleInput],
+    gateway_backend: Option<&str>,
+    pd_router_backend: Option<&str>,
     kv_transfer: Option<KvTransferMechanism>,
     plan: &PlanServeResult,
 ) -> Result<(), InferlabError> {
@@ -2672,37 +3218,27 @@ fn validate_serve_graph(
         {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
-                    "integration {integration:?} returned a duplicate or empty role id"
+                    "integration {integration:?} returned a duplicate or empty Engine role id"
                 ),
             });
         }
     }
-    for requested in requested_roles {
-        if role_kinds.get(requested.id.as_str()) != Some(&requested.kind)
-            || !plan.roles.iter().any(|role| {
-                role.id == requested.id && role.declared_replica_count == requested.replica_count
-            })
-        {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "integration {integration:?} did not preserve requested role {:?} with kind {:?}",
-                    requested.id, requested.kind
-                ),
-            });
-        }
-    }
-    if plan.roles.iter().any(|role| {
-        !requested_roles
-            .iter()
-            .any(|requested| requested.id == role.id)
-            && role.kind != ServeRoleKind::Router
-    }) {
+    if plan.roles.len() != requested_roles.len()
+        || requested_roles.iter().any(|requested| {
+            role_kinds.get(requested.id.as_str()) != Some(&requested.kind)
+                || !plan.roles.iter().any(|role| {
+                    role.id == requested.id
+                        && role.declared_replica_count == requested.replica_count
+                })
+        })
+    {
         return Err(InferlabError::InvalidConfig {
             message: format!(
-                "integration {integration:?} introduced an unexpected non-router role"
+                "integration {integration:?} did not preserve the requested Engine role set"
             ),
         });
     }
+
     let role_replica_counts = plan
         .roles
         .iter()
@@ -2714,19 +3250,20 @@ fn validate_serve_graph(
         let Some(replica_count) = role_replica_counts.get(replica.role_id.as_str()) else {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
-                    "integration {integration:?} replica {:?} references unknown role {:?}",
+                    "integration {integration:?} replica {:?} references unknown Engine role {:?}",
                     replica.id, replica.role_id
                 ),
             });
         };
         if replica.id.is_empty()
             || replica.replica_index >= *replica_count
+            || replica.device_count == 0
             || !replica_ids.insert(replica.id.as_str())
             || !role_replicas.insert((replica.role_id.as_str(), replica.replica_index))
         {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
-                    "integration {integration:?} returned an invalid or duplicate replica binding"
+                    "integration {integration:?} returned an invalid or duplicate Engine replica"
                 ),
             });
         }
@@ -2736,94 +3273,131 @@ fn validate_serve_graph(
             if !role_replicas.contains(&(role.id.as_str(), index)) {
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "integration {integration:?} omitted replica {index} for role {:?}",
+                        "integration {integration:?} omitted replica {index} for Engine role {:?}",
                         role.id
                     ),
                 });
             }
-        }
-        match role.kind {
-            ServeRoleKind::Router
-                if role.effective_parallelism != Parallelism::default()
-                    || plan
-                        .replicas
-                        .iter()
-                        .any(|replica| replica.role_id == role.id && replica.device_count != 0) =>
-            {
-                return Err(InferlabError::InvalidConfig {
-                    message: format!(
-                        "integration {integration:?} router role {:?} must have empty parallelism and zero device count",
-                        role.id
-                    ),
-                });
-            }
-            ServeRoleKind::Serve | ServeRoleKind::Prefill | ServeRoleKind::Decode
-                if plan
-                    .replicas
-                    .iter()
-                    .any(|replica| replica.role_id == role.id && replica.device_count == 0) =>
-            {
-                return Err(InferlabError::InvalidConfig {
-                    message: format!(
-                        "integration {integration:?} model-serving role {:?} must require at least one device per replica",
-                        role.id
-                    ),
-                });
-            }
-            _ => {}
         }
     }
-    let mut graph_roles = role_kinds
+
+    let mut graph_nodes = role_kinds
         .keys()
         .map(|role| (*role).to_owned())
         .collect::<BTreeSet<_>>();
-    let routing_role = match &plan.routing {
-        RoutingResult::Direct { role, replica }
-        | RoutingResult::IntegrationNative { role, replica, .. } => {
-            let Some(replica_count) = role_replica_counts.get(role.as_str()) else {
+    let routing_source = match topology {
+        ServeTopology::Single => {
+            if plan.pd_router.is_some() || pd_router_backend.is_some() {
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "integration {integration:?} selected unknown public role {role:?}"
-                    ),
-                });
-            };
-            if replica >= replica_count {
-                return Err(InferlabError::InvalidConfig {
-                    message: format!(
-                        "integration {integration:?} selected unknown public replica {replica} for role {role:?}"
+                        "integration {integration:?} returned a P/D Router for single topology"
                     ),
                 });
             }
-            if topology == ServeTopology::PrefillDecode
-                && role_kinds.get(role.as_str()) != Some(&ServeRoleKind::Router)
-            {
-                return Err(InferlabError::InvalidConfig {
+            let serve = plan
+                .roles
+                .iter()
+                .find(|role| role.kind == ServeRoleKind::Serve)
+                .ok_or_else(|| InferlabError::InvalidConfig {
                     message: format!(
-                        "integration {integration:?} selected a non-router public process for a routed topology"
+                        "integration {integration:?} did not return the single Engine role"
                     ),
-                });
+                })?;
+            match (gateway_backend, plan.gateway.as_ref()) {
+                (None, None) => {
+                    if serve.public_endpoint.is_none()
+                        || plan
+                            .roles
+                            .iter()
+                            .filter(|role| role.public_endpoint.is_some())
+                            .count()
+                            != 1
+                    {
+                        return Err(InferlabError::InvalidConfig {
+                            message: format!(
+                                "integration {integration:?} direct single must expose exactly one Engine endpoint"
+                            ),
+                        });
+                    }
+                    serve.id.clone()
+                }
+                (Some(selected), Some(gateway)) if gateway.backend == selected => {
+                    if gateway.render_source != RenderSource::Integration
+                        || plan.roles.iter().any(|role| role.public_endpoint.is_some())
+                        || !matches!(
+                            gateway.targets.as_slice(),
+                            [GatewayTarget::Engine { role }] if role == &serve.id
+                        )
+                    {
+                        return Err(InferlabError::InvalidConfig {
+                            message: format!(
+                                "integration {integration:?} returned an incompatible routed-single Gateway"
+                            ),
+                        });
+                    }
+                    graph_nodes.insert("gateway".to_owned());
+                    "gateway".to_owned()
+                }
+                _ => {
+                    return Err(InferlabError::InvalidConfig {
+                        message: format!(
+                            "integration {integration:?} Gateway plan does not match selected gateway_backend {gateway_backend:?}"
+                        ),
+                    });
+                }
             }
-            role.clone()
         }
-        RoutingResult::InferlabBuiltin {
-            prefill_role,
-            decode_role,
-            ..
-        } => {
-            if topology != ServeTopology::PrefillDecode
-                || role_kinds.get(prefill_role.as_str()) != Some(&ServeRoleKind::Prefill)
-                || role_kinds.get(decode_role.as_str()) != Some(&ServeRoleKind::Decode)
+        ServeTopology::PrefillDecode => {
+            let gateway = plan
+                .gateway
+                .as_ref()
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} did not return a Gateway for prefill_decode"
+                    ),
+                })?;
+            let pd_router = plan.pd_router.as_ref().ok_or_else(|| {
+                InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} did not return a P/D Router for prefill_decode"
+                    ),
+                }
+            })?;
+            if Some(gateway.backend.as_str()) != gateway_backend
+                || Some(pd_router.backend.as_str()) != pd_router_backend
             {
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "integration {integration:?} built-in router does not reference the planned prefill and decode roles"
+                        "integration {integration:?} frontend backends do not match gateway_backend {gateway_backend:?} and pd_router_backend {pd_router_backend:?}"
                     ),
                 });
             }
-            graph_roles.insert("router".to_owned());
-            "router".to_owned()
+            if gateway.render_source != pd_router.render_source
+                || gateway.implementation != pd_router.implementation
+                || gateway.implementation_version != pd_router.implementation_version
+                || gateway.co_rendering.process_role != FrontendProcessRole::Gateway
+                || gateway.co_rendering != pd_router.co_rendering
+                || plan.roles.iter().any(|role| role.public_endpoint.is_some())
+                || !matches!(gateway.targets.as_slice(), [GatewayTarget::PdRouter])
+                || role_kinds.get(pd_router.prefill_role.as_str()) != Some(&ServeRoleKind::Prefill)
+                || role_kinds.get(pd_router.decode_role.as_str()) != Some(&ServeRoleKind::Decode)
+            {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} returned incompatible fused frontend component plans"
+                    ),
+                });
+            }
+            graph_nodes.insert("gateway".to_owned());
+            graph_nodes.insert("pd_router".to_owned());
+            "pd_router".to_owned()
         }
     };
+
+    validate_workload_endpoint(
+        integration,
+        public_endpoint_requirement(integration, topology, plan)?,
+    )?;
     if kv_transfer.is_some()
         && !plan.links.iter().any(|link| {
             matches!(
@@ -2841,17 +3415,17 @@ fn validate_serve_graph(
     for link in &plan.links {
         let valid = match link {
             ServeRoleLink::RequestRouting { source, targets } => {
-                graph_roles.contains(source)
+                graph_nodes.contains(source)
                     && !targets.is_empty()
-                    && targets.iter().all(|target| graph_roles.contains(target))
+                    && targets.iter().all(|target| graph_nodes.contains(target))
             }
             ServeRoleLink::KvTransfer {
                 source,
                 target,
                 mechanism,
             } => {
-                graph_roles.contains(source)
-                    && graph_roles.contains(target)
+                graph_nodes.contains(source)
+                    && graph_nodes.contains(target)
                     && Some(*mechanism) == kv_transfer
             }
             ServeRoleLink::Bootstrap {
@@ -2859,8 +3433,8 @@ fn validate_serve_graph(
                 target,
                 port,
             } => {
-                graph_roles.contains(source)
-                    && graph_roles.contains(target)
+                graph_nodes.contains(source)
+                    && graph_nodes.contains(target)
                     && role_all_have_port(&plan.replicas, target, port)
             }
             ServeRoleLink::SideChannel {
@@ -2868,8 +3442,8 @@ fn validate_serve_graph(
                 target,
                 port,
             } => {
-                graph_roles.contains(source)
-                    && graph_roles.contains(target)
+                graph_nodes.contains(source)
+                    && graph_nodes.contains(target)
                     && role_all_have_port(&plan.replicas, source, port)
                     && role_all_have_port(&plan.replicas, target, port)
             }
@@ -2877,125 +3451,134 @@ fn validate_serve_graph(
         if !valid {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
-                    "integration {integration:?} returned a role link with unknown endpoints"
+                    "integration {integration:?} returned a link with unknown component or Engine endpoints"
                 ),
             });
         }
     }
-    if topology == ServeTopology::PrefillDecode {
-        let prefill = role_kinds
-            .iter()
-            .find_map(|(id, kind)| (*kind == ServeRoleKind::Prefill).then_some(*id))
-            .ok_or_else(|| InferlabError::InvalidConfig {
-                message: format!("integration {integration:?} did not plan a prefill role"),
-            })?;
-        let decode = role_kinds
-            .iter()
-            .find_map(|(id, kind)| (*kind == ServeRoleKind::Decode).then_some(*id))
-            .ok_or_else(|| InferlabError::InvalidConfig {
-                message: format!("integration {integration:?} did not plan a decode role"),
-            })?;
-        let request_routing = plan.links.iter().any(|link| {
-            matches!(
-                link,
-                ServeRoleLink::RequestRouting { source, targets }
-                    if source == &routing_role
-                        && targets.iter().any(|target| target == prefill)
-                        && targets.iter().any(|target| target == decode)
-            )
-        });
-        let kv_link = plan.links.iter().any(|link| {
-            matches!(
-                link,
-                ServeRoleLink::KvTransfer { source, target, mechanism }
-                    if source == prefill && target == decode && Some(*mechanism) == kv_transfer
-            )
-        });
-        if !request_routing || !kv_link {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "integration {integration:?} did not declare the required request-routing and KV-transfer links"
-                ),
-            });
+
+    match topology {
+        ServeTopology::Single if plan.gateway.is_some() => {
+            let serve = plan
+                .roles
+                .iter()
+                .find(|role| role.kind == ServeRoleKind::Serve)
+                .map(|role| role.id.as_str())
+                .unwrap_or("serve");
+            if !plan.links.iter().any(|link| {
+                matches!(
+                    link,
+                    ServeRoleLink::RequestRouting { source, targets }
+                        if source == "gateway" && targets == &[serve.to_owned()]
+                )
+            }) {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} did not link Gateway to its single Engine"
+                    ),
+                });
+            }
         }
-        let transport_link = match (integration, kv_transfer) {
-            ("tensorrt-llm", Some(KvTransferMechanism::Nixl)) => {
-                if plan.links.iter().any(|link| {
+        ServeTopology::Single => {}
+        ServeTopology::PrefillDecode => {
+            let pd_router =
+                plan.pd_router
+                    .as_ref()
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: "validated prefill_decode plan lost its P/D Router".to_owned(),
+                    })?;
+            let gateway_handoff = plan.links.iter().any(|link| {
+                matches!(
+                    link,
+                    ServeRoleLink::RequestRouting { source, targets }
+                        if source == "gateway" && targets == &[String::from("pd_router")]
+                )
+            });
+            let request_routing = plan.links.iter().any(|link| {
+                matches!(
+                    link,
+                    ServeRoleLink::RequestRouting { source, targets }
+                        if source == &routing_source
+                            && targets.iter().any(|target| target == &pd_router.prefill_role)
+                            && targets.iter().any(|target| target == &pd_router.decode_role)
+                )
+            });
+            let kv_link = plan.links.iter().any(|link| {
+                matches!(
+                    link,
+                    ServeRoleLink::KvTransfer { source, target, mechanism }
+                        if source == &pd_router.prefill_role
+                            && target == &pd_router.decode_role
+                            && Some(*mechanism) == kv_transfer
+                )
+            });
+            if !gateway_handoff || !request_routing || !kv_link {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} did not declare the required Gateway, P/D routing, and KV links"
+                    ),
+                });
+            }
+            let transport_link = match (integration, kv_transfer) {
+                ("tensorrt-llm", Some(KvTransferMechanism::Nixl)) => {
+                    if plan.links.iter().any(|link| {
+                        matches!(
+                            link,
+                            ServeRoleLink::Bootstrap { .. } | ServeRoleLink::SideChannel { .. }
+                        )
+                    }) {
+                        return Err(InferlabError::InvalidConfig {
+                            message: format!(
+                                "integration {integration:?} declared a bootstrap or side-channel link for in-band NIXL transfer"
+                            ),
+                        });
+                    }
+                    true
+                }
+                ("sglang", Some(KvTransferMechanism::Mooncake | KvTransferMechanism::Nixl))
+                | (_, Some(KvTransferMechanism::Mooncake)) => plan.links.iter().any(|link| {
                     matches!(
                         link,
-                        ServeRoleLink::Bootstrap { .. } | ServeRoleLink::SideChannel { .. }
+                        ServeRoleLink::Bootstrap { source, target, port }
+                            if source == &routing_source
+                                && target == &pd_router.prefill_role
+                                && role_all_have_port(
+                                    &plan.replicas,
+                                    &pd_router.prefill_role,
+                                    port
+                                )
                     )
-                }) {
-                    return Err(InferlabError::InvalidConfig {
-                        message: format!(
-                            "integration {integration:?} declared a bootstrap or side-channel link for in-band NIXL transfer"
-                        ),
-                    });
-                }
-                true
+                }),
+                (_, Some(KvTransferMechanism::Nixl)) => plan.links.iter().any(|link| {
+                    matches!(
+                        link,
+                        ServeRoleLink::SideChannel { source, target, port }
+                            if source == &pd_router.prefill_role
+                                && target == &pd_router.decode_role
+                                && role_all_have_port(
+                                    &plan.replicas,
+                                    &pd_router.prefill_role,
+                                    port
+                                )
+                                && role_all_have_port(
+                                    &plan.replicas,
+                                    &pd_router.decode_role,
+                                    port
+                                )
+                    )
+                }),
+                (_, None) => false,
+            };
+            if !transport_link {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} did not declare the required KV transport link and process ports"
+                    ),
+                });
             }
-            ("sglang", Some(KvTransferMechanism::Mooncake | KvTransferMechanism::Nixl))
-            | (_, Some(KvTransferMechanism::Mooncake)) => plan.links.iter().any(|link| {
-                matches!(
-                    link,
-                    ServeRoleLink::Bootstrap { source, target, port }
-                        if source == &routing_role
-                            && target == prefill
-                            && role_all_have_port(&plan.replicas, prefill, port)
-                )
-            }),
-            (_, Some(KvTransferMechanism::Nixl)) => plan.links.iter().any(|link| {
-                matches!(
-                    link,
-                    ServeRoleLink::SideChannel { source, target, port }
-                        if source == prefill
-                            && target == decode
-                            && role_all_have_port(&plan.replicas, prefill, port)
-                            && role_all_have_port(&plan.replicas, decode, port)
-                )
-            }),
-            (_, None) => false,
-        };
-        if !transport_link {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "integration {integration:?} did not declare the required KV transport link and process ports"
-                ),
-            });
         }
     }
     Ok(())
-}
-
-fn resolve_routing_backend(
-    topology: ServeTopology,
-    selected: Option<String>,
-    routing: &RoutingResult,
-) -> Result<Option<String>, InferlabError> {
-    let compatible = match (topology, selected.as_deref(), routing) {
-        (ServeTopology::Single, None, RoutingResult::Direct { .. })
-        | (
-            ServeTopology::PrefillDecode,
-            None | Some("builtin"),
-            RoutingResult::InferlabBuiltin { .. },
-        ) => true,
-        (ServeTopology::PrefillDecode, Some(backend), RoutingResult::IntegrationNative { .. }) => {
-            backend != "builtin"
-        }
-        _ => false,
-    };
-    if !compatible {
-        return Err(InferlabError::InvalidConfig {
-            message: format!(
-                "integration routing ownership does not match topology {topology:?} and selected backend {selected:?}"
-            ),
-        });
-    }
-    if topology == ServeTopology::PrefillDecode && selected.is_none() {
-        Ok(Some("builtin".to_owned()))
-    } else {
-        Ok(selected)
-    }
 }
 
 fn role_all_have_port(replicas: &[ServeReplicaRequirement], role: &str, port: &str) -> bool {
@@ -3046,6 +3629,7 @@ fn validate_integration_identity(expected: &str, actual: &str) -> Result<(), Inf
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn allocate_processes(
     workspace: &LoadedWorkspace,
     placement_id: &str,
@@ -3069,9 +3653,10 @@ fn allocate_processes(
                 ),
             });
         }
-        if requirement.role_id.is_empty() {
+        let placement_role = requirement.placement_role();
+        if placement_role.is_empty() {
             return Err(InferlabError::InvalidConfig {
-                message: format!("process {:?} has an empty role id", requirement.id),
+                message: format!("process {:?} has an empty placement role", requirement.id),
             });
         }
         let mut port_names = BTreeSet::new();
@@ -3092,7 +3677,7 @@ fn allocate_processes(
             vec![fixed.machine.clone()]
         } else if let Some(role_machines) = placement
             .roles
-            .get(&requirement.role_id)
+            .get(placement_role)
             .and_then(|role| role.machines())
             .filter(|machines| !machines.is_empty())
         {
@@ -3113,7 +3698,7 @@ fn allocate_processes(
             if candidates.is_empty() {
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "placement {placement_id:?} has no local machine for built-in proxy process {:?}",
+                        "placement {placement_id:?} has no local machine for control-plane-rendered frontend {:?}",
                         requirement.id
                     ),
                 });
@@ -3125,10 +3710,9 @@ fn allocate_processes(
                 let Some(machine) = workspace.local.machines.get(*machine_id) else {
                     return false;
                 };
-                let used = usage.get(*machine_id);
                 machine_capacity(
                     machine,
-                    used,
+                    usage.get(*machine_id),
                     requirement.device_count as usize,
                     requirement.ports.len() + 1,
                 )
@@ -3161,11 +3745,10 @@ fn allocate_processes(
             None => {
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "placement {placement_id:?} has no machine with {} free devices and {} free ports for process {:?} in role {:?}",
+                        "placement {placement_id:?} has no machine with {} free devices and {} free ports for process {:?} in role {placement_role:?}",
                         requirement.device_count,
                         requirement.ports.len() + 1,
-                        requirement.id,
-                        requirement.role_id
+                        requirement.id
                     ),
                 });
             }
@@ -3258,7 +3841,11 @@ fn allocate_processes(
                     },
                 )
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        let endpoint = EndpointAssignment {
+            host: machine.host.clone(),
+            port: endpoint_port,
+        };
         let runtime_cache = runtime_cache_plan(
             workspace,
             machine,
@@ -3267,7 +3854,7 @@ fn allocate_processes(
             pixi_environment,
             image_identity,
         );
-        let runtime_cache_root = runtime_cache
+        let cache = runtime_cache
             .path
             .to_str()
             .ok_or_else(|| InferlabError::InvalidConfig {
@@ -3277,53 +3864,115 @@ fn allocate_processes(
                 ),
             })?
             .to_owned();
-        let (model_locator, model_locator_source) = if requirement.device_count == 0 {
-            (None, None)
-        } else if let Some(locator) = weight.machine_locators.get(&machine_id) {
-            (Some(locator.clone()), Some(ModelLocatorSource::Machine))
-        } else if let Some(locator) = &weight.locator {
-            (Some(locator.clone()), Some(ModelLocatorSource::Fallback))
-        } else {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "model weights have no locator for model-serving process {:?} on machine {machine_id:?}",
-                    requirement.id
-                ),
-            });
-        };
-        let rank_count = u32::try_from(
-            requirements
-                .iter()
-                .filter(|candidate| candidate.replica_id == requirement.replica_id)
-                .count(),
-        )
-        .map_err(|_| InferlabError::InvalidConfig {
-            message: format!("replica {:?} has too many ranks", requirement.replica_id),
-        })?;
-        allocations.push(ResolvedProcessAllocation {
-            wire: ServeProcessAllocation {
-                process: requirement.id.clone(),
-                role: requirement.role_id.clone(),
-                replica: requirement.replica_index,
-                rank: requirement.rank,
-                rank_count,
-                machine: machine_id.clone(),
-                devices,
-                model_locator,
-                endpoint: Some(EndpointAssignment {
-                    host: machine.host.clone(),
-                    port: endpoint_port,
-                }),
-                ports: named_ports,
-                cache: runtime_cache_root,
-                launch: match &machine.launch {
-                    LaunchBinding::Local => AllocationLaunch::Local,
-                    LaunchBinding::Ssh { target } => AllocationLaunch::Ssh {
-                        target: target.clone(),
-                    },
-                },
-                dependencies: requirement.launch_dependencies.clone(),
+        let launch = match &machine.launch {
+            LaunchBinding::Local => AllocationLaunch::Local,
+            LaunchBinding::Ssh { target } => AllocationLaunch::Ssh {
+                target: target.clone(),
             },
+        };
+        let (wire, model_locator_source) = match &requirement.identity {
+            ProcessRequirementIdentity::ModelRank {
+                role_id,
+                role_kind,
+                replica_id,
+                replica_index,
+                rank,
+                effective_settings,
+                effective_parallelism,
+                links,
+                render_inputs,
+            } => {
+                let (model_locator, source) = if let Some(locator) =
+                    weight.machine_locators.get(&machine_id)
+                {
+                    (locator.clone(), ModelLocatorSource::Machine)
+                } else if let Some(locator) = &weight.locator {
+                    (locator.clone(), ModelLocatorSource::Fallback)
+                } else {
+                    return Err(InferlabError::InvalidConfig {
+                        message: format!(
+                            "model weights have no locator for Engine process {:?} on machine {machine_id:?}",
+                            requirement.id
+                        ),
+                    });
+                };
+                let rank_count = u32::try_from(
+                    requirements
+                        .iter()
+                        .filter(|candidate| {
+                            matches!(
+                                &candidate.identity,
+                                ProcessRequirementIdentity::ModelRank {
+                                    replica_id: candidate_replica,
+                                    ..
+                                } if candidate_replica == replica_id
+                            )
+                        })
+                        .count(),
+                )
+                .map_err(|_| InferlabError::InvalidConfig {
+                    message: format!("replica {replica_id:?} has too many ranks"),
+                })?;
+                (
+                    ServeProcessAllocation::ModelRank {
+                        process: requirement.id.clone(),
+                        role: role_id.clone(),
+                        role_kind: *role_kind,
+                        replica: *replica_index,
+                        rank: *rank,
+                        rank_count,
+                        machine: machine_id.clone(),
+                        devices,
+                        model_locator,
+                        endpoint: Some(endpoint),
+                        ports: named_ports,
+                        cache,
+                        launch,
+                        effective_settings: effective_settings.clone(),
+                        effective_parallelism: effective_parallelism.clone(),
+                        links: links.clone(),
+                        dependencies: requirement.launch_dependencies.clone(),
+                        render_inputs: render_inputs.clone(),
+                    },
+                    Some(source),
+                )
+            }
+            ProcessRequirementIdentity::Frontend {
+                process_role,
+                components,
+                gateway,
+                pd_router,
+                links,
+                render_inputs,
+            } => {
+                if requirement.device_count != 0 || !devices.is_empty() {
+                    return Err(InferlabError::InvalidConfig {
+                        message: "frontend process must not allocate model devices".to_owned(),
+                    });
+                }
+                (
+                    ServeProcessAllocation::Frontend {
+                        process: requirement.id.clone(),
+                        process_role: *process_role,
+                        components: components.clone(),
+                        machine: machine_id.clone(),
+                        devices,
+                        endpoint,
+                        ports: named_ports,
+                        cache,
+                        launch,
+                        gateway: gateway.clone(),
+                        pd_router: pd_router.clone(),
+                        links: links.clone(),
+                        dependencies: requirement.launch_dependencies.clone(),
+                        render_inputs: render_inputs.clone(),
+                    },
+                    None,
+                )
+            }
+        };
+        allocations.push(ResolvedProcessAllocation {
+            wire,
             runtime_cache,
             model_locator_source,
         });
@@ -3457,7 +4106,6 @@ fn readiness_plan(
     probe: &ReadinessProbe,
     timeout: u64,
     capture_armed: bool,
-    roles: &[ServeRoleResult],
     allocations: &[ResolvedProcessAllocation],
 ) -> Result<ReadinessPlan, InferlabError> {
     match probe {
@@ -3472,12 +4120,16 @@ fn readiness_plan(
         ReadinessProbe::HttpTargetRegistry(registry) => {
             let expected_targets = allocations
                 .iter()
-                .filter(|allocation| allocation.wire.rank == 0)
                 .filter_map(|allocation| {
-                    roles
-                        .iter()
-                        .find(|role| role.id == allocation.wire.role)
-                        .map(|role| (allocation, role.kind))
+                    let ServeProcessAllocation::ModelRank {
+                        role_kind,
+                        rank: 0,
+                        ..
+                    } = &allocation.wire
+                    else {
+                        return None;
+                    };
+                    Some((allocation, *role_kind))
                 })
                 .filter_map(|(allocation, kind)| match kind {
                     ServeRoleKind::Prefill => Some((
@@ -3488,29 +4140,28 @@ fn readiness_plan(
                     ServeRoleKind::Decode => {
                         Some((allocation, registry.decode_role_value.as_str(), None))
                     }
-                    ServeRoleKind::Serve | ServeRoleKind::Router => None,
+                    ServeRoleKind::Serve => None,
                 })
                 .map(|(allocation, role, bootstrap_port)| {
                     let bootstrap_port = bootstrap_port
                         .map(|port| {
                             allocation
-                                .wire
-                                .ports
+                                .ports()
                                 .get(port)
                                 .map(|endpoint| endpoint.port)
                                 .ok_or_else(|| InferlabError::InvalidConfig {
                                     message: format!(
                                         "prefill process {:?} has no registry bootstrap port {port:?}",
-                                        allocation.wire.process
+                                        allocation.process()
                                     ),
                                 })
                         })
                         .transpose()?;
-                    let endpoint = allocation.wire.endpoint.as_ref().ok_or_else(|| {
+                    let endpoint = allocation.endpoint().ok_or_else(|| {
                         InferlabError::InvalidConfig {
                             message: format!(
                                 "process {:?} has no endpoint for target-aware readiness",
-                                allocation.wire.process
+                                allocation.process()
                             ),
                         }
                     })?;
@@ -3839,9 +4490,10 @@ fn lookup<'a, T>(
 mod tests {
     use super::*;
     use inferlab_protocol::{
-        EndpointRequirement, HttpTargetRegistryReadiness, IntegrationIdentity,
-        LaunchFileDeclaration, ParallelismAttention, ParallelismExperts, ParallelismOuter,
-        RenderInputDeclaration,
+        EndpointRequirement, FrontendCoRendering, FrontendHandoff, GatewayTarget,
+        HttpTargetRegistryReadiness, IntegrationIdentity, LaunchFileDeclaration,
+        ParallelismAttention, ParallelismExperts, ParallelismOuter, PdRoutingPolicies,
+        RenderInputDeclaration, ServeRoleResult,
     };
     use std::error::Error;
 
@@ -3897,6 +4549,8 @@ mod tests {
                 effective_replica_count: role.replica_count,
                 effective_settings: BTreeMap::new(),
                 effective_parallelism: Parallelism::default(),
+                public_endpoint: None,
+                render_inputs: Vec::new(),
             })
             .collect();
         let replicas = requested_roles
@@ -3919,6 +4573,17 @@ mod tests {
                 capture_target: None,
             })
             .collect();
+        let implementation = match framework {
+            "sglang" => "sglang",
+            "tensorrt-llm" => "trtllm",
+            _ => "vllm_nixl",
+        };
+        let co_rendering = FrontendCoRendering {
+            process_role: FrontendProcessRole::Gateway,
+        };
+        let readiness = ReadinessProbe::Http {
+            path: "/healthcheck".to_owned(),
+        };
         let plan = PlanServeResult {
             integration: IntegrationIdentity {
                 adapter_id: format!("inferlab-{framework}"),
@@ -3930,7 +4595,11 @@ mod tests {
             replicas,
             links: vec![
                 ServeRoleLink::RequestRouting {
-                    source: "router".to_owned(),
+                    source: "gateway".to_owned(),
+                    targets: vec!["pd_router".to_owned()],
+                },
+                ServeRoleLink::RequestRouting {
+                    source: "pd_router".to_owned(),
                     targets: vec!["prefill".to_owned(), "decode".to_owned()],
                 },
                 ServeRoleLink::KvTransfer {
@@ -3939,32 +4608,48 @@ mod tests {
                     mechanism: KvTransferMechanism::Nixl,
                 },
                 ServeRoleLink::Bootstrap {
-                    source: "router".to_owned(),
+                    source: "pd_router".to_owned(),
                     target: "prefill".to_owned(),
                     port: "bootstrap".to_owned(),
                 },
             ],
-            routing: RoutingResult::InferlabBuiltin {
-                implementation: match framework {
-                    "sglang" => BuiltinRouterKind::Sglang,
-                    "tensorrt-llm" => BuiltinRouterKind::Trtllm,
-                    _ => BuiltinRouterKind::VllmNixl,
+            gateway: Some(GatewayPlan {
+                backend: "builtin".to_owned(),
+                implementation: implementation.to_owned(),
+                implementation_version: "1".to_owned(),
+                effective_settings: BTreeMap::new(),
+                endpoint: EndpointRequirement {
+                    protocol: EndpointProtocol::Http,
+                    completions_path: "/v1/completions".to_owned(),
+                    chat_completions_path: "/v1/chat/completions".to_owned(),
+                    prefix_cache_reset: None,
                 },
-                policy: "round_robin".to_owned(),
+                readiness: readiness.clone(),
+                ports: Vec::new(),
+                targets: vec![GatewayTarget::PdRouter],
+                render_inputs: Vec::new(),
+                render_source: RenderSource::ControlPlane,
+                co_rendering: co_rendering.clone(),
+            }),
+            pd_router: Some(PdRouterPlan {
+                backend: "builtin".to_owned(),
+                implementation: implementation.to_owned(),
+                implementation_version: "1".to_owned(),
+                effective_settings: BTreeMap::new(),
+                policies: PdRoutingPolicies {
+                    prefill: "round_robin".to_owned(),
+                    decode: "round_robin".to_owned(),
+                },
                 prefill_role: "prefill".to_owned(),
                 decode_role: "decode".to_owned(),
+                target_scheme: TargetEndpointScheme::Http,
                 ports: Vec::new(),
-                readiness: ReadinessProbe::Http {
-                    path: "/healthcheck".to_owned(),
-                },
-            },
-            endpoint: EndpointRequirement {
-                protocol: EndpointProtocol::Http,
-                completions_path: "/v1/completions".to_owned(),
-                chat_completions_path: "/v1/chat/completions".to_owned(),
-                prefix_cache_reset: None,
-            },
-            render_inputs: Vec::new(),
+                readiness,
+                handoff: FrontendHandoff::InProcess,
+                render_inputs: Vec::new(),
+                render_source: RenderSource::ControlPlane,
+                co_rendering,
+            }),
         };
         (requested_roles, plan)
     }
@@ -3976,50 +4661,52 @@ mod tests {
         for replica in &mut plan.replicas {
             replica.ports.clear();
         }
-        plan.roles.push(ServeRoleResult {
-            id: "router".to_owned(),
-            kind: ServeRoleKind::Router,
-            declared_replica_count: 1,
-            effective_replica_count: 1,
-            effective_settings: BTreeMap::new(),
-            effective_parallelism: Parallelism::default(),
-        });
-        plan.replicas.push(ServeReplicaRequirement {
-            id: "router".to_owned(),
-            role_id: "router".to_owned(),
-            replica_index: 0,
-            device_count: 0,
-            ports: Vec::new(),
-            primary_ports: Vec::new(),
-            primary_readiness: ReadinessProbe::Http {
-                path: "/health".to_owned(),
-            },
-            worker_readiness: ReadinessProbe::ProcessAlive,
-            capture_target: None,
-        });
-        plan.routing = RoutingResult::IntegrationNative {
-            role: "router".to_owned(),
-            replica: 0,
-            policy: "round_robin".to_owned(),
-        };
+        if let Some(gateway) = &mut plan.gateway {
+            gateway.backend = "trtllm-disaggregated".to_owned();
+            gateway.implementation = "trtllm-disaggregated".to_owned();
+            gateway.render_source = RenderSource::Integration;
+        }
+        if let Some(pd_router) = &mut plan.pd_router {
+            pd_router.backend = "trtllm-disaggregated".to_owned();
+            pd_router.implementation = "trtllm-disaggregated".to_owned();
+            pd_router.render_source = RenderSource::Integration;
+        }
         (requested_roles, plan)
     }
 
     #[test]
-    fn omitted_prefill_decode_backend_freezes_only_builtin_ownership() {
-        let (_, builtin) = bootstrap_prefill_decode_plan("vllm");
-        assert!(matches!(
-            resolve_routing_backend(
-                ServeTopology::PrefillDecode,
-                None,
-                &builtin.routing,
-            ),
-            Ok(Some(backend)) if backend == "builtin"
-        ));
+    fn gateway_and_pd_router_backend_facts_are_validated_independently() {
+        let (roles, mut plan) = bootstrap_prefill_decode_plan("sglang");
+        if let Some(gateway) = &mut plan.gateway {
+            gateway.backend = "gateway-provider".to_owned();
+        }
+        if let Some(pd_router) = &mut plan.pd_router {
+            pd_router.backend = "pd-provider".to_owned();
+        }
 
-        let (_, native) = native_trtllm_prefill_decode_plan();
         assert!(
-            resolve_routing_backend(ServeTopology::PrefillDecode, None, &native.routing,).is_err()
+            validate_serve_graph(
+                "sglang",
+                ServeTopology::PrefillDecode,
+                &roles,
+                Some("gateway-provider"),
+                Some("pd-provider"),
+                Some(KvTransferMechanism::Nixl),
+                &plan,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_serve_graph(
+                "sglang",
+                ServeTopology::PrefillDecode,
+                &roles,
+                Some("pd-provider"),
+                Some("gateway-provider"),
+                Some(KvTransferMechanism::Nixl),
+                &plan,
+            )
+            .is_err()
         );
     }
 
@@ -4117,6 +4804,8 @@ mod tests {
                 "sglang",
                 ServeTopology::PrefillDecode,
                 &sglang_roles,
+                Some("builtin"),
+                Some("builtin"),
                 Some(KvTransferMechanism::Nixl),
                 &sglang_plan,
             )
@@ -4128,6 +4817,8 @@ mod tests {
             "vllm",
             ServeTopology::PrefillDecode,
             &vllm_roles,
+            Some("builtin"),
+            Some("builtin"),
             Some(KvTransferMechanism::Nixl),
             &vllm_plan,
         );
@@ -4144,6 +4835,8 @@ mod tests {
                 "tensorrt-llm",
                 ServeTopology::PrefillDecode,
                 &trtllm_roles,
+                Some("trtllm-disaggregated"),
+                Some("trtllm-disaggregated"),
                 Some(KvTransferMechanism::Nixl),
                 &trtllm_plan,
             )
@@ -4153,7 +4846,7 @@ mod tests {
         let mut endpoint_link_plan = trtllm_plan.clone();
         add_first_replica_port(&mut endpoint_link_plan, "prefill", "bootstrap")?;
         endpoint_link_plan.links.push(ServeRoleLink::Bootstrap {
-            source: "router".to_owned(),
+            source: "pd_router".to_owned(),
             target: "prefill".to_owned(),
             port: "bootstrap".to_owned(),
         });
@@ -4161,6 +4854,8 @@ mod tests {
             "tensorrt-llm",
             ServeTopology::PrefillDecode,
             &trtllm_roles,
+            Some("trtllm-disaggregated"),
+            Some("trtllm-disaggregated"),
             Some(KvTransferMechanism::Nixl),
             &endpoint_link_plan,
         );
@@ -4174,7 +4869,7 @@ mod tests {
         add_first_replica_port(&mut plan, "decode", "diagnostic")?;
         add_second_replica(&mut roles, &mut plan, "decode", Vec::new())?;
         plan.links.push(ServeRoleLink::Bootstrap {
-            source: "router".to_owned(),
+            source: "pd_router".to_owned(),
             target: "decode".to_owned(),
             port: "diagnostic".to_owned(),
         });
@@ -4183,11 +4878,13 @@ mod tests {
             "sglang",
             ServeTopology::PrefillDecode,
             &roles,
+            Some("builtin"),
+            Some("builtin"),
             Some(KvTransferMechanism::Nixl),
             &plan,
         );
 
-        assert!(result.is_err_and(|error| error.to_string().contains("unknown endpoints")));
+        assert!(result.is_err_and(|error| error.to_string().contains("unknown component")));
         Ok(())
     }
 
@@ -4213,12 +4910,14 @@ mod tests {
                 "sglang",
                 ServeTopology::PrefillDecode,
                 &roles,
+                Some("builtin"),
+                Some("builtin"),
                 Some(KvTransferMechanism::Nixl),
                 &plan,
             );
 
             assert!(
-                result.is_err_and(|error| error.to_string().contains("unknown endpoints")),
+                result.is_err_and(|error| error.to_string().contains("unknown component")),
                 "side channel accepted a missing {missing_role} replica endpoint"
             );
         }
@@ -4227,19 +4926,6 @@ mod tests {
 
     #[test]
     fn target_registry_readiness_derives_rank_zero_serving_targets() -> Result<(), InferlabError> {
-        let role = |id: &str, kind| ServeRoleResult {
-            id: id.to_owned(),
-            kind,
-            declared_replica_count: 1,
-            effective_replica_count: 1,
-            effective_settings: BTreeMap::new(),
-            effective_parallelism: Parallelism::default(),
-        };
-        let roles = vec![
-            role("prefill", ServeRoleKind::Prefill),
-            role("decode", ServeRoleKind::Decode),
-            role("router", ServeRoleKind::Router),
-        ];
         let allocation =
             |process_id: &str, role_id: &str, rank: u32, port: u16, bootstrap_port: Option<u16>| {
                 let mut ports = BTreeMap::new();
@@ -4253,15 +4939,20 @@ mod tests {
                     );
                 }
                 ResolvedProcessAllocation {
-                    wire: ServeProcessAllocation {
+                    wire: ServeProcessAllocation::ModelRank {
                         process: process_id.to_owned(),
                         role: role_id.to_owned(),
+                        role_kind: if role_id == "prefill" {
+                            ServeRoleKind::Prefill
+                        } else {
+                            ServeRoleKind::Decode
+                        },
                         replica: 0,
                         rank,
                         rank_count: if role_id == "prefill" { 2 } else { 1 },
                         machine: "node".to_owned(),
-                        model_locator: Some("/models/example".to_owned()),
-                        devices: Vec::new(),
+                        model_locator: "/models/example".to_owned(),
+                        devices: vec![0],
                         endpoint: Some(EndpointAssignment {
                             host: "node.example".to_owned(),
                             port,
@@ -4269,7 +4960,11 @@ mod tests {
                         ports,
                         cache: format!("/cache/{process_id}"),
                         launch: AllocationLaunch::Local,
+                        effective_settings: BTreeMap::new(),
+                        effective_parallelism: Parallelism::default(),
+                        links: Vec::new(),
                         dependencies: Vec::new(),
+                        render_inputs: Vec::new(),
                     },
                     runtime_cache: RuntimeCachePlan {
                         storage_root: PathBuf::from("/cache"),
@@ -4290,7 +4985,6 @@ mod tests {
             allocation("prefill", "prefill", 0, 8000, Some(9000)),
             allocation("prefill-rank-001", "prefill", 1, 8001, Some(9001)),
             allocation("decode", "decode", 0, 8100, None),
-            allocation("router", "router", 0, 30000, None),
         ];
         let probe = ReadinessProbe::HttpTargetRegistry(Box::new(HttpTargetRegistryReadiness {
             target_scheme: inferlab_protocol::TargetEndpointScheme::Grpc,
@@ -4306,7 +5000,7 @@ mod tests {
             prefill_bootstrap_port: "bootstrap".to_owned(),
         }));
 
-        let readiness = readiness_plan(&probe, 900, false, &roles, &allocations)?;
+        let readiness = readiness_plan(&probe, 900, false, &allocations)?;
         assert!(matches!(
             &readiness,
             ReadinessPlan::HttpTargetRegistry { .. }

@@ -18,13 +18,16 @@ from inferlab_adapter_sdk import (
     LaunchFileDeclaration,
     PlanServeInput,
     PlanServeResult,
+    ProcessSpec,
     ReadinessProbe,
     ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
     ReadinessProbeProcessAlive,
+    RenderedServeProcessFrontend,
+    RenderedServeProcessModelRank,
     RenderInputDeclaration,
-    RoutingResult,
-    RoutingResultDirect,
+    RenderSource,
+    ServeProcessAllocationFrontend,
     ServeReplicaRequirement,
     ServeRoleKind,
     ServeRoleResult,
@@ -32,11 +35,16 @@ from inferlab_adapter_sdk import (
     SuppliedRenderInput,
     TargetEndpointScheme,
     effective_settings,
+    fused_pd_frontend_plans,
     handle_request,
     integration_identity,
+    rendered_frontend,
+    rendered_model_rank,
     replica_id,
+    require_integration_fused_frontend,
     require_role,
     run_adapter,
+    split_serve_allocations,
     validate_settings,
 )
 from inferlab_adapter_sdk._generated import (
@@ -61,7 +69,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v6.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v7.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -149,6 +157,11 @@ def fixture_plan_serve(input: PlanServeInput) -> PlanServeResult:
                 effective_replica_count=1,
                 effective_settings=input.roles[0].settings,
                 effective_parallelism=input.roles[0].parallelism,
+                public_endpoint=EndpointRequirement(
+                    protocol=EndpointProtocol(),
+                    completions_path="/v1/completions",
+                    chat_completions_path="/v1/chat/completions",
+                ),
             )
         ],
         replicas=[
@@ -164,12 +177,6 @@ def fixture_plan_serve(input: PlanServeInput) -> PlanServeResult:
             )
         ],
         links=[],
-        routing=RoutingResult(root=RoutingResultDirect(role="serve", replica=0)),
-        endpoint=EndpointRequirement(
-            protocol=EndpointProtocol(),
-            completions_path="/v1/completions",
-            chat_completions_path="/v1/chat/completions",
-        ),
     )
 
 
@@ -187,9 +194,71 @@ def test_generated_models_accept_shared_valid_fixtures() -> None:
     assert isinstance(plan_response.root, AdapterResponseOk)
     plan_result = plan_response.root.result.root
     assert isinstance(plan_result, AdapterResultPlanServe)
-    assert plan_result.output.render_inputs == []
+    assert plan_result.output.gateway is not None
+    assert plan_result.output.gateway.backend == "vllm-router"
+    assert plan_result.output.pd_router is not None
+    assert plan_result.output.pd_router.backend == "vllm-router"
     assert isinstance(render_request.root, AdapterRequestRenderServe)
-    assert render_request.root.input.render_inputs == []
+    frontend = render_request.root.input.allocations[2].root
+    assert isinstance(frontend, ServeProcessAllocationFrontend)
+    assert frontend.components.model_dump() == ("gateway", "pd_router")
+    assert not hasattr(frontend, "model_locator")
+
+
+def test_sdk_owns_fused_frontend_and_allocation_identity_invariants() -> None:
+    request = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "render-serve-request.json")
+    )
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    allocations, model_allocations = split_serve_allocations(request.root.input.allocations)
+    assert len(model_allocations) == 2
+    frontend = allocations[-1]
+    pd_router = require_integration_fused_frontend(
+        frontend,
+        gateway_backend="vllm-router",
+        pd_router_backend="vllm-router",
+    )
+    assert pd_router.policies.prefill == "round_robin"
+
+    model_process = rendered_model_rank(model_allocations[0], ProcessSpec(argv=["engine"], env={}))
+    frontend_process = rendered_frontend(frontend, ProcessSpec(argv=["gateway"], env={}))
+    assert isinstance(model_process.root, RenderedServeProcessModelRank)
+    assert isinstance(frontend_process.root, RenderedServeProcessFrontend)
+    assert frontend_process.root.components.model_dump() == (
+        "gateway",
+        "pd_router",
+    )
+
+
+def test_sdk_constructs_both_fused_component_plans_from_one_binding() -> None:
+    response = AdapterResponse.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-response.json")
+    )
+    assert isinstance(response.root, AdapterResponseOk)
+    result = response.root.result.root
+    assert isinstance(result, AdapterResultPlanServe)
+    expected_gateway = result.output.gateway
+    expected_pd_router = result.output.pd_router
+    assert expected_gateway is not None
+    assert expected_pd_router is not None
+
+    gateway, pd_router = fused_pd_frontend_plans(
+        gateway_backend="vllm-router",
+        pd_router_backend="vllm-router",
+        implementation="vllm-router",
+        implementation_version="0.5.0",
+        render_source=RenderSource.integration,
+        endpoint=expected_gateway.endpoint,
+        gateway_readiness=expected_gateway.readiness,
+        pd_router_readiness=expected_pd_router.readiness,
+        policies=expected_pd_router.policies,
+        prefill_role="prefill",
+        decode_role="decode",
+        target_scheme=TargetEndpointScheme.http,
+    )
+
+    assert gateway == expected_gateway
+    assert pd_router == expected_pd_router
 
 
 def test_generated_models_preserve_rendered_launch_files() -> None:
@@ -199,7 +268,9 @@ def test_generated_models_preserve_rendered_launch_files() -> None:
     assert isinstance(response.root, AdapterResponseOk)
     result = response.root.result.root
     assert isinstance(result, AdapterResultRenderServe)
-    launch_file = result.output.processes[0].launch_files[0]
+    process = result.output.processes[0].root
+    assert isinstance(process, RenderedServeProcessModelRank)
+    launch_file = process.launch_files[0]
 
     assert isinstance(launch_file, LaunchFileDeclaration)
     assert launch_file.relative_path.endswith("/generation.yaml")

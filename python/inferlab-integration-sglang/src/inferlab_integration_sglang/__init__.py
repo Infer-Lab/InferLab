@@ -3,7 +3,6 @@ from pathlib import Path
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
-    BuiltinRouterKind,
     EndpointProtocol,
     EndpointRequirement,
     HttpActionSpec,
@@ -13,6 +12,7 @@ from inferlab_adapter_sdk import (
     ParallelismAttention,
     ParallelismExperts,
     ParallelismOuter,
+    PdRoutingPolicies,
     PlanServeInput,
     PlanServeResult,
     ProcessSpec,
@@ -23,11 +23,9 @@ from inferlab_adapter_sdk import (
     RenderedServeProcess,
     RenderServeInput,
     RenderServeResult,
-    RoutingResult,
-    RoutingResultDirect,
-    RoutingResultInferlabBuiltin,
-    RoutingResultIntegrationNative,
-    ServeProcessAllocation,
+    RenderSource,
+    ServeProcessAllocationFrontend,
+    ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
     ServeRoleInput,
     ServeRoleKind,
@@ -41,10 +39,15 @@ from inferlab_adapter_sdk import (
     TargetEndpointScheme,
     append_option,
     effective_settings,
+    fused_pd_frontend_plans,
     integration_identity,
     merge_serve_args,
+    rendered_frontend,
+    rendered_model_rank,
     replica_id,
+    require_integration_fused_frontend,
     require_role,
+    split_serve_allocations,
     validate_settings,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -280,20 +283,19 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "single topology does not use a KV-transfer mechanism",
         )
-    if input.routing_backend is not None:
+    if input.gateway_backend is not None or input.pd_router_backend is not None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            f"SGLang single topology does not support routing backend {input.routing_backend!r}",
+            "SGLang single topology does not have a qualified Gateway backend",
         )
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas = _plan_role(input, role, [])
+    role_result.public_endpoint = _endpoint_requirement()
     return PlanServeResult(
         integration=_identity(),
         roles=[role_result],
         replicas=replicas,
         links=[],
-        routing=RoutingResult(root=RoutingResultDirect(role=role.id, replica=0)),
-        endpoint=_endpoint_requirement(),
     )
 
 
@@ -304,11 +306,21 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "prefill_decode topology requires a KV-transfer mechanism",
         )
-    routing_backend = input.routing_backend or "builtin"
-    if routing_backend not in {"builtin", "sglang-router"}:
+    backend_pair = (input.gateway_backend, input.pd_router_backend)
+    if backend_pair not in {
+        ("builtin", "builtin"),
+        ("sglang-router", "sglang-router"),
+    }:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            f"SGLang does not support routing backend {input.routing_backend!r}",
+            f"SGLang does not support Gateway/P/D Router pair {backend_pair!r}",
+        )
+    gateway_backend = input.gateway_backend
+    pd_router_backend = input.pd_router_backend
+    if gateway_backend is None or pd_router_backend is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "SGLang prefill_decode requires both frontend backends",
         )
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
@@ -319,7 +331,13 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     links = [
         ServeRoleLink(
             root=ServeRoleLinkRequestRouting(
-                source="router",
+                source="gateway",
+                targets=["pd_router"],
+            )
+        ),
+        ServeRoleLink(
+            root=ServeRoleLinkRequestRouting(
+                source="pd_router",
                 targets=[prefill.id, decode.id],
             )
         ),
@@ -332,70 +350,59 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         ),
         ServeRoleLink(
             root=ServeRoleLinkBootstrap(
-                source="router",
+                source="pd_router",
                 target=prefill.id,
                 port="bootstrap",
             )
         ),
     ]
-    if routing_backend == "builtin":
-        routing = RoutingResult(
-            root=RoutingResultInferlabBuiltin(
-                implementation=BuiltinRouterKind.sglang,
-                policy="round_robin",
-                prefill_role=prefill.id,
-                decode_role=decode.id,
-                ports=[],
-                readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/healthcheck")),
-            )
-        )
+    if backend_pair == ("builtin", "builtin"):
+        implementation = "sglang"
+        implementation_version = "2"
+        render_source = RenderSource.control_plane
+        gateway_readiness = ReadinessProbe(root=ReadinessProbeHttp(path="/healthcheck"))
+        pd_router_readiness = gateway_readiness
     else:
-        roles.append(
-            ServeRoleResult(
-                id="router",
-                kind=ServeRoleKind.router,
-                declared_replica_count=1,
-                effective_replica_count=1,
-                effective_settings={},
-                effective_parallelism=Parallelism(),
+        implementation = "sglang-router"
+        implementation_version = _identity().adapter_version
+        render_source = RenderSource.integration
+        gateway_readiness = ReadinessProbe(root=ReadinessProbeHttp(path="/readiness"))
+        pd_router_readiness = ReadinessProbe(
+            root=ReadinessProbeHttpTargetRegistry(
+                target_scheme=TargetEndpointScheme.http,
+                readiness_path="/readiness",
+                registry_path="/workers",
+                targets_field="workers",
+                target_url_field="url",
+                target_role_field="worker_type",
+                target_healthy_field="is_healthy",
+                target_bootstrap_port_field="bootstrap_port",
+                prefill_role_value="prefill",
+                decode_role_value="decode",
+                prefill_bootstrap_port="bootstrap",
             )
         )
-        replicas.append(
-            ServeReplicaRequirement(
-                id="router",
-                role_id="router",
-                replica_index=0,
-                device_count=0,
-                ports=[],
-                primary_ports=[],
-                primary_readiness=ReadinessProbe(
-                    root=ReadinessProbeHttpTargetRegistry(
-                        target_scheme=TargetEndpointScheme.http,
-                        readiness_path="/readiness",
-                        registry_path="/workers",
-                        targets_field="workers",
-                        target_url_field="url",
-                        target_role_field="worker_type",
-                        target_healthy_field="is_healthy",
-                        target_bootstrap_port_field="bootstrap_port",
-                        prefill_role_value="prefill",
-                        decode_role_value="decode",
-                        prefill_bootstrap_port="bootstrap",
-                    )
-                ),
-                worker_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
-            )
-        )
-        routing = RoutingResult(
-            root=RoutingResultIntegrationNative(role="router", replica=0, policy="round_robin")
-        )
+    gateway, pd_router = fused_pd_frontend_plans(
+        gateway_backend=gateway_backend,
+        pd_router_backend=pd_router_backend,
+        implementation=implementation,
+        implementation_version=implementation_version,
+        render_source=render_source,
+        endpoint=_endpoint_requirement(),
+        gateway_readiness=gateway_readiness,
+        pd_router_readiness=pd_router_readiness,
+        policies=PdRoutingPolicies(prefill="round_robin", decode="round_robin"),
+        prefill_role=prefill.id,
+        decode_role=decode.id,
+        target_scheme=TargetEndpointScheme.http,
+    )
     return PlanServeResult(
         integration=_identity(),
         roles=roles,
         replicas=replicas,
         links=links,
-        routing=routing,
-        endpoint=_endpoint_requirement(),
+        gateway=gateway,
+        pd_router=pd_router,
     )
 
 
@@ -412,17 +419,16 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
 
 def _render_process(
     input: RenderServeInput,
-    role: ServeRoleResult,
-    allocation: ServeProcessAllocation,
+    allocation: ServeProcessAllocationModelRank,
 ) -> RenderedServeProcess:
-    settings = _settings(role.effective_settings)
-    outer = role.effective_parallelism.outer or ParallelismOuter()
-    attention = role.effective_parallelism.attention or ParallelismAttention()
-    experts = role.effective_parallelism.experts or ParallelismExperts()
-    if allocation.model_locator is None or allocation.endpoint is None:
+    settings = _settings(allocation.effective_settings)
+    outer = allocation.effective_parallelism.outer or ParallelismOuter()
+    attention = allocation.effective_parallelism.attention or ParallelismAttention()
+    experts = allocation.effective_parallelism.experts or ParallelismExperts()
+    if allocation.endpoint is None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
-            f"serving allocation {allocation.process!r} is missing its model or endpoint",
+            f"serving allocation {allocation.process!r} is missing its endpoint",
         )
     endpoint = allocation.endpoint
     argv = [
@@ -476,14 +482,14 @@ def _render_process(
                 AdapterErrorCode.invalid_request,
                 "prefill_decode render is missing its KV-transfer mechanism",
             )
-        if role.kind == ServeRoleKind.prefill:
+        if allocation.role_kind == ServeRoleKind.prefill:
             mode = "prefill"
-        elif role.kind == ServeRoleKind.decode:
+        elif allocation.role_kind == ServeRoleKind.decode:
             mode = "decode"
         else:
             raise AdapterOperationError(
                 AdapterErrorCode.invalid_request,
-                f"prefill_decode allocation has unsupported role {role.id!r}",
+                f"prefill_decode allocation has unsupported role {allocation.role!r}",
             )
         inferlab_args.extend(
             [
@@ -493,7 +499,7 @@ def _render_process(
                 transport.value,
             ]
         )
-        if role.kind == ServeRoleKind.prefill:
+        if allocation.role_kind == ServeRoleKind.prefill:
             bootstrap = allocation.ports.get("bootstrap")
             if bootstrap is None:
                 raise AdapterOperationError(
@@ -504,29 +510,26 @@ def _render_process(
     argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OPTION_ARITY))
     process_env = _runtime_cache_env(allocation.cache)
     process_env.update(settings.extra_env or {})
-    return RenderedServeProcess(
-        process=allocation.process,
-        role=allocation.role,
-        replica=allocation.replica,
-        rank=allocation.rank,
-        rank_count=allocation.rank_count,
-        launch_files=[],
-        command=ProcessSpec(argv=argv, env=process_env),
+    return rendered_model_rank(
+        allocation,
+        ProcessSpec(argv=argv, env=process_env),
     )
 
 
 def _render_router(
-    input: RenderServeInput,
-    allocation: ServeProcessAllocation,
+    allocation: ServeProcessAllocationFrontend,
+    model_allocations: list[ServeProcessAllocationModelRank],
 ) -> RenderedServeProcess:
-    prefill_roles = {role.id for role in input.roles if role.kind == ServeRoleKind.prefill}
-    decode_roles = {role.id for role in input.roles if role.kind == ServeRoleKind.decode}
-    prefill = [item for item in input.allocations if item.role in prefill_roles and item.rank == 0]
-    decode = [item for item in input.allocations if item.role in decode_roles and item.rank == 0]
-    if allocation.endpoint is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_request, "SGLang Router allocation requires an endpoint"
-        )
+    prefill = [
+        item
+        for item in model_allocations
+        if item.role_kind == ServeRoleKind.prefill and item.rank == 0
+    ]
+    decode = [
+        item
+        for item in model_allocations
+        if item.role_kind == ServeRoleKind.decode and item.rank == 0
+    ]
     endpoint = allocation.endpoint
     argv = [
         "python3",
@@ -567,15 +570,7 @@ def _render_router(
             )
         argv.extend(["--decode", f"http://{item.endpoint.host}:{item.endpoint.port}"])
     argv.extend(["--policy", "round_robin"])
-    return RenderedServeProcess(
-        process=allocation.process,
-        role=allocation.role,
-        replica=allocation.replica,
-        rank=allocation.rank,
-        rank_count=allocation.rank_count,
-        launch_files=[],
-        command=ProcessSpec(argv=argv, env={}),
-    )
+    return rendered_frontend(allocation, ProcessSpec(argv=argv, env={}))
 
 
 def render_serve(input: RenderServeInput) -> RenderServeResult:
@@ -583,24 +578,23 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request, "serve allocation must not be empty"
         )
-    roles = {role.id: role for role in input.roles}
-    processes = []
-    for allocation in input.allocations:
-        role = roles.get(allocation.role)
-        if role is None:
-            raise AdapterOperationError(
-                AdapterErrorCode.invalid_request,
-                f"allocation references unknown role {allocation.role!r}",
+    allocations, model_allocations = split_serve_allocations(input.allocations)
+    processes: list[RenderedServeProcess] = []
+    for allocation in allocations:
+        if isinstance(allocation, ServeProcessAllocationModelRank):
+            if allocation.rank_count > 1:
+                raise AdapterOperationError(
+                    AdapterErrorCode.invalid_request,
+                    "the SGLang integration does not support multi-node serving yet",
+                )
+            processes.append(_render_process(input, allocation))
+        elif isinstance(allocation, ServeProcessAllocationFrontend):
+            require_integration_fused_frontend(
+                allocation,
+                gateway_backend="sglang-router",
+                pd_router_backend="sglang-router",
             )
-        if role.kind == ServeRoleKind.router:
-            processes.append(_render_router(input, allocation))
-            continue
-        if allocation.rank_count > 1:
-            raise AdapterOperationError(
-                AdapterErrorCode.invalid_request,
-                "the SGLang integration does not support multi-node serving yet",
-            )
-        processes.append(_render_process(input, role, allocation))
+            processes.append(_render_router(allocation, model_allocations))
     return RenderServeResult(integration=_identity(), processes=processes)
 
 

@@ -1,0 +1,132 @@
+{
+  "operation": "render_serve",
+  "protocol_version": "7",
+  "input": {
+    "allocations": [
+      {
+        "cache": "/cache/server",
+        "dependencies": [],
+        "devices": [0],
+        "effective_parallelism": {
+          "attention": {
+            "context_parallel_size": 1,
+            "data_parallel_size": 1,
+            "tensor_parallel_size": 1
+          },
+          "experts": {
+            "data_parallel_size": 1,
+            "dense_tensor_parallel_size": 1,
+            "expert_parallel_size": 1,
+            "tensor_parallel_size": 1
+          },
+          "outer": {
+            "pipeline_parallel_size": 1,
+            "tensor_parallel_size": 1
+          }
+        },
+        "effective_settings": {
+          "default_max_output_tokens": 3
+        },
+        "endpoint": {
+          "host": "engine.example",
+          "port": 50051
+        },
+        "kind": "model_rank",
+        "launch": {
+          "kind": "local"
+        },
+        "links": [
+          {
+            "kind": "request_routing",
+            "source": "gateway",
+            "targets": ["serve"]
+          }
+        ],
+        "machine": "engine-node",
+        "model_locator": "/models/fixture-model",
+        "ports": {},
+        "process": "server",
+        "rank": 0,
+        "rank_count": 1,
+        "render_inputs": [],
+        "replica": 0,
+        "role": "serve",
+        "role_kind": "serve"
+      },
+      {
+        "cache": "/cache/gateway",
+        "components": ["gateway"],
+        "dependencies": ["server"],
+        "devices": [],
+        "endpoint": {
+          "host": "gateway.example",
+          "port": 30000
+        },
+        "gateway": {
+          "backend": "smg",
+          "co_rendering": {
+            "process_role": "gateway"
+          },
+          "effective_settings": {
+            "circuit_breaker": false,
+            "policy": "passthrough",
+            "retries": false,
+            "worker_protocol": "tokenspeed_scheduler_v1"
+          },
+          "endpoint": {
+            "chat_completions_path": "/v1/chat/completions",
+            "completions_path": "/v1/completions",
+            "prefix_cache_reset": {
+              "method": "post",
+              "path": "/flush_cache"
+            },
+            "protocol": "http"
+          },
+          "implementation": "tokenspeed-smg",
+          "implementation_version": "unavailable",
+          "ports": ["prometheus"],
+          "readiness": {
+            "kind": "http",
+            "path": "/readiness"
+          },
+          "render_inputs": [],
+          "render_source": "integration",
+          "targets": [
+            {
+              "kind": "engine",
+              "role": "serve"
+            }
+          ]
+        },
+        "kind": "frontend",
+        "launch": {
+          "kind": "local"
+        },
+        "links": [
+          {
+            "kind": "request_routing",
+            "source": "gateway",
+            "targets": ["serve"]
+          }
+        ],
+        "machine": "gateway-node",
+        "ports": {
+          "prometheus": {
+            "host": "gateway.example",
+            "port": 30001
+          }
+        },
+        "process": "gateway",
+        "process_role": "gateway",
+        "render_inputs": []
+      }
+    ],
+    "gateway_backend": "smg",
+    "model": {
+      "id": "fixture-model",
+      "served_name": "fixture-model"
+    },
+    "profiling": false,
+    "topology": "single"
+  }
+}

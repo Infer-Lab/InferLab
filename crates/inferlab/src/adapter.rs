@@ -89,7 +89,7 @@ impl AdapterClient for ProcessAdapterClient {
         input: PlanServeInput,
     ) -> Result<AdapterLowering<PlanServeResult>, InferlabError> {
         let request = AdapterRequest::PlanServe {
-            protocol_version: ProtocolVersion::V6,
+            protocol_version: ProtocolVersion::V7,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
@@ -104,7 +104,7 @@ impl AdapterClient for ProcessAdapterClient {
         input: RenderServeInput,
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError> {
         let request = AdapterRequest::RenderServe {
-            protocol_version: ProtocolVersion::V6,
+            protocol_version: ProtocolVersion::V7,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
@@ -401,7 +401,7 @@ impl AdapterClient for ImageAdapterClient {
         input: PlanServeInput,
     ) -> Result<AdapterLowering<PlanServeResult>, InferlabError> {
         let request = AdapterRequest::PlanServe {
-            protocol_version: ProtocolVersion::V6,
+            protocol_version: ProtocolVersion::V7,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, request)?;
@@ -416,7 +416,7 @@ impl AdapterClient for ImageAdapterClient {
         input: RenderServeInput,
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError> {
         let request = AdapterRequest::RenderServe {
-            protocol_version: ProtocolVersion::V6,
+            protocol_version: ProtocolVersion::V7,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, request)?;
@@ -649,7 +649,7 @@ fn interrupted_probe_error(reference: &str, kill: std::io::Result<()>) -> Inferl
 }
 
 /// The protocol version this binary speaks, as its wire string.
-const PROTOCOL_VERSION: &str = "6";
+const PROTOCOL_VERSION: &str = "7";
 
 /// The raw `protocol_version` string an adapter answered, read without
 /// committing to the full versioned response shape. Absent when the field is

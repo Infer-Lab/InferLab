@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "agent-plugin-installer"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f52b416e959bac0b2cd8676d8ee45bf08db900f0b72c025a8e73212f6d3490"
+checksum = "e90821b0c5b490bbc138406ec0aad75c4da794543351d74ff72f1f4d03d62418"
 dependencies = [
  "clap",
  "thiserror",
@@ -777,7 +777,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "agent-plugin-installer",
  "clap",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-fake-engine"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "futures-util",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-protocol"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-proxy"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2106,7 +2106,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2353,7 +2353,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2410,7 +2410,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2903,7 +2903,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3518,7 +3518,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

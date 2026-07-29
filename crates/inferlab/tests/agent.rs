@@ -11,12 +11,21 @@ use tempfile::TempDir;
 /// exercised by shape, not by effect.
 const NATIVE_CLI: &str = r#"#!/bin/sh
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$FAKE_AGENT_CLI_LOG"
+case "$*" in
+  *"plugin marketplace list --json"*)
+    case "$(basename "$0")" in
+      codex) printf '%s\n' '{"marketplaces":[]}' ;;
+      claude) printf '%s\n' '[]' ;;
+    esac
+    ;;
+esac
 exit 0
 "#;
 
 struct AgentHarness {
     _dir: TempDir,
     bin: PathBuf,
+    data: PathBuf,
     log: PathBuf,
 }
 
@@ -24,7 +33,9 @@ impl AgentHarness {
     fn new(with_clis: bool) -> Result<Self, Box<dyn Error>> {
         let dir = tempfile::tempdir()?;
         let bin = dir.path().join("bin");
+        let data = dir.path().join("data");
         fs::create_dir_all(&bin)?;
+        fs::create_dir_all(&data)?;
         let log = dir.path().join("cli.log");
         if with_clis {
             for cli in ["claude", "codex"] {
@@ -36,6 +47,7 @@ impl AgentHarness {
         Ok(Self {
             _dir: dir,
             bin,
+            data,
             log,
         })
     }
@@ -46,7 +58,12 @@ impl AgentHarness {
         path.push(std::env::var_os("PATH").unwrap_or_default());
         Ok(Command::new(env!("CARGO_BIN_EXE_inferlab"))
             .env("PATH", path)
+            .env("XDG_DATA_HOME", &self.data)
             .env("FAKE_AGENT_CLI_LOG", &self.log)
+            .env(
+                "FAKE_CODEX_MARKETPLACE_STATE",
+                self.data.join("codex-marketplace"),
+            )
             .args(args)
             .output()?)
     }
@@ -120,6 +137,44 @@ fn install_validates_the_shipped_package_and_drives_both_clis() -> Result<(), Bo
 fn install_with_no_from_checkout_uses_the_embedded_package_and_drives_both_clis()
 -> Result<(), Box<dyn Error>> {
     let harness = AgentHarness::new(true)?;
+    // Codex rejects an `add` for an existing marketplace name. Preserve
+    // that real CLI behavior so repeated installation proves InferLab
+    // inspects and replaces the registration instead of relying on a
+    // permissive fake.
+    let codex = harness.bin.join("codex");
+    fs::write(
+        &codex,
+        r#"#!/bin/sh
+printf 'codex %s\n' "$*" >> "$FAKE_AGENT_CLI_LOG"
+case "$*" in
+  *"plugin marketplace list --json"*)
+    if [ -f "$FAKE_CODEX_MARKETPLACE_STATE" ]; then
+      source=$(/bin/cat "$FAKE_CODEX_MARKETPLACE_STATE")
+      printf '{"marketplaces":[{"name":"inferlab","marketplaceSource":{"sourceType":"local","source":"%s"}}]}\n' "$source"
+    else
+      printf '%s\n' '{"marketplaces":[]}'
+    fi
+    exit 0
+    ;;
+  "plugin marketplace remove inferlab")
+    /bin/rm -f "$FAKE_CODEX_MARKETPLACE_STATE"
+    exit 0
+    ;;
+  "plugin marketplace add "*)
+    case "$*" in *"--help"*) exit 0 ;; esac
+    if [ -f "$FAKE_CODEX_MARKETPLACE_STATE" ]; then
+      echo 'marketplace already exists' >&2
+      exit 7
+    fi
+    for source in "$@"; do :; done
+    printf '%s' "$source" > "$FAKE_CODEX_MARKETPLACE_STATE"
+    exit 0
+    ;;
+esac
+exit 0
+"#,
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755))?;
     // No `--from-checkout`: the binary-embedded default package must be
     // extracted and validated on its own, with no repository checkout in
     // reach ([[RFC-0008:C-AGENT-PLUGIN]]).
@@ -155,6 +210,125 @@ fn install_with_no_from_checkout_uses_the_embedded_package_and_drives_both_clis(
         );
     }
     assert!(logged.contains("inferlab"), "{logged}");
+
+    let registered_sources = logged
+        .lines()
+        .filter(|line| line.contains("plugin marketplace add") && !line.contains("--help"))
+        .map(|line| {
+            line.split_whitespace()
+                .next_back()
+                .ok_or("marketplace source")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(registered_sources.len(), 2, "{logged}");
+    for source in &registered_sources {
+        let source = Path::new(source);
+        assert!(source.starts_with(&harness.data), "{}", source.display());
+        assert!(
+            source.is_dir(),
+            "embedded marketplace source vanished after install: {}",
+            source.display()
+        );
+    }
+
+    let second = harness.run(&["agent", "install", "--agent", "all"])?;
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let repeated_log = harness.logged()?;
+    let repeated_sources = repeated_log
+        .lines()
+        .filter(|line| line.contains("plugin marketplace add") && !line.contains("--help"))
+        .map(|line| {
+            line.split_whitespace()
+                .next_back()
+                .ok_or("marketplace source")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        repeated_sources,
+        [
+            registered_sources[0],
+            registered_sources[1],
+            registered_sources[0],
+            registered_sources[1],
+        ],
+        "{repeated_log}"
+    );
+    assert!(
+        repeated_log.contains("codex plugin marketplace remove inferlab"),
+        "Codex's non-idempotent registration must be replaced before the second add: {repeated_log}"
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_fails_when_the_registered_inferlab_marketplace_source_is_missing()
+-> Result<(), Box<dyn Error>> {
+    let harness = AgentHarness::new(true)?;
+    let missing = harness.data.join("missing-inferlab-marketplace");
+    let codex_marketplaces = serde_json::json!({
+        "marketplaces": [{
+            "name": "inferlab",
+            "root": missing,
+            "marketplaceSource": {
+                "sourceType": "local",
+                "source": missing,
+            },
+        }],
+    });
+    let claude_marketplaces = serde_json::json!([{
+        "name": "inferlab",
+        "source": "directory",
+        "path": missing,
+        "installLocation": missing,
+    }]);
+    for (cli, marketplaces) in [
+        ("codex", codex_marketplaces),
+        ("claude", claude_marketplaces),
+    ] {
+        let path = harness.bin.join(cli);
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n\
+                 printf '{cli} %s\\n' \"$*\" >> \"$FAKE_AGENT_CLI_LOG\"\n\
+                 case \"$*\" in\n\
+                   *\"plugin marketplace list --json\"*) printf '%s\\n' '{}';;\n\
+                 esac\n\
+                 exit 0\n",
+                marketplaces
+            ),
+        )?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let output = harness.run(&["agent", "doctor", "--agent", "all"])?;
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    let rows = report["rows"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["status"], "failed");
+        assert!(
+            row["message"]
+                .as_str()
+                .ok_or("message")?
+                .contains("missing-inferlab-marketplace"),
+            "{row}"
+        );
+        assert!(
+            row["commands"]
+                .as_array()
+                .ok_or("commands")?
+                .last()
+                .and_then(Value::as_str)
+                .is_some_and(|command| command.contains("plugin marketplace list --json")),
+            "{row}"
+        );
+    }
     Ok(())
 }
 
@@ -208,6 +382,7 @@ fn native_failure_continues_other_runtimes_then_fails_loudly() -> Result<(), Box
         "#!/bin/sh\n\
          printf 'codex %s\\n' \"$*\" >> \"$FAKE_AGENT_CLI_LOG\"\n\
          case \"$*\" in *help*) exit 0 ;; esac\n\
+         case \"$*\" in *\"plugin marketplace list --json\"*) printf '%s\\n' '{\"marketplaces\":[]}'; exit 0 ;; esac\n\
          case \"$*\" in *\"plugin add\"*) echo 'codex exploded' >&2; exit 7 ;; esac\n\
          exit 0\n",
     )?;
@@ -415,6 +590,7 @@ fn a_spawn_failure_after_a_mutation_keeps_the_mutation_in_the_report() -> Result
             "#!/bin/sh\n\
              printf 'codex %s\\n' \"$*\" >> \"$FAKE_AGENT_CLI_LOG\"\n\
              case \"$*\" in *help*) exit 0 ;; esac\n\
+             case \"$*\" in *\"plugin marketplace list --json\"*) printf '%s\\n' '{{\"marketplaces\":[]}}'; exit 0 ;; esac\n\
              case \"$*\" in *\"marketplace add\"*) /bin/chmod a-x {} ;; esac\n\
              exit 0\n",
             codex.display()

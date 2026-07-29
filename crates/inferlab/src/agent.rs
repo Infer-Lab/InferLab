@@ -10,21 +10,24 @@
 
 pub use agent_plugin_installer::AgentSelector;
 use agent_plugin_installer::{
-    AgentRuntime, BatchFailure, BatchResult, BatchRuntimeOutcome, BatchStatus, DoctorStatus,
-    FailurePolicy, InstallRequest, PluginRef, UninstallRequest, UpdateRequest, doctor_many,
-    install_many, uninstall_many, update_many,
+    AgentPluginError, AgentPluginOperation, AgentRuntime, BatchFailure, BatchResult,
+    BatchRuntimeOutcome, BatchStatus, DEFAULT_COMMAND_TIMEOUT, DoctorStatus, FailurePolicy,
+    InstallRequest, PluginRef, UninstallRequest, UpdateRequest, check_operation, doctor_many,
+    install as install_plugin, uninstall_many, update_many,
 };
 use flate2::read::GzDecoder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::{Path, PathBuf};
 use tar::Archive;
-use tempfile::TempDir;
 
 const PLUGIN: PluginRef<'static> = PluginRef {
     selector: "inferlab@inferlab",
     name: "inferlab",
 };
 const MARKETPLACE: &str = "inferlab";
+const INFERLAB_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The plugin package this binary carries, packed reproducibly by
 /// `build.rs` from `resources/plugin/` (mirroring the repo-root package:
@@ -71,42 +74,263 @@ pub struct AgentRow {
 pub fn doctor(selector: AgentSelector) -> AgentReport {
     let rows = doctor_many(selector)
         .into_iter()
-        .map(|outcome| AgentRow {
-            agent: outcome.runtime.id(),
-            operation: "doctor",
-            status: match outcome.status {
-                DoctorStatus::Ready => "ready",
-                DoctorStatus::Missing => "missing",
-                DoctorStatus::Failed => "failed",
-            },
-            cli: outcome.runtime.cli(),
-            commands: outcome.commands,
-            message: outcome.message,
+        .map(|mut outcome| {
+            let marketplace_failure = if outcome.status == DoctorStatus::Ready {
+                match inspect_marketplace(outcome.runtime) {
+                    Ok(inspection) => {
+                        outcome.commands.push(inspection.command);
+                        marketplace_state_failure(outcome.runtime, &inspection.state)
+                    }
+                    Err(failure) => {
+                        if let Some(command) = failure.command {
+                            outcome.commands.push(command);
+                        }
+                        Some(failure.message)
+                    }
+                }
+            } else {
+                None
+            };
+            AgentRow {
+                agent: outcome.runtime.id(),
+                operation: "doctor",
+                status: match (&outcome.status, &marketplace_failure) {
+                    (DoctorStatus::Ready, None) => "ready",
+                    (DoctorStatus::Missing, _) => "missing",
+                    (DoctorStatus::Ready | DoctorStatus::Failed, Some(_) | None) => "failed",
+                },
+                cli: outcome.runtime.cli(),
+                commands: outcome.commands,
+                message: marketplace_failure.or(outcome.message),
+            }
         })
         .collect();
     AgentReport { rows }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum MarketplaceState {
+    Absent,
+    Local(PathBuf),
+    Other,
+}
+
+struct MarketplaceInspection {
+    command: String,
+    state: MarketplaceState,
+}
+
+struct MarketplaceCommandFailure {
+    command: Option<String>,
+    message: String,
+}
+
+struct MarketplacePreparationFailure {
+    commands: Vec<String>,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexMarketplaceList {
+    marketplaces: Vec<CodexMarketplace>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexMarketplace {
+    name: String,
+    marketplace_source: Option<CodexMarketplaceSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexMarketplaceSource {
+    source_type: String,
+    source: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeMarketplace {
+    name: String,
+    source: String,
+    path: Option<PathBuf>,
+}
+
+fn inspect_marketplace(
+    runtime: AgentRuntime,
+) -> Result<MarketplaceInspection, MarketplaceCommandFailure> {
+    let args = ["plugin", "marketplace", "list", "--json"]
+        .map(str::to_owned)
+        .to_vec();
+    let (command, stdout) = run_marketplace_command(runtime, &args, "marketplace inspection")?;
+    let state = match runtime {
+        AgentRuntime::Codex => codex_marketplace_state(&stdout),
+        AgentRuntime::Claude => claude_marketplace_state(&stdout),
+    }
+    .map_err(|message| MarketplaceCommandFailure {
+        command: Some(command.clone()),
+        message,
+    })?;
+    Ok(MarketplaceInspection { command, state })
+}
+
+fn run_marketplace_command(
+    runtime: AgentRuntime,
+    args: &[String],
+    operation: &str,
+) -> Result<(String, Vec<u8>), MarketplaceCommandFailure> {
+    let argv = std::iter::once(runtime.cli().to_owned())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>();
+    let command = render_agent_command(&argv);
+    let bound = crate::time_bound::OperationBound::finite(DEFAULT_COMMAND_TIMEOUT);
+    let outcome = crate::container::run_with_bound(&argv, None, None, &bound, None);
+    match outcome {
+        Ok(crate::container::BoundedWait::Exited { status, stdout, .. }) if status.success() => {
+            Ok((command, stdout))
+        }
+        Ok(crate::container::BoundedWait::Exited {
+            status,
+            stdout,
+            stderr,
+            ..
+        }) => {
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            Err(MarketplaceCommandFailure {
+                command: Some(command),
+                message: format!(
+                    "{} {operation} exited with {}: {}",
+                    runtime.id(),
+                    status,
+                    String::from_utf8_lossy(&detail).trim()
+                ),
+            })
+        }
+        Ok(crate::container::BoundedWait::Expired { .. }) => Err(MarketplaceCommandFailure {
+            command: Some(command),
+            message: format!(
+                "{} {operation} timed out after {} seconds",
+                runtime.id(),
+                DEFAULT_COMMAND_TIMEOUT.as_secs()
+            ),
+        }),
+        Ok(crate::container::BoundedWait::Interrupted { .. }) => Err(MarketplaceCommandFailure {
+            command: Some(command),
+            message: format!("{} {operation} was interrupted", runtime.id()),
+        }),
+        Err(crate::container::BoundedError::Launch(error)) => Err(MarketplaceCommandFailure {
+            command: None,
+            message: format!("{} {operation} could not start: {error}", runtime.id()),
+        }),
+        Err(
+            crate::container::BoundedError::Stdin(error)
+            | crate::container::BoundedError::Wait(error),
+        ) => Err(MarketplaceCommandFailure {
+            command: Some(command),
+            message: format!("{} {operation} failed: {error}", runtime.id()),
+        }),
+        Err(crate::container::BoundedError::WaitCleanup { source, .. }) => {
+            Err(MarketplaceCommandFailure {
+                command: Some(command),
+                message: format!("{} {operation} failed: {source}", runtime.id()),
+            })
+        }
+    }
+}
+
+fn codex_marketplace_state(stdout: &[u8]) -> Result<MarketplaceState, String> {
+    let marketplaces: CodexMarketplaceList = match serde_json::from_slice(stdout) {
+        Ok(marketplaces) => marketplaces,
+        Err(error) => {
+            return Err(format!(
+                "codex marketplace inspection returned invalid JSON: {error}"
+            ));
+        }
+    };
+    let Some(marketplace) = marketplaces
+        .marketplaces
+        .into_iter()
+        .find(|marketplace| marketplace.name == MARKETPLACE)
+    else {
+        return Ok(MarketplaceState::Absent);
+    };
+    let Some(source) = marketplace.marketplace_source else {
+        return Err("codex InferLab marketplace did not report its source".to_owned());
+    };
+    if source.source_type == "local" {
+        Ok(MarketplaceState::Local(source.source))
+    } else {
+        Ok(MarketplaceState::Other)
+    }
+}
+
+fn claude_marketplace_state(stdout: &[u8]) -> Result<MarketplaceState, String> {
+    let marketplaces: Vec<ClaudeMarketplace> = match serde_json::from_slice(stdout) {
+        Ok(marketplaces) => marketplaces,
+        Err(error) => {
+            return Err(format!(
+                "claude marketplace inspection returned invalid JSON: {error}"
+            ));
+        }
+    };
+    let Some(marketplace) = marketplaces
+        .into_iter()
+        .find(|marketplace| marketplace.name == MARKETPLACE)
+    else {
+        return Ok(MarketplaceState::Absent);
+    };
+    if marketplace.source != "directory" {
+        return Ok(MarketplaceState::Other);
+    }
+    let Some(path) = marketplace.path else {
+        return Err("claude InferLab marketplace did not report its directory path".to_owned());
+    };
+    Ok(MarketplaceState::Local(path))
+}
+
+fn marketplace_state_failure(runtime: AgentRuntime, state: &MarketplaceState) -> Option<String> {
+    let MarketplaceState::Local(path) = state else {
+        return None;
+    };
+    (!path.is_dir()).then(|| {
+        format!(
+            "{} InferLab marketplace source {} is not an available directory",
+            runtime.id(),
+            path.display()
+        )
+    })
+}
+
+fn render_agent_command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| {
+            if arg.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '@' | '=')
+            }) {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Installs the plugin package. `checkout` overrides the source with a
 /// local checkout or unpacked release tarball, operating on it identically
 /// to before; when omitted, the package embedded in this binary is
-/// extracted to a temporary directory first and that directory takes the
-/// checkout's place for the rest of this call
+/// materialized under InferLab's versioned data directory and that durable
+/// directory takes the checkout's place
 /// ([[RFC-0008:C-AGENT-PLUGIN]]).
 pub fn install(selector: AgentSelector, checkout: Option<&Path>) -> AgentReport {
     let runtimes = selector.runtimes();
 
-    // `_embedded` keeps the extracted temporary directory alive for the
-    // rest of this call: dropping it early would delete the files
-    // `package_gate` and `InstallRequest::local` still need to read from
-    // `source`.
-    let (_embedded, source): (Option<TempDir>, PathBuf) = match checkout {
-        Some(dir) => (None, dir.to_path_buf()),
-        None => match extract_embedded_package() {
-            Ok(dir) => {
-                let path = dir.path().to_path_buf();
-                (Some(dir), path)
-            }
+    let source = match checkout {
+        Some(dir) => dir.to_path_buf(),
+        None => match materialize_embedded_package(runtimes) {
+            Ok(path) => path,
             Err(message) => {
                 return AgentReport {
                     rows: runtimes
@@ -138,32 +362,223 @@ pub fn install(selector: AgentSelector, checkout: Option<&Path>) -> AgentReport 
         }
     };
 
-    from_batch(
-        install_many(
-            selector,
-            |_| InstallRequest::local(&source, PLUGIN),
-            FailurePolicy::Continue,
-        ),
-        "install",
-        "installed",
-    )
+    install_from_source(selector, &source)
 }
 
-/// Extracts the binary-embedded plugin package into a fresh temporary
-/// directory and returns it. A missing temporary directory or a corrupted
-/// archive is exactly the "corrupted, or otherwise unreadable" payload
-/// scenario [[RFC-0008:C-AGENT-PLUGIN]] requires the operation to fail
-/// loudly before any native CLI runs; `package_gate` still names the exact
-/// missing member if extraction succeeds but leaves one absent.
-fn extract_embedded_package() -> Result<TempDir, String> {
-    let dir = tempfile::tempdir().map_err(|error| {
-        format!("embedded plugin package: cannot create a temporary directory: {error}")
+fn install_from_source(selector: AgentSelector, source: &Path) -> AgentReport {
+    let preflights = selector
+        .runtimes()
+        .iter()
+        .copied()
+        .map(|runtime| check_operation(runtime, AgentPluginOperation::Install))
+        .collect::<Vec<_>>();
+    if preflights
+        .iter()
+        .any(|outcome| outcome.status != DoctorStatus::Ready)
+    {
+        return preflight_failure(preflights);
+    }
+
+    let rows = preflights
+        .into_iter()
+        .map(|preflight| install_runtime_from_source(preflight, source))
+        .collect::<Vec<_>>();
+    AgentReport { rows }
+}
+
+fn preflight_failure(preflights: Vec<agent_plugin_installer::DoctorOutcome>) -> AgentReport {
+    let rows = preflights
+        .into_iter()
+        .map(|outcome| {
+            let ready = outcome.status == DoctorStatus::Ready;
+            let message = if ready {
+                "mutations not attempted: a preceding gate failed".to_owned()
+            } else {
+                format!(
+                    "{} CLI ({}) is not ready: {}",
+                    outcome.runtime.id(),
+                    outcome.runtime.cli(),
+                    outcome
+                        .message
+                        .unwrap_or_else(|| "runtime is not ready".to_owned())
+                )
+            };
+            make_row(
+                outcome.runtime,
+                "install",
+                if ready { "skipped" } else { "failed" },
+                outcome.commands,
+                Some(message),
+            )
+        })
+        .collect();
+    AgentReport { rows }
+}
+
+fn install_runtime_from_source(
+    preflight: agent_plugin_installer::DoctorOutcome,
+    source: &Path,
+) -> AgentRow {
+    let runtime = preflight.runtime;
+    let mut commands = preflight.commands;
+    match prepare_marketplace_registration(runtime, source) {
+        Ok(preparation) => commands.extend(preparation),
+        Err(failure) => {
+            commands.extend(failure.commands);
+            return make_row(
+                runtime,
+                "install",
+                "failed",
+                commands,
+                Some(failure.message),
+            );
+        }
+    }
+
+    match install_plugin(runtime, InstallRequest::local(source, PLUGIN)) {
+        Ok(outcome) => {
+            commands.extend(outcome.commands);
+            make_row(runtime, "install", "installed", commands, None)
+        }
+        Err(error) => {
+            commands.extend(error.completed.clone());
+            if let AgentPluginError::CliFailed { command, .. } = &error.error {
+                commands.push(command.clone());
+            }
+            make_row(
+                runtime,
+                "install",
+                "failed",
+                commands,
+                Some(error.to_string()),
+            )
+        }
+    }
+}
+
+fn prepare_marketplace_registration(
+    runtime: AgentRuntime,
+    source: &Path,
+) -> Result<Vec<String>, MarketplacePreparationFailure> {
+    let inspection =
+        inspect_marketplace(runtime).map_err(|failure| MarketplacePreparationFailure {
+            commands: failure.command.into_iter().collect(),
+            message: failure.message,
+        })?;
+    let mut commands = vec![inspection.command];
+    let replace = match (&runtime, &inspection.state) {
+        (_, MarketplaceState::Absent) => false,
+        (AgentRuntime::Codex, _) => true,
+        (AgentRuntime::Claude, MarketplaceState::Local(current)) => current != source,
+        (AgentRuntime::Claude, MarketplaceState::Other) => true,
+    };
+    if !replace {
+        return Ok(commands);
+    }
+    let args = ["plugin", "marketplace", "remove", MARKETPLACE]
+        .map(str::to_owned)
+        .to_vec();
+    match run_marketplace_command(runtime, &args, "marketplace replacement") {
+        Ok((command, _)) => {
+            commands.push(command);
+            Ok(commands)
+        }
+        Err(mut failure) => {
+            if let Some(command) = failure.command.take() {
+                commands.push(command);
+            }
+            Err(MarketplacePreparationFailure {
+                commands,
+                message: failure.message,
+            })
+        }
+    }
+}
+
+/// Materialize the binary-embedded package at a content-addressed,
+/// versioned path owned by InferLab. Native runtimes persist local
+/// marketplace paths, so a call-scoped temporary directory is not a valid
+/// installation source.
+fn materialize_embedded_package(runtimes: &[AgentRuntime]) -> Result<PathBuf, String> {
+    let destination = embedded_package_path()?;
+    if runtimes
+        .iter()
+        .copied()
+        .all(|runtime| validate_package(runtime, &destination).is_ok())
+    {
+        return Ok(destination);
+    }
+
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "embedded plugin package: installation path {} has no parent",
+            destination.display()
+        )
     })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "embedded plugin package: cannot create data directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let staging = tempfile::Builder::new()
+        .prefix(".inferlab-plugin-")
+        .tempdir_in(parent)
+        .map_err(|error| {
+            format!(
+                "embedded plugin package: cannot create staging directory in {}: {error}",
+                parent.display()
+            )
+        })?;
     let decoder = GzDecoder::new(EMBEDDED_PLUGIN_TAR_GZ);
-    Archive::new(decoder).unpack(dir.path()).map_err(|error| {
-        format!("embedded plugin package: cannot extract the binary-embedded payload: {error}")
+    Archive::new(decoder)
+        .unpack(staging.path())
+        .map_err(|error| {
+            format!("embedded plugin package: cannot extract the binary-embedded payload: {error}")
+        })?;
+    for runtime in runtimes {
+        validate_package(*runtime, staging.path())?;
+    }
+
+    if destination.exists() {
+        if destination.is_dir() {
+            fs::remove_dir_all(&destination)
+        } else {
+            fs::remove_file(&destination)
+        }
+        .map_err(|error| {
+            format!(
+                "embedded plugin package: cannot replace incomplete materialization {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
+    let staging = staging.keep();
+    fs::rename(&staging, &destination).map_err(|error| {
+        format!(
+            "embedded plugin package: cannot publish {} as {}: {error}",
+            staging.display(),
+            destination.display()
+        )
     })?;
-    Ok(dir)
+    Ok(destination)
+}
+
+fn embedded_package_path() -> Result<PathBuf, String> {
+    let data_home = if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(path)
+    } else {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".local/share"))
+            .ok_or_else(|| {
+                "embedded plugin package: neither XDG_DATA_HOME nor HOME is set".to_owned()
+            })?
+    };
+    let digest = format!("{:x}", Sha256::digest(EMBEDDED_PLUGIN_TAR_GZ));
+    Ok(data_home
+        .join("inferlab/agent-plugins")
+        .join(format!("{INFERLAB_VERSION}-{digest}")))
 }
 
 pub fn update(selector: AgentSelector) -> AgentReport {

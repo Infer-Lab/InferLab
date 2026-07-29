@@ -47,6 +47,16 @@ for manifest in \
   sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" "${manifest}"
 done
 
+for skill in \
+  plugins/inferlab/skills/inferlab/SKILL.md \
+  crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md; do
+  grep -qE '/blob/v[0-9]+\.[0-9]+\.[0-9]+/docs/workspace-authoring\.md' "${skill}" \
+    || fail "${skill}: no versioned workspace-authoring link found"
+  sed -E -i \
+    "s|/blob/v[0-9]+\\.[0-9]+\\.[0-9]+/docs/workspace-authoring\\.md|/blob/v${version}/docs/workspace-authoring.md|" \
+    "${skill}"
+done
+
 cargo build --workspace
 pixi run build-python
 

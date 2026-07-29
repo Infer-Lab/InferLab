@@ -86,7 +86,7 @@ enum AgentCommand {
     Update(AgentSelectArgs),
     /// Uninstall the plugin.
     Uninstall(AgentSelectArgs),
-    /// Diagnose whether the native agent CLIs are ready.
+    /// Diagnose native agent CLIs and registered InferLab marketplace sources.
     Doctor(AgentSelectArgs),
 }
 

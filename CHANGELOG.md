@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-28
+
+### Fixed
+
+- Default `inferlab agent install` now materializes the embedded plugin under a
+  durable, versioned InferLab data directory instead of registering a temporary
+  marketplace source that disappears when the command exits. Re-running
+  `inferlab agent install --agent all` with 0.6.1 repairs affected 0.6.0 Codex
+  and Claude registrations, and `inferlab agent doctor` now reports a
+  configured local InferLab marketplace whose directory is missing.
+- Public CI provides the Protocol Buffers compiler required to compile and test
+  the optional Specialized Engine SMG transport on a clean runner.
+
 ## [0.6.0] - 2026-07-27
 
 ### Added

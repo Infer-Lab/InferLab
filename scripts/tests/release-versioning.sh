@@ -41,9 +41,11 @@ python/inferlab-integration-vllm/pyproject.toml
 .claude-plugin/marketplace.json
 plugins/inferlab/.claude-plugin/plugin.json
 plugins/inferlab/.codex-plugin/plugin.json
+plugins/inferlab/skills/inferlab/SKILL.md
 crates/inferlab/resources/plugin/.claude-plugin/marketplace.json
 crates/inferlab/resources/plugin/plugins/inferlab/.claude-plugin/plugin.json
 crates/inferlab/resources/plugin/plugins/inferlab/.codex-plugin/plugin.json
+crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md
 protocol/fixtures/valid/plan-serve-response.json
 protocol/fixtures/valid/render-serve-response.json
 protocol/fixtures/valid/render-serve-response-launch-file.json
@@ -94,6 +96,13 @@ printf '%s\n' "${protocol_hashes}" | sha256sum --check --quiet \
 grep -Eq "\"version\": \"${target_product_version}\"" \
   "${fixture}/plugins/inferlab/.codex-plugin/plugin.json" \
   || fail "embedded plugin did not follow the product version"
+for skill in \
+  plugins/inferlab/skills/inferlab/SKILL.md \
+  crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md; do
+  grep -Fq "/blob/v${target_product_version}/docs/workspace-authoring.md" \
+    "${fixture}/${skill}" \
+    || fail "${skill} documentation link did not follow the product version"
+done
 "${fixture}/scripts/check-product-release-version.sh" "v${target_product_version}"
 
 vllm_wheel="inferlab_integration_vllm-${vllm_version}-py3-none-any.whl"
@@ -115,7 +124,10 @@ if PATH="${fixture}/bin:${PATH}" \
 fi
 grep -q 'exact inferlab-adapter-sdk runtime dependency' \
   "${temporary}/non-exact.out" \
-  || fail "non-exact SDK dependency failure did not identify the runtime requirement"
+  || {
+    cat "${temporary}/non-exact.out" >&2
+    fail "non-exact SDK dependency failure did not identify the runtime requirement"
+  }
 cp "${temporary}/vllm-pyproject.toml" "${vllm_pyproject}"
 
 PATH="${fixture}/bin:${PATH}" \

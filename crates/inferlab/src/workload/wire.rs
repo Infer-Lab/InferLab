@@ -10,9 +10,9 @@ use crate::workspace::{
 };
 use inferlab_protocol::{
     BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetInput, BenchDefinitionInput,
-    BenchPopulationInput, BenchRequestSloInput, BenchRequestSourceInput, ClientEndpointInput,
-    EndpointProtocol, EvalDefinitionInput, EvalTaskSourceInput, MeasurementModelInput,
-    SettingValue,
+    BenchPopulationInput, BenchPrefixSharingInput, BenchRandomShapeInput, BenchRequestSloInput,
+    BenchRequestSourceInput, ClientEndpointInput, EndpointProtocol, EvalDefinitionInput,
+    EvalTaskSourceInput, MeasurementModelInput, SettingValue,
 };
 
 pub(super) fn endpoint_input(endpoint: &WorkloadEndpoint) -> ClientEndpointInput {
@@ -56,9 +56,31 @@ pub(super) fn bench_request_source_input(
         ResolvedBenchRequestSource::Random {
             input_tokens,
             output_tokens,
+            prefix_sharing,
         } => BenchRequestSourceInput::Random {
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
+            prefix_sharing: prefix_sharing
+                .as_ref()
+                .map(|sharing| BenchPrefixSharingInput {
+                    shared_prefix_ratio: sharing.shared_prefix_ratio,
+                    shared_prefix_tokens: sharing.shared_prefix_tokens,
+                    unique_suffix_tokens: sharing.unique_suffix_tokens,
+                }),
+        },
+        ResolvedBenchRequestSource::RandomMixture {
+            shapes,
+            total_weight,
+        } => BenchRequestSourceInput::RandomMixture {
+            shapes: shapes
+                .iter()
+                .map(|shape| BenchRandomShapeInput {
+                    input_tokens: shape.input_tokens,
+                    output_tokens: shape.output_tokens,
+                    weight: shape.weight,
+                })
+                .collect(),
+            total_weight: *total_weight,
         },
         ResolvedBenchRequestSource::Dataset {
             dataset,

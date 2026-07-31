@@ -10,6 +10,7 @@ mypy_path = [
     "python/inferlab-eval-runner/src",
     "python/inferlab-integration-specialized-engine/src",
     "python/inferlab-integration-vllm/src",
+    "python/inferlab-measurement-sdk/src",
 ]
 
 [tool.ruff]
@@ -17,6 +18,7 @@ target-version = "py312"
 line-length = 100
 extend-exclude = [
     "python/inferlab-adapter-sdk/src/inferlab_adapter_sdk/_generated.py",
+    "python/inferlab-measurement-sdk/src/inferlab_measurement_sdk/_generated.py",
 ]
 
 [tool.ruff.lint]

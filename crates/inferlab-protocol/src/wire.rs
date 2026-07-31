@@ -1,9 +1,8 @@
-//! The versioned wire types of the framework integration protocol
-//! ([[RFC-0006:C-INTEGRATIONS]]): the one-shot stdin/stdout JSON contract for
-//! the plan/render serve operations, plus the client request/result surfaces
-//! the release-owned Eval and Bench measurement runtimes exchange with their
-//! clients. [`AdapterProtocol`] is the schema root from which the committed
-//! JSON schema and the Python SDK models are generated.
+//! The versioned wire types used by framework integrations
+//! ([[RFC-0006:C-INTEGRATIONS]]) and by the release-owned Eval and Bench
+//! measurement clients ([[RFC-0004:C-MEASUREMENTS]]). [`AdapterProtocol`] and
+//! [`MeasurementProtocol`] are separate schema roots over this one Rust source
+//! authority.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -385,6 +384,14 @@ pub enum BenchRequestSourceInput {
     Random {
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharingInput>,
+    },
+    /// AIPerf samples exact token-shape pairs from one seeded categorical
+    /// distribution.
+    RandomMixture {
+        shapes: Vec<BenchRandomShapeInput>,
+        total_weight: u64,
     },
     /// Inferlab materializes a release-catalog conversation snapshot before
     /// AIPerf starts.
@@ -394,6 +401,25 @@ pub enum BenchRequestSourceInput {
         output_tokens: Option<u32>,
         catalog: BenchDatasetCatalogInput,
     },
+}
+
+/// The effective split between one shared system-message prefix and each
+/// request's independently generated user suffix.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPrefixSharingInput {
+    pub shared_prefix_ratio: f64,
+    pub shared_prefix_tokens: u32,
+    pub unique_suffix_tokens: u32,
+}
+
+/// One exact ISL/OSL pair and its relative categorical sampling weight.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchRandomShapeInput {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub weight: u32,
 }
 
 /// Release-qualified public Bench datasets.
@@ -1241,14 +1267,20 @@ pub struct RawArtifact {
     pub path: PathBuf,
 }
 
-/// The schema root aggregating every wire type. It exists to generate one
-/// committed JSON schema (and the Python SDK models); its optional client
-/// fields are never all populated in a single message.
+/// The schema root for the independently released framework adapter SDK.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterProtocol {
     pub request: AdapterRequest,
     pub response: AdapterResponse,
+}
+
+/// The schema root aggregating the request and result surfaces used by the
+/// product-owned Eval and Bench measurement clients. Its optional fields are
+/// code-generation anchors and are never all populated in one message.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasurementProtocol {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_client_request: Option<EvalClientRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

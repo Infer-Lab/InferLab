@@ -6,7 +6,9 @@ use crate::record::{RECORD_FILE, RECORDS_DIR, now_unix_ms, validate_record_id};
 use crate::time_bound::OperationTimingEvidence;
 use crate::workload::ResolvedWorkloadPlan;
 use crate::workload::adaptive::AdaptiveTerminationReason;
-use crate::workload::domain::{BenchDatasetCatalog, WorkloadHttpMethod};
+use crate::workload::domain::{
+    BenchDatasetCatalog, ResolvedBenchPrefixSharing, ResolvedBenchRandomShape, WorkloadHttpMethod,
+};
 use inferlab_protocol::{
     BenchDatasetPreparationResult, EvalFailureKind, EvalMetricGate, EvalNormalizedMetric,
     EvalTrialSummary, RawArtifact,
@@ -108,6 +110,12 @@ pub enum BenchRequestSourceEvidence {
     Random {
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(default)]
+        prefix_sharing: Option<ResolvedBenchPrefixSharing>,
+    },
+    RandomMixture {
+        shapes: Vec<ResolvedBenchRandomShape>,
+        total_weight: u64,
     },
     Dataset(Box<BenchDatasetRequestSourceEvidence>),
 }

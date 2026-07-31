@@ -298,10 +298,22 @@ fn prepare_bench_request_source(
         ResolvedBenchRequestSource::Random {
             input_tokens,
             output_tokens,
+            prefix_sharing,
         } => {
             session.set_bench_request_source(BenchRequestSourceEvidence::Random {
                 input_tokens,
                 output_tokens,
+                prefix_sharing,
+            })?;
+            Ok(())
+        }
+        ResolvedBenchRequestSource::RandomMixture {
+            shapes,
+            total_weight,
+        } => {
+            session.set_bench_request_source(BenchRequestSourceEvidence::RandomMixture {
+                shapes,
+                total_weight,
             })?;
             Ok(())
         }

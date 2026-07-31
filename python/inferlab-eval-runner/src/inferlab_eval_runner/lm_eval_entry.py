@@ -15,7 +15,7 @@ from pathlib import Path
 from types import MethodType
 from typing import Protocol, cast
 
-from inferlab_adapter_sdk import JsonObject, load_json_object
+from inferlab_measurement_sdk import JsonObject, load_json_object
 
 
 class PayloadClientClass(Protocol):

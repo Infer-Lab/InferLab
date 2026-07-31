@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-30
+
+### Added
+
+- Serving Bench random sources can declare one shared system-prefix ratio.
+  InferLab resolves and records exact shared-prefix and unique-suffix token
+  counts while keeping the configured ratio distinct from the backend's
+  observed prompt-cache hit ratio.
+- Serving Bench can draw a deterministic request population from an ordered,
+  weighted mixture of exact input/output token shapes. Shape selection,
+  warmup, and profiling remain on the existing release-pinned AIPerf path.
+
+### Changed
+
+- The public `inferlab-adapter-sdk` now contains only framework-integration
+  protocol models and helpers. Eval and Bench use a new internal
+  `inferlab-measurement-sdk` that is versioned and delivered with the InferLab
+  product, so future measurement-only changes do not force adapter releases.
+  `inferlab-measurement-sdk`, `inferlab-eval-runner`, and
+  `inferlab-bench-runner` all carry product version `0.7.0` and are not
+  workspace-side publications.
+- The 0.7.0 workspace package set uses `inferlab-adapter-sdk==0.6.0`, version
+  `0.5.1` of the vLLM, SGLang, TensorRT-LLM, and TokenSpeed integrations, and
+  `inferlab-integration-specialized-engine==0.2.1`. These integration patches
+  only adopt the narrower SDK dependency; serving behavior and adapter
+  protocol version 7 are unchanged. Existing workspaces must update the exact
+  adapter SDK and selected integration pins together and relock. The internal
+  measurement SDK is not a workspace dependency.
+
 ## [0.6.1] - 2026-07-28
 
 ### Fixed

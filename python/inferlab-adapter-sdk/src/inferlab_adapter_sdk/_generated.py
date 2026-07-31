@@ -40,153 +40,9 @@ class AllocationLaunch(RootModel[AllocationLaunchLocal | AllocationLaunchSsh]):
     ]
 
 
-class BenchDatasetCacheState(StrEnum):
-    missing = 'missing'
-    present = 'present'
-
-
-class BenchDatasetCatalogInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    cache_path: str
-    cache_state: BenchDatasetCacheState
-    license: str
-    materialization_identity: str
-    sha256: str
-    source_format: str
-    upstream_identity: str
-    url: str
-
-
-class BenchDatasetInput(RootModel[Literal['sharegpt']]):
-    root: Annotated[
-        Literal['sharegpt'],
-        Field(description='Release-qualified public Bench datasets.'),
-    ] = 'sharegpt'
-
-
-class BenchLoadInputConcurrencyLimited(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    concurrency: Annotated[int, Field(ge=0)]
-    kind: Literal['concurrency_limited'] = 'concurrency_limited'
-
-
-class BenchLoadInputRequestRateLimited(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    burstiness: float | None = None
-    kind: Literal['request_rate_limited'] = 'request_rate_limited'
-    request_rate: float
-
-
-class BenchLoadInputUnboundedRequestRate(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    kind: Literal['unbounded_request_rate'] = 'unbounded_request_rate'
-
-
-class BenchLoadInput(
-    RootModel[
-        BenchLoadInputConcurrencyLimited
-        | BenchLoadInputRequestRateLimited
-        | BenchLoadInputUnboundedRequestRate
-    ]
-):
-    root: Annotated[
-        BenchLoadInputConcurrencyLimited
-        | BenchLoadInputRequestRateLimited
-        | BenchLoadInputUnboundedRequestRate,
-        Field(description='How a Bench case paces its requests.'),
-    ]
-
-
-class BenchPopulationInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    entries: Annotated[int, Field(ge=0)]
-    path: str
-    sha256: str
-    tpot_applicable: bool
-
-
-class BenchRequestSloInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    minimum_good_request_ratio: float
-    request_latency_ms: float | None = None
-    tpot_ms: float | None = None
-    ttft_ms: float | None = None
-
-
-class BenchRequestSloResult(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    good_request_ratio: float
-    good_requests: Annotated[int, Field(ge=0)]
-    goodput: float
-    native_aggregate_good_request_count: Annotated[int | None, Field(ge=0)] = None
-    native_aggregate_good_request_count_consistent: bool | None = None
-    profiling_duration_seconds: float
-    profiling_duration_source: str
-    request_count_reconciled: bool
-
-
-class BenchRequestSourceInputRandom(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    input_tokens: Annotated[int, Field(ge=0)]
-    kind: Literal['random'] = 'random'
-    output_tokens: Annotated[int, Field(ge=0)]
-
-
-class BenchRequestSourceInputDataset(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    catalog: BenchDatasetCatalogInput
-    dataset: BenchDatasetInput
-    kind: Literal['dataset'] = 'dataset'
-    max_input_tokens: Annotated[int, Field(ge=0)]
-    output_tokens: Annotated[int | None, Field(ge=0)] = None
-
-
-class BenchRequestSourceInput(
-    RootModel[BenchRequestSourceInputRandom | BenchRequestSourceInputDataset]
-):
-    root: Annotated[
-        BenchRequestSourceInputRandom | BenchRequestSourceInputDataset,
-        Field(
-            description='One closed request origin lowered by Inferlab for the Bench runtime.'
-        ),
-    ]
-
-
-class BenchTokenCountSummary(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    maximum: Annotated[int, Field(ge=0)]
-    mean: float
-    minimum: Annotated[int, Field(ge=0)]
-
-
 class CaptureWindowControlEndpoint(StrEnum):
     replica_entry = 'replica_entry'
     gateway = 'gateway'
-
-
-class ClientStatus(StrEnum):
-    succeeded = 'succeeded'
-    failed = 'failed'
 
 
 class EndpointAssignment(BaseModel):
@@ -202,113 +58,6 @@ class EndpointProtocol(RootModel[Literal['http']]):
         Literal['http'],
         Field(description='The application protocol a workload endpoint speaks.'),
     ] = 'http'
-
-
-class EvalDefinitionInputOpenaiSmoke(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    kind: Literal['openai_smoke'] = 'openai_smoke'
-    max_tokens: Annotated[int, Field(ge=0)]
-    prompt: str
-    timeout_seconds: Annotated[int, Field(ge=0)]
-
-
-class EvalFailureKind(StrEnum):
-    task_resolution = 'task_resolution'
-    probe_tokenizer = 'probe_tokenizer'
-    probe_transport = 'probe_transport'
-    probe_http = 'probe_http'
-    probe_malformed_response = 'probe_malformed_response'
-    probe_generated_only_logprobs = 'probe_generated_only_logprobs'
-    probe_tokenizer_alignment = 'probe_tokenizer_alignment'
-    metric_normalization = 'metric_normalization'
-
-
-class EvalMetricComparison(StrEnum):
-    at_least = 'at_least'
-    at_most = 'at_most'
-
-
-class EvalMetricGateConclusion(StrEnum):
-    passed = 'passed'
-    failed = 'failed'
-
-
-class EvalNormalizedMetric(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    filter: str | None = None
-    higher_is_better: bool
-    metric: str
-    native_metric_key: str
-    source_identity: str
-    value: float
-
-
-class EvalTaskSourceInputBuiltIn(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    kind: Literal['built_in'] = 'built_in'
-    name: str
-
-
-class EvalTaskSourceInputBundled(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    dataset_asset_sha256: str
-    kind: Literal['bundled'] = 'bundled'
-    name: str
-    path: str
-    prompt_asset_sha256: str
-    scorer_sha256: str
-    task_closure_sha256: str
-    task_definition_sha256: str
-    task_identity: str
-
-
-class EvalTaskSourceInputWorkspaceYaml(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    kind: Literal['workspace_yaml'] = 'workspace_yaml'
-    path: str
-
-
-class EvalTaskSourceInput(
-    RootModel[
-        EvalTaskSourceInputBuiltIn
-        | EvalTaskSourceInputBundled
-        | EvalTaskSourceInputWorkspaceYaml
-    ]
-):
-    root: Annotated[
-        EvalTaskSourceInputBuiltIn
-        | EvalTaskSourceInputBundled
-        | EvalTaskSourceInputWorkspaceYaml,
-        Field(
-            description='The resolved lm-eval task source consumed by the release-owned Eval runner.'
-        ),
-    ]
-
-
-class EvalTrialSummary(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    completed_trials: Annotated[int, Field(ge=0)]
-    higher_is_better: bool
-    issued_trials: Annotated[int, Field(ge=0)]
-    pass_rate: float | None = None
-    passed_trials: Annotated[int, Field(ge=0)]
-    per_trial_filter: str | None = None
-    per_trial_metric: str
-    request_failure_trials: Annotated[int, Field(ge=0)]
-    requested_trials: Annotated[int, Field(ge=0)]
-    unissued_trials: Annotated[int, Field(ge=0)]
 
 
 class FrontendGatewayComponent(RootModel[Literal['gateway']]):
@@ -421,14 +170,6 @@ class LaunchFileDeclaration(BaseModel):
     text: str
 
 
-class MeasurementModelInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    locator: str
-    served_name: str
-
-
 class ParallelismAttention(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -479,15 +220,6 @@ class ProtocolVersion(RootModel[Literal['7']]):
             description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `7` (serialized as the\nstring `"7"`); a mismatch is rejected before lowering.'
         ),
     ] = '7'
-
-
-class RawArtifact(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    kind: str
-    name: str
-    path: str
 
 
 class ReadinessProbeHttp(BaseModel):
@@ -656,134 +388,6 @@ class AdapterResponseError(BaseModel):
     status: Literal['error'] = 'error'
 
 
-class BenchCaseInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    load_shape: BenchLoadInput
-    request_count: Annotated[int, Field(ge=0)]
-    warmup_request_count: Annotated[int, Field(ge=0)] = 0
-
-
-class BenchClientResult(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    completed_requests: Annotated[int, Field(ge=0)]
-    error: str | None = None
-    failed_requests: Annotated[int, Field(ge=0)]
-    metrics: dict[str, float]
-    native_command: list[str]
-    native_exit_code: int | None = None
-    normalization_schema: str
-    raw_artifacts: list[RawArtifact]
-    request_slo: BenchRequestSloResult | None = None
-    schema_version: Annotated[
-        int,
-        Field(
-            description='Result envelope version; clients write `1`. The measurement runtime\nrejects a bench result whose version is not `1`.',
-            ge=0,
-        ),
-    ]
-    status: ClientStatus
-
-
-class BenchDatasetPreparationRequest(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    artifact_dir: str
-    model: MeasurementModelInput
-    protocol_version: ProtocolVersion
-    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
-    request_source: BenchRequestSourceInput
-    required_entries: Annotated[int, Field(ge=0)]
-    seed: Annotated[int, Field(ge=0)]
-    source_path: str
-
-
-class BenchDatasetPreparationResult(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    admitted_entries: Annotated[int, Field(ge=0)]
-    candidate_entries: Annotated[int, Field(ge=0)]
-    error: str | None = None
-    evidence_path: str | None = None
-    ineligible_entries: Annotated[int, Field(ge=0)]
-    ineligible_reasons: dict[str, int] = {}
-    input_tokens: BenchTokenCountSummary | None = None
-    materialization_identity: str
-    output_tokens: BenchTokenCountSummary | None = None
-    population: BenchPopulationInput | None = None
-    requested_entries: Annotated[int, Field(ge=0)]
-    schema_version: Annotated[int, Field(ge=0)]
-    status: ClientStatus
-
-
-class BenchDefinitionInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
-    request_slo: BenchRequestSloInput | None = None
-    request_source: BenchRequestSourceInput
-    reset_prefix_cache: bool = False
-    seed: Annotated[int, Field(ge=0)]
-    timeout_seconds: Annotated[int, Field(ge=0)]
-
-
-class ClientEndpointInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    chat_completions_path: str
-    completions_path: str
-    host: str
-    port: Annotated[int, Field(ge=0, le=65535)]
-    protocol: EndpointProtocol
-
-
-class EvalDefinitionInputLmEval(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    concurrency: Annotated[int | None, Field(ge=0)] = None
-    few_shot: Annotated[int | None, Field(ge=0)] = None
-    kind: Literal['lm_eval'] = 'lm_eval'
-    limit: Annotated[int | None, Field(ge=0)] = None
-    max_tokens: Annotated[int | None, Field(ge=0)] = None
-    metric: str
-    metric_filter: str | None = None
-    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
-    seed: Annotated[int | None, Field(ge=0)] = None
-    task: EvalTaskSourceInput
-    threshold: float
-    timeout_seconds: Annotated[int, Field(ge=0)]
-    trials: Annotated[int, Field(ge=0)]
-
-
-class EvalDefinitionInput(
-    RootModel[EvalDefinitionInputOpenaiSmoke | EvalDefinitionInputLmEval]
-):
-    root: Annotated[
-        EvalDefinitionInputOpenaiSmoke | EvalDefinitionInputLmEval,
-        Field(
-            description='The measurement an Eval client runs against the workload endpoint.'
-        ),
-    ]
-
-
-class EvalMetricGate(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    comparison: EvalMetricComparison
-    conclusion: EvalMetricGateConclusion
-    metric: EvalNormalizedMetric
-    threshold: float
-
-
 class FrontendCoRendering(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -922,25 +526,6 @@ class ServeRoleInput(BaseModel):
     settings: dict[str, SettingValue]
 
 
-class BenchClientRequest(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    artifact_dir: str
-    case: BenchCaseInput
-    case_budget_seconds: Annotated[
-        float,
-        Field(
-            description='Remaining control-plane case budget when the client is released.'
-        ),
-    ]
-    definition: BenchDefinitionInput
-    endpoint: ClientEndpointInput
-    model: MeasurementModelInput
-    population: BenchPopulationInput | None = None
-    protocol_version: ProtocolVersion
-
-
 class CaptureWindowControlRequirement(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -958,51 +543,6 @@ class EndpointRequirement(BaseModel):
     completions_path: str
     prefix_cache_reset: HttpActionSpec | None = None
     protocol: EndpointProtocol
-
-
-class EvalClientRequest(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    artifact_dir: str
-    case_budget_seconds: Annotated[
-        float,
-        Field(
-            description='Remaining control-plane case budget when the client is released.'
-        ),
-    ]
-    definition: EvalDefinitionInput
-    endpoint: ClientEndpointInput
-    model: MeasurementModelInput
-    protocol_version: ProtocolVersion
-    workspace_root: str
-    workspace_source_exclusions: list[str]
-
-
-class EvalClientResult(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    error: str | None = None
-    failure_kind: EvalFailureKind | None = None
-    gate: EvalMetricGate | None = None
-    metrics: dict[str, float]
-    native_command: list[str]
-    native_exit_code: int | None = None
-    native_timed_out: bool = False
-    normalized_metrics: Annotated[
-        dict[str, EvalNormalizedMetric], Field(validate_default=True)
-    ] = {}
-    raw_artifacts: list[RawArtifact]
-    schema_version: Annotated[
-        int,
-        Field(
-            description='Result envelope version; clients write `1`. The measurement runtime\nrejects an eval result whose version is not `1`.',
-            ge=0,
-        ),
-    ]
-    status: ClientStatus
-    trial_summary: EvalTrialSummary | None = None
 
 
 class GatewayPlan(BaseModel):
@@ -1243,12 +783,6 @@ class AdapterProtocol(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    bench_client_request: BenchClientRequest | None = None
-    bench_client_result: BenchClientResult | None = None
-    bench_dataset_preparation_request: BenchDatasetPreparationRequest | None = None
-    bench_dataset_preparation_result: BenchDatasetPreparationResult | None = None
-    eval_client_request: EvalClientRequest | None = None
-    eval_client_result: EvalClientResult | None = None
     request: AdapterRequest
     response: AdapterResponse
 

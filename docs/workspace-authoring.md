@@ -12,17 +12,23 @@ It does not read local bindings or inspect a stack realization. Use
 `inferlab workspace show --json` when another tool needs the canonical merged
 definition.
 
-## Upgrading to 0.6
+## Upgrading to 0.7
 
-InferLab 0.6 uses adapter protocol version 7 and does not interpret
-protocol-version-6 requests or responses. Existing workspaces must update their
-exact package pins to `inferlab-adapter-sdk==0.5.0` and version `0.5.0` of the
-selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration. A Specialized
-Engine workspace uses `inferlab-integration-specialized-engine==0.2.0`. Run
+InferLab 0.7 retains adapter protocol version 7 while narrowing the public
+adapter SDK to framework-integration support. Existing 0.6 workspaces must
+update their exact package pins to `inferlab-adapter-sdk==0.6.0` and version
+`0.5.1` of the selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration.
+A Specialized Engine workspace uses
+`inferlab-integration-specialized-engine==0.2.1`. These integration patches
+only adopt the narrower SDK dependency; serving behavior is unchanged. Run
 `inferlab workspace lock` after changing the selected packages so the committed
-Pixi lock becomes the new workspace authority.
+Pixi lock becomes the new workspace authority. The product-owned
+`inferlab-measurement-sdk` is internal to the installed measurement toolchain
+and must not be added to a serving workspace.
 
-Serving definitions must also replace the former `routing_backend` field.
+Workspaces upgrading from 0.5 or earlier must also replace the former
+`routing_backend` field because protocol version 7 does not interpret
+protocol-version-6 requests or responses.
 A direct `single` server declares neither frontend backend; a routed `single`
 declares `gateway_backend`; and a `prefill_decode` server declares both
 `gateway_backend` and `pd_router_backend`. The protocol-v7 control plane rejects
@@ -437,6 +443,37 @@ the existing exact synthetic token shape:
 ```toml
 request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024 }
 ```
+
+For synthetic sources, `input_tokens` counts generated message content before
+the model's chat template adds role separators and generation markers. A fixed
+random shape may split that content into one system prefix shared by every
+request and an independently generated user suffix:
+
+```toml
+request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+```
+
+InferLab floors `input_tokens * shared_prefix_ratio` to obtain the shared
+prefix length and records both effective lengths. This controls the planned
+cacheable-content fraction; it does not guarantee the observed
+`prompt_cache_read_ratio`, which still depends on backend cache policy, block
+alignment, concurrency, and the first uncached request.
+
+Use `random_mixture` when one Bench should sample several exact ISL/OSL pairs:
+
+```toml
+request_source = { kind = "random_mixture", shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 8192, output_tokens = 1024, weight = 3 },
+] }
+```
+
+Each request independently selects one shape with probability
+`weight / sum(weight)` under the Bench seed. Weights are sampling proportions,
+not exact request quotas. Shapes must be distinct, and their output lengths
+must either all equal one or all be at least two so TPOT applicability remains
+unambiguous. Every case starts from the same deterministic source sequence;
+its warmup and profiling phases consume consecutive, non-overlapping entries.
 
 The release catalog currently exposes ShareGPT as a bounded conversational
 source. InferLab pins the Apache-2.0

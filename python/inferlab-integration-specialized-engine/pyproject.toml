@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-integration-specialized-engine"
-version = "0.2.0"
+version = "0.2.1"
 description = "Inferlab adapter integration for token-only Specialized Engines"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["inferlab-adapter-sdk==0.5.0"]
+dependencies = ["inferlab-adapter-sdk==0.6.0"]
 
 [project.scripts]
 inferlab-adapter-specialized-engine = "inferlab_integration_specialized_engine.__main__:main"

@@ -5,13 +5,6 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from inferlab_adapter_sdk import (
-    BenchClientRequest,
-    BenchClientResult,
-    BenchDatasetPreparationRequest,
-    CaseDeadline,
-    ClientStatus,
-)
 from inferlab_bench_runner.bench_client import (
     aiperf_config,
     execute,
@@ -25,6 +18,13 @@ from inferlab_bench_runner.bench_client import (
     run_aiperf,
     token_count,
     warmup_counts,
+)
+from inferlab_measurement_sdk import (
+    BenchClientRequest,
+    BenchClientResult,
+    BenchDatasetPreparationRequest,
+    CaseDeadline,
+    ClientStatus,
 )
 
 
@@ -58,6 +58,7 @@ def request(
     warmup_request_count: int = 0,
     output_tokens: int = 1000,
     request_slo: dict[str, float] | None = None,
+    request_source: dict[str, object] | None = None,
 ) -> BenchClientRequest:
     return BenchClientRequest.model_validate(
         {
@@ -71,10 +72,13 @@ def request(
             },
             "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
             "definition": {
-                "request_source": {
+                "request_source": request_source
+                if request_source is not None
+                else {
                     "kind": "random",
                     "input_tokens": 8000,
                     "output_tokens": output_tokens,
+                    "prefix_sharing": None,
                 },
                 "seed": 7,
                 "request_body": request_body
@@ -462,6 +466,73 @@ def test_config_maps_request_rate_without_burstiness_to_poisson(tmp_path: Path) 
         "rate": 3.5,
         "requests": 4,
     }
+
+
+def test_config_lowers_shared_prefix_to_one_system_message_prefix(tmp_path: Path) -> None:
+    config = aiperf_config(
+        request(
+            tmp_path,
+            {"kind": "concurrency_limited", "concurrency": 1},
+            warmup_request_count=2,
+            request_source={
+                "kind": "random",
+                "input_tokens": 8000,
+                "output_tokens": 1000,
+                "prefix_sharing": {
+                    "shared_prefix_ratio": 0.75,
+                    "shared_prefix_tokens": 6000,
+                    "unique_suffix_tokens": 2000,
+                },
+            },
+        )
+    )
+
+    benchmark = cast(dict[str, object], config["benchmark"])
+    assert benchmark["dataset"] == {
+        "type": "synthetic",
+        "entries": 6,
+        "randomSeed": 7,
+        "sampling": "sequential",
+        "prompts": {"isl": 2000, "osl": 1000},
+        "prefixPrompts": {"sharedSystemLength": 6000},
+    }
+
+
+def test_config_lowers_weighted_exact_shapes_to_aiperf_sequence_distribution(
+    tmp_path: Path,
+) -> None:
+    config = aiperf_config(
+        request(
+            tmp_path,
+            {"kind": "concurrency_limited", "concurrency": 1},
+            request_source={
+                "kind": "random_mixture",
+                "shapes": [
+                    {"input_tokens": 1024, "output_tokens": 128, "weight": 7},
+                    {"input_tokens": 8192, "output_tokens": 1024, "weight": 3},
+                ],
+                "total_weight": 10,
+            },
+        )
+    )
+
+    benchmark = cast(dict[str, object], config["benchmark"])
+    assert benchmark["dataset"] == {
+        "type": "synthetic",
+        "entries": 4,
+        "randomSeed": 7,
+        "sampling": "sequential",
+        "prompts": {
+            "sequenceDistribution": [
+                {"isl": 1024, "osl": 128, "probability": 70.0},
+                {"isl": 8192, "osl": 1024, "probability": 30.0},
+            ]
+        },
+    }
+    endpoint = cast(dict[str, object], benchmark["endpoint"])
+    extra = cast(dict[str, object], endpoint["extra"])
+    assert extra["ignore_eos"] is True
+    assert "min_tokens" not in extra
 
 
 def test_normalization_uses_the_versioned_aiperf_summary_mapping() -> None:

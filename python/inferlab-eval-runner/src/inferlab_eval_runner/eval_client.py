@@ -15,15 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from inferlab_adapter_sdk import (
+from inferlab_measurement_sdk import (
     CaseDeadline,
-    JsonObject,
-    endpoint_url,
-    load_json_object,
-    parse_args,
-    plain_setting,
-)
-from inferlab_adapter_sdk._generated import (
     ClientStatus,
     EvalClientRequest,
     EvalClientResult,
@@ -37,7 +30,12 @@ from inferlab_adapter_sdk._generated import (
     EvalTaskSourceInputBundled,
     EvalTaskSourceInputWorkspaceYaml,
     EvalTrialSummary,
+    JsonObject,
     RawArtifact,
+    endpoint_url,
+    load_json_object,
+    parse_args,
+    plain_setting,
 )
 
 from inferlab_eval_runner.lm_eval_entry import TrialEvidenceWriter

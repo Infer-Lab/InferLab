@@ -137,6 +137,22 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
             .join("runner/inferlab_bench_runner/bench_client.py")
             .is_file()
     );
+    for module in ["__init__.py", "runtime.py", "_generated.py"] {
+        assert!(
+            home.install_dir()
+                .join("runner/inferlab_measurement_sdk")
+                .join(module)
+                .is_file(),
+            "missing installed measurement SDK module {module}"
+        );
+    }
+    assert!(
+        !home
+            .install_dir()
+            .join("runner/inferlab_adapter_sdk")
+            .exists(),
+        "measurement toolchain retained the workspace-side adapter SDK"
+    );
     for phase in [
         "installation-state inspection",
         "writer-lock waiting",

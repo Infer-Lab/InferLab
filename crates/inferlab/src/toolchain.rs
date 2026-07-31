@@ -22,20 +22,19 @@ const LOCK: &str = include_str!("../resources/eval-toolchain/pixi.lock");
 const EVAL_RUNNER: &str = include_str!("../resources/toolchain-python/eval_client.py");
 const LM_EVAL_ENTRY: &str = include_str!("../resources/toolchain-python/lm_eval_entry.py");
 const BENCH_RUNNER: &str = include_str!("../resources/toolchain-python/bench_client.py");
-// The complete adapter-sdk package as the runners import it: the runners
-// use package-level names, so every module of the package ships and every
-// module enters the runner digests. Adding a module to the sdk MUST extend
-// this list — the test fixture shims pixi, so only a real
+// The complete internal measurement-sdk package as the runners import it:
+// every module ships and enters the runner digests. Adding a module to the sdk
+// MUST extend this list — the test fixture shims pixi, so only a real
 // `inferlab toolchain install` exercises these imports
 // ([[RFC-0004:C-INFERLAB-TOOLCHAIN]]). The copies under resources/ keep the
 // published crate self-contained; a packaging test pins each byte-identical
 // to its python source.
-const PROTOCOL_INIT: &str =
-    include_str!("../resources/toolchain-python/inferlab_adapter_sdk/__init__.py");
-const PROTOCOL_RUNTIME: &str =
-    include_str!("../resources/toolchain-python/inferlab_adapter_sdk/runtime.py");
-const GENERATED_PROTOCOL: &str =
-    include_str!("../resources/toolchain-python/inferlab_adapter_sdk/_generated.py");
+const MEASUREMENT_SDK_INIT: &str =
+    include_str!("../resources/toolchain-python/inferlab_measurement_sdk/__init__.py");
+const MEASUREMENT_SDK_RUNTIME: &str =
+    include_str!("../resources/toolchain-python/inferlab_measurement_sdk/runtime.py");
+const GENERATED_MEASUREMENT_PROTOCOL: &str =
+    include_str!("../resources/toolchain-python/inferlab_measurement_sdk/_generated.py");
 const ESTONIA_TASK: &str = include_str!("../resources/bundled-eval-tasks/estonia/estonia.yaml");
 const ESTONIA_PROMPT: &str = include_str!("../resources/bundled-eval-tasks/estonia/prompt.txt");
 const ESTONIA_DATASET: &str = include_str!("../resources/bundled-eval-tasks/estonia/dataset.json");
@@ -387,9 +386,9 @@ fn eval_identity(platform: &str, handshake: EvalHandshake) -> EvalToolchainIdent
         runner_sha256: eval_runner_digest(
             EVAL_RUNNER.as_bytes(),
             LM_EVAL_ENTRY.as_bytes(),
-            PROTOCOL_INIT.as_bytes(),
-            PROTOCOL_RUNTIME.as_bytes(),
-            GENERATED_PROTOCOL.as_bytes(),
+            MEASUREMENT_SDK_INIT.as_bytes(),
+            MEASUREMENT_SDK_RUNTIME.as_bytes(),
+            GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
         ),
         lm_eval_version: handshake.lm_eval_version,
         bundled_task_closure_sha256: bundled_task_closure_digest(),
@@ -431,9 +430,9 @@ fn bundled_task_closure_digest() -> String {
 fn runner_digest(runner: &[u8]) -> String {
     runner_digest_parts(
         runner,
-        PROTOCOL_INIT.as_bytes(),
-        PROTOCOL_RUNTIME.as_bytes(),
-        GENERATED_PROTOCOL.as_bytes(),
+        MEASUREMENT_SDK_INIT.as_bytes(),
+        MEASUREMENT_SDK_RUNTIME.as_bytes(),
+        GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
     )
 }
 
@@ -487,11 +486,11 @@ fn create_dir_all(path: &Path) -> Result<(), InferlabError> {
 fn write_release_files(path: &Path) -> Result<(), InferlabError> {
     let eval_runner = path.join("runner/inferlab_eval_runner");
     let bench_runner = path.join("runner/inferlab_bench_runner");
-    let protocol = path.join("runner/inferlab_adapter_sdk");
+    let measurement_sdk = path.join("runner/inferlab_measurement_sdk");
     let estonia = path.join("runner/inferlab_eval_runner/bundled_tasks/estonia");
     create_dir_all(&eval_runner)?;
     create_dir_all(&bench_runner)?;
-    create_dir_all(&protocol)?;
+    create_dir_all(&measurement_sdk)?;
     create_dir_all(&estonia)?;
     write(path.join("pixi.toml"), MANIFEST)?;
     write(path.join("pixi.lock"), LOCK)?;
@@ -504,9 +503,12 @@ fn write_release_files(path: &Path) -> Result<(), InferlabError> {
     write(estonia.join("estonia.py"), ESTONIA_SCORER)?;
     write(bench_runner.join("bench_client.py"), BENCH_RUNNER)?;
     write(bench_runner.join("__init__.py"), "")?;
-    write(protocol.join("__init__.py"), PROTOCOL_INIT)?;
-    write(protocol.join("runtime.py"), PROTOCOL_RUNTIME)?;
-    write(protocol.join("_generated.py"), GENERATED_PROTOCOL)
+    write(measurement_sdk.join("__init__.py"), MEASUREMENT_SDK_INIT)?;
+    write(measurement_sdk.join("runtime.py"), MEASUREMENT_SDK_RUNTIME)?;
+    write(
+        measurement_sdk.join("_generated.py"),
+        GENERATED_MEASUREMENT_PROTOCOL,
+    )
 }
 
 fn write(path: PathBuf, contents: &str) -> Result<(), InferlabError> {
@@ -749,9 +751,9 @@ fn eval_identity_matches(identity: &EvalToolchainIdentity, platform: &str) -> bo
             == eval_runner_digest(
                 EVAL_RUNNER.as_bytes(),
                 LM_EVAL_ENTRY.as_bytes(),
-                PROTOCOL_INIT.as_bytes(),
-                PROTOCOL_RUNTIME.as_bytes(),
-                GENERATED_PROTOCOL.as_bytes(),
+                MEASUREMENT_SDK_INIT.as_bytes(),
+                MEASUREMENT_SDK_RUNTIME.as_bytes(),
+                GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
             )
         && pinned_pypi_version("eval", "lm-eval")
             .is_ok_and(|expected| identity.lm_eval_version == expected)
@@ -790,9 +792,12 @@ fn release_files_match(path: &Path) -> bool {
     let eval_runner = fs::read(eval_runner_path(path)).ok();
     let lm_eval_entry = fs::read(path.join("runner/inferlab_eval_runner/lm_eval_entry.py")).ok();
     let bench_runner = fs::read(bench_runner_path(path)).ok();
-    let protocol_init = fs::read(path.join("runner/inferlab_adapter_sdk/__init__.py")).ok();
-    let protocol_runtime = fs::read(path.join("runner/inferlab_adapter_sdk/runtime.py")).ok();
-    let protocol = fs::read(path.join("runner/inferlab_adapter_sdk/_generated.py")).ok();
+    let measurement_sdk_init =
+        fs::read(path.join("runner/inferlab_measurement_sdk/__init__.py")).ok();
+    let measurement_sdk_runtime =
+        fs::read(path.join("runner/inferlab_measurement_sdk/runtime.py")).ok();
+    let measurement_protocol =
+        fs::read(path.join("runner/inferlab_measurement_sdk/_generated.py")).ok();
     let bundled_task =
         fs::read(path.join("runner/inferlab_eval_runner/bundled_tasks/estonia/estonia.yaml")).ok();
     let bundled_prompt =
@@ -804,18 +809,18 @@ fn release_files_match(path: &Path) -> bool {
     let on_disk_digest = |runner: Option<&[u8]>| -> Option<String> {
         Some(runner_digest_parts(
             runner?,
-            protocol_init.as_deref()?,
-            protocol_runtime.as_deref()?,
-            protocol.as_deref()?,
+            measurement_sdk_init.as_deref()?,
+            measurement_sdk_runtime.as_deref()?,
+            measurement_protocol.as_deref()?,
         ))
     };
     let on_disk_eval_digest = || -> Option<String> {
         Some(eval_runner_digest(
             eval_runner.as_deref()?,
             lm_eval_entry.as_deref()?,
-            protocol_init.as_deref()?,
-            protocol_runtime.as_deref()?,
-            protocol.as_deref()?,
+            measurement_sdk_init.as_deref()?,
+            measurement_sdk_runtime.as_deref()?,
+            measurement_protocol.as_deref()?,
         ))
     };
     manifest
@@ -828,9 +833,9 @@ fn release_files_match(path: &Path) -> bool {
             == Some(eval_runner_digest(
                 EVAL_RUNNER.as_bytes(),
                 LM_EVAL_ENTRY.as_bytes(),
-                PROTOCOL_INIT.as_bytes(),
-                PROTOCOL_RUNTIME.as_bytes(),
-                GENERATED_PROTOCOL.as_bytes(),
+                MEASUREMENT_SDK_INIT.as_bytes(),
+                MEASUREMENT_SDK_RUNTIME.as_bytes(),
+                GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
             ))
         && on_disk_digest(bench_runner.as_deref()) == Some(runner_digest(BENCH_RUNNER.as_bytes()))
         && bundled_task.as_deref() == Some(ESTONIA_TASK.as_bytes())

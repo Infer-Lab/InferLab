@@ -10,10 +10,10 @@ fail() {
   exit 1
 }
 
-expected_release_owned=$'inferlab-bench-runner\ninferlab-eval-runner'
+expected_release_owned=$'inferlab-bench-runner\ninferlab-eval-runner\ninferlab-measurement-sdk'
 actual_release_owned="$("${root}/scripts/python-package-inventory.sh" release-owned)"
 test "${actual_release_owned}" = "${expected_release_owned}" \
-  || fail "release-owned inventory did not contain exactly the measurement runners"
+  || fail "release-owned inventory did not contain exactly the measurement packages"
 
 fixture="${temporary}/repo"
 mkdir -p "${fixture}/scripts" "${fixture}/bin" "${fixture}/dist"
@@ -33,6 +33,7 @@ crates/inferlab/Cargo.toml
 python/inferlab-adapter-sdk/pyproject.toml
 python/inferlab-bench-runner/pyproject.toml
 python/inferlab-eval-runner/pyproject.toml
+python/inferlab-measurement-sdk/pyproject.toml
 python/inferlab-integration-sglang/pyproject.toml
 python/inferlab-integration-specialized-engine/pyproject.toml
 python/inferlab-integration-tensorrt-llm/pyproject.toml
@@ -81,13 +82,18 @@ grep -Eq "^version = \"${target_product_version}\"$" "${fixture}/Cargo.toml" \
   || fail "product version was not updated"
 grep -Eq 'inferlab-protocol = .*version = "9"' "${fixture}/crates/inferlab/Cargo.toml" \
   || fail "the binary crate dependency requirement did not follow the product major version"
-for package in inferlab-bench-runner inferlab-eval-runner; do
+for package in inferlab-bench-runner inferlab-eval-runner inferlab-measurement-sdk; do
   grep -Eq "^version = \"${target_product_version}\"$" \
     "${fixture}/python/${package}/pyproject.toml" \
     || fail "${package} did not follow the product version"
-  grep -Fq "inferlab-adapter-sdk==${sdk_version}" \
+done
+for package in inferlab-bench-runner inferlab-eval-runner; do
+  grep -Fq "inferlab-measurement-sdk==${target_product_version}" \
     "${fixture}/python/${package}/pyproject.toml" \
-    || fail "${package} SDK dependency changed during a product bump"
+    || fail "${package} measurement SDK dependency did not follow the product bump"
+  ! grep -Fq "inferlab-adapter-sdk" \
+    "${fixture}/python/${package}/pyproject.toml" \
+    || fail "${package} depends on the public adapter SDK"
 done
 printf '%s\n' "${workspace_hashes}" | sha256sum --check --quiet \
   || fail "a workspace-side package changed during a product bump"
@@ -99,6 +105,9 @@ grep -Eq "\"version\": \"${target_product_version}\"" \
 for skill in \
   plugins/inferlab/skills/inferlab/SKILL.md \
   crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md; do
+  grep -Fq "[${target_product_version} workspace authoring guide]" \
+    "${fixture}/${skill}" \
+    || fail "${skill} documentation link label did not follow the product version"
   grep -Fq "/blob/v${target_product_version}/docs/workspace-authoring.md" \
     "${fixture}/${skill}" \
     || fail "${skill} documentation link did not follow the product version"
@@ -147,9 +156,9 @@ test -f "${fixture}/dist/${vllm_wheel}.sha256" \
   || fail "publication preparation did not write the selected wheel checksum"
 
 if PATH="${fixture}/bin:${PATH}" \
-  "${fixture}/scripts/prepare-python-package-release.sh" inferlab-eval-runner \
+  "${fixture}/scripts/prepare-python-package-release.sh" inferlab-measurement-sdk \
   > "${temporary}/invalid.out" 2>&1; then
-  fail "publication preparation accepted a release-owned internal runner"
+  fail "publication preparation accepted the internal measurement SDK"
 fi
 grep -q 'not a workspace-side package' "${temporary}/invalid.out" \
-  || fail "invalid package failure did not name the ownership boundary"
+  || fail "internal measurement SDK failure did not name the ownership boundary"

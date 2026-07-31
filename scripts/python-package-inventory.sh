@@ -21,6 +21,7 @@ case "${scope}" in
     pyprojects=(
       "${python_root}/inferlab-bench-runner/pyproject.toml"
       "${python_root}/inferlab-eval-runner/pyproject.toml"
+      "${python_root}/inferlab-measurement-sdk/pyproject.toml"
     )
     ;;
   *)

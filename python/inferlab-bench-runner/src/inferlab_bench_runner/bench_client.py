@@ -14,16 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from inferlab_adapter_sdk import (
-    CaseBudgetExpired,
-    CaseDeadline,
-    JsonObject,
-    endpoint_url,
-    load_json_object,
-    parse_args,
-    plain_setting,
-)
-from inferlab_adapter_sdk._generated import (
+from inferlab_measurement_sdk import (
     BenchClientRequest,
     BenchClientResult,
     BenchDatasetPreparationRequest,
@@ -36,9 +27,17 @@ from inferlab_adapter_sdk._generated import (
     BenchRequestSloResult,
     BenchRequestSourceInputDataset,
     BenchRequestSourceInputRandom,
+    BenchRequestSourceInputRandomMixture,
     BenchTokenCountSummary,
+    CaseBudgetExpired,
+    CaseDeadline,
     ClientStatus,
+    JsonObject,
     RawArtifact,
+    endpoint_url,
+    load_json_object,
+    parse_args,
+    plain_setting,
 )
 
 RUNNER_VERSION = "0.3.0"
@@ -510,13 +509,42 @@ def resolve_aiperf_population(request: BenchClientRequest) -> AiperfRequestPopul
             "randomSeed": request.definition.seed,
             "sampling": "sequential",
             "prompts": {
-                "isl": source.input_tokens,
+                "isl": source.prefix_sharing.unique_suffix_tokens
+                if source.prefix_sharing is not None
+                else source.input_tokens,
                 "osl": source.output_tokens,
             },
         }
+        if source.prefix_sharing is not None:
+            dataset["prefixPrompts"] = {
+                "sharedSystemLength": source.prefix_sharing.shared_prefix_tokens
+            }
         if request.population is not None:
             raise ValueError("random Bench request must not provide a materialized population")
         tpot_applicable = source.output_tokens >= 2
+    elif isinstance(source, BenchRequestSourceInputRandomMixture):
+        if request.population is not None:
+            raise ValueError(
+                "random_mixture Bench request must not provide a materialized population"
+            )
+        if source.total_weight <= 0:
+            raise ValueError("random_mixture Bench request has no positive total weight")
+        probabilities: list[JsonObject] = [
+            {
+                "isl": shape.input_tokens,
+                "osl": shape.output_tokens,
+                "probability": (100.0 * float(shape.weight) / float(source.total_weight)),
+            }
+            for shape in source.shapes
+        ]
+        dataset = {
+            "type": "synthetic",
+            "entries": entries,
+            "randomSeed": request.definition.seed,
+            "sampling": "sequential",
+            "prompts": {"sequenceDistribution": probabilities},
+        }
+        tpot_applicable = bool(source.shapes and source.shapes[0].output_tokens >= 2)
     elif isinstance(source, BenchRequestSourceInputDataset):
         population = request.population
         if population is None:

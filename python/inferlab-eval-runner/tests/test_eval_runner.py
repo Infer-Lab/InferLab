@@ -7,18 +7,6 @@ from types import SimpleNamespace
 from typing import TextIO, cast
 
 import pytest
-from inferlab_adapter_sdk import (
-    CaseDeadline,
-    ClientStatus,
-    EvalClientRequest,
-    EvalClientResult,
-    EvalDefinitionInput,
-    EvalDefinitionInputLmEval,
-    EvalFailureKind,
-    EvalMetricComparison,
-    EvalMetricGateConclusion,
-    RawArtifact,
-)
 from inferlab_eval_runner.bundled_tasks.estonia.estonia import process_results as score_estonia
 from inferlab_eval_runner.eval_client import (
     PROMPT_LOGPROB_PROBE_PROMPT,
@@ -53,6 +41,18 @@ from inferlab_eval_runner.lm_eval_entry import (
 )
 from inferlab_eval_runner.lm_eval_entry import (
     main as lm_eval_entry_main,
+)
+from inferlab_measurement_sdk import (
+    CaseDeadline,
+    ClientStatus,
+    EvalClientRequest,
+    EvalClientResult,
+    EvalDefinitionInput,
+    EvalDefinitionInputLmEval,
+    EvalFailureKind,
+    EvalMetricComparison,
+    EvalMetricGateConclusion,
+    RawArtifact,
 )
 
 

@@ -6,7 +6,7 @@ use std::process::Command;
 /// Every packaged copy must stay byte-identical to its source: the license
 /// copies (and the embedded notice) under [[RFC-0001:C-LICENSE-RETENTION]],
 /// and the toolchain payload that keeps the published crate self-contained.
-/// The adapter-sdk set is enumerated from its source directory and the
+/// The internal measurement-sdk set is enumerated from its source directory and the
 /// include count pins toolchain.rs to the same set, so a new sdk module
 /// cannot be silently incomplete — it fails here rather than at a real
 /// toolchain install ([[RFC-0004:C-INFERLAB-TOOLCHAIN]]).
@@ -68,7 +68,7 @@ fn packaged_copies_match_their_sources() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let sdk_source = root.join("python/inferlab-adapter-sdk/src/inferlab_adapter_sdk");
+    let sdk_source = root.join("python/inferlab-measurement-sdk/src/inferlab_measurement_sdk");
     let mut modules = Vec::new();
     for entry in fs::read_dir(&sdk_source)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
@@ -80,7 +80,7 @@ fn packaged_copies_match_their_sources() -> Result<(), Box<dyn Error>> {
     assert!(!modules.is_empty(), "sdk source enumeration found nothing");
     for name in &modules {
         let copy = crate_dir
-            .join("resources/toolchain-python/inferlab_adapter_sdk")
+            .join("resources/toolchain-python/inferlab_measurement_sdk")
             .join(name);
         let copied = fs::read(&copy).map_err(|error| {
             format!(
@@ -96,7 +96,7 @@ fn packaged_copies_match_their_sources() -> Result<(), Box<dyn Error>> {
     }
     let toolchain_rs = include_str!("../src/toolchain.rs");
     let includes = toolchain_rs
-        .matches("toolchain-python/inferlab_adapter_sdk/")
+        .matches("toolchain-python/inferlab_measurement_sdk/")
         .count();
     assert_eq!(
         includes,

@@ -532,6 +532,11 @@ pub enum BenchRequestSource {
     Random {
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_sharing: Option<BenchPrefixSharing>,
+    },
+    RandomMixture {
+        shapes: Vec<BenchRandomShape>,
     },
     Dataset {
         dataset: BenchDataset,
@@ -541,12 +546,31 @@ pub enum BenchRequestSource {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPrefixSharing {
+    pub shared_prefix_ratio: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchRandomShape {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub weight: u32,
+}
+
 impl BenchRequestSource {
     pub fn tpot_applicability(&self) -> BenchTpotApplicability {
         match self {
             Self::Random { output_tokens, .. } => {
                 BenchTpotApplicability::from_output_tokens(*output_tokens)
             }
+            Self::RandomMixture { shapes } => shapes
+                .first()
+                .map_or(BenchTpotApplicability::Inapplicable, |shape| {
+                    BenchTpotApplicability::from_output_tokens(shape.output_tokens)
+                }),
             Self::Dataset { output_tokens, .. } => output_tokens.map_or(
                 BenchTpotApplicability::Applicable,
                 BenchTpotApplicability::from_output_tokens,
@@ -2099,6 +2123,7 @@ fn validate_bench_common(
         BenchRequestSource::Random {
             input_tokens,
             output_tokens,
+            prefix_sharing,
         } => {
             require_positive("request_source.input_tokens", id, u64::from(*input_tokens))?;
             require_positive(
@@ -2106,6 +2131,67 @@ fn validate_bench_common(
                 id,
                 u64::from(*output_tokens),
             )?;
+            if let Some(prefix_sharing) = prefix_sharing {
+                let ratio = prefix_sharing.shared_prefix_ratio;
+                if !(ratio.is_finite() && ratio > 0.0 && ratio < 1.0) {
+                    return invalid(format!(
+                        "bench {id:?} request_source.prefix_sharing.shared_prefix_ratio must be finite and in (0, 1)"
+                    ));
+                }
+                let shared_prefix_tokens = (f64::from(*input_tokens) * ratio).floor() as u32;
+                if shared_prefix_tokens == 0 {
+                    return invalid(format!(
+                        "bench {id:?} request_source shared prefix must resolve to at least one token"
+                    ));
+                }
+            }
+        }
+        BenchRequestSource::RandomMixture { shapes } => {
+            if shapes.len() < 2 {
+                return invalid(format!(
+                    "bench {id:?} request_source random_mixture requires at least two shapes"
+                ));
+            }
+            let mut identities = BTreeSet::new();
+            let mut total_weight = 0_u64;
+            let first_tpot = BenchTpotApplicability::from_output_tokens(
+                shapes.first().map_or(0, |shape| shape.output_tokens),
+            );
+            for (index, shape) in shapes.iter().enumerate() {
+                require_positive(
+                    &format!("request_source.shapes[{index}].input_tokens"),
+                    id,
+                    u64::from(shape.input_tokens),
+                )?;
+                require_positive(
+                    &format!("request_source.shapes[{index}].output_tokens"),
+                    id,
+                    u64::from(shape.output_tokens),
+                )?;
+                require_positive(
+                    &format!("request_source.shapes[{index}].weight"),
+                    id,
+                    u64::from(shape.weight),
+                )?;
+                if !identities.insert((shape.input_tokens, shape.output_tokens)) {
+                    return invalid(format!(
+                        "bench {id:?} request_source random_mixture contains duplicate shape ({}, {})",
+                        shape.input_tokens, shape.output_tokens
+                    ));
+                }
+                total_weight = total_weight
+                    .checked_add(u64::from(shape.weight))
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: format!(
+                            "bench {id:?} request_source random_mixture total weight exceeds the supported unsigned 64-bit range"
+                        ),
+                    })?;
+                if BenchTpotApplicability::from_output_tokens(shape.output_tokens) != first_tpot {
+                    return invalid(format!(
+                        "bench {id:?} request_source random_mixture must not mix TPOT-applicable and TPOT-inapplicable shapes"
+                    ));
+                }
+            }
         }
         BenchRequestSource::Dataset {
             max_input_tokens,
@@ -3792,6 +3878,155 @@ timeout_seconds = 60
     }
 
     #[test]
+    fn random_request_source_accepts_one_shared_prefix_ratio()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8000, output_tokens = 1000, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("shared-prefix", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            BenchRequestSource::Random {
+                input_tokens: 8000,
+                output_tokens: 1000,
+                prefix_sharing: Some(BenchPrefixSharing {
+                    shared_prefix_ratio: 0.75,
+                }),
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn random_request_source_rejects_a_ratio_that_resolves_to_no_shared_tokens()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 1, output_tokens = 1, prefix_sharing = { shared_prefix_ratio = 0.5 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let Err(error) = validate_bench("empty-prefix", &definition) else {
+            return Err(std::io::Error::other(
+                "a shared-prefix ratio resolving to zero tokens must be rejected",
+            )
+            .into());
+        };
+
+        assert!(
+            error.to_string().contains("shared prefix"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn weighted_random_mixture_owns_exact_shapes_and_one_tpot_class()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 8192, output_tokens = 1024, weight = 3 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("mixture", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert_eq!(
+            request_source.tpot_applicability(),
+            BenchTpotApplicability::Applicable
+        );
+        assert!(matches!(
+            request_source,
+            BenchRequestSource::RandomMixture { shapes }
+                if shapes
+                    == vec![
+                        BenchRandomShape {
+                            input_tokens: 1024,
+                            output_tokens: 128,
+                            weight: 7,
+                        },
+                        BenchRandomShape {
+                            input_tokens: 8192,
+                            output_tokens: 1024,
+                            weight: 3,
+                        },
+                    ]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn weighted_random_mixture_rejects_duplicate_shapes_and_mixed_tpot_classes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let duplicate = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 1024, output_tokens = 128, weight = 3 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+        let mixed_tpot = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", shapes = [
+  { input_tokens = 1024, output_tokens = 1, weight = 1 },
+  { input_tokens = 8192, output_tokens = 2, weight = 1 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        let Err(duplicate_error) = validate_bench("duplicate-mixture", &duplicate) else {
+            return Err(std::io::Error::other("duplicate exact shapes must be rejected").into());
+        };
+        let Err(tpot_error) = validate_bench("mixed-tpot", &mixed_tpot) else {
+            return Err(std::io::Error::other(
+                "one mixture cannot span TPOT applicability classes",
+            )
+            .into());
+        };
+
+        assert!(
+            duplicate_error.to_string().contains("duplicate shape"),
+            "unexpected error: {duplicate_error}"
+        );
+        assert!(
+            tpot_error.to_string().contains("TPOT"),
+            "unexpected error: {tpot_error}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn legacy_flat_token_shape_is_not_a_second_bench_authority() {
         let result = toml::from_str::<BenchDefinition>(
             r#"
@@ -3827,6 +4062,7 @@ timeout_seconds = 60
             &BenchRequestSource::Random {
                 input_tokens: 128,
                 output_tokens: 32,
+                prefix_sharing: None,
             },
             &[],
             &Some(RequestSlo {

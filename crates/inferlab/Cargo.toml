@@ -27,8 +27,8 @@ crossterm.workspace = true
 ctrlc.workspace = true
 flate2.workspace = true
 fs2.workspace = true
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.6" }
-inferlab-proxy = { path = "../inferlab-proxy", version = "0.6" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.7" }
+inferlab-proxy = { path = "../inferlab-proxy", version = "0.7" }
 humantime.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true

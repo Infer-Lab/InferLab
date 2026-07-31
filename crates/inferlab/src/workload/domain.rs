@@ -56,12 +56,32 @@ pub struct BenchDatasetCatalog {
     pub materialization_identity: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ResolvedBenchPrefixSharing {
+    pub shared_prefix_ratio: f64,
+    pub shared_prefix_tokens: u32,
+    pub unique_suffix_tokens: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResolvedBenchRandomShape {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResolvedBenchRequestSource {
     Random {
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(default)]
+        prefix_sharing: Option<ResolvedBenchPrefixSharing>,
+    },
+    RandomMixture {
+        shapes: Vec<ResolvedBenchRandomShape>,
+        total_weight: u64,
     },
     Dataset {
         dataset: BenchDataset,

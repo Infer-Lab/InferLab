@@ -23,8 +23,9 @@ else
 fi
 
 # [[ADR-0021]] Product bumps own the Cargo workspace, embedded plugin, and
-# internal measurement-runner package metadata. Workspace-side integrations
-# retain their independently released package versions and SDK requirements.
+# internal measurement package metadata and dependency closure. Workspace-side
+# integrations retain their independently released package versions and SDK
+# requirements.
 sed -i "s/^version = \"[^\"]*\"/version = \"${version}\"/" Cargo.toml
 sed -E -i "/^inferlab-protocol = / s/version = \"[^\"]+\"/version = \"${crate_requirement}\"/" \
   crates/inferlab/Cargo.toml
@@ -36,6 +37,12 @@ while IFS= read -r package; do
   pyproject="python/${package}/pyproject.toml"
   sed -i "0,/^version = \"[^\"]*\"/s//version = \"${version}\"/" "${pyproject}"
 done <<< "${release_owned_inventory}"
+for runner in inferlab-bench-runner inferlab-eval-runner; do
+  pyproject="python/${runner}/pyproject.toml"
+  sed -E -i \
+    "s/inferlab-measurement-sdk==[0-9]+\\.[0-9]+\\.[0-9]+/inferlab-measurement-sdk==${version}/" \
+    "${pyproject}"
+done
 
 for manifest in \
   .claude-plugin/marketplace.json \
@@ -50,8 +57,13 @@ done
 for skill in \
   plugins/inferlab/skills/inferlab/SKILL.md \
   crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md; do
+  grep -qE '\[[0-9]+\.[0-9]+\.[0-9]+ workspace authoring guide\]' "${skill}" \
+    || fail "${skill}: no versioned workspace-authoring link label found"
   grep -qE '/blob/v[0-9]+\.[0-9]+\.[0-9]+/docs/workspace-authoring\.md' "${skill}" \
     || fail "${skill}: no versioned workspace-authoring link found"
+  sed -E -i \
+    "s|\\[[0-9]+\\.[0-9]+\\.[0-9]+ workspace authoring guide\\]|[${version} workspace authoring guide]|" \
+    "${skill}"
   sed -E -i \
     "s|/blob/v[0-9]+\\.[0-9]+\\.[0-9]+/docs/workspace-authoring\\.md|/blob/v${version}/docs/workspace-authoring.md|" \
     "${skill}"

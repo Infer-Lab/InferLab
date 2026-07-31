@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inferlab-measurement-sdk"
+version = "0.7.0"
+description = "Internal generated models and runtime helpers for InferLab measurement clients"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["pydantic>=2.13,<3"]
+
+[project.urls]
+Repository = "https://github.com/Infer-Lab/InferLab"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inferlab_measurement_sdk"]
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "LICENSE", "README.md"]

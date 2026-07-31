@@ -1,9 +1,9 @@
 use inferlab_protocol::{
-    AdapterRequest, AdapterResponse, AdapterResult, EvalClientRequest, EvalClientResult,
-    EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion,
-    EvalTaskSourceInput, PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe,
-    RenderInputDeclaration, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
-    protocol_schema,
+    AdapterRequest, AdapterResponse, AdapterResult, BenchClientRequest, BenchRequestSourceInput,
+    EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
+    EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID,
+    PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe, RenderInputDeclaration, SettingValue,
+    SuppliedRenderInput, TargetEndpointScheme, measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -68,9 +68,17 @@ const VALID_EVAL_CLIENT_RESULT_NORMALIZED_METRIC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/eval-client-result-normalized-metric.json"
 ));
-const GENERATED_SCHEMA: &str = include_str!(concat!(
+const VALID_BENCH_CLIENT_REQUEST_RANDOM_MIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-request-random-mixture.json"
+));
+const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/schema/adapter-protocol-v7.schema.json"
+));
+const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/schema/measurement-protocol-v1.schema.json"
 ));
 
 #[test]
@@ -87,6 +95,27 @@ fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
     }"#;
 
     assert!(serde_json::from_str::<AdapterRequest>(request).is_err());
+}
+
+#[test]
+fn weighted_random_mixture_fixture_round_trips() -> Result<(), Box<dyn Error>> {
+    let request: BenchClientRequest =
+        serde_json::from_str(VALID_BENCH_CLIENT_REQUEST_RANDOM_MIXTURE)?;
+    let BenchRequestSourceInput::RandomMixture {
+        shapes,
+        total_weight,
+    } = &request.definition.request_source
+    else {
+        return Err("Bench fixture did not contain a random mixture".into());
+    };
+
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(*total_weight, 10);
+    assert_eq!(
+        serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
+        request
+    );
+    Ok(())
 }
 
 #[test]
@@ -111,7 +140,7 @@ fn protocol_v7_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box
 
 #[test]
 fn frontend_component_schema_uses_stable_binding_names() -> Result<(), Box<dyn Error>> {
-    let schema: serde_json::Value = serde_json::from_str(GENERATED_SCHEMA)?;
+    let schema: serde_json::Value = serde_json::from_str(GENERATED_ADAPTER_SCHEMA)?;
     let definitions = schema["$defs"]
         .as_object()
         .ok_or("protocol schema did not contain definitions")?;
@@ -405,51 +434,75 @@ fn invalid_fixtures_are_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn generated_schema_is_current_and_versioned() -> Result<(), Box<dyn Error>> {
-    let mut rendered = serde_json::to_string_pretty(&protocol_schema())?;
-    rendered.push('\n');
+fn generated_schemas_are_current_versioned_and_disjoint() -> Result<(), Box<dyn Error>> {
+    let mut adapter_rendered = serde_json::to_string_pretty(&protocol_schema())?;
+    adapter_rendered.push('\n');
+    let mut measurement_rendered = serde_json::to_string_pretty(&measurement_schema())?;
+    measurement_rendered.push('\n');
 
-    assert_eq!(rendered, GENERATED_SCHEMA);
-    let schema: serde_json::Value = serde_json::from_str(GENERATED_SCHEMA)?;
-    assert_eq!(schema["$id"], PROTOCOL_SCHEMA_ID);
+    assert_eq!(adapter_rendered, GENERATED_ADAPTER_SCHEMA);
+    assert_eq!(measurement_rendered, GENERATED_MEASUREMENT_SCHEMA);
+    let adapter_schema: serde_json::Value = serde_json::from_str(GENERATED_ADAPTER_SCHEMA)?;
+    let measurement_schema: serde_json::Value = serde_json::from_str(GENERATED_MEASUREMENT_SCHEMA)?;
+    assert_eq!(adapter_schema["$id"], PROTOCOL_SCHEMA_ID);
+    assert_eq!(measurement_schema["$id"], MEASUREMENT_SCHEMA_ID);
     assert_eq!(
-        schema["$schema"],
+        adapter_schema["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
     );
-    let definitions = schema["$defs"]
+    assert_eq!(
+        measurement_schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    let adapter_definitions = adapter_schema["$defs"]
         .as_object()
-        .ok_or("protocol schema has no definitions")?;
-    for structural_marker in [
-        "AdapterErrorStatus",
-        "AdapterOkStatus",
-        "ConcurrencyLimitedKind",
-        "LmEvalKind",
-        "LowerBenchOperation",
-        "PlanServeOperation",
-        "RenderServeOperation",
-        "OpenAiSmokeKind",
-        "RequestRateLimitedKind",
-        "UnboundedRequestRateKind",
+        .ok_or("adapter protocol schema has no definitions")?;
+    let measurement_definitions = measurement_schema["$defs"]
+        .as_object()
+        .ok_or("measurement protocol schema has no definitions")?;
+    for adapter_type in [
+        "AdapterRequest",
+        "AdapterResponse",
+        "PlanServeInput",
+        "RenderServeInput",
     ] {
         assert!(
-            !definitions.contains_key(structural_marker),
-            "schema still exposes structural marker {structural_marker}"
+            adapter_definitions.contains_key(adapter_type),
+            "adapter schema omitted {adapter_type}"
         );
     }
-    assert!(!GENERATED_SCHEMA.contains("lower_bench"));
-    assert!(GENERATED_SCHEMA.contains("prefix_cache_reset"));
-    assert!(GENERATED_SCHEMA.contains("prefill_decode"));
-    assert!(!GENERATED_SCHEMA.contains("inferlab_builtin"));
-    assert!(!GENERATED_SCHEMA.contains("integration_native"));
-    assert!(GENERATED_SCHEMA.contains("gateway_backend"));
-    assert!(GENERATED_SCHEMA.contains("pd_router_backend"));
-    assert!(GENERATED_SCHEMA.contains("render_source"));
-    assert!(GENERATED_SCHEMA.contains("frontend"));
-    assert!(GENERATED_SCHEMA.contains("capture_target"));
-    assert!(GENERATED_SCHEMA.contains("window_control"));
-    assert!(GENERATED_SCHEMA.contains("replica_entry"));
-    assert!(GENERATED_SCHEMA.contains("http_target_registry"));
-    assert!(GENERATED_SCHEMA.contains("launch_files"));
-    assert!(GENERATED_SCHEMA.contains("render_inputs"));
+    for measurement_type in [
+        "BenchClientRequest",
+        "BenchClientResult",
+        "EvalClientRequest",
+        "EvalClientResult",
+    ] {
+        assert!(
+            measurement_definitions.contains_key(measurement_type),
+            "measurement schema omitted {measurement_type}"
+        );
+    }
+    assert!(!adapter_definitions.contains_key("BenchClientRequest"));
+    assert!(!adapter_definitions.contains_key("EvalClientRequest"));
+    assert!(!measurement_definitions.contains_key("AdapterRequest"));
+    assert!(!measurement_definitions.contains_key("AdapterResponse"));
+
+    assert!(!GENERATED_ADAPTER_SCHEMA.contains("lower_bench"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("prefix_cache_reset"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("prefill_decode"));
+    assert!(!GENERATED_ADAPTER_SCHEMA.contains("inferlab_builtin"));
+    assert!(!GENERATED_ADAPTER_SCHEMA.contains("integration_native"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("gateway_backend"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("pd_router_backend"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("render_source"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("frontend"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("capture_target"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("window_control"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("replica_entry"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("http_target_registry"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("launch_files"));
+    assert!(GENERATED_ADAPTER_SCHEMA.contains("render_inputs"));
+    assert!(GENERATED_MEASUREMENT_SCHEMA.contains("random_mixture"));
+    assert!(GENERATED_MEASUREMENT_SCHEMA.contains("prefix_sharing"));
     Ok(())
 }

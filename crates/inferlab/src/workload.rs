@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 use domain::{
     AggregateSloBound, BenchDatasetCatalog, BenchPopulation, DatasetCacheState,
-    ResolvedAggregateSlo, ResolvedBenchDefinition, ResolvedBenchRequestSource,
-    ResolvedBenchSloPolicy,
+    ResolvedAggregateSlo, ResolvedBenchDefinition, ResolvedBenchPrefixSharing,
+    ResolvedBenchRandomShape, ResolvedBenchRequestSource, ResolvedBenchSloPolicy,
 };
 pub(crate) use domain::{
     MeasurementModel, WorkloadEndpoint, WorkloadEndpointProtocol, WorkloadHttpAction,
@@ -810,10 +810,42 @@ fn resolve_bench_request_source(
         BenchRequestSource::Random {
             input_tokens,
             output_tokens,
+            prefix_sharing,
         } => Ok(ResolvedBenchRequestSource::Random {
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
+            prefix_sharing: prefix_sharing.as_ref().map(|sharing| {
+                let shared_prefix_tokens =
+                    (f64::from(*input_tokens) * sharing.shared_prefix_ratio).floor() as u32;
+                ResolvedBenchPrefixSharing {
+                    shared_prefix_ratio: sharing.shared_prefix_ratio,
+                    shared_prefix_tokens,
+                    unique_suffix_tokens: *input_tokens - shared_prefix_tokens,
+                }
+            }),
         }),
+        BenchRequestSource::RandomMixture { shapes } => {
+            let total_weight = shapes.iter().try_fold(0_u64, |total, shape| {
+                total.checked_add(u64::from(shape.weight)).ok_or_else(|| {
+                    InferlabError::InvalidConfig {
+                        message:
+                            "resolved Bench random_mixture total weight exceeds the supported unsigned 64-bit range"
+                                .to_owned(),
+                    }
+                })
+            })?;
+            Ok(ResolvedBenchRequestSource::RandomMixture {
+                shapes: shapes
+                    .iter()
+                    .map(|shape| ResolvedBenchRandomShape {
+                        input_tokens: shape.input_tokens,
+                        output_tokens: shape.output_tokens,
+                        weight: shape.weight,
+                    })
+                    .collect(),
+                total_weight,
+            })
+        }
         BenchRequestSource::Dataset {
             dataset,
             max_input_tokens,
@@ -1052,4 +1084,56 @@ pub fn resolved_request_count(
         });
     }
     Ok(count as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::{BenchPrefixSharing, BenchRandomShape};
+
+    #[test]
+    fn synthetic_request_sources_resolve_effective_prefix_and_total_weight()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let prefix = resolve_bench_request_source(&BenchRequestSource::Random {
+            input_tokens: 8000,
+            output_tokens: 1000,
+            prefix_sharing: Some(BenchPrefixSharing {
+                shared_prefix_ratio: 0.75,
+            }),
+        })?;
+        let mixture = resolve_bench_request_source(&BenchRequestSource::RandomMixture {
+            shapes: vec![
+                BenchRandomShape {
+                    input_tokens: 1024,
+                    output_tokens: 128,
+                    weight: 7,
+                },
+                BenchRandomShape {
+                    input_tokens: 8192,
+                    output_tokens: 1024,
+                    weight: 3,
+                },
+            ],
+        })?;
+
+        assert!(matches!(
+            prefix,
+            ResolvedBenchRequestSource::Random {
+                prefix_sharing: Some(ResolvedBenchPrefixSharing {
+                    shared_prefix_ratio: 0.75,
+                    shared_prefix_tokens: 6000,
+                    unique_suffix_tokens: 2000,
+                }),
+                ..
+            }
+        ));
+        assert!(matches!(
+            mixture,
+            ResolvedBenchRequestSource::RandomMixture {
+                total_weight: 10,
+                ..
+            }
+        ));
+        Ok(())
+    }
 }

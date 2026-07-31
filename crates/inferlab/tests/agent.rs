@@ -64,6 +64,10 @@ impl AgentHarness {
                 "FAKE_CODEX_MARKETPLACE_STATE",
                 self.data.join("codex-marketplace"),
             )
+            .env(
+                "FAKE_CLAUDE_MARKETPLACE_STATE",
+                self.data.join("claude-marketplace"),
+            )
             .args(args)
             .output()?)
     }
@@ -261,6 +265,127 @@ exit 0
         repeated_log.contains("codex plugin marketplace remove inferlab"),
         "Codex's non-idempotent registration must be replaced before the second add: {repeated_log}"
     );
+    Ok(())
+}
+
+#[test]
+fn update_uses_the_current_embedded_source_for_both_runtimes() -> Result<(), Box<dyn Error>> {
+    let harness = AgentHarness::new(true)?;
+    let old_source = harness.data.join("old-inferlab-marketplace");
+    fs::create_dir_all(&old_source)?;
+    for state in [
+        harness.data.join("codex-marketplace"),
+        harness.data.join("claude-marketplace"),
+    ] {
+        fs::write(state, old_source.as_os_str().as_encoded_bytes())?;
+    }
+    let source_aware_cli = r#"#!/bin/sh
+cli=$(basename "$0")
+case "$cli" in
+  codex) state=$FAKE_CODEX_MARKETPLACE_STATE ;;
+  claude) state=$FAKE_CLAUDE_MARKETPLACE_STATE ;;
+esac
+printf '%s %s\n' "$cli" "$*" >> "$FAKE_AGENT_CLI_LOG"
+case "$*" in
+  *"plugin marketplace list --json"*)
+    source=$(/bin/cat "$state")
+    case "$cli" in
+      codex) printf '{"marketplaces":[{"name":"inferlab","marketplaceSource":{"sourceType":"local","source":"%s"}}]}\n' "$source" ;;
+      claude) printf '[{"name":"inferlab","source":"directory","path":"%s"}]\n' "$source" ;;
+    esac
+    ;;
+  *"--help"*) ;;
+  "plugin marketplace remove inferlab")
+    /bin/rm -f "$state"
+    ;;
+  "plugin marketplace add "*)
+    if [ -f "$state" ]; then
+      echo 'marketplace already exists from a different source' >&2
+      exit 7
+    fi
+    for source in "$@"; do :; done
+    printf '%s' "$source" > "$state"
+    ;;
+esac
+exit 0
+"#;
+    for cli in ["claude", "codex"] {
+        let path = harness.bin.join(cli);
+        fs::write(&path, source_aware_cli)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let output = harness.run(&["agent", "update", "--agent", "all"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    let rows = report["rows"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 2);
+    let logged = harness.logged()?;
+    for row in rows {
+        assert_eq!(row["operation"], "update");
+        assert_eq!(row["status"], "updated");
+        let cli = row["cli"].as_str().ok_or("cli")?;
+        let reported = row["commands"]
+            .as_array()
+            .ok_or("commands")?
+            .iter()
+            .map(|command| command.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        let observed = logged
+            .lines()
+            .filter(|line| line.starts_with(cli))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(reported, observed, "{cli} report vs fixture log");
+    }
+
+    assert!(
+        !logged.contains("marketplace upgrade") && !logged.contains("marketplace update"),
+        "local marketplace updates must not use Git-refresh commands: {logged}"
+    );
+    assert!(
+        logged.contains("codex plugin add inferlab@inferlab"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("claude plugin install inferlab@inferlab"),
+        "{logged}"
+    );
+    let sources = logged
+        .lines()
+        .filter(|line| line.contains("plugin marketplace add") && !line.contains("--help"))
+        .map(|line| {
+            line.split_whitespace()
+                .next_back()
+                .ok_or("marketplace source")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(sources.len(), 2, "{logged}");
+    for source in &sources {
+        let source = Path::new(source);
+        assert!(source.starts_with(&harness.data), "{}", source.display());
+        assert!(
+            source.is_dir(),
+            "embedded marketplace source vanished after update: {}",
+            source.display()
+        );
+    }
+    for state in [
+        harness.data.join("codex-marketplace"),
+        harness.data.join("claude-marketplace"),
+    ] {
+        let selected = fs::read_to_string(state)?;
+        assert_ne!(Path::new(&selected), old_source);
+        assert!(
+            sources.contains(&selected.as_str()),
+            "runtime retained an unreported source {selected}: {logged}"
+        );
+    }
     Ok(())
 }
 

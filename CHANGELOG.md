@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-30
+
+### Fixed
+
+- `inferlab agent update` now replaces an older versioned local InferLab
+  marketplace with the plugin package embedded in the current binary before
+  refreshing the Codex or Claude installation. After installing the 0.7.1
+  executable, 0.7.0 operators can run
+  `inferlab agent update --agent all`; manual plugin uninstall and reinstall
+  are no longer required.
+
 ## [0.7.0] - 2026-07-30
 
 ### Added

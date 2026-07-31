@@ -12,8 +12,8 @@ pub use agent_plugin_installer::AgentSelector;
 use agent_plugin_installer::{
     AgentPluginError, AgentPluginOperation, AgentRuntime, BatchFailure, BatchResult,
     BatchRuntimeOutcome, BatchStatus, DEFAULT_COMMAND_TIMEOUT, DoctorStatus, FailurePolicy,
-    InstallRequest, PluginRef, UninstallRequest, UpdateRequest, check_operation, doctor_many,
-    install as install_plugin, uninstall_many, update_many,
+    InstallRequest, PluginRef, UninstallRequest, check_operation, doctor_many,
+    install as install_plugin, uninstall_many,
 };
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
@@ -344,7 +344,7 @@ pub fn install(selector: AgentSelector, checkout: Option<&Path>) -> AgentReport 
     };
     let source = source.as_path();
 
-    if let Some(report) = package_gate(runtimes, source) {
+    if let Some(report) = package_gate(runtimes, source, "install") {
         return report;
     }
 
@@ -581,16 +581,53 @@ fn embedded_package_path() -> Result<PathBuf, String> {
         .join(format!("{INFERLAB_VERSION}-{digest}")))
 }
 
+/// Refresh the plugin from this binary's embedded package. Each release has a
+/// new persistent local marketplace path, so native Git-marketplace update
+/// commands cannot perform this transition. Reuse the validated local install
+/// path to replace the registration and refresh the plugin, then expose the
+/// operator-requested update semantics in the report.
 pub fn update(selector: AgentSelector) -> AgentReport {
-    from_batch(
-        update_many(
-            selector,
-            |_| UpdateRequest::new(PLUGIN).with_marketplace_name(MARKETPLACE),
-            FailurePolicy::Continue,
-        ),
-        "update",
-        "updated",
-    )
+    let runtimes = selector.runtimes();
+    let source = match materialize_embedded_package(runtimes) {
+        Ok(path) => path,
+        Err(message) => {
+            return AgentReport {
+                rows: runtimes
+                    .iter()
+                    .copied()
+                    .map(|runtime| failed_gate_row(runtime, "update", message.clone()))
+                    .collect(),
+            };
+        }
+    };
+    if let Some(report) = package_gate(runtimes, &source, "update") {
+        return report;
+    }
+    let source = match source.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            let message = format!(
+                "cannot canonicalize embedded plugin package {}: {error}",
+                source.display()
+            );
+            return AgentReport {
+                rows: runtimes
+                    .iter()
+                    .copied()
+                    .map(|runtime| failed_gate_row(runtime, "update", message.clone()))
+                    .collect(),
+            };
+        }
+    };
+
+    let mut report = install_from_source(selector, &source);
+    for row in &mut report.rows {
+        row.operation = "update";
+        if row.status == "installed" {
+            row.status = "updated";
+        }
+    }
+    report
 }
 
 pub fn uninstall(selector: AgentSelector) -> AgentReport {
@@ -607,7 +644,11 @@ pub fn uninstall(selector: AgentSelector) -> AgentReport {
 
 /// Inferlab validates its shipped package before the shared installer may
 /// invoke a native CLI. One invalid runtime blocks all selected runtimes.
-fn package_gate(runtimes: &[AgentRuntime], checkout: &Path) -> Option<AgentReport> {
+fn package_gate(
+    runtimes: &[AgentRuntime],
+    checkout: &Path,
+    operation: &'static str,
+) -> Option<AgentReport> {
     let failures = runtimes
         .iter()
         .copied()
@@ -622,10 +663,10 @@ fn package_gate(runtimes: &[AgentRuntime], checkout: &Path) -> Option<AgentRepor
         .copied()
         .zip(failures)
         .map(|(runtime, failure)| match failure {
-            Some(message) => failed_gate_row(runtime, "install", message),
+            Some(message) => failed_gate_row(runtime, operation, message),
             None => make_row(
                 runtime,
-                "install",
+                operation,
                 "skipped",
                 Vec::new(),
                 Some("mutations not attempted: a preceding gate failed".to_owned()),

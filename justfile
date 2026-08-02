@@ -68,7 +68,8 @@ plugin-tarball out="inferlab-plugin.tar.gz":
     scripts/pack-plugin.sh "{{ out }}"
     sha256sum "{{ out }}"
 
-# Self-contained Cargo source artifact staged from canonical product payloads
+# Preflight the self-contained Cargo source artifact with local path patches;
+# final publication uses the retained registry-backed `release-crates` stage.
 [group("release")]
 package-inferlab-crate out="target/package":
     scripts/package-inferlab-crate.sh "{{ out }}"

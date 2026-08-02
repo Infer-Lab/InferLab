@@ -144,17 +144,40 @@ jobs:
             inferlab-plugin.tar.gz
             inferlab-plugin.tar.gz.sha256
 
+  workspace-wheels:
+    name: canonical workspace wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve package-index wheels
+        run: python3 scripts/product_release_assets.py "${GITHUB_REF_NAME}" workspace-wheels
+      - uses: actions/upload-artifact@v7
+        with:
+          name: workspace-wheels
+          path: workspace-wheels/
+          if-no-files-found: error
+
   release:
     name: publish release
     runs-on: ubuntu-latest
-    needs: [build, qualify, installer, plugin]
+    needs: [build, qualify, installer, plugin, workspace-wheels]
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - name: Collect artifacts
         uses: actions/download-artifact@v8
         with:
           merge-multiple: true
+      - name: Verify workspace wheel inventory
+        run: |
+          expected=$(scripts/python-package-inventory.sh workspace-side | wc -l)
+          shopt -s nullglob
+          wheels=(*.whl)
+          checksums=(*.whl.sha256)
+          test "${#wheels[@]}" -eq "${expected}"
+          test "${#checksums[@]}" -eq "${expected}"
+          sha256sum --check --strict "${checksums[@]}"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,4 +192,5 @@ jobs:
             inferlab-*-linux inferlab-*-linux.sha256 \
             install.sh install.sh.sha256 \
             inferlab-plugin.tar.gz inferlab-plugin.tar.gz.sha256 \
+            *.whl *.whl.sha256 \
             LICENSE

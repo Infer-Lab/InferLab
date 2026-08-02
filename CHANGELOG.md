@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-01
+
+### Changed
+
+- Product Releases now collect the exact independently versioned workspace-side
+  wheels selected by the tagged source snapshot from the package index and
+  publish them with verified checksum sidecars. Package-only publications no
+  longer create package-scoped GitHub tags or Releases.
+
+### Fixed
+
+- Frozen synthetic Bench populations now derive each undeclared-prefix prompt
+  from its seeded request identity instead of slicing a repeated short corpus,
+  preventing accidental full-prompt prefix-cache hits between independent
+  warmup and profiling requests. Records identify the corrected generator as
+  `inferlab-synthetic-prompt-target-v3`.
+
 ## [0.8.0] - 2026-08-01
 
 ### Added

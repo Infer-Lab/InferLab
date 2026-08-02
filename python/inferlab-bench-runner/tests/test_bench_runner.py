@@ -128,6 +128,31 @@ class NonRoundTripTokenizer(FakeTokenizer):
         return ""
 
 
+class PeriodicCorpusTokenizer:
+    """Model the short token period that exposed the 0.8.0 fallback regression."""
+
+    _synthetic_corpus = (
+        "Reproducible inference measurements need stable prompts, explicit evidence, "
+        "and independently selected request shapes. "
+    )
+    _decoded_prefix = "synthetic_token_"
+
+    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+        assert not add_special_tokens
+        words = text.split()
+        if words and all(word.startswith(self._decoded_prefix) for word in words):
+            return [int(word.removeprefix(self._decoded_prefix)) for word in words]
+        if text and len(text) % len(self._synthetic_corpus) == 0:
+            repetitions = len(text) // len(self._synthetic_corpus)
+            if text == self._synthetic_corpus * repetitions:
+                return list(range(20)) * repetitions
+        return [int.from_bytes(hashlib.sha256(word.encode()).digest()[:8], "big") for word in words]
+
+    def decode(self, token_ids: list[int], **kwargs: object) -> str:
+        assert kwargs == {"skip_special_tokens": True, "clean_up_tokenization_spaces": False}
+        return " ".join(f"{self._decoded_prefix}{token_id}" for token_id in token_ids)
+
+
 def test_direct_file_entrypoint_resolves_the_staged_runner_package() -> None:
     package_root = Path(__file__).resolve().parents[1]
     runner_source = package_root / "src"
@@ -268,6 +293,7 @@ def random_preparation_request(
     request_source: dict[str, object],
     artifact_name: str = "population",
     request_body: dict[str, object] | None = None,
+    seed: int = 7,
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
@@ -278,7 +304,7 @@ def random_preparation_request(
             "request_source": request_source,
             "source_path": None,
             "required_entries": required_entries,
-            "seed": 7,
+            "seed": seed,
             "request_body": request_body or {},
             "artifact_dir": str(tmp_path / artifact_name),
         }
@@ -1035,6 +1061,54 @@ def test_synthetic_population_records_unmodified_fallback_without_a_template_pro
     assert evidence["prompt_token_fallback_reason"] == "chat_template_resolution_unavailable"
 
 
+@pytest.mark.parametrize(
+    "request_source",
+    [
+        {
+            "kind": "random",
+            "input_tokens": 8192,
+            "output_tokens": 1,
+            "prefix_sharing": None,
+        },
+        {
+            "kind": "random_mixture",
+            "shapes": [
+                {"input_tokens": 8192, "output_tokens": 1, "weight": 1},
+            ],
+            "total_weight": 1,
+        },
+    ],
+    ids=["random", "random-mixture"],
+)
+def test_fallback_population_keeps_long_independent_prompts_distinct(
+    tmp_path: Path,
+    request_source: dict[str, object],
+) -> None:
+    result = prepare_population(
+        random_preparation_request(
+            tmp_path,
+            4,
+            request_source=request_source,
+            seed=0,
+        ),
+        PeriodicCorpusTokenizer(),
+    )
+
+    assert result.population is not None
+    population = [
+        json.loads(line) for line in Path(result.population.path).read_text().splitlines()
+    ]
+    contents = [row["messages"][0]["content"] for row in population]
+    assert len(set(contents)) == 4
+    assert all(len(content.split()) == 8192 for content in contents)
+    assert result.prompt_token_targeting is not None
+    assert result.prompt_token_targeting.exact_entries == 0
+    assert result.prompt_token_targeting.fallback_entries == 4
+    assert result.prompt_token_targeting.fallback_reasons == {
+        "chat_template_resolution_unavailable": 4
+    }
+
+
 def test_synthetic_population_keeps_unadjusted_content_when_exact_target_is_unreachable(
     tmp_path: Path,
 ) -> None:
@@ -1119,6 +1193,7 @@ def test_exact_targeting_keeps_the_shared_prefix_and_adjusts_only_the_user_suffi
     assert len({row["messages"][0]["content"] for row in population}) == 1
     assert all(len(row["messages"][0]["content"].split()) == 6 for row in population)
     assert all(len(row["messages"][1]["content"].split()) == 3 for row in population)
+    assert len({row["messages"][1]["content"] for row in population}) == 2
     assert result.prompt_token_targeting is not None
     assert result.prompt_token_targeting.pre_template_content_tokens.minimum == 9
     assert result.prompt_token_targeting.exact_entries == 2

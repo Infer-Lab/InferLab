@@ -46,17 +46,9 @@ wheel="${matches[0]}"
 wheel_basename="$(basename "${wheel}")"
 (cd dist && sha256sum "${wheel_basename}" > "${wheel_basename}.sha256")
 
-tag="${distribution}-v${version}"
-title="${distribution} ${version}"
-notes="Python package release for ${distribution} ${version}."
-
 echo
 echo "== publication commands (ADR-0008: operator-performed, not run here) =="
-echo "# 1. package index (wheel only):"
+echo "# package index (wheel only):"
 printf 'twine upload %q\n' "${wheel}"
-echo "# 2. after pushing the reviewed package tag, create its GitHub release:"
-printf 'gh release create %q --repo Infer-Lab/inferlab --verify-tag --title %q --notes %q \\\n' \
-  "${tag}" "${title}" "${notes}"
-printf '  %q %q LICENSE\n' "${wheel}" "${wheel}.sha256"
 echo
-echo "== stopping before publication; both acts remain operator-performed (ADR-0008) =="
+echo "== stopping before package-index publication; the act remains operator-performed (ADR-0008) =="

@@ -52,7 +52,7 @@ if args.prepare:
     materialization_identity = (
         catalog["materialization_identity"]
         if catalog is not None
-        else "inferlab-synthetic-prompt-target-v2"
+        else "inferlab-synthetic-prompt-target-v3"
     )
     tpot_applicable = True
     if request_source is not None:

@@ -2663,7 +2663,7 @@ if args.prepare:
     evidence_path.write_text("{}\n", encoding="utf-8")
     source = request_source or session_source
     catalog = source.get("catalog") if source is not None else None
-    materialization_identity = catalog["materialization_identity"] if catalog is not None else "inferlab-synthetic-prompt-target-v2"
+    materialization_identity = catalog["materialization_identity"] if catalog is not None else "inferlab-synthetic-prompt-target-v3"
     tpot_applicable = True
     if request_source is not None:
         if request_source["kind"] == "random":

@@ -31,11 +31,7 @@ from inferlab_bench_runner.population_types import (
     unbiased_index,
 )
 
-SYNTHETIC_MATERIALIZATION_IDENTITY = "inferlab-synthetic-prompt-target-v2"
-SYNTHETIC_CORPUS = (
-    "Reproducible inference measurements need stable prompts, explicit evidence, "
-    "and independently selected request shapes. "
-)
+SYNTHETIC_MATERIALIZATION_IDENTITY = "inferlab-synthetic-prompt-target-v3"
 MAX_EXACT_TARGETING_ATTEMPTS = 32
 MAX_EXACT_CONTENT_VARIANTS = 16
 
@@ -43,8 +39,16 @@ MAX_EXACT_CONTENT_VARIANTS = 16
 class SyntheticTextFactory:
     def __init__(self, tokenizer: ChatTokenizer) -> None:
         self.tokenizer = tokenizer
-        self.corpus = SYNTHETIC_CORPUS
-        self.token_ids = tokenizer.encode(self.corpus, add_special_tokens=False)
+
+    @staticmethod
+    def _corpus_word(
+        seed: int,
+        population_index: int,
+        label: str,
+        word_index: int,
+    ) -> str:
+        identity = f"{seed}\0{population_index}\0{label}\0{word_index}".encode()
+        return f"inferlab_{hashlib.sha256(identity).hexdigest()}"
 
     def exact_text(
         self,
@@ -53,15 +57,22 @@ class SyntheticTextFactory:
         population_index: int,
         label: str,
     ) -> str:
-        while len(self.token_ids) < target_tokens + 128:
-            self.corpus += self.corpus
-            self.token_ids = self.tokenizer.encode(self.corpus, add_special_tokens=False)
-        starts = len(self.token_ids) - target_tokens + 1
+        words: list[str] = []
+        token_ids: list[int] = []
+        next_word_count = 128
+        while len(token_ids) < target_tokens + 128:
+            words.extend(
+                self._corpus_word(seed, population_index, label, word_index)
+                for word_index in range(len(words), next_word_count)
+            )
+            token_ids = self.tokenizer.encode(" ".join(words), add_special_tokens=False)
+            next_word_count *= 2
+        starts = len(token_ids) - target_tokens + 1
         first = unbiased_index(seed, population_index, f"{label}-offset", starts)
         for attempt in range(min(starts, 128)):
             start = (first + attempt) % starts
             text = self.tokenizer.decode(
-                self.token_ids[start : start + target_tokens],
+                token_ids[start : start + target_tokens],
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )

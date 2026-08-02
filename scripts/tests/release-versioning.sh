@@ -135,11 +135,10 @@ PATH="${fixture}/bin:${PATH}" \
 
 grep -Fq "twine upload dist/${vllm_wheel}" "${temporary}/release.out" \
   || fail "publication output did not select the requested wheel"
-grep -Fq "gh release create inferlab-integration-vllm-v${vllm_version}" \
-  "${temporary}/release.out" \
-  || fail "publication output did not derive the package-scoped release tag"
-grep -Eq 'gh release create .* --verify-tag ' "${temporary}/release.out" \
-  || fail "publication output did not require the reviewed tag"
+! grep -Fq 'gh release create' "${temporary}/release.out" \
+  || fail "package-only publication still emits a package-scoped GitHub release"
+! grep -Fq "inferlab-integration-vllm-v${vllm_version}" "${temporary}/release.out" \
+  || fail "package-only publication still derives a package-scoped tag"
 ! grep -Fq "${sdk_wheel}" "${temporary}/release.out" \
   || fail "publication output included an unrelated wheel"
 test -f "${fixture}/dist/${vllm_wheel}.sha256" \

@@ -62,7 +62,8 @@ cargo install inferlab
 ```
 
 Or build from a checkout with `cargo install --path crates/inferlab`. The
-published library crates (`inferlab-protocol`, `inferlab-proxy`) exist to
+published library crates (`inferlab-runtime`, `inferlab-profiler`,
+`inferlab-protocol`, `inferlab-proxy`) exist to
 build the binary; their APIs are experimental and carry no stability promise
 yet.
 

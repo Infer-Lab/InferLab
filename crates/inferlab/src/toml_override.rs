@@ -1,9 +1,71 @@
 use crate::InferlabError;
 
+/// One ordered `--set PATH=<TOML-value>` declaration from an invocation.
+///
+/// CLI entry points parse this stream once. Product domains then select the
+/// declarations addressed to one definition and apply them through the same
+/// exact TOML assignment semantics.
+#[derive(Clone)]
+pub(crate) struct InvocationOverride {
+    index: usize,
+    raw: String,
+    path: String,
+    raw_value: String,
+}
+
+impl InvocationOverride {
+    pub(crate) fn parse_all(overrides: &[String]) -> Result<Vec<Self>, InferlabError> {
+        overrides
+            .iter()
+            .enumerate()
+            .map(|(index, raw)| {
+                let (path, raw_value) =
+                    raw.split_once('=')
+                        .ok_or_else(|| InferlabError::InvalidOverride {
+                            value: raw.clone(),
+                            message: "expected PATH=<TOML-value>".to_owned(),
+                        })?;
+                Ok(Self {
+                    index,
+                    raw: raw.clone(),
+                    path: path.to_owned(),
+                    raw_value: raw_value.to_owned(),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) const fn index(&self) -> usize {
+        self.index
+    }
+
+    pub(crate) fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn under(&self, prefix: &str) -> Option<Self> {
+        self.path.strip_prefix(prefix).map(|path| Self {
+            index: self.index,
+            raw: self.raw.clone(),
+            path: path.to_owned(),
+            raw_value: self.raw_value.clone(),
+        })
+    }
+
+    pub(crate) fn assignment(&self) -> Result<ExactTomlOverride, InferlabError> {
+        ExactTomlOverride::parse(&self.path, &self.raw_value, &self.raw)
+    }
+}
+
 /// One invocation override parsed by the TOML implementation as an exact
 /// key-path assignment. Product callers remain responsible for selecting the
 /// definition the assignment may affect and for deserializing the result back
 /// into that definition's closed Rust type.
+#[derive(Clone)]
 pub(crate) struct ExactTomlOverride {
     root_key: String,
     patch: toml::Value,
@@ -57,17 +119,31 @@ impl ExactTomlOverride {
         Ok(Self { root_key, patch })
     }
 
-    pub(crate) fn root_key(&self) -> &str {
-        &self.root_key
-    }
-
     pub(crate) fn into_patch(self) -> toml::Value {
         self.patch
     }
 
-    pub(crate) fn apply_to(self, definition: &mut toml::Value) -> Result<(), String> {
-        merge_exact(definition, self.patch, "")
+    pub(crate) fn root_key(&self) -> &str {
+        &self.root_key
     }
+
+    pub(crate) fn apply_to(
+        self,
+        definition: &mut toml::Value,
+        raw_override: &str,
+    ) -> Result<(), InferlabError> {
+        apply_toml_patch(definition, self.patch).map_err(|message| InferlabError::InvalidOverride {
+            value: raw_override.to_owned(),
+            message,
+        })
+    }
+}
+
+pub(crate) fn apply_toml_patch(
+    definition: &mut toml::Value,
+    patch: toml::Value,
+) -> Result<(), String> {
+    merge_exact(definition, patch, "")
 }
 
 fn invalid_override(raw_override: &str, message: String) -> InferlabError {
@@ -106,7 +182,24 @@ fn merge_exact(current: &mut toml::Value, patch: toml::Value, parent: &str) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::ExactTomlOverride;
+    use super::{ExactTomlOverride, InvocationOverride};
+
+    #[test]
+    fn invocation_stream_is_parsed_once_before_target_selection() -> Result<(), String> {
+        let raw = vec![
+            "server.settings.eager=true".to_owned(),
+            "benches.latency.concurrency=[1, 2]".to_owned(),
+        ];
+        let overrides = InvocationOverride::parse_all(&raw).map_err(|error| error.to_string())?;
+        let bench = overrides[1]
+            .under("benches.latency.")
+            .ok_or_else(|| "bench override was not selected".to_owned())?;
+
+        assert_eq!(bench.index(), 1);
+        assert_eq!(bench.raw(), raw[1]);
+        assert_eq!(bench.path(), "concurrency");
+        Ok(())
+    }
 
     #[test]
     fn toml_owns_quoted_paths_and_structured_values() -> Result<(), String> {
@@ -131,16 +224,18 @@ mod tests {
             toml::from_str("values = [1, 2]\nscalar = 1").map_err(|error| error.to_string())?;
         ExactTomlOverride::parse("values", "[3]", "values=[3]")
             .map_err(|error| error.to_string())?
-            .apply_to(&mut definition)?;
+            .apply_to(&mut definition, "values=[3]")
+            .map_err(|error| error.to_string())?;
         assert_eq!(definition["values"].as_array().map(Vec::len), Some(1));
 
         let error = ExactTomlOverride::parse("scalar.child", "2", "scalar.child=2")
             .map_err(|error| error.to_string())?
-            .apply_to(&mut definition);
+            .apply_to(&mut definition, "scalar.child=2")
+            .map_err(|error| error.to_string());
         assert!(matches!(
             error,
             Err(ref message)
-                if message == "override traverses non-table value at scalar"
+                if message.ends_with("override traverses non-table value at scalar")
         ));
         Ok(())
     }

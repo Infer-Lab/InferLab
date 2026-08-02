@@ -9,6 +9,7 @@ from inferlab_adapter_sdk import (
     CaptureTargetRequirement,
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
+    CaptureWindowHttpActionSpec,
     EndpointProtocol,
     EndpointRequirement,
     FrontendCoRendering,
@@ -38,6 +39,7 @@ from inferlab_adapter_sdk import (
     ServeProcessAllocationFrontend,
     ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
+    ServerMetricsEndpointRequirement,
     ServeRoleKind,
     ServeRoleLink,
     ServeRoleLinkRequestRouting,
@@ -76,7 +78,6 @@ def _identity() -> IntegrationIdentity:
         adapter_distribution=_ADAPTER_DISTRIBUTION,
         framework="specialized-engine",
         framework_distribution=_ADAPTER_DISTRIBUTION,
-        module_file=__file__,
     )
 
 
@@ -154,6 +155,7 @@ def _public_endpoint() -> EndpointRequirement:
         protocol=EndpointProtocol(),
         completions_path="/v1/completions",
         chat_completions_path="/v1/chat/completions",
+        server_metrics=ServerMetricsEndpointRequirement(path="/metrics", port="prometheus"),
         prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
     )
 
@@ -203,7 +205,7 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
         implementation_version=_smg_version(),
         effective_settings={
             "worker_protocol": SettingValue(root="tokenspeed_scheduler_v1"),
-            "policy": SettingValue(root="passthrough"),
+            "policy": SettingValue(root="least_load"),
             "retries": SettingValue(root=False),
             "circuit_breaker": SettingValue(root=False),
         },
@@ -232,8 +234,12 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
                     CaptureTargetRequirement(
                         window_control=CaptureWindowControlRequirement(
                             endpoint=CaptureWindowControlEndpoint.gateway,
-                            start=HttpActionSpec(method=HttpMethod(), path="/start_profile"),
-                            stop=HttpActionSpec(method=HttpMethod(), path="/stop_profile"),
+                            start=CaptureWindowHttpActionSpec(
+                                method=HttpMethod(), path="/start_profile"
+                            ),
+                            stop=CaptureWindowHttpActionSpec(
+                                method=HttpMethod(), path="/stop_profile"
+                            ),
                         )
                     )
                     if input.profiling
@@ -406,7 +412,7 @@ def _render_gateway(
                 "--tokenizer-path",
                 engine.model_locator,
                 "--policy",
-                "passthrough",
+                "least_load",
                 "--disable-retries",
                 "--disable-circuit-breaker",
             ],

@@ -20,3 +20,10 @@ at one. The contract remains serial and has no P/D Router, KV-transfer,
 batching, or Engine-local profiling surface. InferLab can profile the Engine
 process tree while TokenSpeed SMG exposes the capture-window
 `POST /start_profile` and `POST /stop_profile` actions on the Gateway.
+
+The Gateway exposes server metrics on its separately allocated `prometheus`
+port. The integration selects SMG's single-target `least_load` policy so its
+canonical worker monitor polls Engine load fields while retaining the same sole
+routing target. In the current downstream validation, that endpoint exported
+SMG-owned metric families but no `smg_engine_*` families, so Engine-series
+re-export remains a downstream qualification gap.

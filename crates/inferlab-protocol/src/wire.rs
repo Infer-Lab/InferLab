@@ -307,6 +307,18 @@ pub struct ClientEndpointInput {
     pub port: u16,
     pub completions_path: String,
     pub chat_completions_path: String,
+    #[serde(default)]
+    pub server_metrics: Option<ServerMetricsEndpointInput>,
+}
+
+/// The resolved server-metrics endpoint supplied to a measurement client.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerMetricsEndpointInput {
+    pub path: String,
+    #[serde(default)]
+    pub port_name: Option<String>,
+    pub url: String,
 }
 
 /// The measurement an Eval client runs against the workload endpoint.
@@ -364,7 +376,12 @@ pub enum EvalTaskSourceInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchDefinitionInput {
-    pub request_source: BenchRequestSourceInput,
+    #[serde(default)]
+    pub request_source: Option<BenchRequestSourceInput>,
+    #[serde(default)]
+    pub session_source: Option<BenchSessionSourceInput>,
+    #[serde(default)]
+    pub server_metrics: bool,
     pub seed: u64,
     #[serde(default)]
     pub request_body: BTreeMap<String, SettingValue>,
@@ -382,8 +399,8 @@ pub enum BenchRequestSourceInput {
     /// AIPerf generates exact token-shape prompts from the release-pinned
     /// synthetic generator.
     Random {
-        input_tokens: u32,
-        output_tokens: u32,
+        input_tokens: BenchTokenSelectorInput,
+        output_tokens: BenchTokenSelectorInput,
         #[serde(default)]
         prefix_sharing: Option<BenchPrefixSharingInput>,
     },
@@ -396,11 +413,50 @@ pub enum BenchRequestSourceInput {
     /// Inferlab materializes a release-catalog conversation snapshot before
     /// AIPerf starts.
     Dataset {
-        dataset: BenchDatasetInput,
+        dataset: String,
+        #[serde(default)]
+        profile: Option<String>,
         max_input_tokens: u32,
         output_tokens: Option<u32>,
-        catalog: BenchDatasetCatalogInput,
+        catalog: Box<BenchDatasetCatalogInput>,
     },
+}
+
+/// One release-qualified population of dependent linear session templates.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionSourceInput {
+    pub dataset: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub max_input_tokens: u32,
+    pub output_tokens: Option<u32>,
+    pub inter_turn_delay_scale: f64,
+    pub max_inter_turn_delay_seconds: Option<f64>,
+    pub catalog: Box<BenchSessionDatasetCatalogInput>,
+}
+
+/// One fixed or bounded inclusive-uniform token-length selector.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum BenchTokenSelectorInput {
+    Fixed(u32),
+    InclusiveUniform(BenchInclusiveUniformInput),
+}
+
+/// The one bounded distribution currently supported for a token selector.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchInclusiveUniformInput {
+    pub kind: BenchTokenDistributionKindInput,
+    pub min: u32,
+    pub max: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchTokenDistributionKindInput {
+    InclusiveUniform,
 }
 
 /// The effective split between one shared system-message prefix and each
@@ -422,25 +478,63 @@ pub struct BenchRandomShapeInput {
     pub weight: u32,
 }
 
-/// Release-qualified public Bench datasets.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BenchDatasetInput {
-    Sharegpt,
-}
-
 /// Immutable release-catalog facts resolved by the Rust control plane.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchDatasetCatalogInput {
+    pub dataset: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub source: String,
     pub upstream_identity: String,
     pub url: String,
     pub sha256: String,
     pub source_format: String,
+    pub aiperf_format: String,
+    #[serde(default)]
+    pub configuration: Option<String>,
+    #[serde(default)]
+    pub split: Option<String>,
+    #[serde(default)]
+    pub filter: Option<BenchDatasetFilterInput>,
     pub license: String,
     pub cache_path: PathBuf,
     pub cache_state: BenchDatasetCacheState,
     pub materialization_identity: String,
+    pub provides_output_targets: bool,
+}
+
+/// Immutable release-catalog facts for a linear-session materializer. AIPerf
+/// loader names are deliberately absent from this source boundary.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionDatasetCatalogInput {
+    pub dataset: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub source: String,
+    pub upstream_identity: String,
+    pub url: String,
+    pub sha256: String,
+    pub source_format: String,
+    #[serde(default)]
+    pub configuration: Option<String>,
+    #[serde(default)]
+    pub split: Option<String>,
+    #[serde(default)]
+    pub filter: Option<BenchDatasetFilterInput>,
+    pub license: String,
+    pub cache_path: PathBuf,
+    pub cache_state: BenchDatasetCacheState,
+    pub materialization_identity: String,
+    pub provides_output_targets: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchDatasetFilterInput {
+    pub field: String,
+    pub value: String,
 }
 
 /// Read-only cache state observed while resolving the Bench plan.
@@ -459,17 +553,34 @@ pub struct BenchPopulationInput {
     pub sha256: String,
     pub entries: u32,
     pub tpot_applicable: bool,
+    #[serde(default)]
+    pub session_templates: Vec<BenchSessionTemplateInput>,
 }
 
-/// The bounded tokenizer-backed operation that materializes one dataset
-/// population before any Bench case starts.
+/// One frozen linear-template summary needed to assign case slices without
+/// duplicating the content-bearing population evidence artifact.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionTemplateInput {
+    pub template_identity: String,
+    pub turn_count: u32,
+}
+
+/// The bounded tokenizer-backed operation that freezes one request population
+/// before any Bench case starts.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchDatasetPreparationRequest {
+pub struct BenchPopulationPreparationRequest {
     pub protocol_version: ProtocolVersion,
     pub model: MeasurementModelInput,
-    pub request_source: BenchRequestSourceInput,
-    pub source_path: PathBuf,
+    pub tokenizer_backend: String,
+    pub transformers_version: String,
+    #[serde(default)]
+    pub request_source: Option<BenchRequestSourceInput>,
+    #[serde(default)]
+    pub session_source: Option<BenchSessionSourceInput>,
+    #[serde(default)]
+    pub source_path: Option<PathBuf>,
     pub required_entries: u32,
     pub seed: u64,
     #[serde(default)]
@@ -487,10 +598,42 @@ pub struct BenchTokenCountSummary {
     pub mean: f64,
 }
 
-/// Terminal result of dataset population materialization.
+/// Where the concrete template used for local prompt-length projection came
+/// from. The model server remains authoritative for transport rendering.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchPromptTemplateSource {
+    RequestBody,
+    TokenizerDefault,
+}
+
+/// The concrete template used only for local complete-prompt projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPromptTemplateProjection {
+    pub source: BenchPromptTemplateSource,
+    pub content: String,
+    pub sha256: String,
+}
+
+/// Summary of best-effort complete-prompt targeting for a synthetic population.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchDatasetPreparationResult {
+pub struct BenchPromptTokenTargetingSummary {
+    pub selected_prompt_tokens: BenchTokenCountSummary,
+    pub pre_template_content_tokens: BenchTokenCountSummary,
+    #[serde(default)]
+    pub projection_template: Option<BenchPromptTemplateProjection>,
+    pub exact_entries: u32,
+    pub fallback_entries: u32,
+    #[serde(default)]
+    pub fallback_reasons: BTreeMap<String, u32>,
+}
+
+/// Terminal result of request-population materialization.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPopulationPreparationResult {
     pub schema_version: u32,
     pub status: ClientStatus,
     pub materialization_identity: String,
@@ -503,6 +646,8 @@ pub struct BenchDatasetPreparationResult {
     pub population: Option<BenchPopulationInput>,
     pub input_tokens: Option<BenchTokenCountSummary>,
     pub output_tokens: Option<BenchTokenCountSummary>,
+    #[serde(default)]
+    pub prompt_token_targeting: Option<BenchPromptTokenTargetingSummary>,
     pub evidence_path: Option<PathBuf>,
     pub error: Option<String>,
 }
@@ -766,7 +911,7 @@ pub struct SuppliedRenderInput {
 
 /// A whole-replica resource and readiness requirement the integration declares
 /// without choosing placement, ranks, or concrete endpoints.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServeReplicaRequirement {
     pub id: String,
@@ -873,7 +1018,7 @@ pub enum ServeRoleLink {
 
 /// Marks a replica as a profiling capture target and carries its window
 /// control ([[RFC-0004:C-WORKLOAD-PROFILING]]).
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureTargetRequirement {
     pub window_control: CaptureWindowControlRequirement,
@@ -881,12 +1026,12 @@ pub struct CaptureTargetRequirement {
 
 /// The logical workload endpoint and typed actions that open and close a
 /// capture window.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureWindowControlRequirement {
     pub endpoint: CaptureWindowControlEndpoint,
-    pub start: HttpActionSpec,
-    pub stop: HttpActionSpec,
+    pub start: CaptureWindowHttpActionSpec,
+    pub stop: CaptureWindowHttpActionSpec,
 }
 
 /// The logical workload endpoint exposing a capture target's window-control
@@ -941,7 +1086,19 @@ pub struct LaunchFileDeclaration {
     pub sha256: String,
 }
 
-/// An HTTP action (method and path) invoked against the workload endpoint.
+/// A capture-window HTTP action invoked against a logical serving endpoint.
+/// The integration owns any framework-specific JSON body; the control plane
+/// owns execution and evidence.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureWindowHttpActionSpec {
+    pub method: HttpMethod,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BTreeMap<String, SettingValue>>,
+}
+
+/// An HTTP action invoked against a logical serving endpoint.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpActionSpec {
@@ -949,7 +1106,7 @@ pub struct HttpActionSpec {
     pub path: String,
 }
 
-/// The HTTP method of an [`HttpActionSpec`].
+/// The HTTP method of an action specification.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpMethod {
@@ -1025,7 +1182,18 @@ pub struct EndpointRequirement {
     pub completions_path: String,
     pub chat_completions_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_metrics: Option<ServerMetricsEndpointRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<HttpActionSpec>,
+}
+
+/// An integration-owned logical server-metrics endpoint.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerMetricsEndpointRequirement {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
 }
 
 /// The application protocol a workload endpoint speaks.
@@ -1102,6 +1270,10 @@ pub struct BenchCaseInput {
     pub request_count: u32,
     #[serde(default)]
     pub warmup_request_count: u32,
+    #[serde(default)]
+    pub session_count: Option<u32>,
+    #[serde(default)]
+    pub warmup_session_count: Option<u32>,
 }
 
 /// How a Bench case paces its requests.
@@ -1236,10 +1408,100 @@ pub struct BenchClientResult {
     pub metrics: BTreeMap<String, f64>,
     #[serde(default)]
     pub request_slo: Option<BenchRequestSloResult>,
+    #[serde(default)]
+    pub session_evidence: Option<BenchSessionResultEvidence>,
     pub native_command: Vec<String>,
     pub native_exit_code: Option<i32>,
+    #[serde(default)]
+    pub report_invocations: Vec<BenchNativeInvocation>,
     pub raw_artifacts: Vec<RawArtifact>,
     pub error: Option<String>,
+}
+
+/// Reconciled native evidence for one session-bounded Bench phase.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionPhaseSummary {
+    pub planned_sessions: u32,
+    pub started_sessions: u32,
+    pub succeeded_sessions: u32,
+    pub failed_sessions: u32,
+    pub planned_requests: u32,
+    pub attempted_requests: u32,
+    pub completed_requests: u32,
+    pub failed_requests: u32,
+    pub reconciled: bool,
+}
+
+/// Terminal evidence for one admitted runtime session.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchRuntimeSessionResult {
+    pub phase: String,
+    pub runtime_session_id: String,
+    pub template_identity: String,
+    pub planned_turns: u32,
+    pub attempted_turns: u32,
+    pub status: ClientStatus,
+    #[serde(default)]
+    pub failure_classification: Option<String>,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
+    #[serde(default)]
+    pub failing_turn: Option<u32>,
+    pub suppressed_later_turns: u32,
+}
+
+/// One native transport request reconciled to a linear-session turn.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionTurnResult {
+    pub phase: String,
+    pub runtime_session_id: String,
+    pub turn_index: u32,
+    pub pre_template_content_tokens: u32,
+    #[serde(default)]
+    pub observed_prompt_tokens: Option<u32>,
+    pub native_session_num: u64,
+    #[serde(default)]
+    pub preceding_native_session_num: Option<u64>,
+    #[serde(default)]
+    pub preceding_terminal_response_receipt_ns: Option<u64>,
+    #[serde(default)]
+    pub effective_inter_turn_delay_seconds: Option<f64>,
+    pub request_start_ns: u64,
+    #[serde(default)]
+    pub inter_turn_delay_reconciled: Option<bool>,
+    #[serde(default)]
+    pub post_failure_continuation: bool,
+    pub native_artifact_name: String,
+}
+
+/// Session and transport reconciliation returned by the Bench client.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionResultEvidence {
+    pub warmup: BenchSessionPhaseSummary,
+    pub profiling: BenchSessionPhaseSummary,
+    pub sessions: Vec<BenchRuntimeSessionResult>,
+    pub turns: Vec<BenchSessionTurnResult>,
+    pub population_slice_reconciled: bool,
+    pub sessions_reconciled: bool,
+    pub turn_order_reconciled: bool,
+    pub inter_turn_delays_reconciled: bool,
+    pub native_requests_reconciled: bool,
+    pub counts_reconciled: bool,
+}
+
+/// One bounded native post-processing command and its terminal outcome.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchNativeInvocation {
+    pub purpose: String,
+    pub command: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub interrupted: bool,
+    pub timed_out: bool,
 }
 
 /// File-bound request-SLO evidence derived from AIPerf profiling records.
@@ -1290,7 +1552,7 @@ pub struct MeasurementProtocol {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bench_client_result: Option<BenchClientResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bench_dataset_preparation_request: Option<BenchDatasetPreparationRequest>,
+    pub bench_population_preparation_request: Option<BenchPopulationPreparationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bench_dataset_preparation_result: Option<BenchDatasetPreparationResult>,
+    pub bench_population_preparation_result: Option<BenchPopulationPreparationResult>,
 }

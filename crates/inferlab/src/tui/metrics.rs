@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum MetricFamily {
     Throughput,
+    PromptTokens,
     RequestLatency,
     Ttft,
     Tpot,
@@ -17,6 +18,7 @@ impl MetricFamily {
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Throughput => "THROUGHPUT",
+            Self::PromptTokens => "INPUT · OBSERVED",
             Self::RequestLatency => "LATENCY · REQUEST",
             Self::Ttft => "LATENCY · TTFT",
             Self::Tpot => "LATENCY · TPOT",
@@ -30,6 +32,7 @@ impl MetricFamily {
 pub(super) enum MetricUnit {
     None,
     Milliseconds,
+    Tokens,
     RequestsPerSecond,
     TokensPerSecond,
     Ratio,
@@ -40,6 +43,7 @@ impl MetricUnit {
         match self {
             Self::None => "",
             Self::Milliseconds => "ms",
+            Self::Tokens => "tok",
             Self::RequestsPerSecond => "req/s",
             Self::TokensPerSecond => "tok/s",
             Self::Ratio => "%",
@@ -205,18 +209,25 @@ fn descriptor(name: String) -> MetricDescriptor {
         )),
         Some(BenchMetric::Distribution { statistic, family }) => {
             let (label, rank) = statistic_presentation(statistic);
-            Some((
-                label,
-                match family {
-                    DistributionFamily::RequestLatency => MetricFamily::RequestLatency,
-                    DistributionFamily::Ttft => MetricFamily::Ttft,
-                    DistributionFamily::Tpot => MetricFamily::Tpot,
-                },
-                MetricUnit::Milliseconds,
-                rank,
-            ))
+            let (family, unit) = match family {
+                DistributionFamily::PromptTokens => {
+                    (MetricFamily::PromptTokens, MetricUnit::Tokens)
+                }
+                DistributionFamily::RequestLatency => {
+                    (MetricFamily::RequestLatency, MetricUnit::Milliseconds)
+                }
+                DistributionFamily::Ttft => (MetricFamily::Ttft, MetricUnit::Milliseconds),
+                DistributionFamily::Tpot => (MetricFamily::Tpot, MetricUnit::Milliseconds),
+            };
+            Some((label, family, unit, rank))
         }
-        Some(BenchMetric::GoodRequestRatio | BenchMetric::Goodput) | None => None,
+        Some(
+            BenchMetric::AcceptanceLength
+            | BenchMetric::AcceptanceRate
+            | BenchMetric::GoodRequestRatio
+            | BenchMetric::Goodput,
+        )
+        | None => None,
     };
     match known {
         Some((label, family, unit, rank)) => MetricDescriptor {
@@ -288,6 +299,7 @@ mod tests {
             CaseLoad::Concurrency(1),
             &[
                 ("p95_ttft_ms", 12.0),
+                ("mean_prompt_tokens", 136.0),
                 ("request_throughput", 1.0),
                 ("goodput", 0.5),
                 ("vendor_metric", 2.0),
@@ -296,12 +308,14 @@ mod tests {
 
         assert_eq!(metrics[0].name, "request_throughput");
         assert_eq!(metrics[0].family, MetricFamily::Throughput);
-        assert_eq!(metrics[1].name, "p95_ttft_ms");
-        assert_eq!(metrics[1].family, MetricFamily::Ttft);
-        assert_eq!(metrics[2].name, "goodput");
-        assert_eq!(metrics[2].family, MetricFamily::Other);
-        assert_eq!(metrics[3].name, "vendor_metric");
+        assert_eq!(metrics[1].name, "mean_prompt_tokens");
+        assert_eq!(metrics[1].family, MetricFamily::PromptTokens);
+        assert_eq!(metrics[2].name, "p95_ttft_ms");
+        assert_eq!(metrics[2].family, MetricFamily::Ttft);
+        assert_eq!(metrics[3].name, "goodput");
         assert_eq!(metrics[3].family, MetricFamily::Other);
+        assert_eq!(metrics[4].name, "vendor_metric");
+        assert_eq!(metrics[4].family, MetricFamily::Other);
     }
 
     #[test]

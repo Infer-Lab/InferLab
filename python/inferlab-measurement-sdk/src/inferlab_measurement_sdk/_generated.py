@@ -13,25 +13,12 @@ class BenchDatasetCacheState(StrEnum):
     present = 'present'
 
 
-class BenchDatasetCatalogInput(BaseModel):
+class BenchDatasetFilterInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    cache_path: str
-    cache_state: BenchDatasetCacheState
-    license: str
-    materialization_identity: str
-    sha256: str
-    source_format: str
-    upstream_identity: str
-    url: str
-
-
-class BenchDatasetInput(RootModel[Literal['sharegpt']]):
-    root: Annotated[
-        Literal['sharegpt'],
-        Field(description='Release-qualified public Bench datasets.'),
-    ] = 'sharegpt'
+    field: str
+    value: str
 
 
 class BenchLoadInputConcurrencyLimited(BaseModel):
@@ -73,14 +60,15 @@ class BenchLoadInput(
     ]
 
 
-class BenchPopulationInput(BaseModel):
+class BenchNativeInvocation(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    entries: Annotated[int, Field(ge=0)]
-    path: str
-    sha256: str
-    tpot_applicable: bool
+    command: list[str]
+    exit_code: int | None = None
+    interrupted: bool
+    purpose: str
+    timed_out: bool
 
 
 class BenchPrefixSharingInput(BaseModel):
@@ -90,6 +78,11 @@ class BenchPrefixSharingInput(BaseModel):
     shared_prefix_ratio: float
     shared_prefix_tokens: Annotated[int, Field(ge=0)]
     unique_suffix_tokens: Annotated[int, Field(ge=0)]
+
+
+class BenchPromptTemplateSource(StrEnum):
+    request_body = 'request_body'
+    tokenizer_default = 'tokenizer_default'
 
 
 class BenchRandomShapeInput(BaseModel):
@@ -125,16 +118,6 @@ class BenchRequestSloResult(BaseModel):
     request_count_reconciled: bool
 
 
-class BenchRequestSourceInputRandom(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    input_tokens: Annotated[int, Field(ge=0)]
-    kind: Literal['random'] = 'random'
-    output_tokens: Annotated[int, Field(ge=0)]
-    prefix_sharing: BenchPrefixSharingInput | None = None
-
-
 class BenchRequestSourceInputRandomMixture(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -144,32 +127,80 @@ class BenchRequestSourceInputRandomMixture(BaseModel):
     total_weight: Annotated[int, Field(ge=0)]
 
 
-class BenchRequestSourceInputDataset(BaseModel):
+class BenchSessionDatasetCatalogInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    catalog: BenchDatasetCatalogInput
-    dataset: BenchDatasetInput
-    kind: Literal['dataset'] = 'dataset'
+    cache_path: str
+    cache_state: BenchDatasetCacheState
+    configuration: str | None = None
+    dataset: str
+    filter: BenchDatasetFilterInput | None = None
+    license: str
+    materialization_identity: str
+    profile: str | None = None
+    provides_output_targets: bool
+    sha256: str
+    source: str
+    source_format: str
+    split: str | None = None
+    upstream_identity: str
+    url: str
+
+
+class BenchSessionPhaseSummary(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    attempted_requests: Annotated[int, Field(ge=0)]
+    completed_requests: Annotated[int, Field(ge=0)]
+    failed_requests: Annotated[int, Field(ge=0)]
+    failed_sessions: Annotated[int, Field(ge=0)]
+    planned_requests: Annotated[int, Field(ge=0)]
+    planned_sessions: Annotated[int, Field(ge=0)]
+    reconciled: bool
+    started_sessions: Annotated[int, Field(ge=0)]
+    succeeded_sessions: Annotated[int, Field(ge=0)]
+
+
+class BenchSessionSourceInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    catalog: BenchSessionDatasetCatalogInput
+    dataset: str
+    inter_turn_delay_scale: float
     max_input_tokens: Annotated[int, Field(ge=0)]
+    max_inter_turn_delay_seconds: float | None = None
     output_tokens: Annotated[int | None, Field(ge=0)] = None
+    profile: str | None = None
 
 
-class BenchRequestSourceInput(
-    RootModel[
-        BenchRequestSourceInputRandom
-        | BenchRequestSourceInputRandomMixture
-        | BenchRequestSourceInputDataset
-    ]
-):
-    root: Annotated[
-        BenchRequestSourceInputRandom
-        | BenchRequestSourceInputRandomMixture
-        | BenchRequestSourceInputDataset,
-        Field(
-            description='One closed request origin lowered by Inferlab for the Bench runtime.'
-        ),
-    ]
+class BenchSessionTemplateInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    template_identity: str
+    turn_count: Annotated[int, Field(ge=0)]
+
+
+class BenchSessionTurnResult(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    effective_inter_turn_delay_seconds: float | None = None
+    inter_turn_delay_reconciled: bool | None = None
+    native_artifact_name: str
+    native_session_num: Annotated[int, Field(ge=0)]
+    observed_prompt_tokens: Annotated[int | None, Field(ge=0)] = None
+    phase: str
+    post_failure_continuation: bool = False
+    pre_template_content_tokens: Annotated[int, Field(ge=0)]
+    preceding_native_session_num: Annotated[int | None, Field(ge=0)] = None
+    preceding_terminal_response_receipt_ns: Annotated[int | None, Field(ge=0)] = None
+    request_start_ns: Annotated[int, Field(ge=0)]
+    runtime_session_id: str
+    turn_index: Annotated[int, Field(ge=0)]
 
 
 class BenchTokenCountSummary(BaseModel):
@@ -179,6 +210,20 @@ class BenchTokenCountSummary(BaseModel):
     maximum: Annotated[int, Field(ge=0)]
     mean: float
     minimum: Annotated[int, Field(ge=0)]
+
+
+class BenchTokenDistributionKindInput(RootModel[Literal['inclusive_uniform']]):
+    root: Literal['inclusive_uniform'] = 'inclusive_uniform'
+
+
+class BenchTokenSelectorInput1(RootModel[int]):
+    root: Annotated[
+        int,
+        Field(
+            description='One fixed or bounded inclusive-uniform token-length selector.',
+            ge=0,
+        ),
+    ]
 
 
 class ClientStatus(StrEnum):
@@ -326,6 +371,15 @@ class RawArtifact(BaseModel):
     path: str
 
 
+class ServerMetricsEndpointInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    path: str
+    port_name: str | None = None
+    url: str
+
+
 class SettingValue(
     RootModel[
         Union[bool, int, float, str, list["SettingValue"], dict[str, "SettingValue"]]
@@ -345,75 +399,129 @@ class BenchCaseInput(BaseModel):
     )
     load_shape: BenchLoadInput
     request_count: Annotated[int, Field(ge=0)]
+    session_count: Annotated[int | None, Field(ge=0)] = None
     warmup_request_count: Annotated[int, Field(ge=0)] = 0
+    warmup_session_count: Annotated[int | None, Field(ge=0)] = None
 
 
-class BenchClientResult(BaseModel):
+class BenchDatasetCatalogInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    completed_requests: Annotated[int, Field(ge=0)]
-    error: str | None = None
-    failed_requests: Annotated[int, Field(ge=0)]
-    metrics: dict[str, float]
-    native_command: list[str]
-    native_exit_code: int | None = None
-    normalization_schema: str
-    raw_artifacts: list[RawArtifact]
-    request_slo: BenchRequestSloResult | None = None
-    schema_version: Annotated[
-        int,
+    aiperf_format: str
+    cache_path: str
+    cache_state: BenchDatasetCacheState
+    configuration: str | None = None
+    dataset: str
+    filter: BenchDatasetFilterInput | None = None
+    license: str
+    materialization_identity: str
+    profile: str | None = None
+    provides_output_targets: bool
+    sha256: str
+    source: str
+    source_format: str
+    split: str | None = None
+    upstream_identity: str
+    url: str
+
+
+class BenchInclusiveUniformInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    kind: BenchTokenDistributionKindInput
+    max: Annotated[int, Field(ge=0)]
+    min: Annotated[int, Field(ge=0)]
+
+
+class BenchPopulationInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    entries: Annotated[int, Field(ge=0)]
+    path: str
+    session_templates: Annotated[
+        list[BenchSessionTemplateInput], Field(validate_default=True)
+    ] = []
+    sha256: str
+    tpot_applicable: bool
+
+
+class BenchPromptTemplateProjection(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    content: str
+    sha256: str
+    source: BenchPromptTemplateSource
+
+
+class BenchPromptTokenTargetingSummary(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    exact_entries: Annotated[int, Field(ge=0)]
+    fallback_entries: Annotated[int, Field(ge=0)]
+    fallback_reasons: dict[str, int] = {}
+    pre_template_content_tokens: BenchTokenCountSummary
+    projection_template: BenchPromptTemplateProjection | None = None
+    selected_prompt_tokens: BenchTokenCountSummary
+
+
+class BenchRequestSourceInputDataset(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    catalog: BenchDatasetCatalogInput
+    dataset: str
+    kind: Literal['dataset'] = 'dataset'
+    max_input_tokens: Annotated[int, Field(ge=0)]
+    output_tokens: Annotated[int | None, Field(ge=0)] = None
+    profile: str | None = None
+
+
+class BenchRuntimeSessionResult(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    attempted_turns: Annotated[int, Field(ge=0)]
+    diagnostic: str | None = None
+    failing_turn: Annotated[int | None, Field(ge=0)] = None
+    failure_classification: str | None = None
+    phase: str
+    planned_turns: Annotated[int, Field(ge=0)]
+    runtime_session_id: str
+    status: ClientStatus
+    suppressed_later_turns: Annotated[int, Field(ge=0)]
+    template_identity: str
+
+
+class BenchSessionResultEvidence(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    counts_reconciled: bool
+    inter_turn_delays_reconciled: bool
+    native_requests_reconciled: bool
+    population_slice_reconciled: bool
+    profiling: BenchSessionPhaseSummary
+    sessions: list[BenchRuntimeSessionResult]
+    sessions_reconciled: bool
+    turn_order_reconciled: bool
+    turns: list[BenchSessionTurnResult]
+    warmup: BenchSessionPhaseSummary
+
+
+class BenchTokenSelectorInput(
+    RootModel[BenchTokenSelectorInput1 | BenchInclusiveUniformInput]
+):
+    root: Annotated[
+        BenchTokenSelectorInput1 | BenchInclusiveUniformInput,
         Field(
-            description='Result envelope version; clients write `1`. The measurement runtime\nrejects a bench result whose version is not `1`.',
-            ge=0,
+            description='One fixed or bounded inclusive-uniform token-length selector.'
         ),
     ]
-    status: ClientStatus
-
-
-class BenchDatasetPreparationRequest(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    artifact_dir: str
-    model: MeasurementModelInput
-    protocol_version: ProtocolVersion
-    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
-    request_source: BenchRequestSourceInput
-    required_entries: Annotated[int, Field(ge=0)]
-    seed: Annotated[int, Field(ge=0)]
-    source_path: str
-
-
-class BenchDatasetPreparationResult(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    admitted_entries: Annotated[int, Field(ge=0)]
-    candidate_entries: Annotated[int, Field(ge=0)]
-    error: str | None = None
-    evidence_path: str | None = None
-    ineligible_entries: Annotated[int, Field(ge=0)]
-    ineligible_reasons: dict[str, int] = {}
-    input_tokens: BenchTokenCountSummary | None = None
-    materialization_identity: str
-    output_tokens: BenchTokenCountSummary | None = None
-    population: BenchPopulationInput | None = None
-    requested_entries: Annotated[int, Field(ge=0)]
-    schema_version: Annotated[int, Field(ge=0)]
-    status: ClientStatus
-
-
-class BenchDefinitionInput(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
-    request_slo: BenchRequestSloInput | None = None
-    request_source: BenchRequestSourceInput
-    reset_prefix_cache: bool = False
-    seed: Annotated[int, Field(ge=0)]
-    timeout_seconds: Annotated[int, Field(ge=0)]
 
 
 class ClientEndpointInput(BaseModel):
@@ -425,6 +533,7 @@ class ClientEndpointInput(BaseModel):
     host: str
     port: Annotated[int, Field(ge=0, le=65535)]
     protocol: EndpointProtocol
+    server_metrics: ServerMetricsEndpointInput | None = None
 
 
 class EvalDefinitionInputLmEval(BaseModel):
@@ -467,23 +576,78 @@ class EvalMetricGate(BaseModel):
     threshold: float
 
 
-class BenchClientRequest(BaseModel):
+class BenchClientResult(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    artifact_dir: str
-    case: BenchCaseInput
-    case_budget_seconds: Annotated[
-        float,
+    completed_requests: Annotated[int, Field(ge=0)]
+    error: str | None = None
+    failed_requests: Annotated[int, Field(ge=0)]
+    metrics: dict[str, float]
+    native_command: list[str]
+    native_exit_code: int | None = None
+    normalization_schema: str
+    raw_artifacts: list[RawArtifact]
+    report_invocations: Annotated[
+        list[BenchNativeInvocation], Field(validate_default=True)
+    ] = []
+    request_slo: BenchRequestSloResult | None = None
+    schema_version: Annotated[
+        int,
         Field(
-            description='Remaining control-plane case budget when the client is released.'
+            description='Result envelope version; clients write `1`. The measurement runtime\nrejects a bench result whose version is not `1`.',
+            ge=0,
         ),
     ]
-    definition: BenchDefinitionInput
-    endpoint: ClientEndpointInput
-    model: MeasurementModelInput
+    session_evidence: BenchSessionResultEvidence | None = None
+    status: ClientStatus
+
+
+class BenchPopulationPreparationResult(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    admitted_entries: Annotated[int, Field(ge=0)]
+    candidate_entries: Annotated[int, Field(ge=0)]
+    error: str | None = None
+    evidence_path: str | None = None
+    ineligible_entries: Annotated[int, Field(ge=0)]
+    ineligible_reasons: dict[str, int] = {}
+    input_tokens: BenchTokenCountSummary | None = None
+    materialization_identity: str
+    output_tokens: BenchTokenCountSummary | None = None
     population: BenchPopulationInput | None = None
-    protocol_version: ProtocolVersion
+    prompt_token_targeting: BenchPromptTokenTargetingSummary | None = None
+    requested_entries: Annotated[int, Field(ge=0)]
+    schema_version: Annotated[int, Field(ge=0)]
+    status: ClientStatus
+
+
+class BenchRequestSourceInputRandom(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    input_tokens: BenchTokenSelectorInput
+    kind: Literal['random'] = 'random'
+    output_tokens: BenchTokenSelectorInput
+    prefix_sharing: BenchPrefixSharingInput | None = None
+
+
+class BenchRequestSourceInput(
+    RootModel[
+        BenchRequestSourceInputRandom
+        | BenchRequestSourceInputRandomMixture
+        | BenchRequestSourceInputDataset
+    ]
+):
+    root: Annotated[
+        BenchRequestSourceInputRandom
+        | BenchRequestSourceInputRandomMixture
+        | BenchRequestSourceInputDataset,
+        Field(
+            description='One closed request origin lowered by Inferlab for the Bench runtime.'
+        ),
+    ]
 
 
 class EvalClientRequest(BaseModel):
@@ -531,14 +695,66 @@ class EvalClientResult(BaseModel):
     trial_summary: EvalTrialSummary | None = None
 
 
+class BenchDefinitionInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
+    request_slo: BenchRequestSloInput | None = None
+    request_source: BenchRequestSourceInput | None = None
+    reset_prefix_cache: bool = False
+    seed: Annotated[int, Field(ge=0)]
+    server_metrics: bool = False
+    session_source: BenchSessionSourceInput | None = None
+    timeout_seconds: Annotated[int, Field(ge=0)]
+
+
+class BenchPopulationPreparationRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    artifact_dir: str
+    model: MeasurementModelInput
+    protocol_version: ProtocolVersion
+    request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
+    request_source: BenchRequestSourceInput | None = None
+    required_entries: Annotated[int, Field(ge=0)]
+    seed: Annotated[int, Field(ge=0)]
+    session_source: BenchSessionSourceInput | None = None
+    source_path: str | None = None
+    tokenizer_backend: str
+    transformers_version: str
+
+
+class BenchClientRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    artifact_dir: str
+    case: BenchCaseInput
+    case_budget_seconds: Annotated[
+        float,
+        Field(
+            description='Remaining control-plane case budget when the client is released.'
+        ),
+    ]
+    definition: BenchDefinitionInput
+    endpoint: ClientEndpointInput
+    model: MeasurementModelInput
+    population: BenchPopulationInput | None = None
+    protocol_version: ProtocolVersion
+
+
 class MeasurementProtocol(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
     bench_client_request: BenchClientRequest | None = None
     bench_client_result: BenchClientResult | None = None
-    bench_dataset_preparation_request: BenchDatasetPreparationRequest | None = None
-    bench_dataset_preparation_result: BenchDatasetPreparationResult | None = None
+    bench_population_preparation_request: BenchPopulationPreparationRequest | None = (
+        None
+    )
+    bench_population_preparation_result: BenchPopulationPreparationResult | None = None
     eval_client_request: EvalClientRequest | None = None
     eval_client_result: EvalClientResult | None = None
 

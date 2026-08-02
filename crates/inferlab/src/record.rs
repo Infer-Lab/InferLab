@@ -50,7 +50,7 @@ pub(crate) fn new_record_id(identity: RecordIdentity<'_>) -> Result<String, Infe
 pub(crate) fn now_unix_ms() -> Result<u64, InferlabError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
+        .map(inferlab_runtime::operation_bound::duration_millis)
         .map_err(|error| InferlabError::ServerLifecycle {
             message: format!("system clock is before Unix epoch: {error}"),
         })

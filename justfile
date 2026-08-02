@@ -68,6 +68,11 @@ plugin-tarball out="inferlab-plugin.tar.gz":
     scripts/pack-plugin.sh "{{ out }}"
     sha256sum "{{ out }}"
 
+# Self-contained Cargo source artifact staged from canonical product payloads
+[group("release")]
+package-inferlab-crate out="target/package":
+    scripts/package-inferlab-crate.sh "{{ out }}"
+
 # Install the operator skill into local agent runtimes from this checkout
 [group("release")]
 install-skill:

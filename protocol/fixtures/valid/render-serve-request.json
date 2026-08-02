@@ -78,7 +78,7 @@
         "gateway": {
           "backend": "vllm-router",
           "implementation": "vllm-router",
-          "implementation_version": "0.5.1",
+          "implementation_version": "fixture-frontend-version",
           "effective_settings": {},
           "endpoint": {
             "protocol": "http",
@@ -95,7 +95,7 @@
         "pd_router": {
           "backend": "vllm-router",
           "implementation": "vllm-router",
-          "implementation_version": "0.5.1",
+          "implementation_version": "fixture-frontend-version",
           "effective_settings": {},
           "policies": {"prefill": "round_robin", "decode": "round_robin"},
           "prefill_role": "prefill",

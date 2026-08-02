@@ -108,6 +108,7 @@ def test_weighted_random_mixture_fixture_round_trips() -> None:
     request = BenchClientRequest.model_validate(
         load_json(FIXTURES / "valid" / "bench-client-request-random-mixture.json")
     )
+    assert request.definition.request_source is not None
     source = request.definition.request_source.root
 
     assert isinstance(source, BenchRequestSourceInputRandomMixture)

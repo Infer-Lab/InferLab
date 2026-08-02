@@ -30,8 +30,9 @@ const MARKETPLACE: &str = "inferlab";
 const INFERLAB_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The plugin package this binary carries, packed reproducibly by
-/// `build.rs` from `resources/plugin/` (mirroring the repo-root package:
-/// `LICENSE`, `.claude-plugin/`, `.agents/`, `plugins/inferlab/`). Installed
+/// `build.rs` from the canonical repo-root package (`LICENSE`,
+/// `.claude-plugin/`, `.agents/`, `plugins/inferlab/`), or from its generated
+/// crate staging projection. Installed
 /// by default; `--from-checkout` overrides the source entirely and never
 /// touches this payload ([[RFC-0008:C-AGENT-PLUGIN]]).
 const EMBEDDED_PLUGIN_TAR_GZ: &[u8] =
@@ -185,13 +186,15 @@ fn run_marketplace_command(
         .chain(args.iter().cloned())
         .collect::<Vec<_>>();
     let command = render_agent_command(&argv);
-    let bound = crate::time_bound::OperationBound::finite(DEFAULT_COMMAND_TIMEOUT);
-    let outcome = crate::container::run_with_bound(&argv, None, None, &bound, None);
+    let bound = inferlab_runtime::operation_bound::OperationBound::finite(DEFAULT_COMMAND_TIMEOUT);
+    let outcome = inferlab_runtime::container::run_with_bound(&argv, None, None, &bound, None);
     match outcome {
-        Ok(crate::container::BoundedWait::Exited { status, stdout, .. }) if status.success() => {
+        Ok(inferlab_runtime::container::BoundedWait::Exited { status, stdout, .. })
+            if status.success() =>
+        {
             Ok((command, stdout))
         }
-        Ok(crate::container::BoundedWait::Exited {
+        Ok(inferlab_runtime::container::BoundedWait::Exited {
             status,
             stdout,
             stderr,
@@ -208,30 +211,36 @@ fn run_marketplace_command(
                 ),
             })
         }
-        Ok(crate::container::BoundedWait::Expired { .. }) => Err(MarketplaceCommandFailure {
-            command: Some(command),
-            message: format!(
-                "{} {operation} timed out after {} seconds",
-                runtime.id(),
-                DEFAULT_COMMAND_TIMEOUT.as_secs()
-            ),
-        }),
-        Ok(crate::container::BoundedWait::Interrupted { .. }) => Err(MarketplaceCommandFailure {
-            command: Some(command),
-            message: format!("{} {operation} was interrupted", runtime.id()),
-        }),
-        Err(crate::container::BoundedError::Launch(error)) => Err(MarketplaceCommandFailure {
-            command: None,
-            message: format!("{} {operation} could not start: {error}", runtime.id()),
-        }),
+        Ok(inferlab_runtime::container::BoundedWait::Expired { .. }) => {
+            Err(MarketplaceCommandFailure {
+                command: Some(command),
+                message: format!(
+                    "{} {operation} timed out after {} seconds",
+                    runtime.id(),
+                    DEFAULT_COMMAND_TIMEOUT.as_secs()
+                ),
+            })
+        }
+        Ok(inferlab_runtime::container::BoundedWait::Interrupted { .. }) => {
+            Err(MarketplaceCommandFailure {
+                command: Some(command),
+                message: format!("{} {operation} was interrupted", runtime.id()),
+            })
+        }
+        Err(inferlab_runtime::container::BoundedError::Launch(error)) => {
+            Err(MarketplaceCommandFailure {
+                command: None,
+                message: format!("{} {operation} could not start: {error}", runtime.id()),
+            })
+        }
         Err(
-            crate::container::BoundedError::Stdin(error)
-            | crate::container::BoundedError::Wait(error),
+            inferlab_runtime::container::BoundedError::Stdin(error)
+            | inferlab_runtime::container::BoundedError::Wait(error),
         ) => Err(MarketplaceCommandFailure {
             command: Some(command),
             message: format!("{} {operation} failed: {error}", runtime.id()),
         }),
-        Err(crate::container::BoundedError::WaitCleanup { source, .. }) => {
+        Err(inferlab_runtime::container::BoundedError::WaitCleanup { source, .. }) => {
             Err(MarketplaceCommandFailure {
                 command: Some(command),
                 message: format!("{} {operation} failed: {source}", runtime.id()),

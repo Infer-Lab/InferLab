@@ -1,0 +1,25 @@
+[package]
+name = "inferlab-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Framework-neutral runtime lifecycle mechanics for the InferLab product."
+keywords = ["llm", "inference", "runtime", "process"]
+categories = ["development-tools"]
+include = ["src/**", "LICENSE"]
+
+[dependencies]
+ctrlc.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+wait-timeout.workspace = true
+
+[lints]
+workspace = true

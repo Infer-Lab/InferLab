@@ -1,14 +1,18 @@
 use crate::InferlabError;
 use crate::environment;
+use crate::workspace::JsonValue;
 use inferlab_protocol::{
     AdapterErrorCode, AdapterRequest, AdapterResponse, AdapterResult, PlanServeInput,
-    PlanServeResult, ProtocolVersion, RenderServeInput, RenderServeResult,
+    PlanServeResult, ProtocolVersion, RenderServeInput, RenderServeResult, SettingValue,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::time_bound::{OperationBound, OperationTerminalCause, OperationTimingEvidence};
+use inferlab_runtime::operation_bound::{
+    OperationBound, OperationTerminalCause, OperationTimingEvidence,
+};
 
 const ADAPTER_TIMEOUT: Duration = Duration::from_secs(30);
 /// An image-backed adapter pays container start-up on top of framework
@@ -45,6 +49,20 @@ pub struct AdapterLowering<T> {
     pub request_sha256: String,
     pub response_sha256: String,
     pub timing: OperationTimingEvidence,
+}
+
+/// Project already validated JSON-compatible domain values onto the adapter
+/// wire representation without maintaining a second scalar/object mapping.
+pub(crate) fn project_setting_values(
+    scope: &str,
+    values: &BTreeMap<String, JsonValue>,
+) -> Result<BTreeMap<String, SettingValue>, InferlabError> {
+    let json = serde_json::to_value(values).map_err(|error| InferlabError::InvalidConfig {
+        message: format!("failed to prepare {scope} for adapter projection: {error}"),
+    })?;
+    serde_json::from_value(json).map_err(|error| InferlabError::InvalidConfig {
+        message: format!("failed to project {scope} onto the adapter protocol: {error}"),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -169,7 +187,9 @@ impl ImageAdapterClient {
             cidfile.display().to_string(),
         ];
         if let Some(device) = self.device {
-            launcher.extend(crate::container::docker_device_args(&device.to_string()));
+            launcher.extend(inferlab_runtime::container::docker_device_args(
+                &device.to_string(),
+            ));
         }
         if self.explicit_entrypoint {
             // An external image carries no workspace-side packages, so lowering
@@ -269,7 +289,9 @@ pub(crate) fn probe_external_framework(
         cidfile.display().to_string(),
     ];
     if let Some(device) = device {
-        launcher.extend(crate::container::docker_device_args(&device.to_string()));
+        launcher.extend(inferlab_runtime::container::docker_device_args(
+            &device.to_string(),
+        ));
     }
     launcher.extend([
         "--entrypoint".to_owned(),
@@ -281,13 +303,13 @@ pub(crate) fn probe_external_framework(
     let probe_failed = |message: String| InferlabError::ImageSelection { message };
     let bound = OperationBound::finite(timeout);
     let (status, stdout, stderr) =
-        match crate::container::run_with_bound(&launcher, None, None, &bound, None) {
-            Ok(crate::container::BoundedWait::Exited {
+        match inferlab_runtime::container::run_with_bound(&launcher, None, None, &bound, None) {
+            Ok(inferlab_runtime::container::BoundedWait::Exited {
                 status,
                 stdout,
                 stderr,
             }) => (status, stdout, stderr),
-            Ok(crate::container::BoundedWait::Expired { kill, .. }) => {
+            Ok(inferlab_runtime::container::BoundedWait::Expired { kill, .. }) => {
                 remove_adapter_container(&cidfile);
                 if let Err(error) = kill {
                     eprintln!(
@@ -299,23 +321,23 @@ pub(crate) fn probe_external_framework(
                     timeout.as_secs()
                 )));
             }
-            Ok(crate::container::BoundedWait::Interrupted { kill, .. }) => {
+            Ok(inferlab_runtime::container::BoundedWait::Interrupted { kill, .. }) => {
                 remove_adapter_container(&cidfile);
                 return Err(interrupted_probe_error(reference, kill));
             }
-            Err(crate::container::BoundedError::Launch(source)) => {
+            Err(inferlab_runtime::container::BoundedError::Launch(source)) => {
                 return Err(probe_failed(format!(
                     "framework probe failed to launch: {source}"
                 )));
             }
             Err(
-                crate::container::BoundedError::Stdin(source)
-                | crate::container::BoundedError::Wait(source),
+                inferlab_runtime::container::BoundedError::Stdin(source)
+                | inferlab_runtime::container::BoundedError::Wait(source),
             ) => {
                 remove_adapter_container(&cidfile);
                 return Err(probe_failed(format!("framework probe failed: {source}")));
             }
-            Err(crate::container::BoundedError::WaitCleanup {
+            Err(inferlab_runtime::container::BoundedError::WaitCleanup {
                 source, cleanup, ..
             }) => {
                 remove_adapter_container(&cidfile);
@@ -375,13 +397,13 @@ fn remove_adapter_container(cidfile: &Path) {
     if cid.is_empty() {
         return;
     }
-    use crate::container::{Removal, RemovalFailure, remove_container};
+    use inferlab_runtime::container::{Removal, RemovalFailure, remove_container};
     let detail = match remove_container(None, &cid) {
         Removal::Confirmed { .. } => return,
         Removal::Unconfirmed(RemovalFailure::Exit { stderr, .. }) => stderr.trim().to_owned(),
         Removal::Unconfirmed(RemovalFailure::Deadline { .. }) => format!(
             "docker rm did not finish within {} seconds",
-            crate::container::REMOVAL_TIMEOUT.as_secs()
+            inferlab_runtime::container::REMOVAL_TIMEOUT.as_secs()
         ),
         Removal::Unconfirmed(RemovalFailure::Launch(error) | RemovalFailure::Wait(error)) => {
             error.to_string()
@@ -472,25 +494,29 @@ fn invoke_adapter(
 ) -> Result<AdapterInvocation, InferlabError> {
     let payload = serde_json::to_vec(&request)
         .map_err(|source| InferlabError::SerializeAdapterRequest { source })?;
+    let supported_protocol_version =
+        raw_protocol_version(&payload).ok_or_else(|| InferlabError::AdapterProtocolVersion {
+            message: "the serialized adapter request omitted its protocol version".to_owned(),
+        })?;
     let request_sha256 = format!("{:x}", Sha256::digest(&payload));
     let adapter_io = |source| InferlabError::AdapterIo {
         integration: integration.to_owned(),
         source,
     };
     let bound = OperationBound::finite(timeout);
-    let (status, stdout, stderr) = match crate::container::run_with_bound(
+    let (status, stdout, stderr) = match inferlab_runtime::container::run_with_bound(
         launcher,
         Some(workspace_root),
         Some(&payload),
         &bound,
         None,
     ) {
-        Ok(crate::container::BoundedWait::Exited {
+        Ok(inferlab_runtime::container::BoundedWait::Exited {
             status,
             stdout,
             stderr,
         }) => (status, stdout, stderr),
-        Ok(crate::container::BoundedWait::Expired { kill, .. }) => {
+        Ok(inferlab_runtime::container::BoundedWait::Expired { kill, .. }) => {
             if let Err(source) = kill {
                 eprintln!(
                     "warning: adapter client cleanup failed after the {integration:?} invocation deadline: {source}"
@@ -501,22 +527,22 @@ fn invoke_adapter(
                 seconds: timeout.as_secs(),
             });
         }
-        Ok(crate::container::BoundedWait::Interrupted { kill, .. }) => {
+        Ok(inferlab_runtime::container::BoundedWait::Interrupted { kill, .. }) => {
             return Err(interrupted_adapter_error(integration, kill));
         }
-        Err(crate::container::BoundedError::Launch(source)) => {
+        Err(inferlab_runtime::container::BoundedError::Launch(source)) => {
             return Err(InferlabError::LaunchAdapter {
                 integration: integration.to_owned(),
                 source,
             });
         }
         Err(
-            crate::container::BoundedError::Stdin(source)
-            | crate::container::BoundedError::Wait(source),
+            inferlab_runtime::container::BoundedError::Stdin(source)
+            | inferlab_runtime::container::BoundedError::Wait(source),
         ) => {
             return Err(adapter_io(source));
         }
-        Err(crate::container::BoundedError::WaitCleanup {
+        Err(inferlab_runtime::container::BoundedError::WaitCleanup {
             source, cleanup, ..
         }) => {
             if !cleanup.verified {
@@ -551,10 +577,10 @@ fn invoke_adapter(
     let answered = raw_protocol_version(&stdout);
     ensure_adapter_active(&bound, integration, timeout)?;
     if let Some(answered) = answered
-        && answered != PROTOCOL_VERSION
+        && answered != supported_protocol_version
     {
         return Err(InferlabError::AdapterProtocolVersion {
-            message: protocol_version_remedy(integration, &answered),
+            message: protocol_version_remedy(integration, &answered, &supported_protocol_version),
         });
     }
     let response = serde_json::from_slice(&stdout);
@@ -589,9 +615,10 @@ fn invoke_adapter(
             };
             Err(InferlabError::AdapterProtocolVersion {
                 message: format!(
-                    "{detail}; this inferlab binary speaks protocol version {PROTOCOL_VERSION} \
+                    "{detail}; this inferlab binary speaks protocol version {} \
                      — bump the workspace adapter pins and relock, or run a release whose binary \
-                     speaks the integration's protocol version"
+                     speaks the integration's protocol version",
+                    supported_protocol_version
                 ),
             })
         }
@@ -648,9 +675,6 @@ fn interrupted_probe_error(reference: &str, kill: std::io::Result<()>) -> Inferl
     }
 }
 
-/// The protocol version this binary speaks, as its wire string.
-const PROTOCOL_VERSION: &str = "7";
-
 /// The raw `protocol_version` string an adapter answered, read without
 /// committing to the full versioned response shape. Absent when the field is
 /// missing or not a string — those fall through to ordinary shape validation.
@@ -664,10 +688,10 @@ fn raw_protocol_version(stdout: &[u8]) -> Option<String> {
 
 /// The operator-facing protocol-version mismatch message: both versions and the
 /// remedy ([[RFC-0006:C-INTEGRATIONS]]).
-fn protocol_version_remedy(integration: &str, answered: &str) -> String {
+fn protocol_version_remedy(integration: &str, answered: &str, supported: &str) -> String {
     format!(
         "integration {integration} answered with protocol version {answered}; this inferlab \
-         binary speaks protocol version {PROTOCOL_VERSION} — bump the workspace adapter pins and \
+         binary speaks protocol version {supported} — bump the workspace adapter pins and \
          relock, or run a release whose binary speaks protocol version {answered}"
     )
 }
@@ -906,7 +930,7 @@ mod tests {
 
         assert_eq!(
             invocation.timing.budget,
-            crate::time_bound::OperationBudgetEvidence::Finite {
+            inferlab_runtime::operation_bound::OperationBudgetEvidence::Finite {
                 configured_ms: 3_000,
             }
         );

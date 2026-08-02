@@ -25,20 +25,20 @@
         }
       ]
     },
-    "bench_dataset_preparation_request": {
+    "bench_population_preparation_request": {
       "anyOf": [
         {
-          "$ref": "#/$defs/BenchDatasetPreparationRequest"
+          "$ref": "#/$defs/BenchPopulationPreparationRequest"
         },
         {
           "type": "null"
         }
       ]
     },
-    "bench_dataset_preparation_result": {
+    "bench_population_preparation_result": {
       "anyOf": [
         {
-          "$ref": "#/$defs/BenchDatasetPreparationResult"
+          "$ref": "#/$defs/BenchPopulationPreparationResult"
         },
         {
           "type": "null"
@@ -81,10 +81,28 @@
           "format": "uint32",
           "minimum": 0
         },
+        "session_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
         "warmup_request_count": {
           "type": "integer",
           "format": "uint32",
           "default": 0,
+          "minimum": 0
+        },
+        "warmup_session_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
           "minimum": 0
         }
       },
@@ -193,6 +211,13 @@
             "$ref": "#/$defs/RawArtifact"
           }
         },
+        "report_invocations": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BenchNativeInvocation"
+          }
+        },
         "request_slo": {
           "anyOf": [
             {
@@ -209,6 +234,17 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "session_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchSessionResultEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "status": {
           "$ref": "#/$defs/ClientStatus"
@@ -238,11 +274,35 @@
       "description": "Immutable release-catalog facts resolved by the Rust control plane.",
       "type": "object",
       "properties": {
+        "aiperf_format": {
+          "type": "string"
+        },
         "cache_path": {
           "type": "string"
         },
         "cache_state": {
           "$ref": "#/$defs/BenchDatasetCacheState"
+        },
+        "configuration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchDatasetFilterInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "license": {
           "type": "string"
@@ -250,11 +310,31 @@
         "materialization_identity": {
           "type": "string"
         },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "provides_output_targets": {
+          "type": "boolean"
+        },
         "sha256": {
+          "type": "string"
+        },
+        "source": {
           "type": "string"
         },
         "source_format": {
           "type": "string"
+        },
+        "split": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "upstream_identity": {
           "type": "string"
@@ -265,25 +345,266 @@
       },
       "additionalProperties": false,
       "required": [
+        "dataset",
+        "source",
         "upstream_identity",
         "url",
         "sha256",
         "source_format",
+        "aiperf_format",
         "license",
         "cache_path",
         "cache_state",
-        "materialization_identity"
+        "materialization_identity",
+        "provides_output_targets"
       ]
     },
-    "BenchDatasetInput": {
-      "description": "Release-qualified public Bench datasets.",
-      "type": "string",
-      "enum": [
-        "sharegpt"
+    "BenchDatasetFilterInput": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "value"
       ]
     },
-    "BenchDatasetPreparationRequest": {
-      "description": "The bounded tokenizer-backed operation that materializes one dataset\npopulation before any Bench case starts.",
+    "BenchDefinitionInput": {
+      "description": "The workload shape a Bench client drives, shared across its load cases.",
+      "type": "object",
+      "properties": {
+        "request_body": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          },
+          "default": {}
+        },
+        "request_slo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchRequestSloInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "request_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchRequestSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reset_prefix_cache": {
+          "type": "boolean",
+          "default": false
+        },
+        "seed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "server_metrics": {
+          "type": "boolean",
+          "default": false
+        },
+        "session_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchSessionSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "timeout_seconds"
+      ]
+    },
+    "BenchInclusiveUniformInput": {
+      "description": "The one bounded distribution currently supported for a token selector.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/BenchTokenDistributionKindInput"
+        },
+        "max": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "min",
+        "max"
+      ]
+    },
+    "BenchLoadInput": {
+      "description": "How a Bench case paces its requests.",
+      "oneOf": [
+        {
+          "description": "A fixed number of in-flight requests.",
+          "type": "object",
+          "properties": {
+            "concurrency": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "concurrency_limited"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "concurrency"
+          ]
+        },
+        {
+          "description": "A target arrival rate, optionally shaped by a burstiness factor.",
+          "type": "object",
+          "properties": {
+            "burstiness": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "request_rate_limited"
+            },
+            "request_rate": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request_rate"
+          ]
+        },
+        {
+          "description": "All requests issued as fast as possible.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unbounded_request_rate"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "BenchNativeInvocation": {
+      "description": "One bounded native post-processing command and its terminal outcome.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "command",
+        "interrupted",
+        "timed_out"
+      ]
+    },
+    "BenchPopulationInput": {
+      "description": "One frozen dataset population consumed sequentially by every Bench case.",
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        },
+        "session_templates": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BenchSessionTemplateInput"
+          }
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "tpot_applicable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "entries",
+        "tpot_applicable"
+      ]
+    },
+    "BenchPopulationPreparationRequest": {
+      "description": "The bounded tokenizer-backed operation that freezes one request population\nbefore any Bench case starts.",
       "type": "object",
       "properties": {
         "artifact_dir": {
@@ -303,7 +624,15 @@
           "default": {}
         },
         "request_source": {
-          "$ref": "#/$defs/BenchRequestSourceInput"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchRequestSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "required_entries": {
           "type": "integer",
@@ -315,7 +644,28 @@
           "format": "uint64",
           "minimum": 0
         },
+        "session_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchSessionSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "source_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "tokenizer_backend": {
+          "type": "string"
+        },
+        "transformers_version": {
           "type": "string"
         }
       },
@@ -323,15 +673,15 @@
       "required": [
         "protocol_version",
         "model",
-        "request_source",
-        "source_path",
+        "tokenizer_backend",
+        "transformers_version",
         "required_entries",
         "seed",
         "artifact_dir"
       ]
     },
-    "BenchDatasetPreparationResult": {
-      "description": "Terminal result of dataset population materialization.",
+    "BenchPopulationPreparationResult": {
+      "description": "Terminal result of request-population materialization.",
       "type": "object",
       "properties": {
         "admitted_entries": {
@@ -403,6 +753,17 @@
             }
           ]
         },
+        "prompt_token_targeting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchPromptTokenTargetingSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "requested_entries": {
           "type": "integer",
           "format": "uint32",
@@ -426,145 +787,6 @@
         "candidate_entries",
         "admitted_entries",
         "ineligible_entries"
-      ]
-    },
-    "BenchDefinitionInput": {
-      "description": "The workload shape a Bench client drives, shared across its load cases.",
-      "type": "object",
-      "properties": {
-        "request_body": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SettingValue"
-          },
-          "default": {}
-        },
-        "request_slo": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/BenchRequestSloInput"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "request_source": {
-          "$ref": "#/$defs/BenchRequestSourceInput"
-        },
-        "reset_prefix_cache": {
-          "type": "boolean",
-          "default": false
-        },
-        "seed": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "timeout_seconds": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "request_source",
-        "seed",
-        "timeout_seconds"
-      ]
-    },
-    "BenchLoadInput": {
-      "description": "How a Bench case paces its requests.",
-      "oneOf": [
-        {
-          "description": "A fixed number of in-flight requests.",
-          "type": "object",
-          "properties": {
-            "concurrency": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
-            },
-            "kind": {
-              "type": "string",
-              "const": "concurrency_limited"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "concurrency"
-          ]
-        },
-        {
-          "description": "A target arrival rate, optionally shaped by a burstiness factor.",
-          "type": "object",
-          "properties": {
-            "burstiness": {
-              "type": [
-                "number",
-                "null"
-              ],
-              "format": "double"
-            },
-            "kind": {
-              "type": "string",
-              "const": "request_rate_limited"
-            },
-            "request_rate": {
-              "type": "number",
-              "format": "double"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "request_rate"
-          ]
-        },
-        {
-          "description": "All requests issued as fast as possible.",
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "unbounded_request_rate"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind"
-          ]
-        }
-      ]
-    },
-    "BenchPopulationInput": {
-      "description": "One frozen dataset population consumed sequentially by every Bench case.",
-      "type": "object",
-      "properties": {
-        "entries": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "path": {
-          "type": "string"
-        },
-        "sha256": {
-          "type": "string"
-        },
-        "tpot_applicable": {
-          "type": "boolean"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "path",
-        "sha256",
-        "entries",
-        "tpot_applicable"
       ]
     },
     "BenchPrefixSharingInput": {
@@ -591,6 +813,84 @@
         "shared_prefix_ratio",
         "shared_prefix_tokens",
         "unique_suffix_tokens"
+      ]
+    },
+    "BenchPromptTemplateProjection": {
+      "description": "The concrete template used only for local complete-prompt projection.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/BenchPromptTemplateSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "content",
+        "sha256"
+      ]
+    },
+    "BenchPromptTemplateSource": {
+      "description": "Where the concrete template used for local prompt-length projection came\nfrom. The model server remains authoritative for transport rendering.",
+      "type": "string",
+      "enum": [
+        "request_body",
+        "tokenizer_default"
+      ]
+    },
+    "BenchPromptTokenTargetingSummary": {
+      "description": "Summary of best-effort complete-prompt targeting for a synthetic population.",
+      "type": "object",
+      "properties": {
+        "exact_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "fallback_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "fallback_reasons": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
+        "pre_template_content_tokens": {
+          "$ref": "#/$defs/BenchTokenCountSummary"
+        },
+        "projection_template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchPromptTemplateProjection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "selected_prompt_tokens": {
+          "$ref": "#/$defs/BenchTokenCountSummary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "selected_prompt_tokens",
+        "pre_template_content_tokens",
+        "exact_entries",
+        "fallback_entries"
       ]
     },
     "BenchRandomShapeInput": {
@@ -720,18 +1020,14 @@
           "type": "object",
           "properties": {
             "input_tokens": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
+              "$ref": "#/$defs/BenchTokenSelectorInput"
             },
             "kind": {
               "type": "string",
               "const": "random"
             },
             "output_tokens": {
-              "type": "integer",
-              "format": "uint32",
-              "minimum": 0
+              "$ref": "#/$defs/BenchTokenSelectorInput"
             },
             "prefix_sharing": {
               "anyOf": [
@@ -787,7 +1083,7 @@
               "$ref": "#/$defs/BenchDatasetCatalogInput"
             },
             "dataset": {
-              "$ref": "#/$defs/BenchDatasetInput"
+              "type": "string"
             },
             "kind": {
               "type": "string",
@@ -805,6 +1101,13 @@
               ],
               "format": "uint32",
               "minimum": 0
+            },
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
             }
           },
           "additionalProperties": false,
@@ -815,6 +1118,433 @@
             "catalog"
           ]
         }
+      ]
+    },
+    "BenchRuntimeSessionResult": {
+      "description": "Terminal evidence for one admitted runtime session.",
+      "type": "object",
+      "properties": {
+        "attempted_turns": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "diagnostic": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "failing_turn": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "failure_classification": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "phase": {
+          "type": "string"
+        },
+        "planned_turns": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "runtime_session_id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ClientStatus"
+        },
+        "suppressed_later_turns": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "template_identity": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "runtime_session_id",
+        "template_identity",
+        "planned_turns",
+        "attempted_turns",
+        "status",
+        "suppressed_later_turns"
+      ]
+    },
+    "BenchSessionDatasetCatalogInput": {
+      "description": "Immutable release-catalog facts for a linear-session materializer. AIPerf\nloader names are deliberately absent from this source boundary.",
+      "type": "object",
+      "properties": {
+        "cache_path": {
+          "type": "string"
+        },
+        "cache_state": {
+          "$ref": "#/$defs/BenchDatasetCacheState"
+        },
+        "configuration": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchDatasetFilterInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "license": {
+          "type": "string"
+        },
+        "materialization_identity": {
+          "type": "string"
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "provides_output_targets": {
+          "type": "boolean"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_format": {
+          "type": "string"
+        },
+        "split": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "upstream_identity": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "dataset",
+        "source",
+        "upstream_identity",
+        "url",
+        "sha256",
+        "source_format",
+        "license",
+        "cache_path",
+        "cache_state",
+        "materialization_identity",
+        "provides_output_targets"
+      ]
+    },
+    "BenchSessionPhaseSummary": {
+      "description": "Reconciled native evidence for one session-bounded Bench phase.",
+      "type": "object",
+      "properties": {
+        "attempted_requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "completed_requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "failed_requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "failed_sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "planned_requests": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "planned_sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reconciled": {
+          "type": "boolean"
+        },
+        "started_sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "succeeded_sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "planned_sessions",
+        "started_sessions",
+        "succeeded_sessions",
+        "failed_sessions",
+        "planned_requests",
+        "attempted_requests",
+        "completed_requests",
+        "failed_requests",
+        "reconciled"
+      ]
+    },
+    "BenchSessionResultEvidence": {
+      "description": "Session and transport reconciliation returned by the Bench client.",
+      "type": "object",
+      "properties": {
+        "counts_reconciled": {
+          "type": "boolean"
+        },
+        "inter_turn_delays_reconciled": {
+          "type": "boolean"
+        },
+        "native_requests_reconciled": {
+          "type": "boolean"
+        },
+        "population_slice_reconciled": {
+          "type": "boolean"
+        },
+        "profiling": {
+          "$ref": "#/$defs/BenchSessionPhaseSummary"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BenchRuntimeSessionResult"
+          }
+        },
+        "sessions_reconciled": {
+          "type": "boolean"
+        },
+        "turn_order_reconciled": {
+          "type": "boolean"
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BenchSessionTurnResult"
+          }
+        },
+        "warmup": {
+          "$ref": "#/$defs/BenchSessionPhaseSummary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "warmup",
+        "profiling",
+        "sessions",
+        "turns",
+        "population_slice_reconciled",
+        "sessions_reconciled",
+        "turn_order_reconciled",
+        "inter_turn_delays_reconciled",
+        "native_requests_reconciled",
+        "counts_reconciled"
+      ]
+    },
+    "BenchSessionSourceInput": {
+      "description": "One release-qualified population of dependent linear session templates.",
+      "type": "object",
+      "properties": {
+        "catalog": {
+          "$ref": "#/$defs/BenchSessionDatasetCatalogInput"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "inter_turn_delay_scale": {
+          "type": "number",
+          "format": "double"
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_inter_turn_delay_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "dataset",
+        "max_input_tokens",
+        "inter_turn_delay_scale",
+        "catalog"
+      ]
+    },
+    "BenchSessionTemplateInput": {
+      "description": "One frozen linear-template summary needed to assign case slices without\nduplicating the content-bearing population evidence artifact.",
+      "type": "object",
+      "properties": {
+        "template_identity": {
+          "type": "string"
+        },
+        "turn_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "template_identity",
+        "turn_count"
+      ]
+    },
+    "BenchSessionTurnResult": {
+      "description": "One native transport request reconciled to a linear-session turn.",
+      "type": "object",
+      "properties": {
+        "effective_inter_turn_delay_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "inter_turn_delay_reconciled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "native_artifact_name": {
+          "type": "string"
+        },
+        "native_session_num": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "observed_prompt_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "phase": {
+          "type": "string"
+        },
+        "post_failure_continuation": {
+          "type": "boolean",
+          "default": false
+        },
+        "pre_template_content_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "preceding_native_session_num": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "preceding_terminal_response_receipt_ns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "request_start_ns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "runtime_session_id": {
+          "type": "string"
+        },
+        "turn_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "runtime_session_id",
+        "turn_index",
+        "pre_template_content_tokens",
+        "native_session_num",
+        "request_start_ns",
+        "native_artifact_name"
       ]
     },
     "BenchTokenCountSummary": {
@@ -843,6 +1573,25 @@
         "mean"
       ]
     },
+    "BenchTokenDistributionKindInput": {
+      "type": "string",
+      "enum": [
+        "inclusive_uniform"
+      ]
+    },
+    "BenchTokenSelectorInput": {
+      "description": "One fixed or bounded inclusive-uniform token-length selector.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        {
+          "$ref": "#/$defs/BenchInclusiveUniformInput"
+        }
+      ]
+    },
     "ClientEndpointInput": {
       "description": "The public workload endpoint an Eval or Bench client connects to.",
       "type": "object",
@@ -864,6 +1613,17 @@
         },
         "protocol": {
           "$ref": "#/$defs/EndpointProtocol"
+        },
+        "server_metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServerMetricsEndpointInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -1464,6 +2224,30 @@
         "name",
         "kind",
         "path"
+      ]
+    },
+    "ServerMetricsEndpointInput": {
+      "description": "The resolved server-metrics endpoint supplied to a measurement client.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "port_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "url"
       ]
     },
     "SettingValue": {

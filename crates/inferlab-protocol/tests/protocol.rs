@@ -104,7 +104,11 @@ fn weighted_random_mixture_fixture_round_trips() -> Result<(), Box<dyn Error>> {
     let BenchRequestSourceInput::RandomMixture {
         shapes,
         total_weight,
-    } = &request.definition.request_source
+    } = request
+        .definition
+        .request_source
+        .as_ref()
+        .ok_or("Bench fixture omitted its request source")?
     else {
         return Err("Bench fixture did not contain a random mixture".into());
     };
@@ -135,6 +139,48 @@ fn protocol_v7_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box
         return Err("protocol v7 accepted the pre-binding capture-control shape".into());
     };
     assert!(error.to_string().contains("unknown field `control`"));
+    Ok(())
+}
+
+#[test]
+fn protocol_v7_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
+    let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
+    response["result"]["output"]["replicas"][0]["capture_target"]["window_control"]["start"]["body"] =
+        serde_json::json!({"activities": ["CUDA_PROFILER"]});
+    let response: AdapterResponse = serde_json::from_value(response)?;
+    let AdapterResponse::Ok { result, .. } = response else {
+        return Err("plan fixture returned an error response".into());
+    };
+    let AdapterResult::PlanServe { output } = *result else {
+        return Err("plan fixture returned a render result".into());
+    };
+    let body = output.replicas[0]
+        .capture_target
+        .as_ref()
+        .and_then(|target| target.window_control.start.body.as_ref())
+        .ok_or("plan fixture did not preserve the start action body")?;
+
+    assert_eq!(
+        serde_json::to_value(body)?,
+        serde_json::json!({"activities": ["CUDA_PROFILER"]})
+    );
+    Ok(())
+}
+
+#[test]
+fn protocol_v7_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>>
+{
+    let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
+    response["result"]["output"]["roles"][0]["public_endpoint"]["prefix_cache_reset"] = serde_json::json!({
+        "method": "post",
+        "path": "/reset_prefix_cache",
+        "body": {"activities": ["CUDA_PROFILER"]}
+    });
+
+    let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
+        return Err("protocol v7 accepted a capture body on a prefix-cache action".into());
+    };
+    assert!(error.to_string().contains("unknown field `body`"));
     Ok(())
 }
 

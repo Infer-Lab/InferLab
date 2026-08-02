@@ -1,6 +1,17 @@
 {
   "schema_version": "1.3",
   "aiperf_version": "0.11.0",
+  "input_sequence_length": {
+    "unit": "tokens",
+    "avg": 136.0,
+    "min": 136.0,
+    "max": 136.0,
+    "std": 0.0,
+    "p50": 136.0,
+    "p90": 136.0,
+    "p95": 136.0,
+    "p99": 136.0
+  },
   "request_throughput": {
     "unit": "requests/sec",
     "avg": 7.412500701361551

@@ -1,0 +1,178 @@
+schema_version = 1
+
+[datasets.sharegpt]
+default_source = "snapshot"
+license = "Apache-2.0"
+materialization_identity = "sharegpt-single-request-v1"
+linear_session_materialization_identity = "sharegpt-linear-session-v1"
+provides_output_targets = true
+
+[datasets.sharegpt.sources.snapshot]
+upstream_identity = "huggingface:anon8231489123/ShareGPT_Vicuna_unfiltered@bcd32a724d8460ebe14e1d05b0195e30e9a46cb1:ShareGPT_V3_unfiltered_cleaned_split.json"
+url = "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/bcd32a724d8460ebe14e1d05b0195e30e9a46cb1/ShareGPT_V3_unfiltered_cleaned_split.json"
+sha256 = "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
+source_format = "sharegpt-json-array-v1"
+aiperf_format = "mooncake_trace"
+
+[datasets.speed_bench]
+license = "NVIDIA Evaluation Dataset License"
+materialization_identity = "speed-bench-first-turn-v1"
+provides_output_targets = false
+
+[datasets.speed_bench.sources.qualitative]
+upstream_identity = "huggingface:nvidia/SPEED-Bench@487aa718444e816458d1a0a52bfce7a454285cf4:qualitative/test-00000-of-00001.parquet"
+url = "https://huggingface.co/datasets/nvidia/SPEED-Bench/resolve/487aa718444e816458d1a0a52bfce7a454285cf4/qualitative/test-00000-of-00001.parquet"
+sha256 = "4f76bc45bdffb38712a5c26d7a7c9a9a791484b392a7b64a6ffb9abe48e02e26"
+source_format = "huggingface-parquet-v1"
+configuration = "qualitative"
+split = "test"
+aiperf_format_prefix = "speed_bench_"
+
+[datasets.speed_bench.sources.throughput_1k]
+upstream_identity = "huggingface:nvidia/SPEED-Bench@487aa718444e816458d1a0a52bfce7a454285cf4:throughput_1k/test-00000-of-00001.parquet"
+url = "https://huggingface.co/datasets/nvidia/SPEED-Bench/resolve/487aa718444e816458d1a0a52bfce7a454285cf4/throughput_1k/test-00000-of-00001.parquet"
+sha256 = "e3aeb2a75680dd35f8eb429cfc471122d1300acd520aec01db3f8476791cb168"
+source_format = "huggingface-parquet-v1"
+configuration = "throughput_1k"
+split = "test"
+aiperf_format_prefix = "speed_bench_throughput_1k_"
+
+[datasets.speed_bench.sources.throughput_2k]
+upstream_identity = "huggingface:nvidia/SPEED-Bench@487aa718444e816458d1a0a52bfce7a454285cf4:throughput_2k/test-00000-of-00001.parquet"
+url = "https://huggingface.co/datasets/nvidia/SPEED-Bench/resolve/487aa718444e816458d1a0a52bfce7a454285cf4/throughput_2k/test-00000-of-00001.parquet"
+sha256 = "54d4139be1861abb760899b20341f07db699653abb33406ddd0d1af435b6480f"
+source_format = "huggingface-parquet-v1"
+configuration = "throughput_2k"
+split = "test"
+aiperf_format_prefix = "speed_bench_throughput_2k_"
+
+[datasets.speed_bench.sources.throughput_8k]
+upstream_identity = "huggingface:nvidia/SPEED-Bench@487aa718444e816458d1a0a52bfce7a454285cf4:throughput_8k/test-00000-of-00001.parquet"
+url = "https://huggingface.co/datasets/nvidia/SPEED-Bench/resolve/487aa718444e816458d1a0a52bfce7a454285cf4/throughput_8k/test-00000-of-00001.parquet"
+sha256 = "11fb562ad82bab6af8139135ac18453230bf3233dee3228235634e5fc4939a78"
+source_format = "huggingface-parquet-v1"
+configuration = "throughput_8k"
+split = "test"
+aiperf_format_prefix = "speed_bench_throughput_8k_"
+
+[datasets.speed_bench.sources.throughput_16k]
+upstream_identity = "huggingface:nvidia/SPEED-Bench@487aa718444e816458d1a0a52bfce7a454285cf4:throughput_16k/test-00000-of-00001.parquet"
+url = "https://huggingface.co/datasets/nvidia/SPEED-Bench/resolve/487aa718444e816458d1a0a52bfce7a454285cf4/throughput_16k/test-00000-of-00001.parquet"
+sha256 = "7e72b4b352c9ebb65f7847c62c446d93a8d2ff049c74d9a158a3c7e3d6ceb8b1"
+source_format = "huggingface-parquet-v1"
+configuration = "throughput_16k"
+split = "test"
+aiperf_format_prefix = "speed_bench_throughput_16k_"
+
+[datasets.speed_bench.sources.throughput_32k]
+upstream_identity = "huggingface:nvidia/SPEED-Bench@487aa718444e816458d1a0a52bfce7a454285cf4:throughput_32k/test-00000-of-00001.parquet"
+url = "https://huggingface.co/datasets/nvidia/SPEED-Bench/resolve/487aa718444e816458d1a0a52bfce7a454285cf4/throughput_32k/test-00000-of-00001.parquet"
+sha256 = "1be3ac70e00d0b8f0db5b0641fc55d1991c629e6bf0093b2f77b435d0cc92023"
+source_format = "huggingface-parquet-v1"
+configuration = "throughput_32k"
+split = "test"
+aiperf_format_prefix = "speed_bench_throughput_32k_"
+
+[datasets.speed_bench.profiles.qualitative_coding]
+source = "qualitative"
+filter = { field = "category", value = "coding" }
+
+[datasets.speed_bench.profiles.qualitative_humanities]
+source = "qualitative"
+filter = { field = "category", value = "humanities" }
+
+[datasets.speed_bench.profiles.qualitative_math]
+source = "qualitative"
+filter = { field = "category", value = "math" }
+
+[datasets.speed_bench.profiles.qualitative_multilingual]
+source = "qualitative"
+filter = { field = "category", value = "multilingual" }
+
+[datasets.speed_bench.profiles.qualitative_qa]
+source = "qualitative"
+filter = { field = "category", value = "qa" }
+
+[datasets.speed_bench.profiles.qualitative_rag]
+source = "qualitative"
+filter = { field = "category", value = "rag" }
+
+[datasets.speed_bench.profiles.qualitative_reasoning]
+source = "qualitative"
+filter = { field = "category", value = "reasoning" }
+
+[datasets.speed_bench.profiles.qualitative_roleplay]
+source = "qualitative"
+filter = { field = "category", value = "roleplay" }
+
+[datasets.speed_bench.profiles.qualitative_stem]
+source = "qualitative"
+filter = { field = "category", value = "stem" }
+
+[datasets.speed_bench.profiles.qualitative_summarization]
+source = "qualitative"
+filter = { field = "category", value = "summarization" }
+
+[datasets.speed_bench.profiles.qualitative_writing]
+source = "qualitative"
+filter = { field = "category", value = "writing" }
+
+[datasets.speed_bench.profiles.throughput_1k_low_entropy]
+source = "throughput_1k"
+filter = { field = "category", value = "low_entropy" }
+
+[datasets.speed_bench.profiles.throughput_1k_mixed]
+source = "throughput_1k"
+filter = { field = "category", value = "mixed" }
+
+[datasets.speed_bench.profiles.throughput_1k_high_entropy]
+source = "throughput_1k"
+filter = { field = "category", value = "high_entropy" }
+
+[datasets.speed_bench.profiles.throughput_2k_low_entropy]
+source = "throughput_2k"
+filter = { field = "category", value = "low_entropy" }
+
+[datasets.speed_bench.profiles.throughput_2k_mixed]
+source = "throughput_2k"
+filter = { field = "category", value = "mixed" }
+
+[datasets.speed_bench.profiles.throughput_2k_high_entropy]
+source = "throughput_2k"
+filter = { field = "category", value = "high_entropy" }
+
+[datasets.speed_bench.profiles.throughput_8k_low_entropy]
+source = "throughput_8k"
+filter = { field = "category", value = "low_entropy" }
+
+[datasets.speed_bench.profiles.throughput_8k_mixed]
+source = "throughput_8k"
+filter = { field = "category", value = "mixed" }
+
+[datasets.speed_bench.profiles.throughput_8k_high_entropy]
+source = "throughput_8k"
+filter = { field = "category", value = "high_entropy" }
+
+[datasets.speed_bench.profiles.throughput_16k_low_entropy]
+source = "throughput_16k"
+filter = { field = "category", value = "low_entropy" }
+
+[datasets.speed_bench.profiles.throughput_16k_mixed]
+source = "throughput_16k"
+filter = { field = "category", value = "mixed" }
+
+[datasets.speed_bench.profiles.throughput_16k_high_entropy]
+source = "throughput_16k"
+filter = { field = "category", value = "high_entropy" }
+
+[datasets.speed_bench.profiles.throughput_32k_low_entropy]
+source = "throughput_32k"
+filter = { field = "category", value = "low_entropy" }
+
+[datasets.speed_bench.profiles.throughput_32k_mixed]
+source = "throughput_32k"
+filter = { field = "category", value = "mixed" }
+
+[datasets.speed_bench.profiles.throughput_32k_high_entropy]
+source = "throughput_32k"
+filter = { field = "category", value = "high_entropy" }

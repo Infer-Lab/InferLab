@@ -62,6 +62,12 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
     assert result.gateway.backend == "smg"
     assert result.gateway.implementation == "tokenspeed-smg"
     assert result.gateway.render_source.value == "integration"
+    assert result.gateway.endpoint.server_metrics is not None
+    assert result.gateway.endpoint.server_metrics.model_dump(mode="json") == {
+        "path": "/metrics",
+        "port": "prometheus",
+    }
+    assert result.gateway.effective_settings["policy"].root == "least_load"
     target = result.gateway.targets[0].root
     assert isinstance(target, GatewayTargetEngine)
     assert target.role == "serve"
@@ -81,8 +87,8 @@ def test_plan_profiles_the_engine_through_the_smg_gateway_window() -> None:
     assert target.model_dump(mode="json") == {
         "window_control": {
             "endpoint": "gateway",
-            "start": {"method": "post", "path": "/start_profile"},
-            "stop": {"method": "post", "path": "/stop_profile"},
+            "start": {"method": "post", "path": "/start_profile", "body": None},
+            "stop": {"method": "post", "path": "/stop_profile", "body": None},
         }
     }
 
@@ -251,7 +257,7 @@ def test_render_uses_only_the_canonical_tp2_worker_contract_and_smg() -> None:
     assert gateway[gateway.index("--worker-urls") + 1] == "grpc://engine.example:50051"
     assert gateway[gateway.index("--worker-startup-timeout-secs") + 1] == "2147483647"
     assert gateway[gateway.index("--tokenizer-path") + 1] == "/models/fixture-model"
-    assert gateway[gateway.index("--policy") + 1] == "passthrough"
+    assert gateway[gateway.index("--policy") + 1] == "least_load"
     assert "--pd-disaggregation" not in gateway
     assert all("grout" not in argument and "sm120" not in argument for argument in engine)
 

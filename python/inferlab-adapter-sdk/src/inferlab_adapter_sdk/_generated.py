@@ -3,7 +3,7 @@
 #   filename:  adapter-protocol-v7.schema.json
 
 from enum import StrEnum
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
@@ -142,7 +142,8 @@ class GatewayTarget(RootModel[GatewayTargetEngine | GatewayTargetPdRouter]):
 
 class HttpMethod(RootModel[Literal['post']]):
     root: Annotated[
-        Literal['post'], Field(description='The HTTP method of an [`HttpActionSpec`].')
+        Literal['post'],
+        Field(description='The HTTP method of an action specification.'),
     ] = 'post'
 
 
@@ -344,6 +345,14 @@ class ServeTopology(StrEnum):
     prefill_decode = 'prefill_decode'
 
 
+class ServerMetricsEndpointRequirement(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    path: str
+    port: str | None = None
+
+
 class SettingValue(
     RootModel[
         Union[bool, int, float, str, list["SettingValue"], dict[str, "SettingValue"]]
@@ -386,6 +395,15 @@ class AdapterResponseError(BaseModel):
     error: AdapterError
     protocol_version: ProtocolVersion
     status: Literal['error'] = 'error'
+
+
+class CaptureWindowHttpActionSpec(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    body: dict[str, Any] | None = None
+    method: HttpMethod
+    path: str
 
 
 class FrontendCoRendering(BaseModel):
@@ -531,8 +549,8 @@ class CaptureWindowControlRequirement(BaseModel):
         extra='forbid',
     )
     endpoint: CaptureWindowControlEndpoint
-    start: HttpActionSpec
-    stop: HttpActionSpec
+    start: CaptureWindowHttpActionSpec
+    stop: CaptureWindowHttpActionSpec
 
 
 class EndpointRequirement(BaseModel):
@@ -543,6 +561,7 @@ class EndpointRequirement(BaseModel):
     completions_path: str
     prefix_cache_reset: HttpActionSpec | None = None
     protocol: EndpointProtocol
+    server_metrics: ServerMetricsEndpointRequirement | None = None
 
 
 class GatewayPlan(BaseModel):

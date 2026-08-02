@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-01
+
+### Added
+
+- Serving Bench random sources accept deterministic inclusive-uniform ISL and
+  OSL selectors, while retaining fixed and weighted-shape AIPerf paths.
+- The release dataset catalog includes immutable, first-turn NVIDIA
+  SPEED-Bench qualitative and throughput profiles. Direct vLLM and SGLang
+  endpoints, together with the Specialized Engine through TokenSpeed SMG's
+  integration-declared Prometheus listener, can expose AIPerf server metrics,
+  including validated `acceptance_length` and `acceptance_rate` SPEED report
+  results.
+- Serving Bench supports AIPerf-native linear ShareGPT sessions whose later
+  turns depend on each live assistant response. Definitions control source
+  think-time scaling and capping, while records preserve phase-qualified
+  session and turn evidence.
+- SGLang serving supports framework-controlled Nsight Systems capture for
+  direct and prefill/decode topologies through integration-declared
+  `/start_profile` and `/stop_profile` actions.
+
+### Changed
+
+- Serving Bench always sends structured messages through the chat-completions
+  route and leaves the effective chat template with the model server. For
+  synthetic sources, InferLab first attempts to size generated content against
+  the complete local template projection so the selected ISL is exact; when
+  the projection or an exact construction is unavailable, it preserves the
+  unadjusted content-length request and records the fallback reason. AIPerf's
+  backend-observed prompt-token metrics remain the authority for measured ISL
+  and token throughput.
+- Runtime lifecycle and profiling now have independent reusable Rust crate
+  boundaries, while resolver, image-context, and serving-Bench coordination
+  are divided by their owning domain without changing the operator commands.
+- The 0.8.0 workspace package set uses `inferlab-adapter-sdk==0.6.1`, version
+  `0.5.2` of the vLLM, SGLang, TensorRT-LLM, and TokenSpeed integrations, and
+  `inferlab-integration-specialized-engine==0.2.2`. Existing workspaces must
+  update the exact SDK and selected integration pins together and relock.
+
+### Fixed
+
+- Linear AIPerf session warmup accounts for the pinned load generator's
+  terminal prefetch, keeping warmup and profiling template slices disjoint and
+  preventing replay or loss at the phase boundary.
+- An operator-authored `request_body.chat_template` remains a literal backend
+  request value instead of being evaluated against AIPerf's own Jinja context.
+
 ## [0.7.1] - 2026-07-30
 
 ### Fixed

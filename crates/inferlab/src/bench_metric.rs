@@ -11,6 +11,8 @@ pub(crate) enum BenchMetric {
         family: DistributionFamily,
     },
     PromptCacheReadRatio,
+    AcceptanceLength,
+    AcceptanceRate,
     GoodRequestRatio,
     Goodput,
 }
@@ -29,6 +31,7 @@ pub(crate) enum DistributionStatistic {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DistributionFamily {
+    PromptTokens,
     RequestLatency,
     Ttft,
     Tpot,
@@ -57,6 +60,8 @@ impl BenchMetric {
             "output_throughput" => Some(Self::OutputThroughput),
             "total_token_throughput" => Some(Self::TotalTokenThroughput),
             "prompt_cache_read_ratio" => Some(Self::PromptCacheReadRatio),
+            "acceptance_length" => Some(Self::AcceptanceLength),
+            "acceptance_rate" => Some(Self::AcceptanceRate),
             "good_request_ratio" => Some(Self::GoodRequestRatio),
             "goodput" => Some(Self::Goodput),
             _ => None,
@@ -83,6 +88,8 @@ impl BenchMetric {
                 format!("{}_{}", statistic.name(), family.name())
             }
             Self::PromptCacheReadRatio => "prompt_cache_read_ratio".to_owned(),
+            Self::AcceptanceLength => "acceptance_length".to_owned(),
+            Self::AcceptanceRate => "acceptance_rate".to_owned(),
             Self::GoodRequestRatio => "good_request_ratio".to_owned(),
             Self::Goodput => "goodput".to_owned(),
         }
@@ -102,13 +109,17 @@ impl BenchMetric {
         matches!(self, Self::GoodRequestRatio | Self::Goodput)
     }
 
+    pub(crate) const fn requires_speed_bench_server_metrics(self) -> bool {
+        matches!(self, Self::AcceptanceLength | Self::AcceptanceRate)
+    }
+
     pub(crate) const fn missing_is_unavailable(self, completed_requests: u64) -> bool {
         matches!(self, Self::PromptCacheReadRatio)
             || (completed_requests == 0 && matches!(self, Self::Distribution { .. }))
     }
 
     pub(crate) fn required_result_metrics(tpot_applicable: bool) -> Vec<Self> {
-        let family_count = if tpot_applicable { 3 } else { 2 };
+        let family_count = if tpot_applicable { 4 } else { 3 };
         let mut metrics = Vec::with_capacity(Self::REQUIRED_SCALARS.len() + 8 * family_count);
         metrics.extend(Self::REQUIRED_SCALARS);
         for family in DistributionFamily::ALL
@@ -120,6 +131,10 @@ impl BenchMetric {
                 .extend(Self::STATISTICS.map(|statistic| Self::Distribution { statistic, family }));
         }
         metrics
+    }
+
+    pub(crate) const fn required_speed_bench_metrics() -> [Self; 2] {
+        [Self::AcceptanceLength, Self::AcceptanceRate]
     }
 }
 
@@ -139,10 +154,16 @@ impl DistributionStatistic {
 }
 
 impl DistributionFamily {
-    const ALL: [Self; 3] = [Self::RequestLatency, Self::Ttft, Self::Tpot];
+    const ALL: [Self; 4] = [
+        Self::PromptTokens,
+        Self::RequestLatency,
+        Self::Ttft,
+        Self::Tpot,
+    ];
 
     const fn name(self) -> &'static str {
         match self {
+            Self::PromptTokens => "prompt_tokens",
             Self::RequestLatency => "request_latency_ms",
             Self::Ttft => "ttft_ms",
             Self::Tpot => "tpot_ms",
@@ -193,13 +214,24 @@ mod tests {
         );
         assert!(metric.is_some_and(BenchMetric::depends_on_tpot));
         assert!(BenchMetric::parse("p95_itl_ms").is_none());
+        assert_eq!(
+            BenchMetric::parse("mean_prompt_tokens"),
+            Some(BenchMetric::Distribution {
+                statistic: DistributionStatistic::Mean,
+                family: DistributionFamily::PromptTokens,
+            })
+        );
+        assert_eq!(
+            BenchMetric::parse("acceptance_length"),
+            Some(BenchMetric::AcceptanceLength)
+        );
     }
 
     #[test]
     fn required_metrics_and_unavailability_share_one_vocabulary() {
         let prefill_only = BenchMetric::required_result_metrics(false);
 
-        assert_eq!(prefill_only.len(), 19);
+        assert_eq!(prefill_only.len(), 27);
         assert!(!prefill_only.iter().any(|metric| metric.depends_on_tpot()));
         assert!(BenchMetric::PromptCacheReadRatio.missing_is_unavailable(1));
         assert!(

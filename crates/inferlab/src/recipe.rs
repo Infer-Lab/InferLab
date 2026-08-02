@@ -1,10 +1,10 @@
 use crate::InferlabError;
-use crate::interrupt;
+use crate::execution::ResolvedExecution;
 use crate::progress::{Phase, Progress};
 use crate::record::{RECORD_FILE, RECORDS_DIR, RecordIdentity, now_unix_ms, record_id};
-use crate::resolve::ResolvedExecution;
 use crate::server::{self, ServerRecord, ServerStatus};
 use crate::workload::{self, WorkloadStatus};
+use inferlab_runtime::interrupt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,7 +68,7 @@ pub fn run(
     resolved: ResolvedExecution,
     progress: &Progress,
 ) -> Result<RecipeRecord, InferlabError> {
-    interrupt::prepare().map_err(|message| InferlabError::ServerLifecycle { message })?;
+    interrupt::prepare().map_err(|source| InferlabError::ServerInterrupt { source })?;
     let measurements =
         resolved
             .measurements

@@ -3,6 +3,10 @@ from pathlib import Path
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
+    CaptureTargetRequirement,
+    CaptureWindowControlEndpoint,
+    CaptureWindowControlRequirement,
+    CaptureWindowHttpActionSpec,
     EndpointProtocol,
     EndpointRequirement,
     HttpActionSpec,
@@ -27,6 +31,7 @@ from inferlab_adapter_sdk import (
     ServeProcessAllocationFrontend,
     ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
+    ServerMetricsEndpointRequirement,
     ServeRoleInput,
     ServeRoleKind,
     ServeRoleLink,
@@ -64,6 +69,7 @@ _INFERLAB_OPTION_ARITY: dict[str, int | None] = {
     "--disaggregation-transfer-backend": 1,
     "--dp-size": 1,
     "--enable-dp-attention": 0,
+    "--enable-metrics": 0,
     "--ep-size": 1,
     "--expert-parallel-size": 1,
     "--host": 1,
@@ -103,6 +109,7 @@ class SglangServeSettings(BaseModel):
     cuda_graph_max_bs_decode: int | None = Field(default=None, ge=1)
     moe_runner_backend: str | None = None
     trust_remote_code: bool = False
+    enable_metrics: bool = False
     extra_args: list[str] | None = None
     extra_env: dict[str, str] | None = None
 
@@ -125,7 +132,6 @@ def _identity() -> IntegrationIdentity:
         adapter_distribution="inferlab-integration-sglang",
         framework="sglang",
         framework_distribution="sglang",
-        module_file=__file__,
     )
 
 
@@ -230,6 +236,22 @@ def _device_count(parallelism: Parallelism) -> int:
     return (outer.tensor_parallel_size or 1) * (outer.pipeline_parallel_size or 1)
 
 
+def _capture_target(profiling: bool) -> CaptureTargetRequirement | None:
+    if not profiling:
+        return None
+    return CaptureTargetRequirement(
+        window_control=CaptureWindowControlRequirement(
+            endpoint=CaptureWindowControlEndpoint.replica_entry,
+            start=CaptureWindowHttpActionSpec(
+                method=HttpMethod(),
+                path="/start_profile",
+                body={"activities": SettingValue(root=[SettingValue(root="CUDA_PROFILER")])},
+            ),
+            stop=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/stop_profile"),
+        )
+    )
+
+
 def _plan_role(
     input: PlanServeInput,
     role: ServeRoleInput,
@@ -252,6 +274,7 @@ def _plan_role(
             primary_ports=["master"],
             primary_readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/v1/models")),
             worker_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
+            capture_target=_capture_target(input.profiling),
         )
         for replica_index in range(role.replica_count)
     ]
@@ -268,11 +291,14 @@ def _plan_role(
     )
 
 
-def _endpoint_requirement() -> EndpointRequirement:
+def _endpoint_requirement(*, include_server_metrics: bool) -> EndpointRequirement:
     return EndpointRequirement(
         protocol=EndpointProtocol(),
         completions_path="/v1/completions",
         chat_completions_path="/v1/chat/completions",
+        server_metrics=(
+            ServerMetricsEndpointRequirement(path="/metrics") if include_server_metrics else None
+        ),
         prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
     )
 
@@ -290,7 +316,10 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         )
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas = _plan_role(input, role, [])
-    role_result.public_endpoint = _endpoint_requirement()
+    settings = _settings(role_result.effective_settings)
+    role_result.public_endpoint = _endpoint_requirement(
+        include_server_metrics=settings.enable_metrics
+    )
     return PlanServeResult(
         integration=_identity(),
         roles=[role_result],
@@ -388,7 +417,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         implementation=implementation,
         implementation_version=implementation_version,
         render_source=render_source,
-        endpoint=_endpoint_requirement(),
+        endpoint=_endpoint_requirement(include_server_metrics=False),
         gateway_readiness=gateway_readiness,
         pd_router_readiness=pd_router_readiness,
         policies=PdRoutingPolicies(prefill="round_robin", decode="round_robin"),
@@ -407,11 +436,6 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
 
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
-    if input.profiling:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "the SGLang integration does not support profiling capture yet",
-        )
     if input.topology == ServeTopology.single:
         return _plan_single(input)
     return _plan_prefill_decode(input)
@@ -475,6 +499,8 @@ def _render_process(
     append_option(inferlab_args, "--moe-runner-backend", settings.moe_runner_backend)
     if settings.trust_remote_code:
         inferlab_args.append("--trust-remote-code")
+    if settings.enable_metrics:
+        inferlab_args.append("--enable-metrics")
     if input.topology == ServeTopology.prefill_decode:
         transport = input.kv_transfer
         if transport is None:

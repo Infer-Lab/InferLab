@@ -9,14 +9,14 @@ description = "Reproducible LLM inference experiment harness: versioned workspac
 keywords = ["llm", "inference", "benchmarking", "evaluation", "vllm"]
 categories = ["command-line-utilities", "science"]
 include = [
-    "src/**",
-    "resources/bundled-eval-tasks/**",
-    "resources/eval-toolchain/pixi.lock",
-    "resources/eval-toolchain/pixi.toml",
-    "resources/plugin/**",
-    "resources/toolchain-python/**",
-    "LICENSE",
-    "build.rs",
+    "/src/**",
+    "/resources/bench-datasets.toml",
+    "/resources/eval-toolchain/pixi.lock",
+    "/resources/eval-toolchain/pixi.toml",
+    "/resources/plugin/**",
+    "/resources/toolchain-python/**",
+    "/LICENSE",
+    "/build.rs",
 ]
 readme = "../../README.md"
 
@@ -24,14 +24,16 @@ readme = "../../README.md"
 agent-plugin-installer.workspace = true
 clap.workspace = true
 crossterm.workspace = true
-ctrlc.workspace = true
 flate2.workspace = true
 fs2.workspace = true
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.7" }
-inferlab-proxy = { path = "../inferlab-proxy", version = "0.7" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.8" }
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.8" }
+inferlab-proxy = { path = "../inferlab-proxy", version = "0.8" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.8" }
+inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.8" }
 humantime.workspace = true
 ratatui.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -44,7 +46,6 @@ tokio.workspace = true
 toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
-wait-timeout.workspace = true
 yaml_serde.workspace = true
 
 [build-dependencies]

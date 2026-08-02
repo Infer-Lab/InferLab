@@ -1,11 +1,9 @@
 import json
 import sys
-import tomllib
 import traceback
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
-from typing import TextIO, cast
+from typing import TextIO
 
 from pydantic import BaseModel, ValidationError
 
@@ -93,17 +91,11 @@ def integration_identity(
     adapter_distribution: str,
     framework: str,
     framework_distribution: str,
-    module_file: str,
 ) -> IntegrationIdentity:
-    pyproject = Path(module_file).resolve().parents[2] / "pyproject.toml"
-    if pyproject.is_file():
-        with pyproject.open("rb") as handle:
-            adapter_version = cast(str, tomllib.load(handle)["project"]["version"])
-    else:
-        try:
-            adapter_version = version(adapter_distribution)
-        except PackageNotFoundError:
-            adapter_version = "unavailable"
+    try:
+        adapter_version = version(adapter_distribution)
+    except PackageNotFoundError:
+        adapter_version = "unavailable"
     try:
         framework_version = version(framework_distribution)
     except PackageNotFoundError:
@@ -355,7 +347,7 @@ def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     )
 
 
-SUPPORTED_PROTOCOL_VERSION = "7"
+SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V7.root
 
 
 def handle_request(

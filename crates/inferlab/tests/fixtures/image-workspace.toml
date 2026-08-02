@@ -41,6 +41,18 @@ default_case = "base"
 
 [servers.dsv4-qualify.cases.base]
 
+[servers.dsv4-routed]
+stack = "vllm"
+model = "dsv4"
+topology = "single"
+gateway_backend = "fixture-gateway"
+readiness_timeout_seconds = 60
+default_case = "base"
+
+[servers.dsv4-routed.roles.serve]
+
+[servers.dsv4-routed.cases.base]
+
 [servers.dsv4b-qualify]
 stack = "vllm"
 model = "dsv4b"
@@ -111,6 +123,10 @@ gate = "smoke"
 server = "dsv4-qualify"
 workload_suite = "smoke-only"
 
+[recipes.dsv4-routed]
+server = "dsv4-routed"
+workload_suite = "smoke-only"
+
 [recipes.dsv4b-qualify]
 server = "dsv4b-qualify"
 workload_suite = "smoke-only"
@@ -159,6 +175,14 @@ recipe = "dsv4b-qualify"
 stack = "vllm"
 base_image = "example.com/micromamba:1.0"
 platforms = ["linux/amd64"]
+
+[images.dsv4-runtime-routed]
+stack = "vllm"
+base_image = "example.com/micromamba:1.0"
+platforms = ["linux/amd64"]
+
+[[images.dsv4-runtime-routed.validations]]
+recipe = "dsv4-routed"
 
 [external_images.fixture-external]
 reference = "example.com/fixture-vllm@sha256:abababababababababababababababababababababababababababababababab"

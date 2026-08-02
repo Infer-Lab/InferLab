@@ -1,0 +1,20 @@
+[package]
+name = "inferlab-serve-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Validated serve-planning stages and frozen process execution facts for InferLab."
+keywords = ["llm", "inference", "planning", "runtime"]
+categories = ["development-tools"]
+include = ["src/**", "LICENSE"]
+
+[dependencies]
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.8" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.8" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.8" }
+serde.workspace = true
+
+[lints]
+workspace = true

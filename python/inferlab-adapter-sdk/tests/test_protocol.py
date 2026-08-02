@@ -1,9 +1,11 @@
 import json
+from importlib.metadata import PackageNotFoundError
 from io import StringIO
 from pathlib import Path
 from typing import cast
 
 import inferlab_adapter_sdk
+import inferlab_adapter_sdk.runtime as adapter_runtime
 import pytest
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
@@ -92,20 +94,20 @@ def test_runtime_owns_shared_settings_translation() -> None:
     assert raised.value.code == AdapterErrorCode.invalid_settings
 
 
-def test_runtime_owns_checkout_identity_and_role_conventions(tmp_path: Path) -> None:
-    package = tmp_path / "adapter"
-    package.mkdir()
-    (package / "pyproject.toml").write_text(
-        '[project]\nname = "fixture-adapter"\nversion = "1.2.3"\n',
-        encoding="utf-8",
-    )
-    module_file = package / "src" / "fixture_adapter" / "__init__.py"
+def test_runtime_owns_package_identity_and_role_conventions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def distribution_version(distribution: str) -> str:
+        if distribution == "fixture-adapter":
+            return "1.2.3"
+        raise PackageNotFoundError(distribution)
+
+    monkeypatch.setattr(adapter_runtime, "version", distribution_version)
     identity = integration_identity(
         adapter_id="fixture",
         adapter_distribution="fixture-adapter",
         framework="fixture-framework",
         framework_distribution="inferlab-definitely-missing-framework",
-        module_file=str(module_file),
     )
     request = AdapterRequest.model_validate(
         load_json(FIXTURES / "valid" / "plan-serve-request.json")
@@ -225,7 +227,7 @@ def test_sdk_constructs_both_fused_component_plans_from_one_binding() -> None:
         gateway_backend="vllm-router",
         pd_router_backend="vllm-router",
         implementation="vllm-router",
-        implementation_version="0.5.1",
+        implementation_version=expected_gateway.implementation_version,
         render_source=RenderSource.integration,
         endpoint=expected_gateway.endpoint,
         gateway_readiness=expected_gateway.readiness,

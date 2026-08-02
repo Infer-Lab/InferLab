@@ -9,30 +9,12 @@ from typing import TextIO, cast
 import pytest
 from inferlab_eval_runner.bundled_tasks.estonia.estonia import process_results as score_estonia
 from inferlab_eval_runner.eval_client import (
-    PROMPT_LOGPROB_PROBE_PROMPT,
-    ProbeTokenization,
-    ProbeTransportError,
-    PromptLogprobProbeRun,
     execute,
-    lm_eval_command,
-    lm_eval_task_argument,
-    mark_lm_eval_process_terminating,
-    normalize_lm_eval_result,
-    normalize_repeated_lm_eval_result,
-    post_prompt_logprob_probe,
-    resolve_lm_eval_target,
-    resolve_lm_eval_task,
     run_lm_eval,
-    run_prompt_logprob_probe,
-    task_requires_prompt_logprobs,
-    validate_prompt_logprob_response,
-    workspace_yaml_include_closure,
-    write_lm_eval_process_evidence,
 )
 from inferlab_eval_runner.lm_eval_entry import (
     PayloadEvidenceWriter,
     RepeatedTrialState,
-    TrialEvidenceWriter,
     initialize_payload_evidence,
     install_repeated_response_capture,
     install_request_body,
@@ -41,6 +23,32 @@ from inferlab_eval_runner.lm_eval_entry import (
 )
 from inferlab_eval_runner.lm_eval_entry import (
     main as lm_eval_entry_main,
+)
+from inferlab_eval_runner.native_contract import TrialEvidenceWriter
+from inferlab_eval_runner.native_execution import (
+    lm_eval_command,
+    mark_lm_eval_process_terminating,
+    write_lm_eval_process_evidence,
+)
+from inferlab_eval_runner.normalization import (
+    normalize_lm_eval_result,
+    normalize_repeated_lm_eval_result,
+)
+from inferlab_eval_runner.prompt_logprobs import (
+    PROMPT_LOGPROB_PROBE_PROMPT,
+    ProbeTokenization,
+    ProbeTransportError,
+    PromptLogprobProbeRun,
+    post_prompt_logprob_probe,
+    run_prompt_logprob_probe,
+    validate_prompt_logprob_response,
+)
+from inferlab_eval_runner.task_resolution import (
+    lm_eval_task_argument,
+    resolve_lm_eval_target,
+    resolve_lm_eval_task,
+    task_requires_prompt_logprobs,
+    workspace_yaml_include_closure,
 )
 from inferlab_measurement_sdk import (
     CaseDeadline,
@@ -341,7 +349,7 @@ def test_bundled_task_resolution_preserves_release_asset_identities(
         }
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.load_lm_eval_yaml",
+        "inferlab_eval_runner.task_resolution.load_lm_eval_yaml",
         lambda path: {
             "task": "inferlab_estonia",
             "output_type": "generate_until",
@@ -728,7 +736,7 @@ def test_workspace_yaml_resolution_preserves_effective_dataset_fields(
         {"kind": "workspace_yaml", "path": str(task_yaml)}
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.load_lm_eval_yaml",
+        "inferlab_eval_runner.task_resolution.load_lm_eval_yaml",
         lambda path: {
             "task": "custom",
             "dataset_path": "json",
@@ -779,7 +787,7 @@ def test_builtin_task_resolution_uses_the_loaded_lm_eval_task(
         },
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.load_lm_eval_task_manager",
+        "inferlab_eval_runner.task_resolution.load_lm_eval_task_manager",
         lambda: SimpleNamespace(
             all_tasks=["arc_easy"],
             all_subtasks=["arc_easy"],
@@ -812,7 +820,7 @@ def test_python_task_with_dynamic_requests_uses_completions_and_the_probe(
         dump_config=lambda: {"task": "squadv2", "output_type": "generate_until"},
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.load_lm_eval_task_manager",
+        "inferlab_eval_runner.task_resolution.load_lm_eval_task_manager",
         lambda: SimpleNamespace(
             all_tasks=["squadv2"],
             all_subtasks=["squadv2"],
@@ -836,7 +844,7 @@ def test_repeated_eval_rejects_a_dynamic_task_before_probe_or_inference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: {
             "status": "resolved",
             "task_identity": "dynamic_task",
@@ -844,7 +852,7 @@ def test_repeated_eval_rejects_a_dynamic_task_before_probe_or_inference(
         },
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.run_prompt_logprob_probe",
+        "inferlab_eval_runner.prompt_logprobs.run_prompt_logprob_probe",
         lambda *args: pytest.fail("repeated dynamic task must fail before probing"),
     )
     monkeypatch.setattr(
@@ -869,7 +877,7 @@ def test_non_individual_selection_is_rejected_in_favor_of_recipe_composition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.load_lm_eval_task_manager",
+        "inferlab_eval_runner.task_resolution.load_lm_eval_task_manager",
         lambda: SimpleNamespace(
             all_tasks=["suite"],
             all_subtasks=[],
@@ -1032,7 +1040,7 @@ def test_prompt_logprob_probe_records_supported_evidence(
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.tokenize_probe_prompt",
+        "inferlab_eval_runner.prompt_logprobs.tokenize_probe_prompt",
         lambda locator, prompt, timeout: probe_tokenization(),
     )
     response = prompt_logprob_response(
@@ -1040,7 +1048,7 @@ def test_prompt_logprob_probe_records_supported_evidence(
         [None, {" prompt": -0.1}, {" tail": -0.2}, {"!": -0.3}],
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.post_prompt_logprob_probe",
+        "inferlab_eval_runner.prompt_logprobs.post_prompt_logprob_probe",
         lambda url, body, timeout: (200, __import__("json").dumps(response).encode()),
     )
 
@@ -1068,7 +1076,7 @@ def test_prompt_logprob_probe_reuses_decreasing_case_budget(
     now = [100.0]
     tokenizer_timeouts: list[float] = []
     http_timeouts: list[float] = []
-    monkeypatch.setattr("inferlab_eval_runner.eval_client.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("inferlab_eval_runner.prompt_logprobs.time.monotonic", lambda: now[0])
     deadline = CaseDeadline(20.0)
 
     def tokenize(locator: str, prompt: str, timeout: float) -> ProbeTokenization:
@@ -1085,8 +1093,8 @@ def test_prompt_logprob_probe_reuses_decreasing_case_budget(
         http_timeouts.append(timeout)
         return 200, __import__("json").dumps(response).encode()
 
-    monkeypatch.setattr("inferlab_eval_runner.eval_client.tokenize_probe_prompt", tokenize)
-    monkeypatch.setattr("inferlab_eval_runner.eval_client.post_prompt_logprob_probe", post)
+    monkeypatch.setattr("inferlab_eval_runner.prompt_logprobs.tokenize_probe_prompt", tokenize)
+    monkeypatch.setattr("inferlab_eval_runner.prompt_logprobs.post_prompt_logprob_probe", post)
 
     result = run_prompt_logprob_probe(request, definition, tmp_path, deadline)
 
@@ -1102,11 +1110,11 @@ def test_prompt_logprob_probe_classifies_http_failure(
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.tokenize_probe_prompt",
+        "inferlab_eval_runner.prompt_logprobs.tokenize_probe_prompt",
         lambda locator, prompt, timeout: probe_tokenization(),
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.post_prompt_logprob_probe",
+        "inferlab_eval_runner.prompt_logprobs.post_prompt_logprob_probe",
         lambda url, body, timeout: (503, b"unavailable"),
     )
 
@@ -1126,7 +1134,7 @@ def test_prompt_logprob_probe_classifies_transport_failure(
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.tokenize_probe_prompt",
+        "inferlab_eval_runner.prompt_logprobs.tokenize_probe_prompt",
         lambda locator, prompt, timeout: probe_tokenization(),
     )
 
@@ -1134,7 +1142,7 @@ def test_prompt_logprob_probe_classifies_transport_failure(
         raise ProbeTransportError("connection refused")
 
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.post_prompt_logprob_probe",
+        "inferlab_eval_runner.prompt_logprobs.post_prompt_logprob_probe",
         fail_transport,
     )
 
@@ -1154,7 +1162,7 @@ def test_prompt_logprob_probe_rejects_a_single_token_prompt_before_http(
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.tokenize_probe_prompt",
+        "inferlab_eval_runner.prompt_logprobs.tokenize_probe_prompt",
         lambda locator, prompt, timeout: ProbeTokenization(
             token_ids=[10], offset_mapping=[(0, 41)]
         ),
@@ -1164,7 +1172,7 @@ def test_prompt_logprob_probe_rejects_a_single_token_prompt_before_http(
         raise AssertionError("HTTP probe must not start for a one-token prompt")
 
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.post_prompt_logprob_probe",
+        "inferlab_eval_runner.prompt_logprobs.post_prompt_logprob_probe",
         unexpected_http,
     )
 
@@ -1461,7 +1469,7 @@ def test_run_lm_eval_reports_a_nonzero_exit(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: {
             "status": "resolved",
             "task_identity": "gsm8k",
@@ -1574,7 +1582,7 @@ def test_repeated_run_uses_one_native_eval_per_trial_and_preserves_native_task_s
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: metric_resolution(),
     )
     request = lm_eval_request(tmp_path)
@@ -1652,7 +1660,7 @@ def test_repeated_planning_timeout_preserves_artifact_derived_trial_summary(
             raise TimeoutError("measurement-case budget expired during trial planning")
 
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: metric_resolution(),
     )
     request = lm_eval_request(tmp_path)
@@ -1686,7 +1694,7 @@ def test_run_lm_eval_reports_absent_results_json(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: {
             "status": "resolved",
             "task_identity": "gsm8k",
@@ -1721,7 +1729,7 @@ def test_run_lm_eval_timeout_preserves_partial_output_and_process_evidence(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: metric_resolution(),
     )
     request = lm_eval_request(tmp_path)
@@ -1755,7 +1763,7 @@ def test_run_lm_eval_normalization_failure_preserves_the_raw_result(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: metric_resolution(),
     )
     request = lm_eval_request(tmp_path)
@@ -1782,7 +1790,7 @@ def test_run_lm_eval_rejects_multiple_native_result_files(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: metric_resolution(),
     )
     request = lm_eval_request(tmp_path)
@@ -1816,7 +1824,7 @@ def test_run_lm_eval_checkpoints_started_native_evidence_before_waiting(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: metric_resolution(),
     )
     request = lm_eval_request(tmp_path)
@@ -1835,7 +1843,7 @@ def test_run_lm_eval_stops_before_native_when_logprob_probe_fails(
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.resolve_lm_eval_task",
+        "inferlab_eval_runner.task_resolution.resolve_lm_eval_task",
         lambda request, definition: {
             "status": "resolved",
             "task_identity": "scoring",
@@ -1848,7 +1856,7 @@ def test_run_lm_eval_stops_before_native_when_logprob_probe_fails(
         path=str(tmp_path / "prompt-logprob-probe.json"),
     )
     monkeypatch.setattr(
-        "inferlab_eval_runner.eval_client.run_prompt_logprob_probe",
+        "inferlab_eval_runner.prompt_logprobs.run_prompt_logprob_probe",
         lambda request, definition, artifact_dir, deadline: PromptLogprobProbeRun(
             EvalFailureKind.probe_generated_only_logprobs,
             "generated-only logprobs",

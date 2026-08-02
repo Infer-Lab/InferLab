@@ -10,11 +10,6 @@ fail() {
   exit 1
 }
 
-expected_release_owned=$'inferlab-bench-runner\ninferlab-eval-runner\ninferlab-measurement-sdk'
-actual_release_owned="$("${root}/scripts/python-package-inventory.sh" release-owned)"
-test "${actual_release_owned}" = "${expected_release_owned}" \
-  || fail "release-owned inventory did not contain exactly the measurement packages"
-
 fixture="${temporary}/repo"
 mkdir -p "${fixture}/scripts" "${fixture}/bin" "${fixture}/dist"
 cp "${root}/scripts/python-package-inventory.sh" "${fixture}/scripts/"
@@ -25,28 +20,22 @@ cp "${root}/scripts/python-package-release-metadata.py" "${fixture}/scripts/"
 cp "${root}/Cargo.toml" "${fixture}/"
 cp "${root}/LICENSE" "${fixture}/"
 
+all_packages="$("${root}/scripts/python-package-inventory.sh" all)"
+while IFS= read -r package; do
+  path="python/${package}/pyproject.toml"
+  mkdir -p "${fixture}/$(dirname "${path}")"
+  cp "${root}/${path}" "${fixture}/${path}"
+done <<< "${all_packages}"
+
 while IFS= read -r path; do
   mkdir -p "${fixture}/$(dirname "${path}")"
   cp "${root}/${path}" "${fixture}/${path}"
 done <<'EOF'
 crates/inferlab/Cargo.toml
-python/inferlab-adapter-sdk/pyproject.toml
-python/inferlab-bench-runner/pyproject.toml
-python/inferlab-eval-runner/pyproject.toml
-python/inferlab-measurement-sdk/pyproject.toml
-python/inferlab-integration-sglang/pyproject.toml
-python/inferlab-integration-specialized-engine/pyproject.toml
-python/inferlab-integration-tensorrt-llm/pyproject.toml
-python/inferlab-integration-tokenspeed/pyproject.toml
-python/inferlab-integration-vllm/pyproject.toml
 .claude-plugin/marketplace.json
 plugins/inferlab/.claude-plugin/plugin.json
 plugins/inferlab/.codex-plugin/plugin.json
 plugins/inferlab/skills/inferlab/SKILL.md
-crates/inferlab/resources/plugin/.claude-plugin/marketplace.json
-crates/inferlab/resources/plugin/plugins/inferlab/.claude-plugin/plugin.json
-crates/inferlab/resources/plugin/plugins/inferlab/.codex-plugin/plugin.json
-crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md
 protocol/fixtures/valid/plan-serve-response.json
 protocol/fixtures/valid/render-serve-response.json
 protocol/fixtures/valid/render-serve-response-launch-file.json
@@ -57,14 +46,13 @@ ln -s "${true_path}" "${fixture}/bin/cargo"
 cp "${root}/scripts/tests/fixtures/pixi-release.sh" "${fixture}/bin/pixi"
 chmod +x "${fixture}/bin/pixi"
 
-workspace_projects=(
-  "${fixture}/python/inferlab-adapter-sdk/pyproject.toml"
-  "${fixture}/python/inferlab-integration-sglang/pyproject.toml"
-  "${fixture}/python/inferlab-integration-specialized-engine/pyproject.toml"
-  "${fixture}/python/inferlab-integration-tensorrt-llm/pyproject.toml"
-  "${fixture}/python/inferlab-integration-tokenspeed/pyproject.toml"
-  "${fixture}/python/inferlab-integration-vllm/pyproject.toml"
-)
+workspace_inventory="$("${fixture}/scripts/python-package-inventory.sh" workspace-side)"
+release_owned_inventory="$("${fixture}/scripts/python-package-inventory.sh" release-owned)"
+release_runner_inventory="$("${fixture}/scripts/python-package-inventory.sh" release-runners)"
+workspace_projects=()
+while IFS= read -r package; do
+  workspace_projects+=("${fixture}/python/${package}/pyproject.toml")
+done <<< "${workspace_inventory}"
 protocol_fixtures=("${fixture}"/protocol/fixtures/valid/*-response*.json)
 workspace_hashes="$(sha256sum "${workspace_projects[@]}")"
 protocol_hashes="$(sha256sum "${protocol_fixtures[@]}")"
@@ -80,21 +68,25 @@ PATH="${fixture}/bin:${PATH}" \
 
 grep -Eq "^version = \"${target_product_version}\"$" "${fixture}/Cargo.toml" \
   || fail "product version was not updated"
-grep -Eq 'inferlab-protocol = .*version = "9"' "${fixture}/crates/inferlab/Cargo.toml" \
-  || fail "the binary crate dependency requirement did not follow the product major version"
-for package in inferlab-bench-runner inferlab-eval-runner inferlab-measurement-sdk; do
+for dependency in inferlab-runtime inferlab-profiler inferlab-protocol inferlab-proxy inferlab-serve-domain; do
+  grep -Eq "^${dependency} = .*version = \"9\"" "${fixture}/crates/inferlab/Cargo.toml" \
+    || fail "${dependency} requirement did not follow the product major version"
+done
+while IFS= read -r package; do
   grep -Eq "^version = \"${target_product_version}\"$" \
     "${fixture}/python/${package}/pyproject.toml" \
     || fail "${package} did not follow the product version"
-done
-for package in inferlab-bench-runner inferlab-eval-runner; do
+done <<< "${release_owned_inventory}"
+while IFS= read -r package; do
   grep -Fq "inferlab-measurement-sdk==${target_product_version}" \
     "${fixture}/python/${package}/pyproject.toml" \
     || fail "${package} measurement SDK dependency did not follow the product bump"
+done <<< "${release_runner_inventory}"
+while IFS= read -r package; do
   ! grep -Fq "inferlab-adapter-sdk" \
     "${fixture}/python/${package}/pyproject.toml" \
-    || fail "${package} depends on the public adapter SDK"
-done
+    || fail "release-owned package ${package} depends on the public adapter SDK"
+done <<< "${release_owned_inventory}"
 printf '%s\n' "${workspace_hashes}" | sha256sum --check --quiet \
   || fail "a workspace-side package changed during a product bump"
 printf '%s\n' "${protocol_hashes}" | sha256sum --check --quiet \
@@ -102,9 +94,7 @@ printf '%s\n' "${protocol_hashes}" | sha256sum --check --quiet \
 grep -Eq "\"version\": \"${target_product_version}\"" \
   "${fixture}/plugins/inferlab/.codex-plugin/plugin.json" \
   || fail "embedded plugin did not follow the product version"
-for skill in \
-  plugins/inferlab/skills/inferlab/SKILL.md \
-  crates/inferlab/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md; do
+for skill in plugins/inferlab/skills/inferlab/SKILL.md; do
   grep -Fq "[${target_product_version} workspace authoring guide]" \
     "${fixture}/${skill}" \
     || fail "${skill} documentation link label did not follow the product version"

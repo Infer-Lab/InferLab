@@ -654,7 +654,7 @@ mod tests {
         std::fs::create_dir_all(&rate_dir)?;
         let request = |load_shape: &str, artifact_dir: &std::path::Path| {
             format!(
-                r#"{{"protocol_version":"7","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions"}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1}},"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"reset_prefix_cache":false}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{}}}"#,
+                r#"{{"protocol_version":"7","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"reset_prefix_cache":false}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{}}}"#,
                 serde_json::to_string(artifact_dir).unwrap_or_else(|_| "\"artifacts\"".to_owned())
             )
         };

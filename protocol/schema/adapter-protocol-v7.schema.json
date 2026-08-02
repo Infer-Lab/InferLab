@@ -276,10 +276,10 @@
           "$ref": "#/$defs/CaptureWindowControlEndpoint"
         },
         "start": {
-          "$ref": "#/$defs/HttpActionSpec"
+          "$ref": "#/$defs/CaptureWindowHttpActionSpec"
         },
         "stop": {
-          "$ref": "#/$defs/HttpActionSpec"
+          "$ref": "#/$defs/CaptureWindowHttpActionSpec"
         }
       },
       "additionalProperties": false,
@@ -287,6 +287,32 @@
         "endpoint",
         "start",
         "stop"
+      ]
+    },
+    "CaptureWindowHttpActionSpec": {
+      "description": "A capture-window HTTP action invoked against a logical serving endpoint.\nThe integration owns any framework-specific JSON body; the control plane\nowns execution and evidence.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path"
       ]
     },
     "EndpointAssignment": {
@@ -341,6 +367,16 @@
         },
         "protocol": {
           "$ref": "#/$defs/EndpointProtocol"
+        },
+        "server_metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServerMetricsEndpointRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -528,7 +564,7 @@
       ]
     },
     "HttpActionSpec": {
-      "description": "An HTTP action (method and path) invoked against the workload endpoint.",
+      "description": "An HTTP action invoked against a logical serving endpoint.",
       "type": "object",
       "properties": {
         "method": {
@@ -545,7 +581,7 @@
       ]
     },
     "HttpMethod": {
-      "description": "The HTTP method of an [`HttpActionSpec`].",
+      "description": "The HTTP method of an action specification.",
       "oneOf": [
         {
           "description": "HTTP POST.",
@@ -1778,6 +1814,25 @@
           "type": "string",
           "const": "prefill_decode"
         }
+      ]
+    },
+    "ServerMetricsEndpointRequirement": {
+      "description": "An integration-owned logical server-metrics endpoint.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
       ]
     },
     "SettingValue": {

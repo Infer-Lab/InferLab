@@ -243,7 +243,6 @@ def _identity() -> IntegrationIdentity:
         adapter_distribution="inferlab-integration-tensorrt-llm",
         framework="tensorrt-llm",
         framework_distribution="tensorrt_llm",
-        module_file=__file__,
     )
 
 

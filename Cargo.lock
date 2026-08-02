@@ -1370,17 +1370,19 @@ dependencies = [
 
 [[package]]
 name = "inferlab"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "agent-plugin-installer",
  "clap",
  "crossterm",
- "ctrlc",
  "flate2",
  "fs2",
  "humantime",
+ "inferlab-profiler",
  "inferlab-protocol",
  "inferlab-proxy",
+ "inferlab-runtime",
+ "inferlab-serve-domain",
  "insta",
  "ratatui",
  "reqwest",
@@ -1396,13 +1398,12 @@ dependencies = [
  "toml",
  "unicode-segmentation",
  "unicode-width",
- "wait-timeout",
  "yaml_serde",
 ]
 
 [[package]]
 name = "inferlab-fake-engine"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "clap",
  "futures-util",
@@ -1415,8 +1416,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "inferlab-profiler"
+version = "0.8.0"
+dependencies = [
+ "inferlab-protocol",
+ "inferlab-runtime",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "inferlab-protocol"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -1425,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-proxy"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1436,6 +1450,31 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "inferlab-runtime"
+version = "0.8.0"
+dependencies = [
+ "ctrlc",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "wait-timeout",
+]
+
+[[package]]
+name = "inferlab-serve-domain"
+version = "0.8.0"
+dependencies = [
+ "inferlab-profiler",
+ "inferlab-protocol",
+ "inferlab-runtime",
+ "serde",
 ]
 
 [[package]]
@@ -2282,6 +2321,7 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

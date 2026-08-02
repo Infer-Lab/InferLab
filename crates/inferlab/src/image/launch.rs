@@ -8,8 +8,8 @@
 //! record already owns.
 
 use crate::InferlabError;
+use crate::execution::ResolvedExecution;
 use crate::image::record::{AssemblyOutcome, ImageRecord};
-use crate::resolve::ResolvedExecution;
 use crate::workspace::LoadedWorkspace;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -43,7 +43,7 @@ pub struct ExternalImagePlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework_version: Option<String>,
     #[serde(skip)]
-    pub framework_probe_timing: Option<crate::time_bound::OperationTimingEvidence>,
+    pub framework_probe_timing: Option<inferlab_runtime::operation_bound::OperationTimingEvidence>,
 }
 
 /// Validate an image selection against the recipe's workspace facts and the
@@ -184,7 +184,7 @@ pub fn select_external(
 /// consumes a placement the substitution cannot serve
 /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub(crate) fn gate_placement(
-    processes: &[crate::resolve::ProcessPlan],
+    processes: &[crate::execution::ProcessPlan],
 ) -> Result<(), InferlabError> {
     if let Err(reason) = super::single_host_local(processes) {
         return Err(reject(format!(
@@ -202,7 +202,7 @@ pub(crate) fn gate_placement(
 /// rejected until an in-container profiler contract exists
 /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 fn gate_capture<'a>(
-    processes: impl IntoIterator<Item = &'a crate::resolve::ProcessPlan>,
+    processes: impl IntoIterator<Item = &'a crate::execution::ProcessPlan>,
 ) -> Result<(), InferlabError> {
     if let Some(process) = processes
         .into_iter()
@@ -271,7 +271,10 @@ fn probe_local_presence(external_id: &str, reference: &str) -> Result<(), Inferl
     let inspect = std::process::Command::new("docker")
         .args(["image", "inspect", "--format", "{{.Id}}", reference])
         .output()
-        .map_err(|source| reject(format!("docker image inspect failed to launch: {source}")))?;
+        .map_err(|source| InferlabError::ImageToolLaunch {
+            operation: format!("docker image inspect {reference}"),
+            source,
+        })?;
     if !inspect.status.success() {
         return Err(reject(format!(
             "external image {external_id:?} ({reference}) is not present in local builder \
@@ -340,7 +343,7 @@ fn host_platform() -> String {
 }
 
 /// Substitute the built image for the locally installed serving environment:
-/// every Pixi-activated server process runs inside `docker run` with host
+/// every integration-rendered server process runs inside `docker run` with host
 /// networking, its allocated devices, and its model weights and runtime cache
 /// mounted at their host paths. Inferlab-owned processes (the built-in proxy)
 /// keep their host command.
@@ -350,7 +353,7 @@ pub(crate) fn containerize(
     machines: &std::collections::BTreeMap<String, crate::workspace::MachineBinding>,
     explicit_entrypoint: bool,
 ) {
-    let remote = &execution.server.placement.remote_containers;
+    let remote = execution.server.placement.remote_containers.clone();
     // One nonce per resolution: the container name is the cleanup handle —
     // a container is a daemon-owned object the process-group kill never
     // reaches — and must not collide with any earlier invocation's leftover
@@ -363,24 +366,18 @@ pub(crate) fn containerize(
             .map(|elapsed| elapsed.as_millis())
             .unwrap_or_default()
     );
-    for process in execution
-        .server
-        .roles
-        .iter_mut()
-        .flat_map(|role| &mut role.replicas)
-        .flat_map(|replica| &mut replica.ranks)
-    {
-        let argv = &process.command.argv;
-        if argv.first().map(String::as_str) != Some("pixi") {
+    for process in execution.server.processes_mut() {
+        if process.command_source != crate::execution::ProcessCommandSource::Integration {
             continue;
         }
+        let argv = &process.command.argv;
         // Machine-scoped launch facts for a remote launch: the container
         // user identity and pass-through observations come from that
         // machine's preflight, not from controller state
         // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
         let remote_facts = match &process.launch {
-            crate::resolve::LaunchPlan::Ssh { .. } => remote.get(&process.machine),
-            crate::resolve::LaunchPlan::Local => None,
+            inferlab_runtime::plan::LaunchPlan::Ssh { .. } => remote.get(&process.machine),
+            inferlab_runtime::plan::LaunchPlan::Local => None,
         };
         let Some(separator) = argv.iter().position(|arg| arg == "--") else {
             continue;
@@ -414,7 +411,7 @@ pub(crate) fn containerize(
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            container.extend(crate::container::docker_device_args(&devices));
+            container.extend(inferlab_runtime::container::docker_device_args(&devices));
         }
         let binding = machines
             .get(&process.machine)
@@ -550,7 +547,7 @@ pub(crate) fn containerize(
             container.extend(inner);
         }
         process.command.argv = container;
-        process.container = Some(crate::resolve::ContainerPlan {
+        process.container = Some(crate::execution::ContainerPlan {
             name: container_name,
             image: image_id.to_owned(),
         });

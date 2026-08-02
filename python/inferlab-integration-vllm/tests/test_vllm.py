@@ -1,3 +1,4 @@
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ from inferlab_adapter_sdk import (
     RenderedServeProcessFrontend,
     handle_request,
 )
+from inferlab_adapter_sdk._generated import AdapterResultPlanServe
 from inferlab_integration_vllm import plan_serve, render_serve
 
 ROOT = Path(__file__).parents[3]
@@ -19,6 +21,13 @@ FIXTURES = ROOT / "protocol" / "fixtures"
 
 def load_json(path: Path) -> dict[str, object]:
     return cast(dict[str, object], json.loads(path.read_text()))
+
+
+def distribution_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unavailable"
 
 
 def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
@@ -33,12 +42,32 @@ def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
     result = plan_serve(request.root.input)
 
     assert expected.root.status == "ok"
+    assert isinstance(expected.root.result.root, AdapterResultPlanServe)
     expected_output = expected.root.result.root.output
-    assert result.model_copy(update={"integration": expected_output.integration}) == expected_output
-    assert result.integration.framework_version == "unavailable"
     assert result.gateway is not None
+    assert result.pd_router is not None
+    assert expected_output.gateway is not None
+    assert expected_output.pd_router is not None
+    normalized = result.model_copy(
+        update={
+            "integration": expected_output.integration,
+            "gateway": result.gateway.model_copy(
+                update={"implementation_version": expected_output.gateway.implementation_version}
+            ),
+            "pd_router": result.pd_router.model_copy(
+                update={"implementation_version": expected_output.pd_router.implementation_version}
+            ),
+        }
+    )
+    assert normalized == expected_output
+    package_version = distribution_version("inferlab-integration-vllm")
+    assert result.integration.adapter_version == package_version
+    assert result.gateway.implementation_version == package_version
+    assert result.pd_router.implementation_version == package_version
+    assert result.integration.framework_version == "unavailable"
     assert result.gateway.endpoint.completions_path == "/v1/completions"
     assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
+    assert result.gateway.endpoint.server_metrics is None
     assert result.gateway.endpoint.prefix_cache_reset is None
     assert result.gateway.backend == "vllm-router"
     assert result.pd_router is not None
@@ -80,6 +109,33 @@ def test_single_topology_rejects_a_routed_backend() -> None:
 
     assert response.root.status == "error"
     assert response.root.error.code == "invalid_settings"
+
+
+def test_single_topology_declares_its_server_metrics_capability() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["topology"] = "single"
+    input_payload["gateway_backend"] = None
+    input_payload["pd_router_backend"] = None
+    input_payload["kv_transfer"] = None
+    input_payload["roles"] = [
+        {
+            "id": "serve",
+            "kind": "serve",
+            "replica_count": 1,
+            "parallelism": {"outer": {"tensor_parallel_size": 2}},
+            "settings": {},
+        }
+    ]
+    request = AdapterRequest.model_validate(payload)
+
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+    endpoint = result.roles[0].public_endpoint
+    assert endpoint is not None
+    assert endpoint.server_metrics is not None
+    assert endpoint.server_metrics.path == "/metrics"
+    assert endpoint.server_metrics.port is None
 
 
 def test_vllm_rejects_an_expert_size_that_does_not_match_tp_times_dp() -> None:
@@ -242,8 +298,8 @@ def test_plan_role_declares_the_whole_replica_accelerator_requirement() -> None:
     assert prefill[0].capture_target.model_dump(mode="json") == {
         "window_control": {
             "endpoint": "replica_entry",
-            "start": {"method": "post", "path": "/start_profile"},
-            "stop": {"method": "post", "path": "/stop_profile"},
+            "start": {"method": "post", "path": "/start_profile", "body": None},
+            "stop": {"method": "post", "path": "/stop_profile", "body": None},
         }
     }
 

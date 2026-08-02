@@ -40,7 +40,8 @@ pub(crate) fn execute(
     // Ctrl-C must reach the foreground command, not kill the wrapper: the
     // installed handler keeps this process alive to report the command's
     // real exit status.
-    crate::interrupt::prepare().map_err(|message| InferlabError::AdHocRun { message })?;
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::AdHocInterrupt { source })?;
     let status = Command::new(&argv[0])
         .args(&argv[1..])
         .status()
@@ -134,7 +135,7 @@ fn container_argv(
         argv.push("--tty".to_owned());
     }
     if let Some(spec) = devices {
-        argv.extend(crate::container::docker_device_args(spec));
+        argv.extend(inferlab_runtime::container::docker_device_args(spec));
     }
     for mount in mounts {
         // The explicit --mount form, not the -v shorthand: at least one site

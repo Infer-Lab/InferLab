@@ -1,7 +1,7 @@
 use crate::InferlabError;
-use crate::interrupt;
 use crate::progress::{Phase, Progress};
 use crate::workspace::StackDefinition;
+use inferlab_runtime::interrupt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -464,7 +464,7 @@ pub(crate) fn lock_workspace_with_progress(
     root: &Path,
     progress: &Progress,
 ) -> Result<LockResult, InferlabError> {
-    interrupt::prepare().map_err(|message| InferlabError::EnvironmentLifecycle { message })?;
+    interrupt::prepare().map_err(|source| InferlabError::EnvironmentInterrupt { source })?;
     let mut transaction = WorkspaceFileTransaction::begin(root)?;
     let result = produce_lock(root, &mut transaction, progress);
     match result {

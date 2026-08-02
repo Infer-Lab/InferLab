@@ -24,8 +24,6 @@ use ratatui::backend::CrosstermBackend;
 use std::collections::BTreeMap;
 use std::io::Stdout;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,15 +40,8 @@ pub(crate) fn run(root: PathBuf, refresh_interval: Duration) -> Result<(), Infer
             message: "--refresh-interval must be greater than zero".to_owned(),
         });
     }
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let signal = Arc::clone(&interrupted);
-    ctrlc::set_handler(move || signal.store(true, Ordering::Release)).map_err(|source| {
-        InferlabError::WriteOutput {
-            source: std::io::Error::other(format!(
-                "failed to install TUI interruption handler: {source}"
-            )),
-        }
-    })?;
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::TuiInterrupt { source })?;
     let mut terminal = TerminalSession::enter()?;
     let (request_tx, request_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
@@ -71,7 +62,7 @@ pub(crate) fn run(root: PathBuf, refresh_interval: Duration) -> Result<(), Infer
     let mut next_presentation_clock = Instant::now() + PRESENTATION_CLOCK_INTERVAL;
     let mut redraw = true;
     let result = loop {
-        if interrupted.load(Ordering::Acquire) {
+        if inferlab_runtime::interrupt::received() {
             break Ok(());
         }
         while let Ok(snapshot) = result_rx.try_recv() {

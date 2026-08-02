@@ -5,7 +5,8 @@
     "host": "127.0.0.1",
     "port": 8000,
     "completions_path": "/v1/completions",
-    "chat_completions_path": "/v1/chat/completions"
+    "chat_completions_path": "/v1/chat/completions",
+    "server_metrics": null
   },
   "model": {
     "locator": "/models/example",
@@ -28,6 +29,7 @@
       ],
       "total_weight": 10
     },
+    "server_metrics": false,
     "seed": 7,
     "timeout_seconds": 120
   },

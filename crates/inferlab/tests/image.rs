@@ -82,8 +82,9 @@ impl TestWorkspace {
     fn new() -> Result<Self, Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let reaper = support::ServeReaper::for_workspace(root.path());
-        let ports = support::reserve_local_ports(1)?;
-        let port = ports.get(0);
+        let ports = support::reserve_local_ports(2)?;
+        let first_port = ports.get(0);
+        let second_port = ports.get(1);
         let inferlab = root.path().join(".inferlab");
         let bin = root.path().join("bin");
         fs::create_dir_all(&inferlab)?;
@@ -190,7 +191,7 @@ impl TestWorkspace {
                  \n\
                  [machines.local]\n\
                  host = \"127.0.0.1\"\n\
-                 ports = [{port}]\n\
+                 ports = [{first_port}, {second_port}]\n\
                  devices = [0, 1, 2, 3]\n\
                  \n\
                  [machines.local.container]\n\
@@ -477,6 +478,15 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
             .ok_or("server record id")?;
         let server_record =
             workspace.load_json(&format!(".inferlab/records/{server_record_id}/record.json"))?;
+        assert_eq!(
+            server_record["resolved"]["server"]["image"]["record_id"],
+            record_id
+        );
+        assert_eq!(
+            server_record["resolved"]["server"]["image"]["image_id"],
+            image_id
+        );
+        assert_eq!(server_record["resolved"]["stack"]["realization"], "image");
         let argv = resolved_rank(&server_record["resolved"]["server"], "server")?
             .command
             .argv;
@@ -668,6 +678,57 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
     assert!(
         exports.join(second_archive).is_file() && exports.join(&archive_name).is_file(),
         "both records' archives coexist"
+    );
+    Ok(())
+}
+
+#[test]
+fn image_validation_containerizes_an_integration_rendered_frontend() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.build(&["dsv4-runtime-routed"])?;
+    assert!(
+        output.status.success(),
+        "routed image validation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = stdout_json(&output)?;
+    let image_record_id = report["record_id"].as_str().ok_or("image record id")?;
+    let image_id = report["manifest"]["assemblies"][0]["image_id"]
+        .as_str()
+        .ok_or("image id")?;
+    let recipe_record_id = match report["manifest"]["validations"][0]["recipe_record_id"].as_str() {
+        Some(id) => id,
+        None => {
+            let image_record =
+                workspace.load_json(&format!(".inferlab/records/{image_record_id}/record.json"))?;
+            return Err(format!(
+                "validation did not produce a recipe record: report={report}; record={image_record}"
+            )
+            .into());
+        }
+    };
+    let recipe =
+        workspace.load_json(&format!(".inferlab/records/{recipe_record_id}/record.json"))?;
+    let server_record_id = recipe["server"]["id"].as_str().ok_or("server record id")?;
+    let server =
+        workspace.load_json(&format!(".inferlab/records/{server_record_id}/record.json"))?;
+    let resolved = &server["resolved"]["server"];
+
+    assert_eq!(resolved["image"]["record_id"], image_record_id);
+    assert_eq!(resolved["image"]["image_id"], image_id);
+    let engine = resolved_rank(resolved, "server")?;
+    let frontend = support::resolved_frontend(resolved)?;
+    assert_eq!(engine.command.argv[0], "docker");
+    assert_eq!(frontend.command.argv[0], "docker");
+    assert!(engine.command.argv.contains(&image_id.to_owned()));
+    assert!(frontend.command.argv.contains(&image_id.to_owned()));
+    assert_eq!(
+        resolved["roles"][0]["replicas"][0]["ranks"][0]["command_source"],
+        "integration"
+    );
+    assert_eq!(
+        resolved["frontend"]["processes"][0]["command_source"],
+        "integration"
     );
     Ok(())
 }

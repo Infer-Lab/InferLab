@@ -7,6 +7,7 @@ from inferlab_adapter_sdk import (
     CaptureTargetRequirement,
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
+    CaptureWindowHttpActionSpec,
     EndpointProtocol,
     EndpointRequirement,
     HttpActionSpec,
@@ -31,6 +32,7 @@ from inferlab_adapter_sdk import (
     ServeProcessAllocationFrontend,
     ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
+    ServerMetricsEndpointRequirement,
     ServeRoleInput,
     ServeRoleKind,
     ServeRoleLink,
@@ -145,7 +147,6 @@ def _identity() -> IntegrationIdentity:
         adapter_distribution="inferlab-integration-vllm",
         framework="vllm",
         framework_distribution="vllm",
-        module_file=__file__,
     )
 
 
@@ -256,8 +257,8 @@ def _plan_role(
             CaptureTargetRequirement(
                 window_control=CaptureWindowControlRequirement(
                     endpoint=CaptureWindowControlEndpoint.replica_entry,
-                    start=HttpActionSpec(method=HttpMethod(), path="/start_profile"),
-                    stop=HttpActionSpec(method=HttpMethod(), path="/stop_profile"),
+                    start=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/start_profile"),
+                    stop=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/stop_profile"),
                 )
             )
             if input.profiling
@@ -306,6 +307,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         protocol=EndpointProtocol(),
         completions_path="/v1/completions",
         chat_completions_path="/v1/chat/completions",
+        server_metrics=ServerMetricsEndpointRequirement(path="/metrics"),
         prefix_cache_reset=HttpActionSpec(
             method=HttpMethod(),
             path="/reset_prefix_cache",

@@ -1,10 +1,14 @@
-use super::runtime::{CleanupEvidence, ProcessHandle, ReadinessEvidence, ReadinessFailure};
 use crate::InferlabError;
-use crate::profiler::{CaptureActionRecord, ProfilerCleanupRecord, ProfilerTargetRecord};
+use crate::execution::ResolvedExecution;
 use crate::record::{
     RECORD_FILE, RECORDS_DIR, RecordIdentity, now_unix_ms, record_id, validate_record_id,
 };
-use crate::resolve::ResolvedExecution;
+use inferlab_profiler::cleanup::ProfilerCleanupRecord;
+use inferlab_profiler::plan::ProfilerTargetRecord;
+use inferlab_profiler::record::CaptureActionRecord;
+use inferlab_runtime::server::{
+    CleanupEvidence, ProcessHandle, ReadinessEvidence, ReadinessFailure,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -82,7 +86,7 @@ pub struct AdapterOperationEvidence {
     pub operation: String,
     pub request_sha256: String,
     pub response_sha256: String,
-    pub timing: crate::time_bound::OperationTimingEvidence,
+    pub timing: inferlab_runtime::operation_bound::OperationTimingEvidence,
 }
 
 /// Device hardware identity of one machine hosting serving processes, probed at
@@ -128,12 +132,13 @@ pub struct ServerRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adapter_operations: Vec<AdapterOperationEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_framework_probe: Option<crate::time_bound::OperationTimingEvidence>,
+    pub external_framework_probe:
+        Option<inferlab_runtime::operation_bound::OperationTimingEvidence>,
     pub failure: Option<FailureEvidence>,
 }
 
 impl ServerRecord {
-    pub const SCHEMA_VERSION: u32 = 4;
+    pub const SCHEMA_VERSION: u32 = 5;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

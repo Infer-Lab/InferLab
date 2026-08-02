@@ -388,7 +388,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("missing matrix bench record id")?;
     let matrix = workspace.load_record(matrix_id)?;
-    assert_eq!(matrix["schema_version"], 7);
+    assert_eq!(matrix["schema_version"], 9);
     assert_eq!(matrix["kind"], "bench");
     assert_eq!(matrix["passed"], true);
     assert!(
@@ -522,7 +522,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("smoke Eval has no record id")?;
     let eval = workspace.load_record(eval_id)?;
-    assert_eq!(eval["schema_version"], 7);
+    assert_eq!(eval["schema_version"], 9);
     assert_eq!(eval["kind"], "eval");
     assert_eq!(eval["resolved"]["execution"]["kind"], "native_openai_smoke");
     assert_eq!(eval["cases"][0]["process"], Value::Null);
@@ -648,10 +648,15 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
     assert_eq!(control["process_id"], "server");
     assert_eq!(control["start"]["method"], "post");
     assert_eq!(
+        control["start"]["body"],
+        serde_json::json!({"activities": ["CUDA_PROFILER"]})
+    );
+    assert_eq!(
         control["start"]["effective_url"],
         format!("http://{}:{}/start_profile", endpoint.host, endpoint.port)
     );
     assert_eq!(control["stop"]["method"], "post");
+    assert!(control["stop"].get("body").is_none());
     assert_eq!(
         control["stop"]["effective_url"],
         format!("http://{}:{}/stop_profile", endpoint.host, endpoint.port)
@@ -660,6 +665,16 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
         server_evidence["profiler_finalization"]["operation"],
         "finalize-collection"
     );
+    let start_action = &bench["capture"]["windows"][0]["start"][0];
+    assert_eq!(start_action["method"], "post");
+    assert_eq!(start_action["path"], "/start_profile");
+    assert_eq!(
+        start_action["body"],
+        serde_json::json!({"activities": ["CUDA_PROFILER"]})
+    );
+    assert_eq!(start_action["status"], 200);
+    assert_eq!(start_action["succeeded"], true);
+    assert!(start_action.get("failure_kind").is_none());
     assert_eq!(server_evidence["profiler_cleanup"]["verified"], true);
     assert_eq!(server_evidence["profiler_cleanup"]["trigger"], "stop");
     assert_eq!(recipe["cleanup"]["verified"], true);
@@ -1657,6 +1672,31 @@ fn failed_bench_is_recorded_before_server_cleanup() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+fn synthetic_population_requires_prompt_targeting_evidence() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_OMIT_PROMPT_TARGETING", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    assert!(
+        bench["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("omitted prompt-targeting evidence"))
+    );
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
 fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let output = workspace
@@ -2143,7 +2183,7 @@ if [ "$1" = install ] && [ "$2" = --manifest-path ] && [ "$4" = --all ] && [ "$5
   cat > "$prefix/.pixi/envs/eval/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"runner_version":"0.3.0","lm_eval_version":"0.4.12"}\n'
+  printf '{"lm_eval_version":"0.4.12"}\n'
   exit 0
 fi
 shift
@@ -2152,7 +2192,7 @@ PYTHON
   cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"runner_version":"0.3.0","aiperf_version":"0.11.0"}\n'
+  printf '{"aiperf_version":"0.11.0","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 shift
@@ -2235,6 +2275,7 @@ if operation == "plan_serve":
                         "start": {
                             "method": "post",
                             "path": "/start_profile",
+                            "body": {"activities": ["CUDA_PROFILER"]},
                         },
                         "stop": {
                             "method": "post",
@@ -2438,8 +2479,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/start_profile":
+            length = int(self.headers.get("Content-Length", "0"))
+            request = json.loads(self.rfile.read(length)) if length else None
+            if (
+                self.headers.get("Content-Type") != "application/json"
+                or request != {"activities": ["CUDA_PROFILER"]}
+            ):
+                self.send_response(400)
+                self.end_headers()
+                return
             time.sleep(float(os.environ.get("FIXTURE_START_PROFILE_DELAY_SECONDS", "0")))
         if self.path == "/stop_profile":
+            if (
+                int(self.headers.get("Content-Length", "0")) != 0
+                or self.headers.get("Content-Type") is not None
+            ):
+                self.send_response(400)
+                self.end_headers()
+                return
             if not os.environ.get("FIXTURE_STOP_PROFILE_SKIP_REPORT"):
                 state_path = os.environ["FIXTURE_NSYS_STATE"]
                 output, count, index = open(state_path).read().split("\t")
@@ -2501,11 +2558,13 @@ fi
 
 const EVAL_CLIENT: &str = r#"#!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input", required=True)
@@ -2566,8 +2625,10 @@ if os.environ.get("FIXTURE_EVAL_EXIT_CODE"):
 
 const BENCH_CLIENT: &str = r#"#!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -2575,8 +2636,77 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--input", required=True)
 parser.add_argument("--output", required=True)
+parser.add_argument("--prepare", action="store_true")
 args = parser.parse_args()
 request = json.load(open(args.input))
+if args.prepare:
+    artifact_dir = Path(request["artifact_dir"])
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    required_entries = request["required_entries"]
+    request_source = request.get("request_source")
+    session_source = request.get("session_source")
+    population_path = artifact_dir / "population.jsonl"
+    population_digest = hashlib.sha256()
+    session_templates = []
+    with population_path.open("wb") as population:
+        for index in range(required_entries):
+            identity = f"fixture-{index:08}"
+            if session_source is None:
+                row = {"session_id": identity, "messages": [{"role": "user", "content": f"fixture prompt {index}"}]}
+            else:
+                row = {"type": "multi_turn", "session_id": identity, "turns": [{"type": "single_turn", "text": "first", "role": "user"}, {"type": "single_turn", "text": "second", "role": "user"}]}
+                session_templates.append({"template_identity": identity, "turn_count": 2})
+            encoded = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            population.write(encoded)
+            population_digest.update(encoded)
+    evidence_path = artifact_dir / "population-evidence.jsonl"
+    evidence_path.write_text("{}\n", encoding="utf-8")
+    source = request_source or session_source
+    catalog = source.get("catalog") if source is not None else None
+    materialization_identity = catalog["materialization_identity"] if catalog is not None else "inferlab-synthetic-prompt-target-v2"
+    tpot_applicable = True
+    if request_source is not None:
+        if request_source["kind"] == "random":
+            output_tokens = request_source["output_tokens"]
+            tpot_applicable = not isinstance(output_tokens, int) or output_tokens >= 2
+        elif request_source["kind"] == "random_mixture":
+            tpot_applicable = all(shape["output_tokens"] >= 2 for shape in request_source["shapes"])
+    elif session_source is not None and session_source.get("output_tokens") is not None:
+        tpot_applicable = session_source["output_tokens"] >= 2
+    prompt_token_targeting = None
+    if request_source is not None and request_source["kind"] in ("random", "random_mixture"):
+        prompt_token_targeting = {
+            "selected_prompt_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
+            "pre_template_content_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
+            "projection_template": {
+                "source": "tokenizer_default",
+                "content": "{{ messages }}",
+                "sha256": hashlib.sha256(b"{{ messages }}").hexdigest(),
+            },
+            "exact_entries": required_entries,
+            "fallback_entries": 0,
+            "fallback_reasons": {},
+        }
+    if os.environ.get("FIXTURE_OMIT_PROMPT_TARGETING") == "1":
+        prompt_token_targeting = None
+    result = {
+        "schema_version": 1,
+        "status": "succeeded",
+        "materialization_identity": materialization_identity,
+        "requested_entries": required_entries,
+        "candidate_entries": required_entries,
+        "admitted_entries": required_entries,
+        "ineligible_entries": 0,
+        "ineligible_reasons": {},
+        "population": {"path": str(population_path), "sha256": population_digest.hexdigest(), "entries": required_entries, "tpot_applicable": tpot_applicable, "session_templates": session_templates},
+        "input_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
+        "output_tokens": {"minimum": 2, "maximum": 2, "mean": 2.0},
+        "prompt_token_targeting": prompt_token_targeting,
+        "evidence_path": str(evidence_path),
+        "error": None,
+    }
+    json.dump(result, open(args.output, "w"))
+    sys.exit(0)
 failed = os.environ.get("FIXTURE_BENCH_FAIL") == "1"
 load = request["case"]["load_shape"]
 rate = float(load.get("request_rate", 1.0))
@@ -2612,6 +2742,14 @@ result = {
         "request_throughput": rate,
         "output_throughput": rate * 1000.0,
         "total_token_throughput": rate * 9000.0,
+        "mean_prompt_tokens": 8000.0,
+        "min_prompt_tokens": 8000.0,
+        "max_prompt_tokens": 8000.0,
+        "stddev_prompt_tokens": 0.0,
+        "p50_prompt_tokens": 8000.0,
+        "p90_prompt_tokens": 8000.0,
+        "p95_prompt_tokens": 8000.0,
+        "p99_prompt_tokens": 8000.0,
         "mean_request_latency_ms": rate * 90.0,
         "min_request_latency_ms": rate * 70.0,
         "max_request_latency_ms": rate * 120.0,

@@ -11,15 +11,17 @@ use super::record::{
 };
 use super::tool::{BuilderTool, CommandSink, NativeCommand};
 use super::{EligibilityPlan, ResolvedImageBuild};
-use crate::adapter::AdapterClient;
+use super::{entrypoint, materialization, package_closure, portable_context};
+use crate::InferlabError;
+use crate::adapter::ImageAdapterClient;
 use crate::environment;
-use crate::interrupt;
+use crate::execution::Workflow;
 use crate::progress::{Phase, Progress};
 use crate::recipe::{self, RecipeStatus};
 use crate::record::{RecordIdentity, new_record_id};
-use crate::resolve::{ResolveRequest, Workflow, resolve};
+use crate::resolve::{ResolveRequest, resolve};
 use crate::workspace::LoadedWorkspace;
-use crate::{InferlabError, image::context};
+use inferlab_runtime::interrupt;
 use serde::Serialize;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
@@ -32,15 +34,14 @@ pub struct ImageBuildReport {
     pub manifest: ProductManifest,
 }
 
-pub fn run<T: BuilderTool, C: AdapterClient>(
+pub fn run<T: BuilderTool>(
     workspace: &LoadedWorkspace,
     resolved: ResolvedImageBuild,
     tool: &T,
-    adapter: &C,
     progress: &Progress,
 ) -> Result<ImageBuildReport, InferlabError> {
     environment::ensure_usable(&workspace.root, &resolved.image.pixi_environment)?;
-    interrupt::prepare().map_err(|message| InferlabError::ImageBuild { message })?;
+    interrupt::prepare().map_err(|source| InferlabError::ImageInterrupt { source })?;
     let id = new_record_id(RecordIdentity::Image {
         image: &resolved.image.id,
     })?;
@@ -124,7 +125,7 @@ pub fn run<T: BuilderTool, C: AdapterClient>(
             plan.platform
         );
         progress.phase(Phase::named("validation").item(item, index + 1, validation_count))?;
-        let outcome = validate(workspace, &store, index, adapter, progress);
+        let outcome = validate(workspace, &store, index, progress);
         store.record_mut().validations[index].outcome = outcome;
         store.rewrite()?;
     }
@@ -177,7 +178,7 @@ fn assemble<T: BuilderTool>(
             ),
         });
     }
-    let pixi_platform = context::pixi_platform(&platform)?;
+    let pixi_platform = package_closure::pixi_platform(&platform)?;
     // The docker context stays frozen and minimal (generated files plus the
     // wheelhouse); package scratch, sanitized sources, and durable logs live
     // in the sibling build directory ([[RFC-0007:C-IMAGE-BUILD]]).
@@ -187,18 +188,22 @@ fn assemble<T: BuilderTool>(
     let build_dir = store
         .dir()
         .join(format!("build-{}", platform.replace('/', "-")));
-    let activation = context::activation_env(
+    let activation = entrypoint::activation_env(
         &workspace.root,
         pixi_platform,
         &resolved.image.pixi_environment,
     )?;
-    let packages = context::locked_packages(&workspace.root, &resolved.image.pixi_environment)?;
+    let packages =
+        package_closure::locked_packages(&workspace.root, &resolved.image.pixi_environment)?;
     // Derived cache-key facts: the selected environment's package closure
     // and the raw activation projection. Unrelated manifest and lock churn
     // leaves both stable ([[RFC-0007:C-IMAGE-BUILD]]).
-    let environment_closure = context::locked_closure_digest(&packages);
-    let editable_identities =
-        context::editable_identities(&workspace.root, &packages, &resolved.image.source_paths)?;
+    let environment_closure = package_closure::locked_closure_digest(&packages);
+    let editable_identities = package_closure::editable_identities(
+        &workspace.root,
+        &packages,
+        &resolved.image.source_paths,
+    )?;
     let activation_digest = {
         let canonical = serde_json::to_string(&activation)
             .map_err(|source| InferlabError::EncodeOutput { source })?;
@@ -379,7 +384,7 @@ fn assemble<T: BuilderTool>(
         });
     }
 
-    let entrypoint = context::render_entrypoint(&activation)?;
+    let entrypoint = entrypoint::render_entrypoint(&activation)?;
     store.record_mut().assemblies[index].excluded_activation = entrypoint.skipped.clone();
     let check_scripts = load_environment_scripts(
         &workspace.root,
@@ -397,8 +402,8 @@ fn assemble<T: BuilderTool>(
             .iter()
             .map(|step| (&step.id, &step.script, &step.sha256)),
     )?;
-    let prepared = context::prepare_context(
-        &context::ContextInputs {
+    let prepared = materialization::prepare_context(
+        &materialization::ContextInputs {
             context_dir: &context_dir,
             base_image: &resolved.image.base_image,
             base_image_digest: &assembly.base_image_digest,
@@ -411,7 +416,11 @@ fn assemble<T: BuilderTool>(
         &source_packages,
     )?;
     for (name, text) in &prepared.rendered {
-        context::guard_portable_text(&format!("generated context file {name}"), text, workspace)?;
+        portable_context::guard_portable_text(
+            &format!("generated context file {name}"),
+            text,
+            workspace,
+        )?;
     }
     store.record_mut().assemblies[index].dockerfile_sha256 = Some(format!(
         "{:x}",
@@ -552,7 +561,7 @@ fn image_check_evidence_from_log(
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&bytes);
-    let marker = format!("{} ", context::CHECK_MARKER);
+    let marker = format!("{} ", materialization::CHECK_MARKER);
     let mut evidence: Vec<environment::EnvironmentCheckEvidence> = Vec::new();
     for line in text.lines() {
         let Some(position) = line.find(&marker) else {
@@ -595,7 +604,7 @@ fn image_check_evidence_from_log(
 fn load_environment_scripts<'a>(
     root: &Path,
     scripts: impl Iterator<Item = (&'a String, &'a PathBuf, &'a String)>,
-) -> Result<Vec<context::ContextScript>, InferlabError> {
+) -> Result<Vec<materialization::ContextScript>, InferlabError> {
     let mut loaded = Vec::new();
     for (id, script, sha256) in scripts {
         let path = root.join(script);
@@ -613,7 +622,7 @@ fn load_environment_scripts<'a>(
                 ),
             });
         }
-        loaded.push(context::ContextScript {
+        loaded.push(materialization::ContextScript {
             id: id.clone(),
             bytes,
         });
@@ -621,11 +630,10 @@ fn load_environment_scripts<'a>(
     Ok(loaded)
 }
 
-fn validate<C: AdapterClient>(
+fn validate(
     workspace: &LoadedWorkspace,
     store: &ImageRecordStore,
     index: usize,
-    adapter: &C,
     progress: &Progress,
 ) -> ValidationOutcome {
     let record = store.record();
@@ -643,6 +651,24 @@ fn validate<C: AdapterClient>(
         };
     }
 
+    let image = super::launch::ImageLaunchPlan {
+        record_id: record.id.clone(),
+        image_id,
+        platform: plan.platform.clone(),
+        workspace_revision: record.resolved.workspace.revision.clone(),
+    };
+    let adapter = ImageAdapterClient {
+        image_id: image.image_id.clone(),
+        device: workspace.local.adapter.image_device,
+        timeout: workspace
+            .local
+            .adapter
+            .image_timeout_seconds
+            .map_or(crate::adapter::IMAGE_ADAPTER_TIMEOUT, |seconds| {
+                std::time::Duration::from_secs(seconds)
+            }),
+        explicit_entrypoint: false,
+    };
     let resolved = match resolve(
         workspace,
         &ResolveRequest {
@@ -652,10 +678,10 @@ fn validate<C: AdapterClient>(
             placement: record.resolved.placement.as_deref(),
             overrides: &[],
             captures: &[],
-            image: None,
+            image: Some(&image),
             external: None,
         },
-        adapter,
+        &adapter,
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -665,13 +691,6 @@ fn validate<C: AdapterClient>(
             };
         }
     };
-    if let Err(reason) = super::single_host_local(resolved.server.processes()) {
-        return ValidationOutcome::BuiltButUnvalidated { reason };
-    }
-    let mut resolved = resolved;
-    // The realization was checked during assembly ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
-    resolved.stack.realization = environment::CheckRealization::Image;
-    super::launch::containerize(&mut resolved, &image_id, &workspace.local.machines, false);
     match recipe::run(&workspace.root, resolved, progress) {
         Ok(record) if record.status == RecipeStatus::Failed => ValidationOutcome::Failed {
             recipe_record_id: Some(record.id),
@@ -714,16 +733,15 @@ fn wheel_cache_key(
             .arg("rev-parse")
             .arg(format!("HEAD:{}", path.display()))
             .output()
-            .map_err(|io| InferlabError::ImageBuild {
-                message: format!("failed to launch git rev-parse: {io}"),
+            .map_err(|source| InferlabError::ImageToolLaunch {
+                operation: format!("git rev-parse HEAD:{}", path.display()),
+                source,
             })?;
         if !output.status.success() {
-            return Err(InferlabError::ImageBuild {
-                message: format!(
-                    "cannot derive source identity for {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
+            return Err(InferlabError::ImageToolExit {
+                operation: format!("derive source identity for {}", path.display()),
+                status: output.status,
+                diagnostics: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
         source_identities.push(format!(
@@ -739,8 +757,8 @@ fn wheel_cache_key(
         "editable_identities": editable_identities,
         "activation": activation_digest,
         "pixi_environment": image.pixi_environment,
-        "generator": context::GENERATOR_IDENTITY,
-        "epoch": context::WHEEL_BUILD_EPOCH,
+        "generator": materialization::GENERATOR_IDENTITY,
+        "epoch": package_closure::WHEEL_BUILD_EPOCH,
         "platform": platform,
     });
     Ok(format!(
@@ -749,7 +767,7 @@ fn wheel_cache_key(
     ))
 }
 
-fn cached_wheel(cache_dir: &Path) -> Result<Option<context::BuiltWheel>, InferlabError> {
+fn cached_wheel(cache_dir: &Path) -> Result<Option<materialization::BuiltWheel>, InferlabError> {
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
         return Ok(None);
     };
@@ -773,9 +791,17 @@ fn cached_wheel(cache_dir: &Path) -> Result<Option<context::BuiltWheel>, Inferla
 /// consumer reads. The build-directory original is removed either way; its
 /// digest and build log remain the record's package evidence.
 fn adopt_into_cache(
-    wheel: context::BuiltWheel,
+    wheel: materialization::BuiltWheel,
     cache_dir: &Path,
-) -> Result<context::BuiltWheel, InferlabError> {
+) -> Result<materialization::BuiltWheel, InferlabError> {
+    adopt_into_cache_with(wheel, cache_dir, |from, to| std::fs::hard_link(from, to))
+}
+
+fn adopt_into_cache_with(
+    wheel: materialization::BuiltWheel,
+    cache_dir: &Path,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<materialization::BuiltWheel, InferlabError> {
     std::fs::create_dir_all(cache_dir).map_err(|source| InferlabError::EnvironmentIo {
         path: cache_dir.to_path_buf(),
         operation: "create wheel cache directory",
@@ -787,35 +813,68 @@ fn adopt_into_cache(
         wheel.filename,
         std::process::id()
     ));
-    std::fs::copy(&wheel.source_path, &staging).map_err(|source| InferlabError::EnvironmentIo {
-        path: wheel.source_path.clone(),
-        operation: "stage wheel into cache",
-        source,
-    })?;
+    if let Err(source) = std::fs::copy(&wheel.source_path, &staging) {
+        let cleanup = std::fs::remove_file(&staging)
+            .err()
+            .filter(|error| error.kind() != std::io::ErrorKind::NotFound);
+        return Err(InferlabError::WheelCacheStaging {
+            source_path: wheel.source_path,
+            staging_path: staging,
+            source,
+            cleanup,
+        });
+    }
     // hard_link fails with AlreadyExists instead of overwriting: the
     // no-clobber publication primitive.
-    let publication = std::fs::hard_link(&staging, &target);
-    let _ = std::fs::remove_file(&staging);
-    std::fs::remove_file(&wheel.source_path).map_err(|source| InferlabError::EnvironmentIo {
-        path: wheel.source_path.clone(),
-        operation: "remove adopted wheel payload",
-        source,
-    })?;
+    let publication = publish(&staging, &target);
     match publication {
-        Ok(()) => Ok(context::BuiltWheel {
-            source_path: target,
-            ..wheel
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => wheel_from_path(target),
-        Err(source) => Err(InferlabError::EnvironmentIo {
-            path: target,
-            operation: "publish staged wheel",
-            source,
-        }),
+        Ok(()) => {
+            std::fs::remove_file(&staging).map_err(|source| InferlabError::EnvironmentIo {
+                path: staging,
+                operation: "remove published wheel staging payload",
+                source,
+            })?;
+            std::fs::remove_file(&wheel.source_path).map_err(|source| {
+                InferlabError::EnvironmentIo {
+                    path: wheel.source_path.clone(),
+                    operation: "remove adopted wheel payload",
+                    source,
+                }
+            })?;
+            Ok(materialization::BuiltWheel {
+                source_path: target,
+                ..wheel
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&staging).map_err(|source| InferlabError::EnvironmentIo {
+                path: staging,
+                operation: "remove losing wheel staging payload",
+                source,
+            })?;
+            let winner = wheel_from_path(target)?;
+            std::fs::remove_file(&wheel.source_path).map_err(|source| {
+                InferlabError::EnvironmentIo {
+                    path: wheel.source_path,
+                    operation: "remove losing wheel payload",
+                    source,
+                }
+            })?;
+            Ok(winner)
+        }
+        Err(source) => {
+            let cleanup = std::fs::remove_file(&staging).err();
+            Err(InferlabError::WheelCachePublication {
+                staging_path: staging,
+                target_path: target,
+                source,
+                cleanup,
+            })
+        }
     }
 }
 
-fn wheel_from_path(wheel_path: PathBuf) -> Result<context::BuiltWheel, InferlabError> {
+fn wheel_from_path(wheel_path: PathBuf) -> Result<materialization::BuiltWheel, InferlabError> {
     let filename = wheel_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -832,7 +891,7 @@ fn wheel_from_path(wheel_path: PathBuf) -> Result<context::BuiltWheel, InferlabE
         });
     }
     let sha256 = crate::digest::hash_file(&wheel_path)?;
-    Ok(context::BuiltWheel {
+    Ok(materialization::BuiltWheel {
         package,
         filename,
         source_path: wheel_path,
@@ -899,19 +958,15 @@ fn sanitized_source_copy(source: &Path, destination: &Path) -> Result<(), Inferl
             .arg(destination)
             .args(["clean", "-fdxq"])
             .output()
-            .map_err(|io| InferlabError::ImageBuild {
-                message: format!(
-                    "failed to launch git clean for {}: {io}",
-                    destination.display()
-                ),
+            .map_err(|source| InferlabError::ImageToolLaunch {
+                operation: format!("git clean {}", destination.display()),
+                source,
             })?;
         if !output.status.success() {
-            return Err(InferlabError::ImageBuild {
-                message: format!(
-                    "git clean of sanitized copy {} failed: {}",
-                    destination.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
+            return Err(InferlabError::ImageToolExit {
+                operation: format!("git clean sanitized copy {}", destination.display()),
+                status: output.status,
+                diagnostics: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
     }
@@ -924,16 +979,15 @@ fn run_copy(source: &Path, destination: &Path) -> Result<(), InferlabError> {
         .arg(source)
         .arg(destination)
         .output()
-        .map_err(|io| InferlabError::ImageBuild {
-            message: format!("failed to launch cp for {}: {io}", source.display()),
+        .map_err(|error| InferlabError::ImageToolLaunch {
+            operation: format!("cp -a {} {}", source.display(), destination.display()),
+            source: error,
         })?;
     if !output.status.success() {
-        return Err(InferlabError::ImageBuild {
-            message: format!(
-                "sanitized copy of {} failed: {}",
-                source.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+        return Err(InferlabError::ImageToolExit {
+            operation: format!("sanitize copy of {}", source.display()),
+            status: output.status,
+            diagnostics: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
     Ok(())
@@ -1013,7 +1067,7 @@ fn build_wheel(
     build_dir: &Path,
     env_overrides: &[(String, String)],
     sink: &mut dyn CommandSink,
-) -> Result<context::BuiltWheel, InferlabError> {
+) -> Result<materialization::BuiltWheel, InferlabError> {
     let wheel_dir = wheel_build_dir(build_dir, wheel_source);
     std::fs::create_dir_all(&wheel_dir).map_err(|source| InferlabError::EnvironmentIo {
         path: wheel_dir.clone(),
@@ -1267,7 +1321,7 @@ mod tests {
         })?;
         let cache_dir = scratch.path().join("cache");
         let wheel = super::adopt_into_cache(
-            crate::image::context::BuiltWheel {
+            crate::image::materialization::BuiltWheel {
                 package: "pkg".to_owned(),
                 filename: "pkg-1.0-py3-none-any.whl".to_owned(),
                 source_path: source_path.clone(),
@@ -1336,7 +1390,7 @@ mod tests {
             }
         })?;
         let adopted = super::adopt_into_cache(
-            crate::image::context::BuiltWheel {
+            crate::image::materialization::BuiltWheel {
                 package: "pkg".to_owned(),
                 filename: "pkg-1.0-py3-none-any.whl".to_owned(),
                 source_path: source_path.clone(),
@@ -1358,6 +1412,63 @@ mod tests {
             "a published wheel is never overwritten"
         );
         assert!(!source_path.exists(), "the losing payload is removed");
+        Ok(())
+    }
+
+    #[test]
+    fn cache_publication_failure_retains_the_built_payload() -> Result<(), crate::InferlabError> {
+        let scratch =
+            tempfile::tempdir().map_err(|source| crate::InferlabError::EnvironmentIo {
+                path: PathBuf::from("tempdir"),
+                operation: "create test scratch",
+                source,
+            })?;
+        let source_path = scratch.path().join("pkg-1.0-py3-none-any.whl");
+        std::fs::write(&source_path, b"wheel bytes").map_err(|source| {
+            crate::InferlabError::EnvironmentIo {
+                path: source_path.clone(),
+                operation: "write test wheel",
+                source,
+            }
+        })?;
+        let cache_dir = scratch.path().join("cache");
+        let result = super::adopt_into_cache_with(
+            crate::image::materialization::BuiltWheel {
+                package: "pkg".to_owned(),
+                filename: "pkg-1.0-py3-none-any.whl".to_owned(),
+                source_path: source_path.clone(),
+                sha256: "0000".to_owned(),
+            },
+            &cache_dir,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected publication failure",
+                ))
+            },
+        );
+
+        let error = result
+            .err()
+            .ok_or_else(|| crate::InferlabError::ImageBuild {
+                message: "cache publication unexpectedly succeeded".to_owned(),
+            })?;
+        assert!(error.to_string().contains("publish staged wheel"));
+        assert!(
+            source_path.is_file(),
+            "failed publication retains the payload"
+        );
+        assert_eq!(
+            std::fs::read_dir(&cache_dir)
+                .map_err(|source| crate::InferlabError::EnvironmentIo {
+                    path: cache_dir.clone(),
+                    operation: "list cache directory",
+                    source,
+                })?
+                .count(),
+            0,
+            "failed publication cleans its staging entry"
+        );
         Ok(())
     }
 

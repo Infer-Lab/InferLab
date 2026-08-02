@@ -35,6 +35,7 @@ input = request["input"]
 operation = request["operation"]
 if operation == "plan_serve":
     role = input["roles"][0]
+    gateway_backend = input.get("gateway_backend")
     settings = dict(role["settings"])
     settings.setdefault("trust_remote_code", False)
     parallelism = {
@@ -66,11 +67,17 @@ if operation == "plan_serve":
                 "effective_replica_count": role["replica_count"],
                 "effective_settings": settings,
                 "effective_parallelism": parallelism,
-                "public_endpoint": {
-                    "protocol": "http",
-                    "completions_path": "/v1/completions",
-                    "chat_completions_path": "/v1/chat/completions",
-                },
+                **(
+                    {}
+                    if gateway_backend
+                    else {
+                        "public_endpoint": {
+                            "protocol": "http",
+                            "completions_path": "/v1/completions",
+                            "chat_completions_path": "/v1/chat/completions",
+                        }
+                    }
+                ),
                 "render_inputs": (
                     [{"source_path": "operator-config.yaml"}]
                     if settings.get("fixture_mode") == "launch-file"
@@ -96,6 +103,7 @@ if operation == "plan_serve":
                                 "start": {
                                     "method": "post",
                                     "path": "/start_profile",
+                                    "body": {"activities": ["CUDA_PROFILER"]},
                                 },
                                 "stop": {
                                     "method": "post",
@@ -110,7 +118,34 @@ if operation == "plan_serve":
             }
             for index in range(role["replica_count"])
         ],
-        "links": [],
+        "links": (
+            [{"kind": "request_routing", "source": "gateway", "targets": [role["id"]]}]
+            if gateway_backend
+            else []
+        ),
+        **(
+            {
+                "gateway": {
+                    "backend": gateway_backend,
+                    "implementation": "fixture-gateway",
+                    "implementation_version": "1",
+                    "effective_settings": {},
+                    "endpoint": {
+                        "protocol": "http",
+                        "completions_path": "/v1/completions",
+                        "chat_completions_path": "/v1/chat/completions",
+                    },
+                    "readiness": {"kind": "http", "path": "/health"},
+                    "ports": [],
+                    "targets": [{"kind": "engine", "role": role["id"]}],
+                    "render_inputs": [],
+                    "render_source": "integration",
+                    "co_rendering": {"process_role": "gateway"},
+                }
+            }
+            if gateway_backend
+            else {}
+        ),
     }
 elif operation == "render_serve":
     allocations = input["allocations"]
@@ -122,6 +157,25 @@ elif operation == "render_serve":
     launch_digest = hashlib.sha256(launch_text.encode("utf-8")).hexdigest()
     processes = []
     for allocation in allocations:
+        if allocation["kind"] == "frontend":
+            processes.append(
+                {
+                    "kind": "frontend",
+                    "process": allocation["process"],
+                    "process_role": allocation["process_role"],
+                    "components": allocation["components"],
+                    "launch_files": [],
+                    "command": {
+                        "argv": [
+                            "fixture-server",
+                            allocation["endpoint"]["host"],
+                            str(allocation["endpoint"]["port"]),
+                        ],
+                        "env": {},
+                    },
+                }
+            )
+            continue
         argv = [
             "fixture-server",
             allocation["endpoint"]["host"],

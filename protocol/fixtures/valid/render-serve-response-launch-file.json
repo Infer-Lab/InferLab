@@ -6,7 +6,7 @@
     "output": {
       "integration": {
         "adapter_id": "fixture",
-        "adapter_version": "0.4.0",
+        "adapter_version": "fixture-adapter-version",
         "framework": "fixture",
         "framework_version": "test"
       },

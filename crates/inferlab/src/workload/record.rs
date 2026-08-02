@@ -1,18 +1,23 @@
+//! Durable workload evidence projection. Runtime code records through this
+//! owner without reconstructing resolved configuration.
+
 use crate::InferlabError;
 use crate::bench_metric::BenchMetric;
-use crate::profiler::CaptureRecord;
 pub(super) use crate::record::write_json;
 use crate::record::{RECORD_FILE, RECORDS_DIR, now_unix_ms, validate_record_id};
-use crate::time_bound::OperationTimingEvidence;
-use crate::workload::ResolvedWorkloadPlan;
 use crate::workload::adaptive::AdaptiveTerminationReason;
 use crate::workload::domain::{
-    BenchDatasetCatalog, ResolvedBenchPrefixSharing, ResolvedBenchRandomShape, WorkloadHttpMethod,
+    BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchPrefixSharing,
+    ResolvedBenchRandomShape, WorkloadHttpMethod,
 };
+use crate::workload::{BenchPlan, ResolvedWorkloadPlan};
+use crate::workspace::BenchTokenSelector;
+use inferlab_profiler::record::CaptureRecord;
 use inferlab_protocol::{
-    BenchDatasetPreparationResult, EvalFailureKind, EvalMetricGate, EvalNormalizedMetric,
-    EvalTrialSummary, RawArtifact,
+    BenchNativeInvocation, BenchPopulationPreparationResult, BenchSessionResultEvidence,
+    EvalFailureKind, EvalMetricGate, EvalNormalizedMetric, EvalTrialSummary, RawArtifact,
 };
+use inferlab_runtime::operation_bound::OperationTimingEvidence;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -108,14 +113,18 @@ pub struct DatasetAcquisitionEvidence {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BenchRequestSourceEvidence {
     Random {
-        input_tokens: u32,
-        output_tokens: u32,
+        input_tokens: BenchTokenSelector,
+        output_tokens: BenchTokenSelector,
         #[serde(default)]
         prefix_sharing: Option<ResolvedBenchPrefixSharing>,
+        #[serde(default)]
+        preparation: Option<BenchPopulationPreparationEvidence>,
     },
     RandomMixture {
         shapes: Vec<ResolvedBenchRandomShape>,
         total_weight: u64,
+        #[serde(default)]
+        preparation: Option<BenchPopulationPreparationEvidence>,
     },
     Dataset(Box<BenchDatasetRequestSourceEvidence>),
 }
@@ -125,12 +134,37 @@ pub enum BenchRequestSourceEvidence {
 pub struct BenchDatasetRequestSourceEvidence {
     pub catalog: BenchDatasetCatalog,
     pub acquisition: DatasetAcquisitionEvidence,
-    pub preparation: Option<BenchDatasetPreparationResult>,
+    pub preparation: Option<BenchPopulationPreparationResult>,
     pub preparation_process: Option<ClientProcessEvidence>,
     pub preparation_request: Option<PathBuf>,
     pub preparation_result: Option<PathBuf>,
     pub preparation_stdout: Option<PathBuf>,
     pub preparation_stderr: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSessionSourceEvidence {
+    pub catalog: BenchSessionDatasetCatalog,
+    pub acquisition: DatasetAcquisitionEvidence,
+    pub preparation: Option<BenchPopulationPreparationResult>,
+    pub preparation_process: Option<ClientProcessEvidence>,
+    pub preparation_request: Option<PathBuf>,
+    pub preparation_result: Option<PathBuf>,
+    pub preparation_stdout: Option<PathBuf>,
+    pub preparation_stderr: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPopulationPreparationEvidence {
+    pub result: Option<BenchPopulationPreparationResult>,
+    pub process: Option<ClientProcessEvidence>,
+    pub request: PathBuf,
+    pub result_path: PathBuf,
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+    pub artifact_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -181,13 +215,26 @@ pub struct CaseSloEvaluation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BenchPopulationSliceEvidence {
-    pub population_sha256: String,
-    pub warmup_start: u32,
-    pub warmup_count: u32,
-    pub profiling_start: u32,
-    pub profiling_count: u32,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BenchPopulationSliceEvidence {
+    Requests {
+        population_sha256: String,
+        warmup_start: u32,
+        warmup_count: u32,
+        profiling_start: u32,
+        profiling_count: u32,
+    },
+    Sessions {
+        population_sha256: String,
+        warmup_start: u32,
+        warmup_session_count: u32,
+        warmup_request_count: u32,
+        warmup_template_identities: Vec<String>,
+        profiling_start: u32,
+        profiling_session_count: u32,
+        profiling_request_count: u32,
+        profiling_template_identities: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -251,6 +298,10 @@ pub struct BenchCaseEvidence {
     pub failed_requests: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalization_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<BenchSessionResultEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub report_invocations: Vec<BenchNativeInvocation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -261,7 +312,9 @@ pub enum WorkloadEvidence {
     },
     Bench {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_source: Option<BenchRequestSourceEvidence>,
+        request_source: Option<Box<BenchRequestSourceEvidence>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_source: Option<Box<BenchSessionSourceEvidence>>,
         cases: Vec<BenchCaseRecord>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<AdaptiveBenchSummary>,
@@ -287,7 +340,7 @@ pub struct WorkloadRecord {
 }
 
 impl WorkloadRecord {
-    const SCHEMA_VERSION: u32 = 7;
+    const SCHEMA_VERSION: u32 = 9;
 }
 
 pub(super) struct WorkloadRecordSession {
@@ -326,6 +379,7 @@ impl WorkloadRecordSession {
                 WorkloadKind::Eval => WorkloadEvidence::Eval { cases: Vec::new() },
                 WorkloadKind::Bench => WorkloadEvidence::Bench {
                     request_source: None,
+                    session_source: None,
                     cases: Vec::new(),
                     summary: None,
                 },
@@ -341,6 +395,20 @@ impl WorkloadRecordSession {
 
     pub fn record_mut(&mut self) -> &mut WorkloadRecord {
         &mut self.record
+    }
+
+    pub fn set_prepared_bench_plan(&mut self, plan: BenchPlan) -> Result<(), InferlabError> {
+        match &mut self.record.resolved {
+            ResolvedWorkloadPlan::Bench(slot) => {
+                *slot = Box::new(plan);
+                Ok(())
+            }
+            ResolvedWorkloadPlan::ManualBench(manual) => {
+                manual.bench = plan;
+                Ok(())
+            }
+            ResolvedWorkloadPlan::Eval(_) => Err(evidence_kind_error("bench", "eval")),
+        }
     }
 
     pub fn push_eval_case(&mut self, case: EvalCaseRecord) -> Result<(), InferlabError> {
@@ -362,7 +430,23 @@ impl WorkloadRecordSession {
                 request_source: slot,
                 ..
             } => {
-                *slot = Some(request_source);
+                *slot = Some(Box::new(request_source));
+                Ok(())
+            }
+            WorkloadEvidence::Eval { .. } => Err(evidence_kind_error("bench", "eval")),
+        }
+    }
+
+    pub fn set_bench_session_source(
+        &mut self,
+        session_source: BenchSessionSourceEvidence,
+    ) -> Result<(), InferlabError> {
+        match &mut self.record.evidence {
+            WorkloadEvidence::Bench {
+                session_source: slot,
+                ..
+            } => {
+                *slot = Some(Box::new(session_source));
                 Ok(())
             }
             WorkloadEvidence::Eval { .. } => Err(evidence_kind_error("bench", "eval")),

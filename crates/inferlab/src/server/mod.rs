@@ -1,17 +1,19 @@
 mod network;
+mod preflight;
 mod record;
-pub(crate) mod runtime;
 
 use crate::InferlabError;
+use crate::execution::{ProcessPlan, ResolvedExecution};
 use crate::progress::{Phase, Progress};
-use crate::resolve::{ProcessPlan, ResolvedExecution};
 use crate::workspace::WorkspaceSnapshot;
 use fs2::FileExt;
-use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
-use runtime::{
-    CleanupEvidence, CleanupTrigger, ProcessCleanup, ProcessObserver, ProcessSpec, ProcessStatus,
-    ReadinessFailureKind, RemoteCheckRequest, ServerRuntime, SystemProcessRuntime,
+use inferlab_runtime::server::{
+    CleanupEvidence, CleanupTrigger, ProcessCleanup, ProcessHandle, ProcessObserver, ProcessSpec,
+    ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind, ServerRuntime,
+    SystemProcessRuntime,
 };
+use preflight::{PreflightObserver, RemoteCheckError, RemoteCheckRequest};
+use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -58,7 +60,8 @@ pub fn start(
     resolved: ResolvedExecution,
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
-    crate::interrupt::prepare().map_err(|message| InferlabError::ServerLifecycle { message })?;
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::ServerInterrupt { source })?;
     start_with_runtime(root, resolved, None, &SystemProcessRuntime, progress)
 }
 
@@ -78,7 +81,7 @@ pub fn status(root: &Path, id: &str) -> Result<ServerStatusReport, InferlabError
 pub(crate) fn status_with_bound(
     root: &Path,
     id: &str,
-    bound: &crate::time_bound::OperationBound,
+    bound: &inferlab_runtime::operation_bound::OperationBound,
 ) -> Result<ServerStatusReport, InferlabError> {
     status_with_runtime(
         root,
@@ -115,6 +118,20 @@ pub(crate) fn require_running(report: &ServerStatusReport) -> Result<(), Inferla
         });
     }
     Ok(())
+}
+
+pub(crate) fn running_profiler_targets(
+    root: &Path,
+    id: &str,
+) -> Result<Vec<inferlab_profiler::plan::ProfilerTargetRecord>, InferlabError> {
+    let report = status(root, id)?;
+    require_running(&report)?;
+    Ok(report
+        .record
+        .process_evidence
+        .into_values()
+        .filter_map(|process| process.profiler)
+        .collect())
 }
 
 pub(crate) fn logs_with_progress(
@@ -162,11 +179,11 @@ pub(crate) fn preflight_targets(
     processes: &mut [ProcessPlan],
     workspace: &WorkspaceSnapshot,
     pixi_environment: &str,
-) -> Result<std::collections::BTreeMap<String, crate::resolve::RemoteWorkspacePlan>, InferlabError>
+) -> Result<std::collections::BTreeMap<String, crate::execution::RemoteWorkspacePlan>, InferlabError>
 {
-    runtime::preflight_targets(processes, workspace, pixi_environment).map_err(|message| {
-        InferlabError::InvalidConfig {
-            message: format!("remote execution preflight failed: {message}"),
+    preflight::preflight_targets(processes, workspace, pixi_environment).map_err(|source| {
+        InferlabError::ServerPreflight {
+            source: Box::new(source),
         }
     })
 }
@@ -176,24 +193,24 @@ pub(crate) fn preflight_container_targets(
     machines: &std::collections::BTreeMap<String, crate::workspace::MachineBinding>,
     external_id: &str,
     reference: &str,
-) -> Result<std::collections::BTreeMap<String, crate::resolve::RemoteContainerFacts>, InferlabError>
+) -> Result<std::collections::BTreeMap<String, crate::execution::RemoteContainerFacts>, InferlabError>
 {
-    runtime::preflight_container_targets(processes, machines, external_id, reference).map_err(
-        |message| InferlabError::ImageSelection {
-            message: format!("remote container preflight failed: {message}"),
+    preflight::preflight_container_targets(processes, machines, external_id, reference).map_err(
+        |source| InferlabError::ImagePreflight {
+            source: Box::new(source),
         },
     )
 }
 
 pub(crate) fn resolve_network(
     processes: &[ProcessPlan],
-) -> Result<Option<crate::resolve::NetworkPlan>, InferlabError> {
-    network::resolve(processes).map_err(|message| InferlabError::InvalidConfig {
-        message: format!("network resolution failed: {message}"),
+) -> Result<Option<crate::execution::NetworkPlan>, InferlabError> {
+    network::resolve(processes).map_err(|source| InferlabError::NetworkResolution {
+        source: Box::new(source),
     })
 }
 
-fn start_with_runtime<R: ServerRuntime>(
+fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
     root: &Path,
     resolved: ResolvedExecution,
     requested_id: Option<&str>,
@@ -257,7 +274,7 @@ fn start_with_runtime<R: ServerRuntime>(
         // scripts exist in the remote checkout.
         let mut checked_machines = std::collections::BTreeSet::new();
         for process in resolved.server.processes() {
-            let crate::resolve::LaunchPlan::Ssh { target } = &process.launch else {
+            let inferlab_runtime::plan::LaunchPlan::Ssh { target } = &process.launch else {
                 continue;
             };
             if !checked_machines.insert(process.machine.clone()) {
@@ -269,8 +286,9 @@ fn start_with_runtime<R: ServerRuntime>(
                 .command
                 .argv
                 .first()
-                .ok_or(())
-                .map_err(|()| format!("process {:?} has no executable", process.id))
+                .ok_or_else(|| RemoteCheckError::MissingExecutable {
+                    process: process.id.clone(),
+                })
                 .and_then(|pixi| {
                     runtime.run_remote_checks(RemoteCheckRequest {
                         target,
@@ -377,18 +395,30 @@ fn start_with_runtime<R: ServerRuntime>(
                 .log(&stderr),
         )?;
         let remote_dir = remote_runtime_dir(process, session.record());
-        let prepared = match crate::profiler::prepare_process(
-            session.record().id.as_str(),
-            context.role_id,
-            context.replica_id,
-            context.replica_index,
-            process,
-            process_contexts.iter().map(|context| context.process),
-            resolved.server.capture_control_deadline_seconds,
+        let control_endpoint = process.capture_target.as_ref().and_then(|target| {
+            process_contexts
+                .iter()
+                .find(|context| context.process.id == target.control_process_id)
+                .map(|context| &context.process.endpoint)
+        });
+        let prepared = match inferlab_profiler::plan::prepare_process(
+            inferlab_profiler::plan::ProcessPreparation {
+                record_id: session.record().id.as_str(),
+                role_id: context.role_id,
+                replica_id: context.replica_id,
+                replica_index: context.replica_index,
+                process_id: &process.id,
+                rank: process.rank(),
+                command: &process.command,
+                launch: &process.launch,
+                capture: process.capture_target.as_ref(),
+                control_endpoint,
+                control_deadline_seconds: resolved.server.capture_control_deadline_seconds,
+            },
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
-                let message = error.to_string();
+                let message = InferlabError::from(error).to_string();
                 session.record_mut().failure = Some(FailureEvidence {
                     phase: FailurePhase::Launch,
                     process_id: Some(process.id.clone()),
@@ -415,7 +445,7 @@ fn start_with_runtime<R: ServerRuntime>(
         }) {
             Ok(handle) => handle,
             Err(failure) => {
-                let message = failure.message;
+                let message = failure.message();
                 session.record_mut().failure = Some(FailureEvidence {
                     phase: FailurePhase::Launch,
                     process_id: Some(process.id.clone()),
@@ -451,7 +481,7 @@ fn start_with_runtime<R: ServerRuntime>(
                 let profiler_cleaned = cleanup_profiler_process(
                     &mut session,
                     &process.id,
-                    crate::profiler::ProfilerCleanupTrigger::StartupRollback,
+                    inferlab_profiler::cleanup::ProfilerCleanupTrigger::StartupRollback,
                 )?;
                 let cleanup_verified = rollback_started(&mut session, runtime, &started)?
                     && profiler_cleaned
@@ -556,7 +586,7 @@ fn fail_if_startup_interrupted<R: ProcessCleanup + ProcessObserver>(
     started: &[String],
     process_id: Option<&str>,
 ) -> Result<(), InferlabError> {
-    if !crate::interrupt::received() {
+    if !inferlab_runtime::interrupt::received() {
         return Ok(());
     }
     session.record_mut().failure = Some(FailureEvidence {
@@ -601,7 +631,7 @@ fn rollback_started<R: ProcessCleanup + ProcessObserver>(
         verified &= cleanup_profiler_process(
             session,
             process_id,
-            crate::profiler::ProfilerCleanupTrigger::StartupRollback,
+            inferlab_profiler::cleanup::ProfilerCleanupTrigger::StartupRollback,
         )?;
     }
     Ok(verified)
@@ -611,20 +641,22 @@ fn sync_logs_for_process<R: ProcessObserver>(
     session: &mut ServerRecordSession,
     runtime: &R,
     process_id: &str,
-    handle: &runtime::ProcessHandle,
+    handle: &ProcessHandle,
 ) -> Result<(), InferlabError> {
     let stdout = session.absolute_stdout(process_id)?;
     let stderr = session.absolute_stderr(process_id)?;
     let started = std::time::Instant::now();
-    let error = runtime.sync_logs(handle, &stdout, &stderr, true).err();
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let error = runtime
+        .sync_logs(handle, &stdout, &stderr, true)
+        .err()
+        .map(|error| error.to_string());
+    let elapsed_ms = inferlab_runtime::operation_bound::duration_millis(started.elapsed());
     let process = session.process_mut(process_id)?;
     process.log_sync_error = error.clone();
     process.log_sync = Some(LogSyncEvidence {
         elapsed_ms,
-        deadline_ms: matches!(handle, runtime::ProcessHandle::Ssh(_)).then(|| {
-            u64::try_from(runtime::REMOTE_LOG_SYNC_DEADLINE.as_millis()).unwrap_or(u64::MAX)
-        }),
+        deadline_ms: matches!(handle, ProcessHandle::Ssh(_))
+            .then(|| inferlab_runtime::operation_bound::duration_millis(REMOTE_LOG_SYNC_DEADLINE)),
         succeeded: error.is_none(),
         error,
     });
@@ -655,7 +687,7 @@ fn status_with_runtime<R: ProcessObserver>(
     id: &str,
     runtime: &R,
     progress: &Progress,
-    bound: Option<&crate::time_bound::OperationBound>,
+    bound: Option<&inferlab_runtime::operation_bound::OperationBound>,
 ) -> Result<ServerStatusReport, InferlabError> {
     let record = load_record(root, id)?;
     let finalized = record.finished_unix_ms.is_some();
@@ -763,7 +795,7 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
                 .process(process_id)?
                 .profiler_finalization
                 .as_ref()
-                .and_then(crate::profiler::CaptureActionRecord::error);
+                .and_then(inferlab_profiler::record::CaptureActionRecord::error);
             if first_error.is_none() {
                 first_error = Some(match error {
                     Some(error) => error,
@@ -787,7 +819,7 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
             if !cleanup_profiler_process(
                 &mut session,
                 process_id,
-                crate::profiler::ProfilerCleanupTrigger::Recovery,
+                inferlab_profiler::cleanup::ProfilerCleanupTrigger::Recovery,
             )? {
                 all_verified = false;
             }
@@ -826,7 +858,7 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
         if !cleanup_profiler_process(
             &mut session,
             process_id,
-            crate::profiler::ProfilerCleanupTrigger::Stop,
+            inferlab_profiler::cleanup::ProfilerCleanupTrigger::Stop,
         )? {
             all_verified = false;
             let error = session
@@ -876,8 +908,8 @@ fn finalize_profiler_process(
     let Some(target) = session.process(process_id)?.profiler.clone() else {
         return Ok(true);
     };
-    let action = crate::profiler::finalize_target(&target);
-    let succeeded = crate::profiler::finalization_succeeded(&action);
+    let action = inferlab_profiler::finalization::finalize_target(&target);
+    let succeeded = inferlab_profiler::finalization::finalization_succeeded(&action);
     session.process_mut(process_id)?.profiler_finalization = Some(action);
     Ok(succeeded)
 }
@@ -885,12 +917,12 @@ fn finalize_profiler_process(
 fn cleanup_profiler_process(
     session: &mut ServerRecordSession,
     process_id: &str,
-    trigger: crate::profiler::ProfilerCleanupTrigger,
+    trigger: inferlab_profiler::cleanup::ProfilerCleanupTrigger,
 ) -> Result<bool, InferlabError> {
     let Some(target) = session.process(process_id)?.profiler.clone() else {
         return Ok(true);
     };
-    let cleanup = crate::profiler::cleanup_target_agent(&target, trigger);
+    let cleanup = inferlab_profiler::cleanup::cleanup_target_agent(&target, trigger);
     let verified = cleanup.verified;
     session.process_mut(process_id)?.profiler_cleanup = Some(cleanup);
     Ok(verified)
@@ -898,31 +930,38 @@ fn cleanup_profiler_process(
 
 #[cfg(test)]
 mod tests {
-    use super::runtime::{LaunchFailure, PreflightObserver, ProcessLauncher, ReadinessObserver};
+    use super::preflight::{
+        HardwareProbeError, PreflightObserver, RemoteCheckOutcome, RemoteCheckRequest,
+    };
     use super::*;
-    use crate::resolve::{
-        AllocationPlan, CasePlan, CaseSelectionSource, CommandPlan, EndpointPlan, IntegrationPlan,
-        LaunchPlan, ModelLocatorSource, ModelPlan, PlacementPlan, PlacementSelectionSource,
-        ProcessEndpointPlan, ProcessIdentityPlan, ProcessPlan, ReadinessPlan, ResourcePlan,
-        RolePlan, RoleReplicaPlan, RuntimeCacheNamespacePlan, RuntimeCachePlan,
-        RuntimeCacheRootSource, ServerPlan, StackPlan, Workflow,
+    use crate::execution::{
+        AllocationPlan, CasePlan, CaseSelectionSource, EndpointPlan, IntegrationPlan,
+        ModelLocatorSource, ModelPlan, PlacementPlan, PlacementSelectionSource,
+        ProcessIdentityPlan, ProcessPlan, ResourcePlan, RolePlan, RoleReplicaPlan,
+        RuntimeCacheNamespacePlan, RuntimeCachePlan, RuntimeCacheRootSource, ServerPlan, StackPlan,
+        Workflow,
     };
     use crate::workspace::WorkspaceSnapshot;
     use inferlab_protocol::{
         EndpointProtocol, Parallelism, ProtocolVersion, ServeRoleKind, ServeTopology,
     };
+    use inferlab_runtime::plan::{CommandPlan, LaunchPlan, ProcessEndpointPlan, ReadinessPlan};
+    use inferlab_runtime::server::{
+        HostProcessHandle, LaunchFailure, LogSyncError, ProcessLauncher, ReadinessEvidence,
+        ReadinessFailure, ReadinessObserver,
+    };
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, VecDeque};
 
     struct FakeRuntime {
-        spawn_results: RefCell<VecDeque<Result<runtime::ProcessHandle, LaunchFailure>>>,
+        spawn_results: RefCell<VecDeque<Result<ProcessHandle, LaunchFailure>>>,
         terminated: RefCell<Vec<u32>>,
         status_calls: Cell<usize>,
         bounded_status_calls: Cell<usize>,
     }
 
     impl ProcessLauncher for FakeRuntime {
-        fn spawn(&self, _spec: ProcessSpec<'_>) -> Result<runtime::ProcessHandle, LaunchFailure> {
+        fn spawn(&self, _spec: ProcessSpec<'_>) -> Result<ProcessHandle, LaunchFailure> {
             self.spawn_results
                 .borrow_mut()
                 .pop_front()
@@ -940,7 +979,7 @@ mod tests {
             _launch: &LaunchPlan,
             _machine: &str,
             devices: &[u32],
-        ) -> Result<record::MachineHardwareEvidence, String> {
+        ) -> Result<record::MachineHardwareEvidence, HardwareProbeError> {
             Ok(record::MachineHardwareEvidence {
                 driver_version: "999.99".to_owned(),
                 devices: devices
@@ -955,16 +994,13 @@ mod tests {
             })
         }
 
-        fn run_remote_checks(
-            &self,
-            _request: RemoteCheckRequest<'_>,
-        ) -> runtime::RemoteCheckOutcome {
+        fn run_remote_checks(&self, _request: RemoteCheckRequest<'_>) -> RemoteCheckOutcome {
             Ok((Vec::new(), None))
         }
     }
 
     impl ProcessObserver for FakeRuntime {
-        fn status(&self, _handle: &runtime::ProcessHandle) -> ProcessStatus {
+        fn status(&self, _handle: &ProcessHandle) -> ProcessStatus {
             self.status_calls.set(self.status_calls.get() + 1);
             ProcessStatus {
                 queried: true,
@@ -975,8 +1011,8 @@ mod tests {
 
         fn status_with_bound(
             &self,
-            _handle: &runtime::ProcessHandle,
-            _bound: &crate::time_bound::OperationBound,
+            _handle: &ProcessHandle,
+            _bound: &inferlab_runtime::operation_bound::OperationBound,
         ) -> ProcessStatus {
             self.bounded_status_calls
                 .set(self.bounded_status_calls.get() + 1);
@@ -989,11 +1025,11 @@ mod tests {
 
         fn sync_logs(
             &self,
-            _handle: &runtime::ProcessHandle,
+            _handle: &ProcessHandle,
             _stdout: &Path,
             _stderr: &Path,
             _cleanup: bool,
-        ) -> Result<(), String> {
+        ) -> Result<(), LogSyncError> {
             Ok(())
         }
     }
@@ -1001,17 +1037,17 @@ mod tests {
     impl ReadinessObserver for FakeRuntime {
         fn wait_ready(
             &self,
-            _handle: &runtime::ProcessHandle,
+            _handle: &ProcessHandle,
             _endpoint: &ProcessEndpointPlan,
             _readiness: &ReadinessPlan,
             _on_probe_failure: &mut dyn FnMut(&str),
-        ) -> Result<runtime::ReadinessEvidence, runtime::ReadinessFailure> {
-            let bound = crate::time_bound::OperationBound::unbounded();
-            Ok(runtime::ReadinessEvidence::ProcessAlive {
+        ) -> Result<ReadinessEvidence, ReadinessFailure> {
+            let bound = inferlab_runtime::operation_bound::OperationBound::unbounded();
+            Ok(ReadinessEvidence::ProcessAlive {
                 ready_unix_ms: 1,
                 timing: bound.timing(
                     "before_process_alive_check",
-                    crate::time_bound::OperationTerminalCause::Succeeded,
+                    inferlab_runtime::operation_bound::OperationTerminalCause::Succeeded,
                 ),
             })
         }
@@ -1020,11 +1056,11 @@ mod tests {
     impl ProcessCleanup for FakeRuntime {
         fn terminate(
             &self,
-            handle: &runtime::ProcessHandle,
+            handle: &ProcessHandle,
             trigger: CleanupTrigger,
             _on_container_removal: &mut dyn FnMut(&str),
         ) -> CleanupEvidence {
-            let runtime::ProcessHandle::Local(handle) = handle else {
+            let ProcessHandle::Local(handle) = handle else {
                 return CleanupEvidence::unavailable(trigger, "unexpected SSH handle".to_owned());
             };
             self.terminated.borrow_mut().push(handle.leader_pid);
@@ -1046,8 +1082,8 @@ mod tests {
         }
     }
 
-    fn fake_handle(pid: u32) -> runtime::ProcessHandle {
-        runtime::ProcessHandle::Local(runtime::HostProcessHandle {
+    fn fake_handle(pid: u32) -> ProcessHandle {
+        ProcessHandle::Local(HostProcessHandle {
             leader_pid: pid,
             process_group: pid,
             leader_start_time_ticks: 1,
@@ -1100,7 +1136,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["schema_version"], 5);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1152,7 +1188,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 3; expected 4"),
+                .contains("unsupported schema version 3; expected 5"),
             "{error}"
         );
         Ok(())
@@ -1165,7 +1201,7 @@ mod tests {
         let runtime = FakeRuntime {
             spawn_results: RefCell::new(VecDeque::from([
                 Ok(fake_handle(41)),
-                Err(LaunchFailure::ownership_unknown(
+                Err(LaunchFailure::unresolved_ownership(
                     "node-b launch failed".to_owned(),
                 )),
             ])),
@@ -1222,7 +1258,9 @@ mod tests {
         let record =
             start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
         let process_count = record.process_evidence.len();
-        let bound = crate::time_bound::OperationBound::finite(std::time::Duration::from_secs(1));
+        let bound = inferlab_runtime::operation_bound::OperationBound::finite(
+            std::time::Duration::from_secs(1),
+        );
 
         let report = status_with_runtime(
             root.path(),
@@ -1245,6 +1283,7 @@ mod tests {
                 rank: 0,
                 rank_count: 1,
             },
+            command_source: crate::execution::ProcessCommandSource::Integration,
             machine: format!("node-{index}"),
             launch: LaunchPlan::Local,
             launch_dependencies: Vec::new(),
@@ -1342,21 +1381,21 @@ mod tests {
                     render_request_sha256: "request".to_owned(),
                     render_response_sha256: "response".to_owned(),
                     plan_timing: Some(
-                        crate::time_bound::OperationBound::finite(std::time::Duration::from_secs(
-                            30,
-                        ))
+                        inferlab_runtime::operation_bound::OperationBound::finite(
+                            std::time::Duration::from_secs(30),
+                        )
                         .timing(
                             "before_adapter_process_launch",
-                            crate::time_bound::OperationTerminalCause::Succeeded,
+                            inferlab_runtime::operation_bound::OperationTerminalCause::Succeeded,
                         ),
                     ),
                     render_timing: Some(
-                        crate::time_bound::OperationBound::finite(std::time::Duration::from_secs(
-                            30,
-                        ))
+                        inferlab_runtime::operation_bound::OperationBound::finite(
+                            std::time::Duration::from_secs(30),
+                        )
                         .timing(
                             "before_adapter_process_launch",
-                            crate::time_bound::OperationTerminalCause::Succeeded,
+                            inferlab_runtime::operation_bound::OperationTerminalCause::Succeeded,
                         ),
                     ),
                 },
@@ -1426,6 +1465,7 @@ mod tests {
                     protocol: EndpointProtocol::Http,
                     completions_path: "/v1/completions".to_owned(),
                     chat_completions_path: "/v1/chat/completions".to_owned(),
+                    server_metrics: None,
                     prefix_cache_reset: None,
                 },
             },

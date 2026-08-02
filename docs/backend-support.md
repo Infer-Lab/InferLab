@@ -22,9 +22,9 @@ Status meanings:
 
 A qualified baseline is evidence for that concrete shape, not blanket
 certification of every framework version, model, device, or parallel configuration.
-InferLab 0.7 uses protocol-v7 candidate packages: adapter SDK `0.6.0`, version
-`0.5.1` of the four maintained framework integrations, and Specialized Engine
-integration `0.2.1`. Retained qualification records from earlier exact package
+InferLab 0.8 uses protocol-v7 candidate packages: adapter SDK `0.6.1`, version
+`0.5.2` of the four maintained framework integrations, and Specialized Engine
+integration `0.2.2`. Retained qualification records from earlier exact package
 versions remain historical evidence; they do not qualify these candidates
 unless a cell explicitly names a protocol-v7 record.
 
@@ -32,10 +32,10 @@ unless a cell explicitly names a protocol-v7 record.
 
 | Capability | vLLM | SGLang | TensorRT-LLM | TokenSpeed | Specialized Engine |
 | --- | --- | --- | --- | --- | --- |
-| Integration package | `inferlab-integration-vllm==0.5.1` | `inferlab-integration-sglang==0.5.1` | `inferlab-integration-tensorrt-llm==0.5.1` | `inferlab-integration-tokenspeed==0.5.1` | `inferlab-integration-specialized-engine==0.2.1` |
-| Single-node `single` topology | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Supported: one Engine replica in one rank process with a pure-TP device set; the protocol-v7 `0.2.1` candidate is Unqualified |
-| `single` public component | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Supported: TokenSpeed SMG Gateway; the protocol-v7 `0.2.1` candidate is Unqualified |
-| Gateway-backed `single` | — | — | — | — | Supported: `smg`, implemented by `tokenspeed-smg`; the protocol-v7 `0.2.1` candidate is Unqualified |
+| Integration package | `inferlab-integration-vllm==0.5.2` | `inferlab-integration-sglang==0.5.2` | `inferlab-integration-tensorrt-llm==0.5.2` | `inferlab-integration-tokenspeed==0.5.2` | `inferlab-integration-specialized-engine==0.2.2` |
+| Single-node `single` topology | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Supported: one Engine replica in one rank process with a pure-TP device set; the protocol-v7 `0.2.2` candidate is Unqualified |
+| `single` public component | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Supported: TokenSpeed SMG Gateway; the protocol-v7 `0.2.2` candidate is Unqualified |
+| Gateway-backed `single` | — | — | — | — | Supported: `smg`, implemented by `tokenspeed-smg`; the protocol-v7 `0.2.2` candidate is Unqualified |
 | Multi-node replica | Supported | — | — | — | — |
 | Disaggregated prefill/decode | Qualified | Qualified for the pairing-specific baselines below | Qualified: built-in and native `trtllm-disaggregated` frontend pairs | Qualified for the maintained 1P1D pairing below | — |
 | KV-transfer backend | Qualified: Mooncake and NIXL | Qualified: Mooncake and NIXL in the pairing-specific baselines below | Qualified: NIXL with the built-in frontend and native `trtllm-disaggregated` pair | Qualified: Mooncake for the maintained 1P1D pairing below | — |
@@ -43,10 +43,11 @@ unless a cell explicitly names a protocol-v7 record.
 | P/D Router backend | Supported: `builtin`, `vllm-router` | Supported: `builtin`, `sglang-router` | Supported: `builtin`, `trtllm-disaggregated` | Supported: `tokenspeed-smg` | — |
 | P/D frontend binding | Supported: one `[gateway, pd_router]` process | Supported: one `[gateway, pd_router]` process | Supported: one `[gateway, pd_router]` process | Supported: one `[gateway, pd_router]` process | — |
 | Declared public workload paths | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` |
-| Completion request used by InferLab | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Supported: deterministic scalar prompt through SMG; the protocol-v7 `0.2.1` candidate is Unqualified |
-| Chat-completions execution | Supported: direct serving lowers a selected vLLM reasoning parser, and the built-in Mooncake and NIXL P/D frontend preserves the route; no exact public-route record qualifies these paths | Supported by deterministic built-in P/D frontend coverage; the integration-rendered pair and every exact public route remain Unqualified | Supported by deterministic built-in P/D frontend coverage for context-first streaming and non-streaming handoff; the integration-rendered pair and every exact public route remain Unqualified | Unqualified: the named path is preserved; the native Gateway/P/D Router pair requires separate route qualification | Unqualified: SMG preserves the path, but no exact public-route record qualifies chat execution |
+| AIPerf server-metrics capability | Qualified for direct `single` on the public endpoint at `/metrics`: a real protocol-v7 candidate Bench preserved the native export and produced both SPEED acceptance reports; Gateway and P/D public endpoints omit the capability | Qualified for direct `single` on the public endpoint at `/metrics` when effective setting `enable_metrics = true`; Gateway and P/D public endpoints omit the capability | — | — | Supported through SMG's separately allocated `prometheus` port at `/metrics`; `least_load` preserves the single-target routing result while activating canonical Engine load polling; real candidate Bench collection and cleanup are demonstrated from a dirty workspace, so reproducible qualification remains pending |
+| Completion request used by InferLab | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Qualified for the retained scalar-prompt baseline; protocol-v7 candidate Unqualified | Supported: deterministic scalar prompt through SMG; the protocol-v7 `0.2.2` candidate is Unqualified |
+| Chat-completions execution | Qualified for direct `single` under the protocol-v7 candidate, including an operator-supplied server-side chat template; built-in Mooncake and NIXL P/D preserve the route but remain unqualified | Supported by deterministic built-in P/D frontend coverage; the integration-rendered pair and every exact public route remain Unqualified | Supported by deterministic built-in P/D frontend coverage for context-first streaming and non-streaming handoff; the integration-rendered pair and every exact public route remain Unqualified | Unqualified: the named path is preserved; the native Gateway/P/D Router pair requires separate route qualification | Unqualified: SMG preserves the path, but no exact public-route record qualifies chat execution |
 | Prefix-cache reset between cases | Limited: `POST /reset_prefix_cache` for `single`; no reset control on the P/D Gateway | `POST /flush_cache` for `single`; Qualified for the demonstrated P/D Gateway/P/D Router pairings below | —; P/D enforces block reuse off at launch | Qualified for `single` and the maintained P/D pairing below through Gateway `POST /flush_cache` | Supported by the worker contract through Gateway `POST /flush_cache`; unqualified for a concrete Engine |
-| Framework profiling capture | Supported: Engine replica entry controls each captured rank process tree | — | — | — | Supported: captures the Engine process tree while TokenSpeed SMG Gateway controls the window through `POST /start_profile` and `POST /stop_profile`; managed capture defaults to CUDA and NVTX tracing, with OS runtime tracing available as an explicit typed override; no concrete Engine route is yet qualified |
+| Framework profiling capture | Supported: Engine replica entry controls each captured rank process tree | Supported for `single` and prefill/decode: every model-serving replica entry controls its captured process tree through `POST /start_profile` with the integration-declared `CUDA_PROFILER` body and `POST /stop_profile`; no real SGLang capture record is yet qualified | — | — | Supported: captures the Engine process tree while TokenSpeed SMG Gateway controls the window through `POST /start_profile` and `POST /stop_profile`; managed capture defaults to CUDA and NVTX tracing, with OS runtime tracing available as an explicit typed override; no concrete Engine route is yet qualified |
 
 The two named paths are endpoint-contract facts, not route qualification. Chat
 execution becomes Qualified only after an InferLab workflow produces a real
@@ -69,8 +70,8 @@ Loglikelihood support is an observed property of the complete public serving
 route, not a consequence of scalar completion support. The first four columns
 below are bounded to the published `0.4.0` integration packages and the named
 maintained DeepSeek-V4 SM120 baselines; they do not qualify the protocol-v7
-`0.5.1` candidates. The Specialized Engine column describes the closed `0.2.1`
-candidate contract. The qualification task was the built-in `hellaswag`
+`0.5.2` candidates. The Specialized Engine column is bounded to the retained
+exact `0.2.1` package. The qualification task was the built-in `hellaswag`
 multiple-choice task with the model-directory Hugging Face tokenizer and text
 requests. A worker-only probe cannot qualify a prefill/decode public endpoint.
 
@@ -96,7 +97,7 @@ an independent public setting.
 
 | Capability | vLLM | SGLang | TensorRT-LLM | TokenSpeed | Specialized Engine |
 | --- | --- | --- | --- | --- | --- |
-| Outer tensor parallelism | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Supported: arbitrary nonzero single-process pure TP; protocol-v7 `0.2.1` candidate Unqualified |
+| Outer tensor parallelism | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Qualified for the retained baseline; protocol-v7 candidate Unqualified | Supported: arbitrary nonzero single-process pure TP; protocol-v7 `0.2.2` candidate Unqualified |
 | Outer pipeline parallelism | Supported | Supported | Supported | — | Limited: `1` |
 | Attention data parallelism | Supported | Supported | Limited: `1` or the outer TP size | Supported | Limited: `1` |
 | Attention context parallelism | — | Supported | — | — | Limited: `1` |
@@ -113,7 +114,7 @@ does not duplicate every arithmetic constraint enforced by each adapter.
 
 | Backend | Real-hardware baseline | Important boundary |
 | --- | --- | --- |
-| vLLM | Source-built DeepSeek-V4 SM120 TP2/EP2 serving; real two-machine 1P1D vLLM Router serving with Mooncake and NIXL | Multi-node replica lowering is supported but unqualified; the maintained cross-machine baseline is 1P1D. |
+| vLLM | Source-built DeepSeek-V4 SM120 TP2/EP2 serving; real two-machine 1P1D vLLM Router serving with Mooncake and NIXL; source-built Qwen3 MoE SM120 TP1 direct serving for protocol-v7 Bench qualification | Multi-node replica lowering is supported but unqualified; the maintained cross-machine baseline is 1P1D. |
 | SGLang | Source-built DeepSeek-V4 SM120 TP2/EP2 serving and pairing-specific single-machine 1P1D serving | P/D qualification is pairing-specific below; TP4 is outside the maintained baseline. |
 | TensorRT-LLM | Source-built DeepSeek-V4 SM120 TP2/EP2 serving and 1P1D NIXL serving with built-in and native routing | SM120 DeepSeek-V4 serving requires the source integration's FlashInfer sparse-MLA path; the stock NGC image through 1.3.0rc21 is not sufficient. |
 | TokenSpeed | Source-built DeepSeek-V4 SM120 TP2/EP2/dense-TP2 serving; single-machine 1P1D serving with TP2/EP2/dense-TP2 per role, native `tokenspeed-smg` routing, and Mooncake KV transfer | P/D qualification is limited to that concrete routing/transfer pairing; the source-built framework baseline includes its required kernel fixes. |

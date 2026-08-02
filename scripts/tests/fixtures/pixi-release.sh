@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [ "${1:-}" = run ] && [ "${2:-}" = python ]; then
   shift 2
-  exec python "$@"
+  exec python3 "$@"
 fi
 
 if [ "${1:-}" = run ] && [ "${2:-}" = build-python ]; then

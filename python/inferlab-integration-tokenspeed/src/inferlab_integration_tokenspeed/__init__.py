@@ -154,7 +154,6 @@ def _identity() -> IntegrationIdentity:
         adapter_distribution="inferlab-integration-tokenspeed",
         framework="tokenspeed",
         framework_distribution="tokenspeed",
-        module_file=__file__,
     )
 
 

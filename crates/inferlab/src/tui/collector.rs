@@ -199,7 +199,9 @@ impl Collector {
         });
         let (journal, journal_error) = self.journal.read(root, observed_unix_ms);
         let mut record_collection = self.records.read(root, observed_unix_ms);
-        let bound = crate::time_bound::OperationBound::finite(SERVER_PROCESS_OBSERVATION_BUDGET);
+        let bound = inferlab_runtime::operation_bound::OperationBound::finite(
+            SERVER_PROCESS_OBSERVATION_BUDGET,
+        );
         self.processes.observe(
             root,
             record_collection
@@ -569,9 +571,9 @@ fn definition_views(
 #[cfg(test)]
 mod tests {
     use super::{DeclaredSchedule, JournalReader, ProcessObserver, ServerProbe, server_probe};
-    use crate::server::runtime::ProcessStatus;
     use crate::server::{ServerProcessStatusReport, ServerStatus};
     use crate::tui::{RecordView, State};
+    use inferlab_runtime::server::ProcessStatus;
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};

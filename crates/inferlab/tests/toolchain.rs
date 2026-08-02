@@ -110,6 +110,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
     );
     assert_eq!(first["bench"]["platform"], host_platform());
     assert_eq!(first["bench"]["aiperf_version"], "0.11.0");
+    assert_eq!(first["bench"]["transformers_version"], "5.12.1");
     assert!(home.install_dir().join("complete.json").is_file());
     assert!(home.install_dir().join("pixi.toml").is_file());
     assert!(home.install_dir().join("pixi.lock").is_file());
@@ -132,11 +133,22 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
             "missing bundled Estonia asset {asset}"
         );
     }
-    assert!(
-        home.install_dir()
-            .join("runner/inferlab_bench_runner/bench_client.py")
-            .is_file()
-    );
+    for module in [
+        "__init__.py",
+        "aiperf.py",
+        "bench_client.py",
+        "execution.py",
+        "population.py",
+        "result_sessions.py",
+    ] {
+        assert!(
+            home.install_dir()
+                .join("runner/inferlab_bench_runner")
+                .join(module)
+                .is_file(),
+            "missing installed Bench runner module {module}"
+        );
+    }
     for module in ["__init__.py", "runtime.py", "_generated.py"] {
         assert!(
             home.install_dir()
@@ -186,6 +198,25 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
     let repaired: Value = serde_json::from_slice(&repaired.stdout)?;
     assert_eq!(repaired["state"], "installed");
     assert_eq!(fs::read_to_string(&home.log)?.lines().count(), 2);
+
+    fs::remove_file(
+        home.install_dir()
+            .join("runner/inferlab_bench_runner/execution.py"),
+    )?;
+    let module_repaired = home.install()?;
+    assert!(
+        module_repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&module_repaired.stderr)
+    );
+    let module_repaired: Value = serde_json::from_slice(&module_repaired.stdout)?;
+    assert_eq!(module_repaired["state"], "installed");
+    assert!(
+        home.install_dir()
+            .join("runner/inferlab_bench_runner/execution.py")
+            .is_file()
+    );
+    assert_eq!(fs::read_to_string(&home.log)?.lines().count(), 3);
     Ok(())
 }
 
@@ -233,7 +264,7 @@ mkdir -p "$prefix/.pixi/envs/eval/bin" "$prefix/.pixi/envs/bench/bin"
 cat > "$prefix/.pixi/envs/eval/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"runner_version":"0.3.0","lm_eval_version":"0.4.12"}\n'
+  printf '{"lm_eval_version":"0.4.12"}\n'
   exit 0
 fi
 printf 'unexpected python fixture arguments: %s\n' "$*" >&2
@@ -242,7 +273,7 @@ PYTHON
 cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"runner_version":"0.3.0","aiperf_version":"0.11.0"}\n'
+  printf '{"aiperf_version":"0.11.0","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 printf 'unexpected python fixture arguments: %s\n' "$*" >&2

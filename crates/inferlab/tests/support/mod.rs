@@ -260,6 +260,8 @@ pub struct CaptureTargetProjection {
 pub struct HttpActionProjection {
     pub method: String,
     pub path: String,
+    #[serde(default)]
+    pub body: Option<BTreeMap<String, serde_json::Value>>,
     pub effective_url: String,
 }
 

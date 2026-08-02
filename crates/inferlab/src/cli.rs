@@ -1,11 +1,12 @@
 use crate::InferlabError;
 use crate::adapter::ProcessAdapterClient;
 use crate::environment;
+use crate::execution::Workflow;
 use crate::operation::{OperationGuard, OperationProgress};
 use crate::progress::{Mode as ProgressMode, Phase, Progress};
 use crate::recipe::{self, RecipeStatus};
 use crate::record::{RecordIdentity, new_record_id};
-use crate::resolve::{ExecutionTarget, ResolveRequest, Workflow, resolve};
+use crate::resolve::{ExecutionTarget, ResolveRequest, resolve};
 use crate::server;
 use crate::toolchain;
 use crate::workload::{self, WorkloadStatus};
@@ -710,8 +711,7 @@ fn run_image_build(
     if args.dry_run {
         return write_json(&resolved.dry_run_plan());
     }
-    let report =
-        crate::image::runtime::run(&workspace, resolved, &tool, &ProcessAdapterClient, progress)?;
+    let report = crate::image::runtime::run(&workspace, resolved, &tool, progress)?;
     let failed = report.status != crate::image::record::ImageStatus::Succeeded;
     let record_id = report.record_id.clone();
     write_json(&report)?;
@@ -834,7 +834,8 @@ fn run_bench_command(
         return write_json(&plan.dry_run_plan());
     }
 
-    crate::interrupt::prepare().map_err(|message| InferlabError::ServerLifecycle { message })?;
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::ServerInterrupt { source })?;
     let record = workload::run_bench(
         root,
         &new_record_id(RecordIdentity::Bench {

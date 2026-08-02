@@ -9,36 +9,15 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::time_bound::OperationBound;
+use inferlab_runtime::operation_bound::OperationBound;
 
 const INFERLAB_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Schema version written into `complete.json` and required when reading it
 /// back; the write and read gates share this one const.
 const COMPLETION_SCHEMA_VERSION: u32 = 3;
-const EVAL_RUNNER_VERSION: &str = "0.3.0";
-const BENCH_RUNNER_VERSION: &str = "0.3.0";
 const MANIFEST: &str = include_str!("../resources/eval-toolchain/pixi.toml");
 const LOCK: &str = include_str!("../resources/eval-toolchain/pixi.lock");
-const EVAL_RUNNER: &str = include_str!("../resources/toolchain-python/eval_client.py");
-const LM_EVAL_ENTRY: &str = include_str!("../resources/toolchain-python/lm_eval_entry.py");
-const BENCH_RUNNER: &str = include_str!("../resources/toolchain-python/bench_client.py");
-// The complete internal measurement-sdk package as the runners import it:
-// every module ships and enters the runner digests. Adding a module to the sdk
-// MUST extend this list — the test fixture shims pixi, so only a real
-// `inferlab toolchain install` exercises these imports
-// ([[RFC-0004:C-INFERLAB-TOOLCHAIN]]). The copies under resources/ keep the
-// published crate self-contained; a packaging test pins each byte-identical
-// to its python source.
-const MEASUREMENT_SDK_INIT: &str =
-    include_str!("../resources/toolchain-python/inferlab_measurement_sdk/__init__.py");
-const MEASUREMENT_SDK_RUNTIME: &str =
-    include_str!("../resources/toolchain-python/inferlab_measurement_sdk/runtime.py");
-const GENERATED_MEASUREMENT_PROTOCOL: &str =
-    include_str!("../resources/toolchain-python/inferlab_measurement_sdk/_generated.py");
-const ESTONIA_TASK: &str = include_str!("../resources/bundled-eval-tasks/estonia/estonia.yaml");
-const ESTONIA_PROMPT: &str = include_str!("../resources/bundled-eval-tasks/estonia/prompt.txt");
-const ESTONIA_DATASET: &str = include_str!("../resources/bundled-eval-tasks/estonia/dataset.json");
-const ESTONIA_SCORER: &str = include_str!("../resources/bundled-eval-tasks/estonia/estonia.py");
+include!(concat!(env!("OUT_DIR"), "/toolchain_python_files.rs"));
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +55,7 @@ pub struct BenchToolchainIdentity {
     pub runner_version: String,
     pub runner_sha256: String,
     pub aiperf_version: String,
+    pub transformers_version: String,
 }
 
 pub struct InstalledEvalToolchain {
@@ -119,15 +99,14 @@ struct Completion {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EvalHandshake {
-    runner_version: String,
     lm_eval_version: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BenchHandshake {
-    runner_version: String,
     aiperf_version: String,
+    transformers_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,19 +281,25 @@ fn resolve_host_platform(
 fn pixi_host_info() -> Result<PixiHostInfo, InferlabError> {
     let argv = ["pixi", "info", "--json"];
     let bound = OperationBound::unbounded();
-    let output = crate::container::run_with_bound(&argv, Some(Path::new("/")), None, &bound, None);
+    let output = inferlab_runtime::container::run_with_bound(
+        &argv,
+        Some(Path::new("/")),
+        None,
+        &bound,
+        None,
+    );
     let (status, stdout, stderr) = match output {
-        Ok(crate::container::BoundedWait::Exited {
+        Ok(inferlab_runtime::container::BoundedWait::Exited {
             status,
             stdout,
             stderr,
         }) => (status, stdout, stderr),
-        Ok(crate::container::BoundedWait::Expired { .. }) => {
+        Ok(inferlab_runtime::container::BoundedWait::Expired { .. }) => {
             return Err(InferlabError::ToolchainVerification {
                 message: "unbounded Pixi host-platform inspection unexpectedly expired".to_owned(),
             });
         }
-        Ok(crate::container::BoundedWait::Interrupted { kill, .. }) => {
+        Ok(inferlab_runtime::container::BoundedWait::Interrupted { kill, .. }) => {
             kill.map_err(|source| InferlabError::LaunchToolchain {
                 action: "Pixi host-platform inspection cleanup",
                 source,
@@ -328,16 +313,16 @@ fn pixi_host_info() -> Result<PixiHostInfo, InferlabError> {
             });
         }
         Err(
-            crate::container::BoundedError::Launch(source)
-            | crate::container::BoundedError::Stdin(source)
-            | crate::container::BoundedError::Wait(source),
+            inferlab_runtime::container::BoundedError::Launch(source)
+            | inferlab_runtime::container::BoundedError::Stdin(source)
+            | inferlab_runtime::container::BoundedError::Wait(source),
         ) => {
             return Err(InferlabError::LaunchToolchain {
                 action: "Pixi host-platform inspection",
                 source,
             });
         }
-        Err(crate::container::BoundedError::WaitCleanup { source, .. }) => {
+        Err(inferlab_runtime::container::BoundedError::WaitCleanup { source, .. }) => {
             return Err(InferlabError::LaunchToolchain {
                 action: "Pixi host-platform inspection",
                 source,
@@ -382,14 +367,8 @@ fn eval_identity(platform: &str, handshake: EvalHandshake) -> EvalToolchainIdent
         platform: platform.to_owned(),
         manifest_sha256: digest(MANIFEST.as_bytes()),
         lock_sha256: digest(LOCK.as_bytes()),
-        runner_version: handshake.runner_version,
-        runner_sha256: eval_runner_digest(
-            EVAL_RUNNER.as_bytes(),
-            LM_EVAL_ENTRY.as_bytes(),
-            MEASUREMENT_SDK_INIT.as_bytes(),
-            MEASUREMENT_SDK_RUNTIME.as_bytes(),
-            GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
-        ),
+        runner_version: INFERLAB_VERSION.to_owned(),
+        runner_sha256: eval_runner_digest(),
         lm_eval_version: handshake.lm_eval_version,
         bundled_task_closure_sha256: bundled_task_closure_digest(),
     }
@@ -401,9 +380,10 @@ fn bench_identity(platform: &str, handshake: BenchHandshake) -> BenchToolchainId
         platform: platform.to_owned(),
         manifest_sha256: digest(MANIFEST.as_bytes()),
         lock_sha256: digest(LOCK.as_bytes()),
-        runner_version: handshake.runner_version,
-        runner_sha256: runner_digest(BENCH_RUNNER.as_bytes()),
+        runner_version: INFERLAB_VERSION.to_owned(),
+        runner_sha256: bench_runner_digest(),
         aiperf_version: handshake.aiperf_version,
+        transformers_version: handshake.transformers_version,
     }
 }
 
@@ -427,37 +407,24 @@ fn bundled_task_closure_digest() -> String {
     format!("{:x}", digest.finalize())
 }
 
-fn runner_digest(runner: &[u8]) -> String {
-    runner_digest_parts(
-        runner,
-        MEASUREMENT_SDK_INIT.as_bytes(),
-        MEASUREMENT_SDK_RUNTIME.as_bytes(),
-        GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
-    )
+fn bench_runner_digest() -> String {
+    runner_digest("inferlab_bench_runner/")
 }
 
-fn runner_digest_parts(runner: &[u8], init: &[u8], runtime: &[u8], generated: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(runner);
-    digest.update(init);
-    digest.update(runtime);
-    digest.update(generated);
-    format!("{:x}", digest.finalize())
+fn eval_runner_digest() -> String {
+    runner_digest("inferlab_eval_runner/")
 }
 
-fn eval_runner_digest(
-    runner: &[u8],
-    entry: &[u8],
-    init: &[u8],
-    runtime: &[u8],
-    generated: &[u8],
-) -> String {
+fn runner_digest(runner_prefix: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(runner);
-    digest.update(entry);
-    digest.update(init);
-    digest.update(runtime);
-    digest.update(generated);
+    for (path, contents) in TOOLCHAIN_PYTHON_FILES.iter().filter(|(path, _)| {
+        path.starts_with(runner_prefix) || path.starts_with("inferlab_measurement_sdk/")
+    }) {
+        digest.update(path.len().to_le_bytes());
+        digest.update(path.as_bytes());
+        digest.update(contents.len().to_le_bytes());
+        digest.update(contents.as_bytes());
+    }
     format!("{:x}", digest.finalize())
 }
 
@@ -484,34 +451,21 @@ fn create_dir_all(path: &Path) -> Result<(), InferlabError> {
 }
 
 fn write_release_files(path: &Path) -> Result<(), InferlabError> {
-    let eval_runner = path.join("runner/inferlab_eval_runner");
-    let bench_runner = path.join("runner/inferlab_bench_runner");
-    let measurement_sdk = path.join("runner/inferlab_measurement_sdk");
-    let estonia = path.join("runner/inferlab_eval_runner/bundled_tasks/estonia");
-    create_dir_all(&eval_runner)?;
-    create_dir_all(&bench_runner)?;
-    create_dir_all(&measurement_sdk)?;
-    create_dir_all(&estonia)?;
     write(path.join("pixi.toml"), MANIFEST)?;
     write(path.join("pixi.lock"), LOCK)?;
-    write(eval_runner.join("eval_client.py"), EVAL_RUNNER)?;
-    write(eval_runner.join("lm_eval_entry.py"), LM_EVAL_ENTRY)?;
-    write(eval_runner.join("__init__.py"), "")?;
-    write(estonia.join("estonia.yaml"), ESTONIA_TASK)?;
-    write(estonia.join("prompt.txt"), ESTONIA_PROMPT)?;
-    write(estonia.join("dataset.json"), ESTONIA_DATASET)?;
-    write(estonia.join("estonia.py"), ESTONIA_SCORER)?;
-    write(bench_runner.join("bench_client.py"), BENCH_RUNNER)?;
-    write(bench_runner.join("__init__.py"), "")?;
-    write(measurement_sdk.join("__init__.py"), MEASUREMENT_SDK_INIT)?;
-    write(measurement_sdk.join("runtime.py"), MEASUREMENT_SDK_RUNTIME)?;
-    write(
-        measurement_sdk.join("_generated.py"),
-        GENERATED_MEASUREMENT_PROTOCOL,
-    )
+    for (relative, contents) in TOOLCHAIN_PYTHON_FILES {
+        write(path.join("runner").join(relative), contents)?;
+    }
+    Ok(())
 }
 
 fn write(path: PathBuf, contents: &str) -> Result<(), InferlabError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| InferlabError::ToolchainVerification {
+            message: format!("toolchain file path {} has no parent", path.display()),
+        })?;
+    create_dir_all(parent)?;
     fs::write(&path, contents).map_err(|source| InferlabError::ToolchainIo {
         operation: "write",
         path,
@@ -531,18 +485,18 @@ fn install_locked(path: &Path) -> Result<(), InferlabError> {
     ];
     let bound = OperationBound::unbounded();
     let (status, stdout, stderr) =
-        match crate::container::run_with_bound(&argv, None, None, &bound, None) {
-            Ok(crate::container::BoundedWait::Exited {
+        match inferlab_runtime::container::run_with_bound(&argv, None, None, &bound, None) {
+            Ok(inferlab_runtime::container::BoundedWait::Exited {
                 status,
                 stdout,
                 stderr,
             }) => (status, stdout, stderr),
-            Ok(crate::container::BoundedWait::Expired { .. }) => {
+            Ok(inferlab_runtime::container::BoundedWait::Expired { .. }) => {
                 return Err(InferlabError::ToolchainVerification {
                     message: "unbounded Pixi installation unexpectedly expired".to_owned(),
                 });
             }
-            Ok(crate::container::BoundedWait::Interrupted { kill, .. }) => {
+            Ok(inferlab_runtime::container::BoundedWait::Interrupted { kill, .. }) => {
                 kill.map_err(|source| InferlabError::LaunchToolchain {
                     action: "Pixi install cleanup",
                     source,
@@ -556,16 +510,16 @@ fn install_locked(path: &Path) -> Result<(), InferlabError> {
                 });
             }
             Err(
-                crate::container::BoundedError::Launch(source)
-                | crate::container::BoundedError::Stdin(source)
-                | crate::container::BoundedError::Wait(source),
+                inferlab_runtime::container::BoundedError::Launch(source)
+                | inferlab_runtime::container::BoundedError::Stdin(source)
+                | inferlab_runtime::container::BoundedError::Wait(source),
             ) => {
                 return Err(InferlabError::LaunchToolchain {
                     action: "Pixi install",
                     source,
                 });
             }
-            Err(crate::container::BoundedError::WaitCleanup { source, .. }) => {
+            Err(inferlab_runtime::container::BoundedError::WaitCleanup { source, .. }) => {
                 return Err(InferlabError::LaunchToolchain {
                     action: "Pixi install",
                     source,
@@ -590,14 +544,6 @@ fn verify_eval_runtime(path: &Path) -> Result<EvalHandshake, InferlabError> {
         &eval_runner_path(path),
         "Eval runner verification",
     )?;
-    if handshake.runner_version != EVAL_RUNNER_VERSION {
-        return Err(InferlabError::ToolchainVerification {
-            message: format!(
-                "Eval runner reported version {}, expected {EVAL_RUNNER_VERSION}",
-                handshake.runner_version
-            ),
-        });
-    }
     let expected = pinned_pypi_version("eval", "lm-eval")?;
     if handshake.lm_eval_version != expected {
         return Err(InferlabError::ToolchainVerification {
@@ -616,14 +562,6 @@ fn verify_bench_runtime(path: &Path) -> Result<BenchHandshake, InferlabError> {
         &bench_runner_path(path),
         "Bench runner verification",
     )?;
-    if handshake.runner_version != BENCH_RUNNER_VERSION {
-        return Err(InferlabError::ToolchainVerification {
-            message: format!(
-                "Bench runner reported version {}, expected {BENCH_RUNNER_VERSION}",
-                handshake.runner_version
-            ),
-        });
-    }
     let expected = pinned_pypi_version("bench", "aiperf")?;
     if handshake.aiperf_version != expected {
         return Err(InferlabError::ToolchainVerification {
@@ -631,6 +569,11 @@ fn verify_bench_runtime(path: &Path) -> Result<BenchHandshake, InferlabError> {
                 "Bench runner reported AIPerf {}, expected {expected}",
                 handshake.aiperf_version
             ),
+        });
+    }
+    if handshake.transformers_version.trim().is_empty() {
+        return Err(InferlabError::ToolchainVerification {
+            message: "Bench runner reported an empty Transformers version".to_owned(),
         });
     }
     Ok(handshake)
@@ -746,15 +689,8 @@ fn eval_identity_matches(identity: &EvalToolchainIdentity, platform: &str) -> bo
         &identity.manifest_sha256,
         &identity.lock_sha256,
         platform,
-    ) && identity.runner_version == EVAL_RUNNER_VERSION
-        && identity.runner_sha256
-            == eval_runner_digest(
-                EVAL_RUNNER.as_bytes(),
-                LM_EVAL_ENTRY.as_bytes(),
-                MEASUREMENT_SDK_INIT.as_bytes(),
-                MEASUREMENT_SDK_RUNTIME.as_bytes(),
-                GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
-            )
+    ) && identity.runner_version == INFERLAB_VERSION
+        && identity.runner_sha256 == eval_runner_digest()
         && pinned_pypi_version("eval", "lm-eval")
             .is_ok_and(|expected| identity.lm_eval_version == expected)
         && identity.bundled_task_closure_sha256 == bundled_task_closure_digest()
@@ -767,8 +703,8 @@ fn bench_identity_matches(identity: &BenchToolchainIdentity, platform: &str) -> 
         &identity.manifest_sha256,
         &identity.lock_sha256,
         platform,
-    ) && identity.runner_version == BENCH_RUNNER_VERSION
-        && identity.runner_sha256 == runner_digest(BENCH_RUNNER.as_bytes())
+    ) && identity.runner_version == INFERLAB_VERSION
+        && identity.runner_sha256 == bench_runner_digest()
         && pinned_pypi_version("bench", "aiperf")
             .is_ok_and(|expected| identity.aiperf_version == expected)
 }
@@ -789,59 +725,17 @@ fn common_identity_matches(
 fn release_files_match(path: &Path) -> bool {
     let manifest = fs::read(path.join("pixi.toml")).ok();
     let lock = fs::read(path.join("pixi.lock")).ok();
-    let eval_runner = fs::read(eval_runner_path(path)).ok();
-    let lm_eval_entry = fs::read(path.join("runner/inferlab_eval_runner/lm_eval_entry.py")).ok();
-    let bench_runner = fs::read(bench_runner_path(path)).ok();
-    let measurement_sdk_init =
-        fs::read(path.join("runner/inferlab_measurement_sdk/__init__.py")).ok();
-    let measurement_sdk_runtime =
-        fs::read(path.join("runner/inferlab_measurement_sdk/runtime.py")).ok();
-    let measurement_protocol =
-        fs::read(path.join("runner/inferlab_measurement_sdk/_generated.py")).ok();
-    let bundled_task =
-        fs::read(path.join("runner/inferlab_eval_runner/bundled_tasks/estonia/estonia.yaml")).ok();
-    let bundled_prompt =
-        fs::read(path.join("runner/inferlab_eval_runner/bundled_tasks/estonia/prompt.txt")).ok();
-    let bundled_dataset =
-        fs::read(path.join("runner/inferlab_eval_runner/bundled_tasks/estonia/dataset.json")).ok();
-    let bundled_scorer =
-        fs::read(path.join("runner/inferlab_eval_runner/bundled_tasks/estonia/estonia.py")).ok();
-    let on_disk_digest = |runner: Option<&[u8]>| -> Option<String> {
-        Some(runner_digest_parts(
-            runner?,
-            measurement_sdk_init.as_deref()?,
-            measurement_sdk_runtime.as_deref()?,
-            measurement_protocol.as_deref()?,
-        ))
-    };
-    let on_disk_eval_digest = || -> Option<String> {
-        Some(eval_runner_digest(
-            eval_runner.as_deref()?,
-            lm_eval_entry.as_deref()?,
-            measurement_sdk_init.as_deref()?,
-            measurement_sdk_runtime.as_deref()?,
-            measurement_protocol.as_deref()?,
-        ))
-    };
+    let python_payload_matches = TOOLCHAIN_PYTHON_FILES.iter().all(|(relative, contents)| {
+        fs::read(path.join("runner").join(relative))
+            .is_ok_and(|installed| installed == contents.as_bytes())
+    });
     manifest
         .as_deref()
         .is_some_and(|bytes| digest(bytes) == digest(MANIFEST.as_bytes()))
         && lock
             .as_deref()
             .is_some_and(|bytes| digest(bytes) == digest(LOCK.as_bytes()))
-        && on_disk_eval_digest()
-            == Some(eval_runner_digest(
-                EVAL_RUNNER.as_bytes(),
-                LM_EVAL_ENTRY.as_bytes(),
-                MEASUREMENT_SDK_INIT.as_bytes(),
-                MEASUREMENT_SDK_RUNTIME.as_bytes(),
-                GENERATED_MEASUREMENT_PROTOCOL.as_bytes(),
-            ))
-        && on_disk_digest(bench_runner.as_deref()) == Some(runner_digest(BENCH_RUNNER.as_bytes()))
-        && bundled_task.as_deref() == Some(ESTONIA_TASK.as_bytes())
-        && bundled_prompt.as_deref() == Some(ESTONIA_PROMPT.as_bytes())
-        && bundled_dataset.as_deref() == Some(ESTONIA_DATASET.as_bytes())
-        && bundled_scorer.as_deref() == Some(ESTONIA_SCORER.as_bytes())
+        && python_payload_matches
 }
 
 fn eval_python_path(path: &Path) -> PathBuf {

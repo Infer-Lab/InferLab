@@ -1,11 +1,11 @@
-use super::runtime;
-use crate::resolve::{
-    ActiveRdmaInterfacePlan, LaunchPlan, NetworkMachinePlan, NetworkPlan, NetworkSelectionReason,
-    ProcessPlan,
+use crate::execution::{
+    ActiveRdmaInterfacePlan, NetworkMachinePlan, NetworkPlan, NetworkSelectionReason, ProcessPlan,
 };
+use inferlab_runtime::plan::LaunchPlan;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::process::{Command, Output};
+use thiserror::Error;
 
 const NETWORK_MARKER: &str = "INFERLAB_NETWORK\t";
 const EXCLUDED_INTERFACE_PREFIXES: [&str; 4] = ["br-", "docker", "veth", "virbr"];
@@ -17,7 +17,62 @@ if command -v ibdev2netdev >/dev/null 2>&1; then
     ibdev2netdev | awk '/\(Up\)/ {printf "INFERLAB_NETWORK\tRDMA\t%s\t%s\n", $5, $1}'
 fi"#;
 
-pub(super) fn resolve(processes: &[ProcessPlan]) -> Result<Option<NetworkPlan>, String> {
+#[derive(Debug, Error)]
+pub(super) enum NetworkResolutionError {
+    #[error("failed to launch network probe for local machine {machine:?}: {source}")]
+    LocalLaunch {
+        machine: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to launch network probe for machine {machine:?}: {source}")]
+    Ssh {
+        machine: String,
+        #[source]
+        source: inferlab_runtime::ssh::SshError,
+    },
+    #[error("network probe for machine {machine:?} exited with {status}: {stderr}")]
+    Exit {
+        machine: String,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("network probe for machine {machine:?} returned non-UTF-8 output: {source}")]
+    NonUtf8 {
+        machine: String,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+    #[error("invalid network probe for {machine:?}: {source}")]
+    InvalidEvidence {
+        machine: String,
+        #[source]
+        source: NetworkEvidenceError,
+    },
+    #[error(
+        "no common routable communication interface across machines [{machines}]; verify that every machine has a common global IPv4 interface and that RDMA links are up"
+    )]
+    NoCommonInterface { machines: String },
+}
+
+#[derive(Debug, Error)]
+pub(super) enum NetworkEvidenceError {
+    #[error("{kind} evidence has no {field}")]
+    MissingField {
+        kind: &'static str,
+        field: &'static str,
+    },
+    #[error("unknown evidence kind {kind:?}")]
+    UnknownKind { kind: String },
+    #[error("empty evidence line")]
+    EmptyLine,
+    #[error("probe returned no route evidence")]
+    MissingRoute,
+}
+
+pub(super) fn resolve(
+    processes: &[ProcessPlan],
+) -> Result<Option<NetworkPlan>, NetworkResolutionError> {
     let mut seen = BTreeSet::new();
     let machines = processes
         .iter()
@@ -37,10 +92,9 @@ pub(super) fn resolve(processes: &[ProcessPlan]) -> Result<Option<NetworkPlan>, 
             .map(|(machine, _)| machine.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "no common routable communication interface across machines [{machine_ids}]; \
-             verify that every machine has a common global IPv4 interface and that RDMA links are up"
-        )
+        NetworkResolutionError::NoCommonInterface {
+            machines: machine_ids,
+        }
     })?;
 
     Ok(Some(NetworkPlan {
@@ -50,44 +104,47 @@ pub(super) fn resolve(processes: &[ProcessPlan]) -> Result<Option<NetworkPlan>, 
     }))
 }
 
-fn probe_machine(process: &ProcessPlan) -> Result<NetworkMachinePlan, String> {
+fn probe_machine(process: &ProcessPlan) -> Result<NetworkMachinePlan, NetworkResolutionError> {
     let output = match &process.launch {
         LaunchPlan::Local => Command::new("bash")
             .args(["-c", PROBE_SCRIPT])
             .output()
-            .map_err(|error| {
-                format!(
-                    "failed to launch network probe for local machine {:?}: {error}",
-                    process.machine
-                )
+            .map_err(|source| NetworkResolutionError::LocalLaunch {
+                machine: process.machine.clone(),
+                source,
             })?,
-        LaunchPlan::Ssh { target } => {
-            runtime::ssh_output(target, PROBE_SCRIPT).map_err(|error| {
-                format!(
-                    "failed to launch network probe for machine {:?} ({target}): {error}",
-                    process.machine
-                )
-            })?
-        }
+        LaunchPlan::Ssh { target } => inferlab_runtime::ssh::ssh_output(target, PROBE_SCRIPT)
+            .map_err(|source| NetworkResolutionError::Ssh {
+                machine: process.machine.clone(),
+                source,
+            })?,
     };
     parse_output(&process.machine, output)
 }
 
-fn parse_output(machine: &str, output: Output) -> Result<NetworkMachinePlan, String> {
+fn parse_output(
+    machine: &str,
+    output: Output,
+) -> Result<NetworkMachinePlan, NetworkResolutionError> {
     if !output.status.success() {
-        return Err(format!(
-            "network probe for machine {machine:?} exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Err(NetworkResolutionError::Exit {
+            machine: machine.to_owned(),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
-    let stdout = String::from_utf8(output.stdout).map_err(|error| {
-        format!("network probe for machine {machine:?} returned non-UTF-8 output: {error}")
-    })?;
-    parse_probe(&stdout).map_err(|error| format!("invalid network probe for {machine:?}: {error}"))
+    let stdout =
+        String::from_utf8(output.stdout).map_err(|source| NetworkResolutionError::NonUtf8 {
+            machine: machine.to_owned(),
+            source,
+        })?;
+    parse_probe(&stdout).map_err(|source| NetworkResolutionError::InvalidEvidence {
+        machine: machine.to_owned(),
+        source,
+    })
 }
 
-fn parse_probe(output: &str) -> Result<NetworkMachinePlan, String> {
+fn parse_probe(output: &str) -> Result<NetworkMachinePlan, NetworkEvidenceError> {
     let mut saw_route = false;
     let mut default_route_interface = None;
     let mut addresses = BTreeMap::<String, Vec<String>>::new();
@@ -111,11 +168,16 @@ fn parse_probe(output: &str) -> Result<NetworkMachinePlan, String> {
                 let interface = fields
                     .next()
                     .filter(|interface| !interface.is_empty())
-                    .ok_or("address evidence has no interface")?;
-                let address = fields
-                    .next()
-                    .filter(|address| !address.is_empty())
-                    .ok_or("address evidence has no address")?;
+                    .ok_or(NetworkEvidenceError::MissingField {
+                        kind: "address",
+                        field: "interface",
+                    })?;
+                let address = fields.next().filter(|address| !address.is_empty()).ok_or(
+                    NetworkEvidenceError::MissingField {
+                        kind: "address",
+                        field: "address",
+                    },
+                )?;
                 if !addresses.contains_key(interface) {
                     address_order.push(interface.to_owned());
                 }
@@ -128,22 +190,31 @@ fn parse_probe(output: &str) -> Result<NetworkMachinePlan, String> {
                 let interface = fields
                     .next()
                     .filter(|interface| !interface.is_empty())
-                    .ok_or("RDMA evidence has no interface")?;
-                let device = fields
-                    .next()
-                    .filter(|device| !device.is_empty())
-                    .ok_or("RDMA evidence has no device")?;
+                    .ok_or(NetworkEvidenceError::MissingField {
+                        kind: "RDMA",
+                        field: "interface",
+                    })?;
+                let device = fields.next().filter(|device| !device.is_empty()).ok_or(
+                    NetworkEvidenceError::MissingField {
+                        kind: "RDMA",
+                        field: "device",
+                    },
+                )?;
                 active_rdma_interfaces.push(ActiveRdmaInterfacePlan {
                     interface: interface.to_owned(),
                     device: device.to_owned(),
                 });
             }
-            Some(kind) => return Err(format!("unknown evidence kind {kind:?}")),
-            None => return Err("empty evidence line".to_owned()),
+            Some(kind) => {
+                return Err(NetworkEvidenceError::UnknownKind {
+                    kind: kind.to_owned(),
+                });
+            }
+            None => return Err(NetworkEvidenceError::EmptyLine),
         }
     }
     if !saw_route {
-        return Err("probe returned no route evidence".to_owned());
+        return Err(NetworkEvidenceError::MissingRoute);
     }
 
     let candidates = address_order
@@ -273,7 +344,7 @@ mod tests {
         for (interface, device) in rdma {
             text.push_str(&format!("{NETWORK_MARKER}RDMA\t{interface}\t{device}\n"));
         }
-        parse_probe(&text)
+        parse_probe(&text).map_err(|error| error.to_string())
     }
 
     #[test]

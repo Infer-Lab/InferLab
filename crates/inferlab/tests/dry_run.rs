@@ -1,6 +1,7 @@
 mod support;
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
@@ -221,7 +222,12 @@ if operation == "plan_serve":
                         ),
                         "start": {
                             "method": "post",
-                            "path": "/start_profile",
+                            "path": (
+                                "http://fixture.invalid/start_profile"
+                                if settings.get("fixture_capture_invalid_path")
+                                else "/start_profile"
+                            ),
+                            "body": {"activities": ["CUDA_PROFILER"]},
                         },
                         "stop": {
                             "method": "post",
@@ -375,8 +381,8 @@ print(json.dumps({
              if [ \"$1\" = install ] && [ \"$2\" = --manifest-path ] && [ \"$4\" = --all ] && [ \"$5\" = --locked ]; then\n\
                prefix=\"$(dirname \"$3\")\"\n\
                mkdir -p \"$prefix/.pixi/envs/eval/bin\" \"$prefix/.pixi/envs/bench/bin\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf '\"'\"'{\"runner_version\":\"0.3.0\",\"lm_eval_version\":\"0.4.12\"}\\n'\"'\"'' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf '\"'\"'{\"runner_version\":\"0.3.0\",\"aiperf_version\":\"0.11.0\"}\\n'\"'\"'' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
+               printf '%s\\n' '#!/bin/sh' 'printf '\"'\"'{\"lm_eval_version\":\"0.4.12\"}\\n'\"'\"'' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
+               printf '%s\\n' '#!/bin/sh' 'printf '\"'\"'{\"aiperf_version\":\"0.11.0\",\"transformers_version\":\"5.12.1\"}\\n'\"'\"'' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
                chmod +x \"$prefix/.pixi/envs/eval/bin/python\" \"$prefix/.pixi/envs/bench/bin/python\"\n\
                exit 0\n\
              fi\n\
@@ -1093,11 +1099,16 @@ fn gateway_single_uses_one_process_only_frontend_without_model_coordinates()
             start: support::HttpActionProjection {
                 method: "post".to_owned(),
                 path: "/start_profile".to_owned(),
+                body: Some(BTreeMap::from([(
+                    "activities".to_owned(),
+                    serde_json::json!(["CUDA_PROFILER"]),
+                )])),
                 effective_url: "http://127.0.0.1:8001/start_profile".to_owned(),
             },
             stop: support::HttpActionProjection {
                 method: "post".to_owned(),
                 path: "/stop_profile".to_owned(),
+                body: None,
                 effective_url: "http://127.0.0.1:8001/stop_profile".to_owned(),
             },
             escapes: support::NsysEscapesProjection::default(),
@@ -1130,6 +1141,35 @@ fn capture_rejects_a_gateway_control_binding_without_a_gateway() -> Result<(), B
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("selected Gateway profiling window control without planning a Gateway"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn capture_rejects_a_concrete_window_control_url() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "[servers.dsv4-qualify.settings]\n",
+        "[servers.dsv4-qualify.settings]\nfixture_capture_invalid_path = true\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+
+    let output = workspace.run(&[
+        "recipe",
+        "run",
+        "dsv4-qualify",
+        "--capture",
+        "c8k1k",
+        "--dry-run",
+    ])?;
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("capture start path") && stderr.contains("absolute origin path"),
         "{stderr}"
     );
     Ok(())
@@ -1231,6 +1271,13 @@ fn recipe_capture_selects_one_workload_and_prepares_the_server() -> Result<(), B
     // endpoints; pin them so a break in the start/stop wiring is caught.
     assert_eq!(capture_target.start.method, "post");
     assert_eq!(capture_target.start.path, "/start_profile");
+    assert_eq!(
+        capture_target.start.body,
+        Some(BTreeMap::from([(
+            "activities".to_owned(),
+            serde_json::json!(["CUDA_PROFILER"]),
+        )]))
+    );
     assert_eq!(
         capture_target.start.effective_url,
         "http://127.0.0.1:8000/start_profile"

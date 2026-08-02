@@ -28,10 +28,15 @@ while IFS= read -r package; do
     || fail "${pyproject}: version ${package_version} != product version ${product_version}"
 done <<< "${release_owned_inventory}"
 
-for runner in inferlab-bench-runner inferlab-eval-runner; do
+release_runner_inventory="$(scripts/python-package-inventory.sh release-runners)"
+while IFS= read -r runner; do
   pyproject="python/${runner}/pyproject.toml"
   grep -Fq "inferlab-measurement-sdk==${product_version}" "${pyproject}" \
     || fail "${pyproject}: does not depend exactly on product-owned inferlab-measurement-sdk ${product_version}"
+done <<< "${release_runner_inventory}"
+
+while IFS= read -r package; do
+  pyproject="python/${package}/pyproject.toml"
   ! grep -Fq "inferlab-adapter-sdk" "${pyproject}" \
     || fail "${pyproject}: release-owned runner depends on the public adapter SDK"
-done
+done <<< "${release_owned_inventory}"

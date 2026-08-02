@@ -3,6 +3,44 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+pub enum GitError {
+    #[error("failed to launch {operation}: {source}")]
+    Launch {
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{operation} stdin was not piped")]
+    MissingStdin { operation: String },
+    #[error("failed to write {operation} input: {source}")]
+    WriteStdin {
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to collect {operation} output: {source}")]
+    Wait {
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{operation} exited with {status}: {diagnostics}")]
+    Exit {
+        operation: String,
+        status: std::process::ExitStatus,
+        diagnostics: String,
+    },
+    #[error("{operation} returned non-UTF-8 output: {source}")]
+    Decode {
+        operation: String,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+    #[error("{operation} returned invalid output: {detail}")]
+    InvalidOutput { operation: String, detail: String },
+}
+
+#[derive(Debug, Error)]
 pub enum InferlabError {
     #[error("no `.inferlab/workspace.toml` found from {start} or its parents")]
     WorkspaceNotFound { start: PathBuf },
@@ -59,11 +97,21 @@ pub enum InferlabError {
     #[error("invalid configuration: {message}")]
     InvalidConfig { message: String },
 
+    #[error("invalid configuration: network resolution failed: {source}")]
+    NetworkResolution {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("invalid server override {value:?}: {message}")]
     InvalidOverride { value: String, message: String },
 
-    #[error("git command failed in {root}: {message}")]
-    Git { root: PathBuf, message: String },
+    #[error("git command failed in {root}: {source}")]
+    Git {
+        root: PathBuf,
+        #[source]
+        source: GitError,
+    },
 
     #[error("failed to launch pixi {action}: {source}")]
     LaunchPixi {
@@ -82,6 +130,12 @@ pub enum InferlabError {
 
     #[error("Pixi environment lifecycle failed: {message}")]
     EnvironmentLifecycle { message: String },
+
+    #[error("Pixi environment lifecycle failed: {source}")]
+    EnvironmentInterrupt {
+        #[source]
+        source: inferlab_runtime::interrupt::InterruptInstallError,
+    },
 
     #[error("failed to {operation} at {path}: {source}")]
     EnvironmentIo {
@@ -227,8 +281,63 @@ pub enum InferlabError {
     #[error("image build failed: {message}")]
     ImageBuild { message: String },
 
+    #[error("image build failed: {source}")]
+    ImageInterrupt {
+        #[source]
+        source: inferlab_runtime::interrupt::InterruptInstallError,
+    },
+
+    #[error(
+        "failed to stage wheel payload from {source_path} at {staging_path}: {source}; partial staging cleanup failure: {cleanup:?}"
+    )]
+    WheelCacheStaging {
+        source_path: PathBuf,
+        staging_path: PathBuf,
+        #[source]
+        source: std::io::Error,
+        cleanup: Option<std::io::Error>,
+    },
+
+    #[error(
+        "failed to publish staged wheel {staging_path} at {target_path}: {source}; staging cleanup failure: {cleanup:?}"
+    )]
+    WheelCachePublication {
+        staging_path: PathBuf,
+        target_path: PathBuf,
+        #[source]
+        source: std::io::Error,
+        cleanup: Option<std::io::Error>,
+    },
+
+    #[error("image tool {operation} could not be launched: {source}")]
+    ImageToolLaunch {
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("image tool {operation} exited with {status}: {diagnostics}")]
+    ImageToolExit {
+        operation: String,
+        status: std::process::ExitStatus,
+        diagnostics: String,
+    },
+
+    #[error("image tool {operation} returned invalid JSON: {source}")]
+    ImageToolJson {
+        operation: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("image selection rejected: {message}")]
     ImageSelection { message: String },
+
+    #[error("image selection rejected: remote container preflight failed: {source}")]
+    ImagePreflight {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("image build completed with failures; record {record_id}")]
     ImageBuildFailed { record_id: String },
@@ -239,11 +348,32 @@ pub enum InferlabError {
     #[error("server lifecycle failed: {message}")]
     ServerLifecycle { message: String },
 
-    #[error("built-in proxy failed: {message}")]
-    Proxy { message: String },
+    #[error("server lifecycle failed: {source}")]
+    ServerInterrupt {
+        #[source]
+        source: inferlab_runtime::interrupt::InterruptInstallError,
+    },
+
+    #[error("remote execution preflight failed: {source}")]
+    ServerPreflight {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error("built-in proxy failed: {source}")]
+    Proxy {
+        #[source]
+        source: inferlab_proxy::ProxyError,
+    },
+
+    #[error("profiling failed: {source}")]
+    Profiling {
+        #[source]
+        source: inferlab_profiler::error::ProfilerError,
+    },
 
     #[error("profiling failed: {message}")]
-    Profiling { message: String },
+    ProfilingEvidence { message: String },
 
     #[error("scratchpad operation failed: {message}")]
     Scratchpad { message: String },
@@ -253,6 +383,12 @@ pub enum InferlabError {
 
     #[error("ad-hoc execution failed: {message}")]
     AdHocRun { message: String },
+
+    #[error("ad-hoc execution failed: {source}")]
+    AdHocInterrupt {
+        #[source]
+        source: inferlab_runtime::interrupt::InterruptInstallError,
+    },
 
     #[error("failed to {operation} dataset path {path}: {source}")]
     DatasetIo {
@@ -320,6 +456,12 @@ pub enum InferlabError {
         source: std::io::Error,
     },
 
+    #[error("failed to write command output: failed to install TUI interruption handler: {source}")]
+    TuiInterrupt {
+        #[source]
+        source: inferlab_runtime::interrupt::InterruptInstallError,
+    },
+
     #[error("failed to encode JSON: {source}")]
     EncodeOutput {
         #[source]
@@ -327,11 +469,15 @@ pub enum InferlabError {
     },
 }
 
+impl From<inferlab_profiler::error::ProfilerError> for InferlabError {
+    fn from(source: inferlab_profiler::error::ProfilerError) -> Self {
+        Self::Profiling { source }
+    }
+}
+
 impl From<inferlab_proxy::ProxyError> for InferlabError {
-    fn from(error: inferlab_proxy::ProxyError) -> Self {
-        Self::Proxy {
-            message: error.to_string(),
-        }
+    fn from(source: inferlab_proxy::ProxyError) -> Self {
+        Self::Proxy { source }
     }
 }
 
@@ -347,12 +493,13 @@ impl InferlabError {
             }
             Self::ParseToml { .. } => "E1003",
             Self::ParseYaml { .. } | Self::SerializeToml { .. } => "E1003",
-            Self::InvalidConfig { .. } => "E1004",
+            Self::InvalidConfig { .. } | Self::NetworkResolution { .. } => "E1004",
             Self::InvalidOverride { .. } => "E1005",
             Self::Git { .. } => "E1006",
             Self::LaunchPixi { .. }
             | Self::PixiExit { .. }
             | Self::EnvironmentLifecycle { .. }
+            | Self::EnvironmentInterrupt { .. }
             | Self::EnvironmentIo { .. }
             | Self::EnvironmentRestore { .. }
             | Self::PixiEnvironmentUnavailable { .. }
@@ -376,11 +523,22 @@ impl InferlabError {
             Self::RecipeFailed { .. }
             | Self::BenchFailed { .. }
             | Self::ImageBuildFailed { .. } => "E4001",
-            Self::ImageBuild { .. } | Self::ImageSelection { .. } => "E4003",
+            Self::ImageBuild { .. }
+            | Self::ImageInterrupt { .. }
+            | Self::WheelCacheStaging { .. }
+            | Self::WheelCachePublication { .. }
+            | Self::ImageToolLaunch { .. }
+            | Self::ImageToolExit { .. }
+            | Self::ImageToolJson { .. }
+            | Self::ImageSelection { .. }
+            | Self::ImagePreflight { .. } => "E4003",
             Self::ServerLifecycle { .. }
+            | Self::ServerInterrupt { .. }
+            | Self::ServerPreflight { .. }
             | Self::ServerBusy { .. }
             | Self::Proxy { .. }
             | Self::Profiling { .. }
+            | Self::ProfilingEvidence { .. }
             | Self::DatasetIo { .. }
             | Self::DatasetHttp { .. }
             | Self::DatasetDigest { .. }
@@ -393,8 +551,56 @@ impl InferlabError {
             }
             Self::Scratchpad { .. } => "E6001",
             Self::Agent { .. } => "E7001",
-            Self::AdHocRun { .. } => "E8001",
-            Self::WriteOutput { .. } | Self::EncodeOutput { .. } => "E9001",
+            Self::AdHocRun { .. } | Self::AdHocInterrupt { .. } => "E8001",
+            Self::WriteOutput { .. } | Self::TuiInterrupt { .. } | Self::EncodeOutput { .. } => {
+                "E9001"
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitError, InferlabError};
+    use std::error::Error;
+    use std::path::PathBuf;
+
+    #[test]
+    fn profiler_failure_retains_the_profiler_error_as_its_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = InferlabError::from(inferlab_profiler::error::ProfilerError::NoTargets);
+        let source = error
+            .source()
+            .ok_or_else(|| std::io::Error::other("profiling error source is missing"))?;
+        assert_eq!(
+            source.to_string(),
+            "managed server has no prepared profiling targets"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn git_failure_retains_root_operation_and_io_source() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let error = InferlabError::Git {
+            root: PathBuf::from("/workspace"),
+            source: GitError::Launch {
+                operation: "git status".to_owned(),
+                source: std::io::Error::other("launch failed"),
+            },
+        };
+        assert!(error.to_string().contains("/workspace"));
+        let source = error
+            .source()
+            .ok_or_else(|| std::io::Error::other("Git boundary source is missing"))?;
+        let git = source
+            .downcast_ref::<GitError>()
+            .ok_or_else(|| std::io::Error::other("Git boundary source has the wrong type"))?;
+        assert!(matches!(git, GitError::Launch { operation, .. } if operation == "git status"));
+        assert_eq!(
+            git.source().map(ToString::to_string).as_deref(),
+            Some("launch failed")
+        );
+        Ok(())
     }
 }

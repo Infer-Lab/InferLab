@@ -90,20 +90,19 @@ impl DockerBuilderTool {
         let output = Command::new(&argv[0])
             .args(&argv[1..])
             .output()
-            .map_err(|source| InferlabError::ImageBuild {
-                message: format!("failed to launch {:?}: {source}", argv[0]),
+            .map_err(|source| InferlabError::ImageToolLaunch {
+                operation: argv.join(" "),
+                source,
             })?;
         let command = NativeCommand {
             argv: argv.to_vec(),
             log: None,
         };
         if !output.status.success() {
-            return Err(InferlabError::ImageBuild {
-                message: format!(
-                    "{} failed: {}",
-                    command.argv.join(" "),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
+            return Err(InferlabError::ImageToolExit {
+                operation: command.argv.join(" "),
+                status: output.status,
+                diagnostics: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
         Ok((
@@ -145,20 +144,18 @@ pub fn run_streamed(
         .stdout(log)
         .stderr(log_err)
         .status()
-        .map_err(|source| InferlabError::ImageBuild {
-            message: format!("failed to launch {:?}: {source}", argv[0]),
+        .map_err(|source| InferlabError::ImageToolLaunch {
+            operation: argv.join(" "),
+            source,
         })?;
     if !status.success() {
         let tail = std::fs::read(log_path)
             .map(|bytes| lossy_tail(&bytes, 2000))
             .unwrap_or_default();
-        return Err(InferlabError::ImageBuild {
-            message: format!(
-                "{} failed ({}); log tail:\n{}",
-                argv.join(" "),
-                status,
-                tail.trim()
-            ),
+        return Err(InferlabError::ImageToolExit {
+            operation: argv.join(" "),
+            status,
+            diagnostics: format!("log tail:\n{}", tail.trim()),
         });
     }
     Ok(())
@@ -208,8 +205,9 @@ impl BuilderTool for DockerBuilderTool {
             base_image,
         ]))?;
         let value: Value =
-            serde_json::from_str(&stdout).map_err(|error| InferlabError::ImageBuild {
-                message: format!("docker manifest inspect produced invalid JSON: {error}"),
+            serde_json::from_str(&stdout).map_err(|source| InferlabError::ImageToolJson {
+                operation: "docker manifest inspect".to_owned(),
+                source,
             })?;
         let entries: Vec<&Value> = match &value {
             Value::Array(entries) => entries.iter().collect(),
@@ -315,8 +313,9 @@ impl BuilderTool for DockerBuilderTool {
         })?;
         let (stdout, _) = Self::run(&argv)?;
         let entrypoint: Vec<String> =
-            serde_json::from_str(stdout.trim()).map_err(|error| InferlabError::ImageBuild {
-                message: format!("docker image inspect produced invalid JSON: {error}"),
+            serde_json::from_str(stdout.trim()).map_err(|source| InferlabError::ImageToolJson {
+                operation: "docker image inspect".to_owned(),
+                source,
             })?;
         Ok(InspectOutcome { entrypoint })
     }

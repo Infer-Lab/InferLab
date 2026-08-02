@@ -6,16 +6,21 @@
 //! from pre-assembly input facts only; the (closure digest, platform) pair is
 //! the assembly deduplication key.
 
-pub mod context;
+mod entrypoint;
 pub mod launch;
+mod materialization;
+mod package_closure;
+mod portable_context;
 pub mod record;
 pub mod runtime;
 pub mod tool;
 
 use crate::InferlabError;
 use crate::adapter::AdapterClient;
-use crate::resolve::{LaunchPlan, ResolveRequest, Workflow, resolve};
+use crate::execution::Workflow;
+use crate::resolve::{ResolveRequest, resolve};
 use crate::workspace::{BuilderKind, LoadedWorkspace, WorkspaceSnapshot};
+use inferlab_runtime::plan::LaunchPlan;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -242,16 +247,16 @@ pub fn resolve_image<T: BuilderTool, C: AdapterClient>(
             value: observed_digest.value.clone(),
         });
         let base_image_digest = observed_digest.value;
-        let pixi_platform = context::pixi_platform(platform)?;
-        context::guard_unmodeled_activation(
+        let pixi_platform = package_closure::pixi_platform(platform)?;
+        entrypoint::guard_unmodeled_activation(
             &workspace.root,
             pixi_platform,
             &image.pixi_environment,
         )?;
         let activation =
-            context::activation_env(&workspace.root, pixi_platform, &image.pixi_environment)?;
-        let entrypoint = context::render_entrypoint(&activation)?;
-        let entrypoint_contract = context::entrypoint_contract_digest(&entrypoint.text);
+            entrypoint::activation_env(&workspace.root, pixi_platform, &image.pixi_environment)?;
+        let entrypoint = entrypoint::render_entrypoint(&activation)?;
+        let entrypoint_contract = entrypoint::entrypoint_contract_digest(&entrypoint.text);
         let content_closure = content_closure(
             &workspace.snapshot,
             &image,
@@ -366,21 +371,21 @@ fn content_closure(
     let mut closure = BTreeMap::new();
     closure.insert(
         "generator".to_owned(),
-        context::GENERATOR_IDENTITY.to_owned(),
+        materialization::GENERATOR_IDENTITY.to_owned(),
     );
     // The build-procedure identity enters both this closure and the wheel
     // cache key, so an epoch bump never assigns one closure digest to
     // differing package content.
     closure.insert(
         "package_build_procedure".to_owned(),
-        context::WHEEL_BUILD_EPOCH.to_string(),
+        package_closure::WHEEL_BUILD_EPOCH.to_string(),
     );
     // Context-generation changes (Dockerfile rendering, package projection,
     // layout) alter the closure even when the crate version and entrypoint
     // text do not move.
     closure.insert(
         "context_procedure".to_owned(),
-        context::IMAGE_CONTEXT_EPOCH.to_string(),
+        materialization::IMAGE_CONTEXT_EPOCH.to_string(),
     );
     closure.insert(
         "entrypoint_contract".to_owned(),
@@ -507,7 +512,7 @@ fn classify_eligibility<C: AdapterClient>(
 /// machine — image validation eligibility and image-backed launches share
 /// this gate.
 pub(crate) fn single_host_local<'a>(
-    processes: impl IntoIterator<Item = &'a crate::resolve::ProcessPlan>,
+    processes: impl IntoIterator<Item = &'a crate::execution::ProcessPlan>,
 ) -> Result<(), String> {
     let mut machines = BTreeSet::new();
     for process in processes {

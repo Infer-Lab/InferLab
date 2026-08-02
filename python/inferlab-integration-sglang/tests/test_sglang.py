@@ -68,12 +68,14 @@ def test_plan_single_topology() -> None:
     assert result.integration.framework == "sglang"
     assert [replica.id for replica in result.replicas] == ["server"]
     assert result.replicas[0].device_count == 2
+    assert result.replicas[0].capture_target is None
     probe = result.replicas[0].primary_readiness.root
     assert isinstance(probe, ReadinessProbeHttp) and probe.path == "/v1/models"
     endpoint = result.roles[0].public_endpoint
     assert endpoint is not None
     assert endpoint.completions_path == "/v1/completions"
     assert endpoint.chat_completions_path == "/v1/chat/completions"
+    assert endpoint.server_metrics is None
     assert endpoint.prefix_cache_reset is not None
     assert endpoint.prefix_cache_reset.path == "/flush_cache"
     assert result.gateway is None
@@ -82,9 +84,30 @@ def test_plan_single_topology() -> None:
     assert outer is not None and outer.tensor_parallel_size == 2
 
 
+def test_plan_single_declares_cuda_profiler_window_control() -> None:
+    result = plan_serve(_plan_input(profiling=True))
+
+    assert len(result.replicas) == 1
+    target = result.replicas[0].capture_target
+    assert target is not None
+    assert target.model_dump(mode="json") == {
+        "window_control": {
+            "endpoint": "replica_entry",
+            "start": {
+                "method": "post",
+                "path": "/start_profile",
+                "body": {"activities": ["CUDA_PROFILER"]},
+            },
+            "stop": {
+                "method": "post",
+                "path": "/stop_profile",
+                "body": None,
+            },
+        }
+    }
+
+
 def test_plan_rejects_unsupported_shapes() -> None:
-    with pytest.raises(AdapterOperationError):
-        plan_serve(_plan_input(profiling=True))
     with pytest.raises(AdapterOperationError):
         plan_serve(
             _plan_input(
@@ -133,6 +156,7 @@ def _prefill_decode_plan_input(
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
     prefill_replicas: int = 2,
     decode_replicas: int = 3,
+    profiling: bool = False,
 ) -> PlanServeInput:
     return _plan_input(
         topology=ServeTopology.prefill_decode,
@@ -140,6 +164,7 @@ def _prefill_decode_plan_input(
         pd_router_backend=frontend_backend,
         kv_transfer=transport,
         roles=_prefill_decode_roles(prefill_replicas, decode_replicas),
+        profiling=profiling,
     )
 
 
@@ -164,6 +189,7 @@ def test_plan_prefill_decode_uses_the_shared_bootstrap_shape(
         [],
         [],
     ]
+    assert all(replica.capture_target is None for replica in result.replicas)
     assert [link.root.kind for link in result.links] == [
         "request_routing",
         "request_routing",
@@ -178,10 +204,32 @@ def test_plan_prefill_decode_uses_the_shared_bootstrap_shape(
     assert result.gateway.render_source == RenderSource.control_plane
     assert result.gateway.endpoint.completions_path == "/v1/completions"
     assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
+    assert result.gateway.endpoint.server_metrics is None
     assert result.gateway.endpoint.prefix_cache_reset is not None
     assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
     assert result.pd_router is not None
     assert result.pd_router.backend == "builtin"
+
+
+def test_plan_prefill_decode_declares_every_replica_as_a_capture_target() -> None:
+    result = plan_serve(_prefill_decode_plan_input(profiling=True))
+
+    assert len(result.replicas) == 5
+    for replica in result.replicas:
+        target = replica.capture_target
+        assert target is not None
+        control = target.window_control
+        assert control.endpoint.value == "replica_entry"
+        assert control.start.model_dump(mode="json") == {
+            "method": "post",
+            "path": "/start_profile",
+            "body": {"activities": ["CUDA_PROFILER"]},
+        }
+        assert control.stop.model_dump(mode="json") == {
+            "method": "post",
+            "path": "/stop_profile",
+            "body": None,
+        }
 
 
 def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
@@ -411,7 +459,8 @@ def test_render_lowers_pipeline_parallelism() -> None:
 
 
 def _render_input(**overrides: object) -> RenderServeInput:
-    plan = plan_serve(_plan_input())
+    profiling = cast(bool, overrides.pop("profiling", False))
+    plan = plan_serve(_plan_input(profiling=profiling))
     parallelism = cast(
         Parallelism,
         overrides.pop("parallelism", plan.roles[0].effective_parallelism),
@@ -426,7 +475,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
-        "profiling": False,
+        "profiling": profiling,
         "allocations": [
             ServeProcessAllocation.model_validate(
                 {
@@ -461,6 +510,7 @@ def _prefill_decode_render_input(
     *,
     frontend_backend: str = "builtin",
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
+    profiling: bool = False,
 ) -> RenderServeInput:
     plan = plan_serve(
         _prefill_decode_plan_input(
@@ -468,6 +518,7 @@ def _prefill_decode_render_input(
             transport=transport,
             prefill_replicas=2,
             decode_replicas=2,
+            profiling=profiling,
         )
     )
     roles = {role.id: role for role in plan.roles}
@@ -535,7 +586,7 @@ def _prefill_decode_render_input(
         gateway_backend=frontend_backend,
         pd_router_backend=frontend_backend,
         kv_transfer=transport,
-        profiling=False,
+        profiling=profiling,
         allocations=allocations,
     )
 
@@ -562,6 +613,31 @@ def test_render_launches_sglang_server() -> None:
     env = process.command.env
     assert env["TRITON_CACHE_DIR"] == "/cache/server/triton"
     assert env["TORCHINDUCTOR_CACHE_DIR"] == "/cache/server/torchinductor"
+
+
+def test_metrics_capability_matches_the_effective_sglang_launch() -> None:
+    plan = plan_serve(_plan_input(settings={"enable_metrics": SettingValue(root=True)}))
+    endpoint = plan.roles[0].public_endpoint
+    assert endpoint is not None
+    assert endpoint.server_metrics is not None
+    assert endpoint.server_metrics.model_dump(mode="json") == {
+        "path": "/metrics",
+        "port": None,
+    }
+
+    result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
+    assert "--enable-metrics" in result.processes[0].root.command.argv
+
+
+def test_render_profiling_keeps_model_server_commands_unchanged() -> None:
+    ordinary = render_serve(_render_input())
+    profiled = render_serve(_render_input(profiling=True))
+
+    assert profiled.processes == ordinary.processes
+
+    ordinary_pd = render_serve(_prefill_decode_render_input())
+    profiled_pd = render_serve(_prefill_decode_render_input(profiling=True))
+    assert profiled_pd.processes == ordinary_pd.processes
 
 
 def test_render_merges_extra_args_with_inferlab_precedence() -> None:

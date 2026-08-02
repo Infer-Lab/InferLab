@@ -1,22 +1,24 @@
+use flate2::read::GzDecoder;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Every packaged copy must stay byte-identical to its source: the license
-/// copies (and the embedded notice) under [[RFC-0001:C-LICENSE-RETENTION]],
-/// and the toolchain payload that keeps the published crate self-contained.
-/// The internal measurement-sdk set is enumerated from its source directory and the
-/// include count pins toolchain.rs to the same set, so a new sdk module
-/// cannot be silently incomplete — it fails here rather than at a real
-/// toolchain install ([[RFC-0004:C-INFERLAB-TOOLCHAIN]]).
 #[test]
-fn packaged_copies_match_their_sources() -> Result<(), Box<dyn Error>> {
+fn packaged_licenses_match_the_repository_notice() -> Result<(), Box<dyn Error>> {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = crate_dir.join("../..");
 
     let repository_license = fs::read(root.join("LICENSE"))?;
-    for crate_name in ["inferlab", "inferlab-protocol", "inferlab-proxy"] {
+    for crate_name in [
+        "inferlab",
+        "inferlab-runtime",
+        "inferlab-profiler",
+        "inferlab-protocol",
+        "inferlab-proxy",
+    ] {
         let copy = fs::read(root.join("crates").join(crate_name).join("LICENSE"))?;
         assert_eq!(
             copy, repository_license,
@@ -31,122 +33,92 @@ fn packaged_copies_match_their_sources() -> Result<(), Box<dyn Error>> {
         "the embedded notice drifted from the repository LICENSE"
     );
 
-    for (copy, source) in [
-        (
-            "resources/toolchain-python/eval_client.py",
-            "python/inferlab-eval-runner/src/inferlab_eval_runner/eval_client.py",
-        ),
-        (
-            "resources/toolchain-python/lm_eval_entry.py",
-            "python/inferlab-eval-runner/src/inferlab_eval_runner/lm_eval_entry.py",
-        ),
-        (
-            "resources/toolchain-python/bench_client.py",
-            "python/inferlab-bench-runner/src/inferlab_bench_runner/bench_client.py",
-        ),
-    ] {
-        assert_eq!(
-            fs::read(crate_dir.join(copy))?,
-            fs::read(root.join(source))?,
-            "{copy} drifted from {source}"
-        );
-    }
-    for name in ["dataset.json", "estonia.py", "estonia.yaml", "prompt.txt"] {
-        assert_eq!(
-            fs::read(
-                crate_dir
-                    .join("resources/bundled-eval-tasks/estonia")
-                    .join(name),
-            )?,
-            fs::read(
-                root.join(
-                    "python/inferlab-eval-runner/src/inferlab_eval_runner/bundled_tasks/estonia",
-                )
-                .join(name),
-            )?,
-            "bundled Estonia resource {name} drifted from its package source"
-        );
-    }
-
-    let sdk_source = root.join("python/inferlab-measurement-sdk/src/inferlab_measurement_sdk");
-    let mut modules = Vec::new();
-    for entry in fs::read_dir(&sdk_source)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".py") {
-            modules.push(name);
-        }
-    }
-    modules.sort();
-    assert!(!modules.is_empty(), "sdk source enumeration found nothing");
-    for name in &modules {
-        let copy = crate_dir
-            .join("resources/toolchain-python/inferlab_measurement_sdk")
-            .join(name);
-        let copied = fs::read(&copy).map_err(|error| {
-            format!(
-                "{}: {error} (a new sdk module without its in-crate copy?)",
-                copy.display()
-            )
-        })?;
-        assert_eq!(
-            copied,
-            fs::read(sdk_source.join(name))?,
-            "{name} drifted from its sdk source"
-        );
-    }
-    let toolchain_rs = include_str!("../src/toolchain.rs");
-    let includes = toolchain_rs
-        .matches("toolchain-python/inferlab_measurement_sdk/")
-        .count();
-    assert_eq!(
-        includes,
-        modules.len(),
-        "toolchain.rs embeds {includes} sdk modules but the sdk package has {}: a new module needs its include_str const",
-        modules.len()
-    );
     Ok(())
 }
 
-/// The crate-local plugin resource mirror that `build.rs` packs into the
-/// binary-embedded default install source
-/// ([[RFC-0008:C-AGENT-PLUGIN]], rationale in [[ADR-0007]]) must stay
-/// byte-identical to the canonical repository-root plugin package: `LICENSE`,
-/// `.claude-plugin/`, `.agents/`, and `plugins/inferlab/`. A recursive walk
-/// (rather than a hand-listed file set) keeps this test covering a new file
-/// added under `plugins/inferlab/skills/inferlab/` later without an edit
-/// here, and fails clearly on either a missing copy or an extra one.
 #[test]
-fn plugin_resource_mirror_matches_its_canonical_sources() -> Result<(), Box<dyn Error>> {
+fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn Error>> {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = crate_dir.join("../..");
-    let embedded_root = crate_dir.join("resources/plugin");
+    assert!(!crate_dir.join("resources/toolchain-python").exists());
+    assert!(!crate_dir.join("resources/plugin").exists());
 
-    let mut canonical = vec![PathBuf::from("LICENSE")];
-    for top in [".claude-plugin", ".agents", "plugins"] {
-        collect_relative_files(&root, &root.join(top), &mut canonical)?;
-    }
-    canonical.sort();
-
-    let mut embedded = Vec::new();
-    collect_relative_files(&embedded_root, &embedded_root, &mut embedded)?;
-    embedded.sort();
-
-    assert_eq!(
-        embedded, canonical,
-        "crates/inferlab/resources/plugin/ does not mirror exactly the canonical \
-         repo-root plugin package (LICENSE, .claude-plugin/, .agents/, plugins/): \
-         a file is missing from one side or the other"
+    let output_dir = tempfile::tempdir()?;
+    let package = Command::new(root.join("scripts/package-inferlab-crate.sh"))
+        .arg(output_dir.path())
+        .output()?;
+    assert!(
+        package.status.success(),
+        "crate staging failed: {}",
+        String::from_utf8_lossy(&package.stderr)
     );
+    let artifact = PathBuf::from(String::from_utf8(package.stdout)?.trim());
+    let files = crate_archive_files(&artifact)?;
 
-    for relative in &canonical {
-        let embedded_bytes = fs::read(embedded_root.join(relative))?;
-        let canonical_bytes = fs::read(root.join(relative))?;
+    assert_tree_in_archive(
+        &root.join("python/inferlab-eval-runner/src/inferlab_eval_runner"),
+        Path::new("resources/toolchain-python/inferlab_eval_runner"),
+        &files,
+    )?;
+    assert_tree_in_archive(
+        &root.join("python/inferlab-bench-runner/src/inferlab_bench_runner"),
+        Path::new("resources/toolchain-python/inferlab_bench_runner"),
+        &files,
+    )?;
+    assert_tree_in_archive(
+        &root.join("python/inferlab-measurement-sdk/src/inferlab_measurement_sdk"),
+        Path::new("resources/toolchain-python/inferlab_measurement_sdk"),
+        &files,
+    )?;
+
+    let mut plugin_sources = vec![(PathBuf::from("LICENSE"), root.join("LICENSE"))];
+    for top in [".claude-plugin", ".agents", "plugins"] {
+        collect_source_files(&root, &root.join(top), &mut plugin_sources)?;
+    }
+    for (relative, source) in plugin_sources {
+        let packaged = Path::new("resources/plugin").join(&relative);
         assert_eq!(
-            embedded_bytes,
-            canonical_bytes,
-            "crates/inferlab/resources/plugin/{} drifted from {}",
-            relative.display(),
-            root.join(relative).display()
+            files.get(&packaged),
+            Some(&fs::read(source)?),
+            "staged plugin file {} differs from its canonical source",
+            relative.display()
+        );
+    }
+    Ok(())
+}
+
+fn crate_archive_files(path: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn Error>> {
+    let decoder = GzDecoder::new(fs::File::open(path)?);
+    let mut archive = tar::Archive::new(decoder);
+    let mut files = BTreeMap::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path()?.into_owned();
+        let relative = path.components().skip(1).collect::<PathBuf>();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        files.insert(relative, bytes);
+    }
+    Ok(files)
+}
+
+fn assert_tree_in_archive(
+    source_root: &Path,
+    packaged_root: &Path,
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut sources = Vec::new();
+    collect_source_files(source_root, source_root, &mut sources)?;
+    for (relative, source) in sources {
+        let packaged = packaged_root.join(&relative);
+        assert_eq!(
+            files.get(&packaged),
+            Some(&fs::read(source)?),
+            "staged payload file {} differs from its canonical source",
+            relative.display()
         );
     }
     Ok(())
@@ -175,19 +147,21 @@ fn plugin_manifests_match_the_crate_version() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Recursively collects every file under `dir`, as paths relative to `root`.
-fn collect_relative_files(
+fn collect_source_files(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<PathBuf>,
+    out: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), Box<dyn Error>> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if entry.file_type()?.is_dir() {
-            collect_relative_files(root, &path, out)?;
-        } else {
-            out.push(path.strip_prefix(root)?.to_path_buf());
+            if entry.file_name() == "__pycache__" {
+                continue;
+            }
+            collect_source_files(root, &path, out)?;
+        } else if path.extension().is_none_or(|extension| extension != "pyc") {
+            out.push((path.strip_prefix(root)?.to_path_buf(), path));
         }
     }
     Ok(())

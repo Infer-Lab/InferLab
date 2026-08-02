@@ -57,6 +57,7 @@ class PreparedAiperfExecution:
     artifact_dir: Path
     config_path: Path
     request_config_path: Path
+    command_prefix: list[str]
     command: list[str]
     population: AiperfRequestPopulation
     profile_artifacts: AiperfProfileArtifacts
@@ -517,7 +518,7 @@ def parse_speed_bench_report(
 
 def run_speed_bench_reports(
     request: BenchClientRequest,
-    aiperf: Path,
+    command_prefix: list[str],
     artifact_dir: Path,
     deadline: CaseDeadline,
 ) -> tuple[dict[str, float], list[BenchNativeInvocation], str | None]:
@@ -530,7 +531,7 @@ def run_speed_bench_reports(
     for normalized_name, (report_metric, filename) in SPEED_REPORT_PATHS.items():
         output_path = artifact_dir / filename
         command = [
-            str(aiperf),
+            *command_prefix,
             "speed-bench-report",
             str(artifact_dir),
             "--output",
@@ -598,7 +599,11 @@ def prepare_aiperf_execution(
         json.dumps(inference_request_config(request), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    aiperf = Path(sys.executable).with_name("aiperf")
+    command_prefix = [
+        sys.executable,
+        "-m",
+        "inferlab_bench_runner.aiperf_entrypoint",
+    ]
     profile_artifacts = (
         AiperfProfileArtifacts(
             summary=artifact_dir / PROFILE_EXPORT_NAME,
@@ -616,7 +621,8 @@ def prepare_aiperf_execution(
         artifact_dir=artifact_dir,
         config_path=config_path,
         request_config_path=request_config_path,
-        command=[str(aiperf), "profile", "--config", str(config_path)],
+        command_prefix=command_prefix,
+        command=[*command_prefix, "profile", "--config", str(config_path)],
         population=population,
         profile_artifacts=profile_artifacts,
     )

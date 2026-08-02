@@ -36,11 +36,12 @@ protocol-check = "scripts/protocol-codegen.sh check"
 format-python = "ruff format python crates/inferlab/tests/fixtures/bin scripts"
 format-python-check = "ruff format --check python crates/inferlab/tests/fixtures/bin scripts"
 lint-python = "ruff check python crates/inferlab/tests/fixtures/bin scripts"
+check-fixture-shell = "sh -n crates/inferlab/tests/fixtures/bin/*.sh"
 typecheck-python = "mypy python scripts"
 test-python = "pytest"
 test-release-versioning = "bash scripts/tests/release-versioning.sh && python -m unittest scripts/tests/test_product_release_assets.py"
 build-python = "scripts/build-python-packages.sh"
-verify-python = { depends-on = ["protocol-check", "format-python-check", "lint-python", "typecheck-python", "test-python", "test-release-versioning", "build-python"] }
+verify-python = { depends-on = ["protocol-check", "format-python-check", "lint-python", "check-fixture-shell", "typecheck-python", "test-python", "test-release-versioning", "build-python"] }
 
 [feature.website.dependencies]
 nodejs = "24.*"

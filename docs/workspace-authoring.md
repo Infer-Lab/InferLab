@@ -403,7 +403,10 @@ source, request body, and concurrency as profiling, but consumes a disjoint
 prefix of the frozen request population. It is excluded from normalized
 metrics and profiling request counts. A requested prefix-cache reset happens
 once before warmup, and the case timeout covers reset, warmup, profiling, and
-result handling; process cleanup retains its separate grace.
+result handling; process cleanup retains its separate grace. When the Bench is
+captured, InferLab opens the framework capture window only after native warmup
+has drained and closes it at the existing client-completion boundary. A warmup
+failure leaves the capture window unopened.
 
 Every successful Bench reports `request_throughput`, `output_throughput`, and
 `total_token_throughput`. For each of `request_latency_ms`, `ttft_ms`, and

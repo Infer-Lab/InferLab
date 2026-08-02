@@ -375,6 +375,16 @@ pub enum InferlabError {
     #[error("profiling failed: {message}")]
     ProfilingEvidence { message: String },
 
+    #[error("profile barrier failed to {operation}: {source}")]
+    ProfileBarrierIo {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("profile barrier protocol failed: {message}")]
+    ProfileBarrierProtocol { message: String },
+
     #[error("scratchpad operation failed: {message}")]
     Scratchpad { message: String },
 
@@ -539,6 +549,8 @@ impl InferlabError {
             | Self::Proxy { .. }
             | Self::Profiling { .. }
             | Self::ProfilingEvidence { .. }
+            | Self::ProfileBarrierIo { .. }
+            | Self::ProfileBarrierProtocol { .. }
             | Self::DatasetIo { .. }
             | Self::DatasetHttp { .. }
             | Self::DatasetDigest { .. }

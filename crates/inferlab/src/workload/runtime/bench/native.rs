@@ -2,7 +2,7 @@
 
 use super::super::client::{
     accept_client_result, client_terminal_cause, freeze_adjudicated_timing,
-    reject_late_adjudication, remaining_seconds, run_client,
+    reject_late_adjudication, remaining_seconds, run_client_with_environment,
 };
 use super::super::{AcceptedClient, AdjudicatedClient};
 use super::result::bench_result_error;
@@ -23,6 +23,7 @@ pub fn run_bench_client(
     session: &WorkloadRecordSession,
     paths: &ClientCasePaths,
     bound: &OperationBound,
+    runtime_environment: &[(&str, &str)],
 ) -> Result<AcceptedClient<BenchClientResult>, InferlabError> {
     let request = BenchClientRequest {
         protocol_version: ProtocolVersion::V7,
@@ -40,7 +41,14 @@ pub fn run_bench_client(
         case_budget_seconds: remaining_seconds(bound),
         artifact_dir: paths.artifact_dir.clone(),
     };
-    let run = run_client(&plan.client.command, &request, session, paths, bound)?;
+    let run = run_client_with_environment(
+        &plan.client.command,
+        &request,
+        session,
+        paths,
+        bound,
+        runtime_environment,
+    )?;
     Ok(accept_client_result::<BenchClientResult>(
         &session.absolute(&paths.result),
         "Bench client",

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-02
+
+### Fixed
+
+- Workload-attached profiling now drains a positive AIPerf-native Bench warmup
+  before opening the Nsight capture window, while retaining one native case
+  run, one sequential request population, and profiling-only metrics.
+- Nsight collection finalization now recognizes a completed repeat-range
+  collection without issuing a redundant failing `nsys stop`. The effective
+  profiler environment is applied consistently to launch, collection start,
+  session inspection, and fallback collection stop.
+
 ## [0.8.1] - 2026-08-01
 
 ### Changed

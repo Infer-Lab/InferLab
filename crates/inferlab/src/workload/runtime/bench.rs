@@ -5,6 +5,7 @@ pub mod adaptive;
 mod case;
 mod matrix;
 mod native;
+mod phase_barrier;
 mod prefix_cache;
 pub mod result;
 pub mod session;

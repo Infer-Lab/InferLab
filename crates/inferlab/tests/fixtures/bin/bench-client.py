@@ -3,10 +3,19 @@ import argparse
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+def record_capture_event(event):
+    path = os.environ.get("FIXTURE_CAPTURE_EVENTS")
+    if path:
+        with open(path, "a") as events:
+            events.write(f"{event}\n")
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input", required=True)
@@ -104,6 +113,17 @@ if args.prepare:
     with open(args.output, "w") as handle:
         json.dump(result, handle)
     raise SystemExit(0)
+barrier = os.environ.get("INFERLAB_AIPERF_PROFILE_BARRIER")
+if barrier:
+    record_capture_event("warmup_complete")
+    if os.environ.get("FIXTURE_BENCH_FAIL_BEFORE_PROFILE") == "1":
+        raise SystemExit(7)
+    host, port = barrier.rsplit(":", 1)
+    with socket.create_connection((host, int(port))) as connection:
+        connection.sendall(b"profiling-ready\n")
+        if connection.makefile("rb").readline() != b"capture-open\n":
+            raise RuntimeError("fixture profiling release was not acknowledged")
+    record_capture_event("profiling_started")
 failed = os.environ.get("FIXTURE_BENCH_FAIL") == "1"
 rate = float(request["case"]["load_shape"].get("request_rate", 1.0))
 request_count = request["case"]["request_count"]

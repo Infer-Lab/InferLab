@@ -57,6 +57,23 @@ pub struct CaptureWindowRecord {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionFinalizationOutcome {
+    RangeEnd,
+    Inactive,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureRangeEndRecord {
+    pub window_id: String,
+    pub range_index: usize,
+    pub expected_range_count: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CaptureActionRecord {
@@ -88,13 +105,29 @@ pub enum CaptureActionRecord {
         succeeded: bool,
         timing: OperationTimingEvidence,
     },
+    CollectionFinalization {
+        target_id: String,
+        operation: String,
+        session: String,
+        outcome: CollectionFinalizationOutcome,
+        observed_state: Option<String>,
+        range_end: Option<CaptureRangeEndRecord>,
+        inspection: Box<CaptureActionRecord>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inspection_error: Option<String>,
+        stop: Option<Box<CaptureActionRecord>>,
+        succeeded: bool,
+        error: Option<String>,
+    },
 }
 
 impl CaptureActionRecord {
     #[must_use]
     pub fn succeeded(&self) -> bool {
         match self {
-            Self::Command { succeeded, .. } | Self::Http { succeeded, .. } => *succeeded,
+            Self::Command { succeeded, .. }
+            | Self::Http { succeeded, .. }
+            | Self::CollectionFinalization { succeeded, .. } => *succeeded,
         }
     }
 
@@ -105,6 +138,7 @@ impl CaptureActionRecord {
                 Some(stderr.trim().to_owned())
             }
             Self::Http { error, .. } => error.clone(),
+            Self::CollectionFinalization { error, .. } => error.clone(),
             _ => None,
         }
     }

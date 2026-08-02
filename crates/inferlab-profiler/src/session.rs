@@ -2,7 +2,8 @@ use crate::error::ProfilerError;
 use crate::finalization;
 use crate::plan::{CapturePlanRecord, ProfilerTargetRecord, compile_plan};
 use crate::record::{
-    CaptureActionRecord, CaptureRecord, CaptureReportRecord, CaptureStatus, CaptureWindowRecord,
+    CaptureActionRecord, CaptureRangeEndRecord, CaptureRecord, CaptureReportRecord, CaptureStatus,
+    CaptureWindowRecord,
 };
 use crate::transport;
 use std::collections::BTreeSet;
@@ -89,16 +90,7 @@ impl CaptureSession {
     where
         E: From<ProfilerError> + ToString,
     {
-        let window = self
-            .plan
-            .windows
-            .iter()
-            .find(|window| window.id == id)
-            .cloned()
-            .ok_or_else(|| ProfilerError::UnknownWindow {
-                window_id: id.to_owned(),
-            })
-            .map_err(E::from)?;
+        let range_index = self.window_range_index(id).map_err(E::from)?;
         let mut start = self.start_window();
         if let Some(action) = start.iter().find(|action| !action.succeeded()) {
             let message = action
@@ -107,7 +99,7 @@ impl CaptureSession {
             let stop = self.stop_window(&start);
             self.record.windows.push(CaptureWindowRecord {
                 id: id.to_owned(),
-                range_index: window.range_index,
+                range_index,
                 start,
                 stop,
                 client_succeeded: false,
@@ -136,7 +128,7 @@ impl CaptureSession {
         let error = client.as_ref().err().map(ToString::to_string);
         self.record.windows.push(CaptureWindowRecord {
             id: id.to_owned(),
-            range_index: window.range_index,
+            range_index,
             start: std::mem::take(&mut start),
             stop,
             client_succeeded,
@@ -149,6 +141,37 @@ impl CaptureSession {
         client
     }
 
+    pub fn record_unopened_window(
+        &mut self,
+        id: &str,
+        client_succeeded: bool,
+        message: String,
+    ) -> Result<(), ProfilerError> {
+        let range_index = self.window_range_index(id)?;
+        self.record.windows.push(CaptureWindowRecord {
+            id: id.to_owned(),
+            range_index,
+            start: Vec::new(),
+            stop: Vec::new(),
+            client_succeeded,
+            succeeded: false,
+            error: Some(message.clone()),
+        });
+        self.fail(message);
+        Ok(())
+    }
+
+    fn window_range_index(&self, id: &str) -> Result<Option<usize>, ProfilerError> {
+        self.plan
+            .windows
+            .iter()
+            .find(|window| window.id == id)
+            .map(|window| window.range_index)
+            .ok_or_else(|| ProfilerError::UnknownWindow {
+                window_id: id.to_owned(),
+            })
+    }
+
     fn start_window(&self) -> Vec<CaptureActionRecord> {
         transport::start_windows(&self.targets)
     }
@@ -159,7 +182,8 @@ impl CaptureSession {
             .filter(|action| action.succeeded())
             .filter_map(|action| match action {
                 CaptureActionRecord::Http { process_id, .. } => Some(process_id.as_str()),
-                CaptureActionRecord::Command { .. } => None,
+                CaptureActionRecord::Command { .. }
+                | CaptureActionRecord::CollectionFinalization { .. } => None,
             })
             .collect::<BTreeSet<_>>();
         transport::stop_windows(&self.targets, &started)
@@ -183,9 +207,8 @@ impl CaptureSession {
     fn finalize_collections(&mut self) {
         let mut failure = None;
         for target in &self.targets {
-            let action = finalization::finalize_target(target);
-            let acceptable = finalization::finalization_succeeded(&action);
-            if !acceptable && failure.is_none() {
+            let action = finalization::finalize_target(target, self.range_end_for(target));
+            if !action.succeeded() && failure.is_none() {
                 failure = Some(action.error().unwrap_or_else(|| {
                     format!("failed to finalize target {:?}", target.process_id)
                 }));
@@ -195,6 +218,42 @@ impl CaptureSession {
         if let Some(message) = failure {
             self.fail(message);
         }
+    }
+
+    fn range_end_for(&self, target: &ProfilerTargetRecord) -> Option<CaptureRangeEndRecord> {
+        let expected_range_count = self
+            .plan
+            .targets
+            .iter()
+            .find(|plan| plan.process_id == target.process_id)?
+            .expected_range_count?;
+        let final_window = self.plan.windows.last()?;
+        if final_window.range_index != Some(expected_range_count) {
+            return None;
+        }
+        let recorded = self
+            .record
+            .windows
+            .iter()
+            .find(|window| window.id == final_window.id)?;
+        let control_process_id = match &target.control {
+            crate::plan::ProfilerControl::Http { process_id, .. } => process_id,
+        };
+        recorded
+            .stop
+            .iter()
+            .any(|action| {
+                matches!(
+                    action,
+                    CaptureActionRecord::Http { process_id, .. }
+                        if process_id == control_process_id
+                )
+            })
+            .then(|| CaptureRangeEndRecord {
+                window_id: final_window.id.clone(),
+                range_index: expected_range_count,
+                expected_range_count,
+            })
     }
 
     fn verify_reports(&mut self) {

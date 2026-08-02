@@ -908,8 +908,8 @@ fn finalize_profiler_process(
     let Some(target) = session.process(process_id)?.profiler.clone() else {
         return Ok(true);
     };
-    let action = inferlab_profiler::finalization::finalize_target(&target);
-    let succeeded = inferlab_profiler::finalization::finalization_succeeded(&action);
+    let action = inferlab_profiler::finalization::finalize_target(&target, None);
+    let succeeded = action.succeeded();
     session.process_mut(process_id)?.profiler_finalization = Some(action);
     Ok(succeeded)
 }

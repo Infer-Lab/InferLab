@@ -49,6 +49,11 @@ unless a cell explicitly names a protocol-v7 record.
 | Prefix-cache reset between cases | Limited: `POST /reset_prefix_cache` for `single`; no reset control on the P/D Gateway | `POST /flush_cache` for `single`; Qualified for the demonstrated P/D Gateway/P/D Router pairings below | —; P/D enforces block reuse off at launch | Qualified for `single` and the maintained P/D pairing below through Gateway `POST /flush_cache` | Supported by the worker contract through Gateway `POST /flush_cache`; unqualified for a concrete Engine |
 | Framework profiling capture | Supported: Engine replica entry controls each captured rank process tree | Supported for `single` and prefill/decode: every model-serving replica entry controls its captured process tree through `POST /start_profile` with the integration-declared `CUDA_PROFILER` body and `POST /stop_profile`; no real SGLang capture record is yet qualified | — | — | Supported: captures the Engine process tree while TokenSpeed SMG Gateway controls the window through `POST /start_profile` and `POST /stop_profile`; managed capture defaults to CUDA and NVTX tracing, with OS runtime tracing available as an explicit typed override; no concrete Engine route is yet qualified |
 
+For every supported framework profiling path, a positive AIPerf-native Bench
+warmup drains before InferLab opens the framework capture window; the window
+still closes at client completion. A failed warmup leaves its planned window
+unopened and fails the measurement.
+
 The two named paths are endpoint-contract facts, not route qualification. Chat
 execution becomes Qualified only after an InferLab workflow produces a real
 record through the exact integration, route, topology, Gateway backend, P/D

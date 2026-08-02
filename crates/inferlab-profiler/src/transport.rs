@@ -54,18 +54,40 @@ pub(crate) fn verify_report(target: &ProfilerTargetRecord, path: &Path) -> Captu
     )
 }
 
-pub(crate) fn finalize_collection(
+pub(crate) fn inspect_collection_state(
     target: &ProfilerTargetRecord,
     deadline: Duration,
 ) -> CaptureActionRecord {
+    let mut argv = env_prefix(&target.escapes.env);
+    argv.extend([
+        target.executable.clone(),
+        "sessions".to_owned(),
+        "list".to_owned(),
+        "--output-format=json".to_owned(),
+    ]);
     command_action(
         target,
-        "finalize-collection",
-        vec![
-            target.executable.clone(),
-            "stop".to_owned(),
-            format!("--session={}", target.session),
-        ],
+        "inspect-collection-state",
+        argv,
+        deadline,
+        CommandActionMode::Cleanup,
+    )
+}
+
+pub(crate) fn stop_collection(
+    target: &ProfilerTargetRecord,
+    deadline: Duration,
+) -> CaptureActionRecord {
+    let mut argv = env_prefix(&target.escapes.env);
+    argv.extend([
+        target.executable.clone(),
+        "stop".to_owned(),
+        format!("--session={}", target.session),
+    ]);
+    command_action(
+        target,
+        "stop-collection",
+        argv,
         deadline,
         CommandActionMode::Cleanup,
     )
@@ -531,6 +553,26 @@ mod tests {
         assert_eq!(
             script,
             "cd '/work dir' && exec 'env' '--' 'NSYS_OPTS=a b;c' 'nsys' 'start'"
+        );
+    }
+
+    #[test]
+    fn ssh_control_script_routes_session_inspection_through_the_target_cwd() {
+        let script = ssh_control_script(
+            Path::new("/remote workspace"),
+            &[
+                "env".to_owned(),
+                "--".to_owned(),
+                "NSYS_HOME=/opt/nsys custom".to_owned(),
+                "nsys-custom".to_owned(),
+                "sessions".to_owned(),
+                "list".to_owned(),
+                "--output-format=json".to_owned(),
+            ],
+        );
+        assert_eq!(
+            script,
+            "cd '/remote workspace' && exec 'env' '--' 'NSYS_HOME=/opt/nsys custom' 'nsys-custom' 'sessions' 'list' '--output-format=json'"
         );
     }
 }

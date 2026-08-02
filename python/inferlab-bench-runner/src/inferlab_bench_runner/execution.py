@@ -1,7 +1,6 @@
 """Coordinate one Bench case deadline across native execution and adjudication."""
 
 import json
-from pathlib import Path
 
 from inferlab_measurement_sdk import (
     BenchClientRequest,
@@ -184,7 +183,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         if not errors and speed_bench_category(request) is not None:
             report_metrics, report_invocations, report_error = run_speed_bench_reports(
                 request,
-                Path(command[0]),
+                prepared.command_prefix,
                 artifact_dir,
                 deadline,
             )

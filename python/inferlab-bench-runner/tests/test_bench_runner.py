@@ -2,8 +2,10 @@ import hashlib
 import json
 import math
 import os
+import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import cast
 
@@ -13,9 +15,15 @@ from inferlab_bench_runner.aiperf import (
     aiperf_session_population_layout,
     inference_request_config,
     parse_speed_bench_report,
+    prepare_aiperf_execution,
     run_aiperf,
     run_speed_bench_reports,
     speed_bench_category,
+)
+from inferlab_bench_runner.aiperf_phase_barrier import (
+    WarmupExpectation,
+    await_capture_open,
+    warmup_completion_error,
 )
 from inferlab_bench_runner.bench_client import main
 from inferlab_bench_runner.execution import execute
@@ -241,6 +249,19 @@ def request(
             "artifact_dir": str(tmp_path),
         }
     )
+
+
+def install_fake_aiperf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, implementation: str
+) -> Path:
+    aiperf = tmp_path / "aiperf"
+    aiperf.write_text(implementation, encoding="utf-8")
+    aiperf.chmod(0o755)
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\nshift 2\nexec "$(dirname "$0")/aiperf" "$@"\n', encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(python))
+    return python
 
 
 def preparation_request(
@@ -1518,7 +1539,7 @@ printf 'Model,coding,Overall\\ndsv4,%s,%s\\n' \"$value\" \"$value\" > \"$output\
 
     metrics, invocations, error = run_speed_bench_reports(
         speed_bench_request(tmp_path),
-        aiperf,
+        [str(aiperf)],
         tmp_path,
         CaseDeadline(5.0),
     )
@@ -1572,7 +1593,7 @@ printf 'Model,coding,Overall\\ndsv4,0.67,0.67\\n' > "$output"
 
     metrics, invocations, error = run_speed_bench_reports(
         speed_bench_request(tmp_path),
-        aiperf,
+        [str(aiperf)],
         tmp_path,
         CaseDeadline(5.0),
     )
@@ -1619,6 +1640,80 @@ def test_config_maps_native_warmup_before_the_concurrency_profile(tmp_path: Path
         "concurrency": 2,
         "requests": 4,
     }
+
+
+def test_profile_command_uses_the_release_owned_aiperf_entrypoint(tmp_path: Path) -> None:
+    prepared = prepare_aiperf_execution(
+        request(tmp_path, {"kind": "concurrency_limited", "concurrency": 2}),
+        CaseDeadline(5.0),
+    )
+
+    assert prepared.command[:3] == [
+        sys.executable,
+        "-m",
+        "inferlab_bench_runner.aiperf_entrypoint",
+    ]
+    assert prepared.command[3:] == ["profile", "--config", str(prepared.config_path)]
+
+
+def test_warmup_gate_requires_the_native_request_phase_to_drain_without_errors() -> None:
+    complete = {
+        "final_requests_sent": 2,
+        "final_requests_completed": 2,
+        "final_requests_cancelled": 0,
+        "final_request_errors": 0,
+        "final_sent_sessions": 2,
+        "final_completed_sessions": 2,
+        "final_cancelled_sessions": 0,
+    }
+
+    assert warmup_completion_error(WarmupExpectation(requests=2, sessions=None), complete) is None
+    assert "errors" in (
+        warmup_completion_error(
+            WarmupExpectation(requests=2, sessions=None),
+            {**complete, "final_request_errors": 1},
+        )
+        or ""
+    )
+
+
+def test_warmup_gate_requires_complete_native_sessions() -> None:
+    incomplete = {
+        "final_requests_sent": 4,
+        "final_requests_completed": 4,
+        "final_requests_cancelled": 0,
+        "final_request_errors": 0,
+        "final_sent_sessions": 2,
+        "final_completed_sessions": 1,
+        "final_cancelled_sessions": 0,
+    }
+
+    error = warmup_completion_error(WarmupExpectation(requests=None, sessions=2), incomplete)
+
+    assert error is not None
+    assert "sessions" in error
+
+
+def test_profile_barrier_waits_for_capture_open_acknowledgement() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    observed: list[bytes] = []
+
+    def acknowledge() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            observed.append(connection.makefile("rb").readline())
+            connection.sendall(b"capture-open\n")
+        listener.close()
+
+    server = threading.Thread(target=acknowledge)
+    server.start()
+    await_capture_open(f"{host}:{port}")
+    server.join()
+
+    assert observed == [b"profiling-ready\n"]
 
 
 def test_config_consumes_a_frozen_dataset_population_sequentially(tmp_path: Path) -> None:
@@ -1966,10 +2061,7 @@ def test_normalization_preserves_optional_weighted_cache_ratio() -> None:
 def test_invalid_summary_preserves_native_failure_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text("#!/bin/sh\nprintf 'native output\\n'\n", encoding="utf-8")
-    aiperf.chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    python = install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nprintf 'native output\\n'\n")
     (tmp_path / "inferlab-bench.json").write_text(
         '{"request_throughput":{"avg":"invalid"}}\n', encoding="utf-8"
     )
@@ -1984,7 +2076,11 @@ def test_invalid_summary_preserves_native_failure_evidence(
     assert result.completed_requests == 1
     assert result.failed_requests == 0
     assert result.native_exit_code == 0
-    assert result.native_command[0] == str(aiperf)
+    assert result.native_command[:3] == [
+        str(python),
+        "-m",
+        "inferlab_bench_runner.aiperf_entrypoint",
+    ]
     assert {artifact.name for artifact in result.raw_artifacts} >= {
         "aiperf_config",
         "aiperf_summary",
@@ -1997,10 +2093,7 @@ def test_invalid_summary_preserves_native_failure_evidence(
 def test_requested_server_metrics_fail_when_aiperf_omits_native_exports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    aiperf.chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nexit 0\n")
     summary_fixture = Path(__file__).parent / "fixtures" / "aiperf-0.11.0-summary.json"
     (tmp_path / "profile_export_aiperf.json").write_text(
         summary_fixture.read_text(encoding="utf-8"), encoding="utf-8"
@@ -2144,10 +2237,7 @@ def test_pinned_aiperf_native_warmup_qualification(tmp_path: Path) -> None:
 def test_incomplete_native_warmup_fails_with_phase_counts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    aiperf.chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nexit 0\n")
     summary_fixture = Path(__file__).parent / "fixtures" / "aiperf-0.11.0-summary.json"
     (tmp_path / "inferlab-bench.json").write_text(
         summary_fixture.read_text(encoding="utf-8"), encoding="utf-8"
@@ -2179,10 +2269,7 @@ def test_incomplete_native_warmup_fails_with_phase_counts(
 def test_request_slo_uses_reconciled_native_records_for_ratio_and_goodput(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    aiperf.chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nexit 0\n")
     summary_fixture = Path(__file__).parent / "fixtures" / "aiperf-0.11.0-summary.json"
     summary = cast(dict[str, object], json.loads(summary_fixture.read_text(encoding="utf-8")))
     summary["good_request_count"] = {"avg": 2.0, "unit": "requests"}
@@ -2232,10 +2319,7 @@ def test_request_slo_uses_reconciled_native_records_for_ratio_and_goodput(
 def test_complete_all_error_request_slo_is_service_quality_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    aiperf.chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nexit 1\n")
     records = [
         {
             "metadata": {
@@ -2274,10 +2358,7 @@ def test_complete_all_error_request_slo_is_service_quality_evidence(
 def test_nonzero_exit_with_only_cancelled_requests_is_not_the_inference_error_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    aiperf.chmod(0o755)
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nexit 1\n")
     records = [
         {
             "metadata": {

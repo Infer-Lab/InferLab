@@ -138,6 +138,17 @@ pub(super) fn run_client(
     paths: &ClientCasePaths,
     bound: &OperationBound,
 ) -> Result<ClientRun, InferlabError> {
+    run_client_with_environment(command, request, session, paths, bound, &[])
+}
+
+pub(super) fn run_client_with_environment(
+    command: &ClientCommandPlan,
+    request: &impl Serialize,
+    session: &WorkloadRecordSession,
+    paths: &ClientCasePaths,
+    bound: &OperationBound,
+    runtime_environment: &[(&str, &str)],
+) -> Result<ClientRun, InferlabError> {
     let request_path = session.absolute(&paths.request);
     let result_path = session.absolute(&paths.result);
     let stdout_path = session.absolute(&paths.stdout);
@@ -173,6 +184,7 @@ pub(super) fn run_client(
         .current_dir(&command.cwd)
         .env_clear()
         .envs(&command.env)
+        .envs(runtime_environment.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

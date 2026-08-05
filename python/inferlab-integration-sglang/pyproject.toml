@@ -18,6 +18,9 @@ inferlab-adapter-sglang = "inferlab_integration_sglang.__main__:main"
 [project.urls]
 Repository = "https://github.com/Infer-Lab/InferLab"
 
+[tool.inferlab.release]
+lifecycle = "workspace-side"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/inferlab_integration_sglang"]
 [tool.hatch.build.targets.sdist]

@@ -15,6 +15,9 @@ dependencies = ["pydantic>=2.13,<3"]
 [project.urls]
 Repository = "https://github.com/Infer-Lab/InferLab"
 
+[tool.inferlab.release]
+lifecycle = "workspace-side"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/inferlab_adapter_sdk"]
 [tool.hatch.build.targets.sdist]

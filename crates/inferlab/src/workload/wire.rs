@@ -1,20 +1,25 @@
 use super::domain::{
-    BenchDatasetCatalog, BenchPopulation, DatasetCacheState, MeasurementModel,
-    ResolvedBenchDefinition, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
+    BenchDatasetCatalog, BenchPopulation, BenchPromptRoute, BenchRenderingAuthority,
+    BenchRequestRepresentation, DatasetCacheState, MeasurementModel, ResolvedBenchDefinition,
+    ResolvedBenchPrompt, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
     ResolvedBenchSource, WorkloadEndpoint, WorkloadEndpointProtocol,
 };
 use crate::InferlabError;
 use crate::adapter::project_setting_values;
 use crate::toolchain::BundledEvalTask;
-use crate::workspace::{BenchTokenSelector, EvalDefinition, EvalTaskSource, RequestSlo};
+use crate::workspace::{
+    BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent, BenchTokenSelector, EvalDefinition,
+    EvalTaskSource, RequestSlo,
+};
 use inferlab_protocol::{
     BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
     BenchDefinitionInput, BenchInclusiveUniformInput, BenchPopulationInput,
-    BenchPrefixSharingInput, BenchRandomShapeInput, BenchRequestSloInput, BenchRequestSourceInput,
-    BenchSessionDatasetCatalogInput, BenchSessionSourceInput, BenchSessionTemplateInput,
-    BenchTokenDistributionKindInput, BenchTokenSelectorInput, ClientEndpointInput,
-    EndpointProtocol, EvalDefinitionInput, EvalTaskSourceInput, MeasurementModelInput,
-    ServerMetricsEndpointInput, SettingValue,
+    BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput, BenchRandomShapeInput,
+    BenchRenderingAuthorityInput, BenchRequestRepresentationInput, BenchRequestSloInput,
+    BenchRequestSourceInput, BenchSessionDatasetCatalogInput, BenchSessionSourceInput,
+    BenchSessionTemplateInput, BenchSharedSystemContentInput, BenchTokenDistributionKindInput,
+    BenchTokenSelectorInput, ClientEndpointInput, EndpointProtocol, EvalDefinitionInput,
+    EvalTaskSourceInput, MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
 };
 use std::collections::BTreeMap;
 
@@ -46,16 +51,19 @@ pub(super) fn model_input(model: &MeasurementModel) -> MeasurementModelInput {
 
 pub(super) fn bench_source_inputs(
     definition: &ResolvedBenchDefinition,
-) -> (
-    Option<BenchRequestSourceInput>,
-    Option<BenchSessionSourceInput>,
-) {
+) -> Result<
+    (
+        Option<BenchRequestSourceInput>,
+        Option<BenchSessionSourceInput>,
+    ),
+    InferlabError,
+> {
     match &definition.source {
         ResolvedBenchSource::Requests { request_source } => {
-            (Some(bench_request_source_input(request_source)), None)
+            Ok((Some(bench_request_source_input(request_source)?), None))
         }
         ResolvedBenchSource::Sessions { session_source } => {
-            (None, Some(bench_session_source_input(session_source)))
+            Ok((None, Some(bench_session_source_input(session_source))))
         }
     }
 }
@@ -69,10 +77,11 @@ pub(super) fn bench_request_body_input(
 pub(super) fn bench_definition_input(
     definition: &ResolvedBenchDefinition,
 ) -> Result<BenchDefinitionInput, InferlabError> {
-    let (request_source, session_source) = bench_source_inputs(definition);
+    let (request_source, session_source) = bench_source_inputs(definition)?;
     Ok(BenchDefinitionInput {
         request_source,
         session_source,
+        prompt: prompt_input(&definition.prompt)?,
         server_metrics: definition.server_metrics,
         seed: definition.seed,
         request_body: bench_request_body_input(definition)?,
@@ -124,26 +133,25 @@ pub(super) fn bench_session_source_input(
 
 pub(super) fn bench_request_source_input(
     source: &ResolvedBenchRequestSource,
-) -> BenchRequestSourceInput {
-    match source {
+) -> Result<BenchRequestSourceInput, InferlabError> {
+    Ok(match source {
         ResolvedBenchRequestSource::Random {
             input_tokens,
             output_tokens,
             prefix_sharing,
+            shared_system_content,
         } => BenchRequestSourceInput::Random {
             input_tokens: token_selector_input(input_tokens),
             output_tokens: token_selector_input(output_tokens),
-            prefix_sharing: prefix_sharing
+            prefix_sharing: prefix_sharing.as_ref().map(prefix_sharing_input),
+            shared_system_content: shared_system_content
                 .as_ref()
-                .map(|sharing| BenchPrefixSharingInput {
-                    shared_prefix_ratio: sharing.shared_prefix_ratio,
-                    shared_prefix_tokens: sharing.shared_prefix_tokens,
-                    unique_suffix_tokens: sharing.unique_suffix_tokens,
-                }),
+                .map(shared_system_content_input),
         },
         ResolvedBenchRequestSource::RandomMixture {
             shapes,
             total_weight,
+            prefix_sharing,
         } => BenchRequestSourceInput::RandomMixture {
             shapes: shapes
                 .iter()
@@ -154,6 +162,7 @@ pub(super) fn bench_request_source_input(
                 })
                 .collect(),
             total_weight: *total_weight,
+            prefix_sharing: prefix_sharing.as_ref().map(prefix_sharing_input),
         },
         ResolvedBenchRequestSource::Dataset {
             dataset,
@@ -168,6 +177,79 @@ pub(super) fn bench_request_source_input(
             output_tokens: *output_tokens,
             catalog: Box::new(catalog_input(catalog)),
         },
+    })
+}
+
+pub(super) fn prompt_input(
+    prompt: &ResolvedBenchPrompt,
+) -> Result<BenchPromptInput, InferlabError> {
+    let request_representation = match prompt.request_representation {
+        BenchRequestRepresentation::FlatPrompt => BenchRequestRepresentationInput::FlatPrompt,
+        BenchRequestRepresentation::StructuredMessages => {
+            BenchRequestRepresentationInput::StructuredMessages
+        }
+    };
+    let route = match prompt.route {
+        BenchPromptRoute::Completions => BenchPromptRouteInput::Completions,
+        BenchPromptRoute::ChatCompletions => BenchPromptRouteInput::ChatCompletions,
+    };
+    let rendering_authority = match prompt.rendering_authority {
+        BenchRenderingAuthority::LocalFlat => BenchRenderingAuthorityInput::LocalFlat,
+        BenchRenderingAuthority::LocalTemplate => BenchRenderingAuthorityInput::LocalTemplate,
+        BenchRenderingAuthority::Server => BenchRenderingAuthorityInput::Server,
+    };
+    Ok(match &prompt.definition {
+        BenchPrompt::Flat => BenchPromptInput::Flat {
+            request_representation,
+            route,
+            rendering_authority,
+        },
+        BenchPrompt::RenderedChat {
+            chat_template,
+            chat_template_kwargs,
+        } => BenchPromptInput::RenderedChat {
+            chat_template: chat_template.clone(),
+            chat_template_kwargs: project_setting_values(
+                "Bench rendered-chat template kwargs",
+                chat_template_kwargs,
+            )?,
+            request_representation,
+            route,
+            rendering_authority,
+        },
+        BenchPrompt::ServerChat => BenchPromptInput::ServerChat {
+            request_representation,
+            route,
+            rendering_authority,
+        },
+    })
+}
+
+fn prefix_sharing_input(sharing: &BenchPrefixSharing) -> BenchPrefixSharingInput {
+    match sharing {
+        BenchPrefixSharing::Tokens {
+            shared_prefix_tokens,
+        } => BenchPrefixSharingInput::Tokens {
+            shared_prefix_tokens: *shared_prefix_tokens,
+        },
+        BenchPrefixSharing::Ratio {
+            shared_prefix_ratio,
+        } => BenchPrefixSharingInput::Ratio {
+            shared_prefix_ratio: *shared_prefix_ratio,
+        },
+    }
+}
+
+fn shared_system_content_input(
+    sharing: &BenchSharedSystemContent,
+) -> BenchSharedSystemContentInput {
+    match sharing {
+        BenchSharedSystemContent::Tokens { tokens } => {
+            BenchSharedSystemContentInput::Tokens { tokens: *tokens }
+        }
+        BenchSharedSystemContent::Ratio { ratio } => {
+            BenchSharedSystemContentInput::Ratio { ratio: *ratio }
+        }
     }
 }
 
@@ -217,6 +299,7 @@ pub(super) fn catalog_input(catalog: &BenchDatasetCatalog) -> BenchDatasetCatalo
 pub(super) fn population_input(population: &BenchPopulation) -> BenchPopulationInput {
     BenchPopulationInput {
         path: population.path.clone(),
+        evidence_path: population.evidence_path.clone(),
         sha256: population.sha256.clone(),
         entries: population.entries,
         tpot_applicable: population.tpot_applicable,

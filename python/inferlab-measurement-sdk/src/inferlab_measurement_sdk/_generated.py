@@ -71,18 +71,49 @@ class BenchNativeInvocation(BaseModel):
     timed_out: bool
 
 
-class BenchPrefixSharingInput(BaseModel):
+class BenchPrefixSharingInput1(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    shared_prefix_tokens: Annotated[int, Field(ge=0)]
+
+
+class BenchPrefixSharingInput2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
     shared_prefix_ratio: float
-    shared_prefix_tokens: Annotated[int, Field(ge=0)]
-    unique_suffix_tokens: Annotated[int, Field(ge=0)]
+
+
+class BenchPrefixSharingInput(
+    RootModel[BenchPrefixSharingInput1 | BenchPrefixSharingInput2]
+):
+    root: Annotated[
+        BenchPrefixSharingInput1 | BenchPrefixSharingInput2,
+        Field(description='One declared exact final-prompt prefix geometry.'),
+    ]
+
+
+class BenchPromptRouteInput(StrEnum):
+    completions = 'completions'
+    chat_completions = 'chat_completions'
 
 
 class BenchPromptTemplateSource(StrEnum):
     request_body = 'request_body'
+    prompt_table = 'prompt_table'
     tokenizer_default = 'tokenizer_default'
+
+
+class BenchPromptTokenReconciliation(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    native_session_num: Annotated[int, Field(ge=0)]
+    observed_prompt_tokens: Annotated[int | None, Field(ge=0)] = None
+    planned_prompt_tokens: Annotated[int, Field(ge=0)]
+    population_index: Annotated[int, Field(ge=0)]
+    reconciled: bool
 
 
 class BenchRandomShapeInput(BaseModel):
@@ -92,6 +123,17 @@ class BenchRandomShapeInput(BaseModel):
     input_tokens: Annotated[int, Field(ge=0)]
     output_tokens: Annotated[int, Field(ge=0)]
     weight: Annotated[int, Field(ge=0)]
+
+
+class BenchRenderingAuthorityInput(StrEnum):
+    local_flat = 'local_flat'
+    local_template = 'local_template'
+    server = 'server'
+
+
+class BenchRequestRepresentationInput(StrEnum):
+    flat_prompt = 'flat_prompt'
+    structured_messages = 'structured_messages'
 
 
 class BenchRequestSloInput(BaseModel):
@@ -123,6 +165,7 @@ class BenchRequestSourceInputRandomMixture(BaseModel):
         extra='forbid',
     )
     kind: Literal['random_mixture'] = 'random_mixture'
+    prefix_sharing: BenchPrefixSharingInput | None = None
     shapes: list[BenchRandomShapeInput]
     total_weight: Annotated[int, Field(ge=0)]
 
@@ -201,6 +244,31 @@ class BenchSessionTurnResult(BaseModel):
     request_start_ns: Annotated[int, Field(ge=0)]
     runtime_session_id: str
     turn_index: Annotated[int, Field(ge=0)]
+
+
+class BenchSharedSystemContentInput1(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    tokens: Annotated[int, Field(ge=0)]
+
+
+class BenchSharedSystemContentInput2(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    ratio: float
+
+
+class BenchSharedSystemContentInput(
+    RootModel[BenchSharedSystemContentInput1 | BenchSharedSystemContentInput2]
+):
+    root: Annotated[
+        BenchSharedSystemContentInput1 | BenchSharedSystemContentInput2,
+        Field(
+            description='One pre-template shared system-content declaration for server-rendered\nsynthetic chat.'
+        ),
+    ]
 
 
 class BenchTokenCountSummary(BaseModel):
@@ -440,12 +508,73 @@ class BenchPopulationInput(BaseModel):
         extra='forbid',
     )
     entries: Annotated[int, Field(ge=0)]
+    evidence_path: str
     path: str
     session_templates: Annotated[
         list[BenchSessionTemplateInput], Field(validate_default=True)
     ] = []
     sha256: str
     tpot_applicable: bool
+
+
+class BenchPrefixGeometrySummary(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    canonical_prefix_sha256: str
+    full_prompt_entries: Annotated[int, Field(ge=0)]
+    maximum_shared_prefix_tokens: Annotated[int, Field(ge=0)]
+    shared_prefix_tokens: BenchTokenCountSummary
+    unique_suffix_tokens: BenchTokenCountSummary
+
+
+class BenchPromptInputFlat(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    kind: Literal['flat'] = 'flat'
+    rendering_authority: BenchRenderingAuthorityInput
+    request_representation: BenchRequestRepresentationInput
+    route: BenchPromptRouteInput
+
+
+class BenchPromptInputRenderedChat(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    chat_template: str | None = None
+    chat_template_kwargs: Annotated[
+        dict[str, SettingValue], Field(validate_default=True)
+    ] = {}
+    kind: Literal['rendered_chat'] = 'rendered_chat'
+    rendering_authority: BenchRenderingAuthorityInput
+    request_representation: BenchRequestRepresentationInput
+    route: BenchPromptRouteInput
+
+
+class BenchPromptInputServerChat(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    kind: Literal['server_chat'] = 'server_chat'
+    rendering_authority: BenchRenderingAuthorityInput
+    request_representation: BenchRequestRepresentationInput
+    route: BenchPromptRouteInput
+
+
+class BenchPromptInput(
+    RootModel[
+        BenchPromptInputFlat | BenchPromptInputRenderedChat | BenchPromptInputServerChat
+    ]
+):
+    root: Annotated[
+        BenchPromptInputFlat
+        | BenchPromptInputRenderedChat
+        | BenchPromptInputServerChat,
+        Field(
+            description='The frozen prompt representation, route, and rendering authority for a\nserving Bench population.'
+        ),
+    ]
 
 
 class BenchPromptTemplateProjection(BaseModel):
@@ -511,6 +640,15 @@ class BenchSessionResultEvidence(BaseModel):
     turn_order_reconciled: bool
     turns: list[BenchSessionTurnResult]
     warmup: BenchSessionPhaseSummary
+
+
+class BenchSharedSystemContentSummary(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    canonical_system_content_sha256: str
+    system_content_tokens: BenchTokenCountSummary
+    user_content_tokens: BenchTokenCountSummary
 
 
 class BenchTokenSelectorInput(
@@ -587,6 +725,9 @@ class BenchClientResult(BaseModel):
     native_command: list[str]
     native_exit_code: int | None = None
     normalization_schema: str
+    prompt_token_reconciliation: Annotated[
+        list[BenchPromptTokenReconciliation], Field(validate_default=True)
+    ] = []
     raw_artifacts: list[RawArtifact]
     report_invocations: Annotated[
         list[BenchNativeInvocation], Field(validate_default=True)
@@ -617,9 +758,11 @@ class BenchPopulationPreparationResult(BaseModel):
     materialization_identity: str
     output_tokens: BenchTokenCountSummary | None = None
     population: BenchPopulationInput | None = None
+    prefix_geometry: BenchPrefixGeometrySummary | None = None
     prompt_token_targeting: BenchPromptTokenTargetingSummary | None = None
     requested_entries: Annotated[int, Field(ge=0)]
     schema_version: Annotated[int, Field(ge=0)]
+    shared_system_content: BenchSharedSystemContentSummary | None = None
     status: ClientStatus
 
 
@@ -631,6 +774,7 @@ class BenchRequestSourceInputRandom(BaseModel):
     kind: Literal['random'] = 'random'
     output_tokens: BenchTokenSelectorInput
     prefix_sharing: BenchPrefixSharingInput | None = None
+    shared_system_content: BenchSharedSystemContentInput | None = None
 
 
 class BenchRequestSourceInput(
@@ -699,6 +843,7 @@ class BenchDefinitionInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    prompt: BenchPromptInput
     request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
     request_slo: BenchRequestSloInput | None = None
     request_source: BenchRequestSourceInput | None = None
@@ -715,6 +860,7 @@ class BenchPopulationPreparationRequest(BaseModel):
     )
     artifact_dir: str
     model: MeasurementModelInput
+    prompt: BenchPromptInput
     protocol_version: ProtocolVersion
     request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
     request_source: BenchRequestSourceInput | None = None

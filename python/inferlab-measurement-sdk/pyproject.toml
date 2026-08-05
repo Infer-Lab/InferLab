@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-measurement-sdk"
-version = "0.8.5"
+version = "0.9.0"
 description = "Internal generated models and runtime helpers for InferLab measurement clients"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,6 +14,9 @@ dependencies = ["pydantic>=2.13,<3"]
 
 [project.urls]
 Repository = "https://github.com/Infer-Lab/InferLab"
+
+[tool.inferlab.release]
+lifecycle = "product"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inferlab_measurement_sdk"]

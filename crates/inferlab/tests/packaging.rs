@@ -71,7 +71,17 @@ fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn E
         &files,
     )?;
 
-    let mut plugin_sources = vec![(PathBuf::from("LICENSE"), root.join("LICENSE"))];
+    let mut plugin_sources = vec![
+        (PathBuf::from("LICENSE"), root.join("LICENSE")),
+        (
+            PathBuf::from("docs/workspace-authoring.md"),
+            root.join("docs/workspace-authoring.md"),
+        ),
+        (
+            PathBuf::from("docs/backend-support.md"),
+            root.join("docs/backend-support.md"),
+        ),
+    ];
     for top in [".claude-plugin", ".agents", "plugins"] {
         collect_source_files(&root, &root.join(top), &mut plugin_sources)?;
     }

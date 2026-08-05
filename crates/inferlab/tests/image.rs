@@ -1413,8 +1413,9 @@ fn serve_start_from_image_admits_manual_bench_and_stops() -> Result<(), Box<dyn 
         .output()?;
     assert!(
         bench.status.success(),
-        "manual bench against the image-backed server failed: {}",
-        String::from_utf8_lossy(&bench.stderr)
+        "manual bench against the image-backed server failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&bench.stdout),
+        String::from_utf8_lossy(&bench.stderr),
     );
     let bench = stdout_json(&bench)?;
     assert_eq!(bench["status"], "succeeded");

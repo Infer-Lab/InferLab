@@ -32,7 +32,7 @@ const CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLIENT_TERM_GRACE: Duration = Duration::from_secs(2);
 const CLIENT_KILL_GRACE: Duration = Duration::from_secs(2);
 const CLIENT_CLEANUP_STATUS_DEADLINE: Duration = Duration::from_secs(2);
-const SYNTHETIC_MATERIALIZATION_IDENTITY: &str = "inferlab-synthetic-prompt-target-v3";
+const SYNTHETIC_MATERIALIZATION_IDENTITY: &str = "inferlab-synthetic-prompt-authority-v4";
 struct AdjudicatedClient<T> {
     accepted: AcceptedClient<T>,
     succeeded: bool,
@@ -209,6 +209,7 @@ mod tests {
             metrics,
             request_slo: None,
             session_evidence: None,
+            prompt_token_reconciliation: Vec::new(),
             native_command: vec!["fixture-bench".to_owned()],
             native_exit_code: Some(0),
             report_invocations: Vec::new(),

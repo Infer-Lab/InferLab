@@ -18,6 +18,9 @@ inferlab-adapter-specialized-engine = "inferlab_integration_specialized_engine._
 [project.urls]
 Repository = "https://github.com/Infer-Lab/InferLab"
 
+[tool.inferlab.release]
+lifecycle = "workspace-side"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/inferlab_integration_specialized_engine"]
 [tool.hatch.build.targets.sdist]

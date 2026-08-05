@@ -166,6 +166,9 @@ pub fn run_bench_case(
             session: result
                 .as_ref()
                 .and_then(|result| result.session_evidence.clone()),
+            prompt_token_reconciliation: result.as_ref().map_or_else(Vec::new, |result| {
+                result.prompt_token_reconciliation.clone()
+            }),
             report_invocations: result
                 .as_ref()
                 .map_or_else(Vec::new, |result| result.report_invocations.clone()),
@@ -308,6 +311,7 @@ fn failed_case(
             failed_requests: None,
             normalization_schema: None,
             session: None,
+            prompt_token_reconciliation: Vec::new(),
             report_invocations: Vec::new(),
         },
         native_command: None,

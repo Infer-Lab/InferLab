@@ -380,6 +380,7 @@ pub struct BenchDefinitionInput {
     pub request_source: Option<BenchRequestSourceInput>,
     #[serde(default)]
     pub session_source: Option<BenchSessionSourceInput>,
+    pub prompt: BenchPromptInput,
     #[serde(default)]
     pub server_metrics: bool,
     pub seed: u64,
@@ -403,12 +404,16 @@ pub enum BenchRequestSourceInput {
         output_tokens: BenchTokenSelectorInput,
         #[serde(default)]
         prefix_sharing: Option<BenchPrefixSharingInput>,
+        #[serde(default)]
+        shared_system_content: Option<BenchSharedSystemContentInput>,
     },
     /// AIPerf samples exact token-shape pairs from one seeded categorical
     /// distribution.
     RandomMixture {
         shapes: Vec<BenchRandomShapeInput>,
         total_weight: u64,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharingInput>,
     },
     /// Inferlab materializes a release-catalog conversation snapshot before
     /// AIPerf starts.
@@ -420,6 +425,57 @@ pub enum BenchRequestSourceInput {
         output_tokens: Option<u32>,
         catalog: Box<BenchDatasetCatalogInput>,
     },
+}
+
+/// The frozen prompt representation, route, and rendering authority for a
+/// serving Bench population.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BenchPromptInput {
+    Flat {
+        request_representation: BenchRequestRepresentationInput,
+        route: BenchPromptRouteInput,
+        rendering_authority: BenchRenderingAuthorityInput,
+    },
+    RenderedChat {
+        #[serde(default)]
+        chat_template: Option<String>,
+        #[serde(default)]
+        chat_template_kwargs: BTreeMap<String, SettingValue>,
+        request_representation: BenchRequestRepresentationInput,
+        route: BenchPromptRouteInput,
+        rendering_authority: BenchRenderingAuthorityInput,
+    },
+    ServerChat {
+        request_representation: BenchRequestRepresentationInput,
+        route: BenchPromptRouteInput,
+        rendering_authority: BenchRenderingAuthorityInput,
+    },
+}
+
+/// The request payload representation frozen by prompt resolution.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchRequestRepresentationInput {
+    FlatPrompt,
+    StructuredMessages,
+}
+
+/// The named OpenAI-compatible endpoint family derived from prompt authority.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchPromptRouteInput {
+    Completions,
+    ChatCompletions,
+}
+
+/// The owner that turns semantic prompt input into the final prompt tokens.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchRenderingAuthorityInput {
+    LocalFlat,
+    LocalTemplate,
+    Server,
 }
 
 /// One release-qualified population of dependent linear session templates.
@@ -459,14 +515,21 @@ pub enum BenchTokenDistributionKindInput {
     InclusiveUniform,
 }
 
-/// The effective split between one shared system-message prefix and each
-/// request's independently generated user suffix.
+/// One declared exact final-prompt prefix geometry.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BenchPrefixSharingInput {
-    pub shared_prefix_ratio: f64,
-    pub shared_prefix_tokens: u32,
-    pub unique_suffix_tokens: u32,
+#[serde(untagged)]
+pub enum BenchPrefixSharingInput {
+    Tokens { shared_prefix_tokens: u32 },
+    Ratio { shared_prefix_ratio: f64 },
+}
+
+/// One pre-template shared system-content declaration for server-rendered
+/// synthetic chat.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum BenchSharedSystemContentInput {
+    Tokens { tokens: u32 },
+    Ratio { ratio: f64 },
 }
 
 /// One exact ISL/OSL pair and its relative categorical sampling weight.
@@ -550,6 +613,7 @@ pub enum BenchDatasetCacheState {
 #[serde(deny_unknown_fields)]
 pub struct BenchPopulationInput {
     pub path: PathBuf,
+    pub evidence_path: PathBuf,
     pub sha256: String,
     pub entries: u32,
     pub tpot_applicable: bool,
@@ -579,6 +643,7 @@ pub struct BenchPopulationPreparationRequest {
     pub request_source: Option<BenchRequestSourceInput>,
     #[serde(default)]
     pub session_source: Option<BenchSessionSourceInput>,
+    pub prompt: BenchPromptInput,
     #[serde(default)]
     pub source_path: Option<PathBuf>,
     pub required_entries: u32,
@@ -604,6 +669,7 @@ pub struct BenchTokenCountSummary {
 #[serde(rename_all = "snake_case")]
 pub enum BenchPromptTemplateSource {
     RequestBody,
+    PromptTable,
     TokenizerDefault,
 }
 
@@ -630,6 +696,27 @@ pub struct BenchPromptTokenTargetingSummary {
     pub fallback_reasons: BTreeMap<String, u32>,
 }
 
+/// Resolved exact final-prompt prefix geometry across one frozen population.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPrefixGeometrySummary {
+    pub shared_prefix_tokens: BenchTokenCountSummary,
+    pub unique_suffix_tokens: BenchTokenCountSummary,
+    pub maximum_shared_prefix_tokens: u32,
+    pub canonical_prefix_sha256: String,
+    pub full_prompt_entries: u32,
+}
+
+/// Resolved pre-template shared system-content shape across one frozen
+/// server-chat population.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchSharedSystemContentSummary {
+    pub system_content_tokens: BenchTokenCountSummary,
+    pub user_content_tokens: BenchTokenCountSummary,
+    pub canonical_system_content_sha256: String,
+}
+
 /// Terminal result of request-population materialization.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -648,6 +735,10 @@ pub struct BenchPopulationPreparationResult {
     pub output_tokens: Option<BenchTokenCountSummary>,
     #[serde(default)]
     pub prompt_token_targeting: Option<BenchPromptTokenTargetingSummary>,
+    #[serde(default)]
+    pub prefix_geometry: Option<BenchPrefixGeometrySummary>,
+    #[serde(default)]
+    pub shared_system_content: Option<BenchSharedSystemContentSummary>,
     pub evidence_path: Option<PathBuf>,
     pub error: Option<String>,
 }
@@ -1410,12 +1501,26 @@ pub struct BenchClientResult {
     pub request_slo: Option<BenchRequestSloResult>,
     #[serde(default)]
     pub session_evidence: Option<BenchSessionResultEvidence>,
+    #[serde(default)]
+    pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
     pub native_command: Vec<String>,
     pub native_exit_code: Option<i32>,
     #[serde(default)]
     pub report_invocations: Vec<BenchNativeInvocation>,
     pub raw_artifacts: Vec<RawArtifact>,
     pub error: Option<String>,
+}
+
+/// One synthetic profiling request's planned-to-observed prompt-token check.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPromptTokenReconciliation {
+    pub population_index: u32,
+    pub native_session_num: u64,
+    pub planned_prompt_tokens: u32,
+    #[serde(default)]
+    pub observed_prompt_tokens: Option<u32>,
+    pub reconciled: bool,
 }
 
 /// Reconciled native evidence for one session-bounded Bench phase.

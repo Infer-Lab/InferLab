@@ -1,5 +1,8 @@
 use crate::bench_metric::BenchMetric;
-use crate::workspace::{BenchTokenSelector, JsonValue, RequestSlo};
+use crate::workspace::{
+    BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent, BenchTokenSelector, JsonValue,
+    RequestSlo,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -97,18 +100,70 @@ pub struct BenchDatasetFilter {
     pub value: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ResolvedBenchPrefixSharing {
-    pub shared_prefix_ratio: f64,
-    pub shared_prefix_tokens: u32,
-    pub unique_suffix_tokens: u32,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResolvedBenchRandomShape {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub weight: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ResolvedBenchPrompt {
+    #[serde(flatten)]
+    pub definition: BenchPrompt,
+    pub request_representation: BenchRequestRepresentation,
+    pub route: BenchPromptRoute,
+    pub rendering_authority: BenchRenderingAuthority,
+}
+
+impl ResolvedBenchPrompt {
+    pub fn from_definition(definition: &BenchPrompt) -> Self {
+        let (request_representation, route, rendering_authority) = match definition {
+            BenchPrompt::Flat => (
+                BenchRequestRepresentation::FlatPrompt,
+                BenchPromptRoute::Completions,
+                BenchRenderingAuthority::LocalFlat,
+            ),
+            BenchPrompt::RenderedChat { .. } => (
+                BenchRequestRepresentation::FlatPrompt,
+                BenchPromptRoute::Completions,
+                BenchRenderingAuthority::LocalTemplate,
+            ),
+            BenchPrompt::ServerChat => (
+                BenchRequestRepresentation::StructuredMessages,
+                BenchPromptRoute::ChatCompletions,
+                BenchRenderingAuthority::Server,
+            ),
+        };
+        Self {
+            definition: definition.clone(),
+            request_representation,
+            route,
+            rendering_authority,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchRequestRepresentation {
+    FlatPrompt,
+    StructuredMessages,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchPromptRoute {
+    Completions,
+    ChatCompletions,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchRenderingAuthority {
+    LocalFlat,
+    LocalTemplate,
+    Server,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -118,11 +173,15 @@ pub enum ResolvedBenchRequestSource {
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
         #[serde(default)]
-        prefix_sharing: Option<ResolvedBenchPrefixSharing>,
+        prefix_sharing: Option<BenchPrefixSharing>,
+        #[serde(default)]
+        shared_system_content: Option<BenchSharedSystemContent>,
     },
     RandomMixture {
         shapes: Vec<ResolvedBenchRandomShape>,
         total_weight: u64,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharing>,
     },
     Dataset {
         dataset: String,
@@ -168,6 +227,7 @@ impl ResolvedBenchSource {
 pub struct ResolvedBenchDefinition {
     #[serde(flatten)]
     pub source: ResolvedBenchSource,
+    pub prompt: ResolvedBenchPrompt,
     pub server_metrics: bool,
     pub seed: u64,
     pub request_body: BTreeMap<String, JsonValue>,
@@ -179,6 +239,7 @@ pub struct ResolvedBenchDefinition {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BenchPopulation {
     pub path: PathBuf,
+    pub evidence_path: PathBuf,
     pub sha256: String,
     pub entries: u32,
     pub tpot_applicable: bool,

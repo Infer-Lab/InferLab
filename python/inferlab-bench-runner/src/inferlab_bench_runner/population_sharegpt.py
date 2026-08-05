@@ -359,6 +359,7 @@ def prepare_sharegpt_population(
         ineligible_reasons=ineligible_reasons,
         population=BenchPopulationInput(
             path=str(population_path),
+            evidence_path=str(evidence_path),
             sha256=population_digest.hexdigest(),
             entries=required,
             tpot_applicable=all(value >= 2 for value in output_counts),
@@ -499,6 +500,7 @@ def prepare_sharegpt_session_population(
         ineligible_reasons=ineligible_reasons,
         population=BenchPopulationInput(
             path=str(population_path),
+            evidence_path=str(population_path),
             sha256=population_digest.hexdigest(),
             entries=required,
             tpot_applicable=all(value >= 2 for value in output_counts),

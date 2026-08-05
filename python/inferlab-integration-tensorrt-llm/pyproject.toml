@@ -18,6 +18,9 @@ inferlab-adapter-tensorrt-llm = "inferlab_integration_tensorrt_llm.__main__:main
 [project.urls]
 Repository = "https://github.com/Infer-Lab/InferLab"
 
+[tool.inferlab.release]
+lifecycle = "workspace-side"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/inferlab_integration_tensorrt_llm"]
 [tool.hatch.build.targets.sdist]

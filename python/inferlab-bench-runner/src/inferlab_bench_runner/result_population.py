@@ -3,9 +3,97 @@
 import json
 from pathlib import Path
 
-from inferlab_measurement_sdk import BenchClientRequest, BenchRequestSourceInputDataset
+from inferlab_measurement_sdk import (
+    BenchClientRequest,
+    BenchPromptTokenReconciliation,
+    BenchRenderingAuthorityInput,
+    BenchRequestSourceInputDataset,
+    BenchRequestSourceInputRandom,
+    BenchRequestSourceInputRandomMixture,
+)
 
 from inferlab_bench_runner.result_records import profiling_records, raw_phase_records
+
+
+def prompt_token_reconciliation(
+    request: BenchClientRequest,
+    profiling_path: Path,
+) -> tuple[list[BenchPromptTokenReconciliation], str | None]:
+    source_input = request.definition.request_source
+    population = request.population
+    if source_input is None or population is None:
+        return [], None
+    source = source_input.root
+    if not isinstance(
+        source, (BenchRequestSourceInputRandom, BenchRequestSourceInputRandomMixture)
+    ):
+        return [], None
+    if request.definition.prompt.root.rendering_authority not in (
+        BenchRenderingAuthorityInput.local_flat,
+        BenchRenderingAuthorityInput.local_template,
+    ):
+        return [], None
+    try:
+        evidence_rows = [
+            json.loads(line)
+            for line in Path(population.evidence_path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as error:
+        return [], f"synthetic population evidence is unreadable: {error}"
+    records, parse_error = profiling_records(profiling_path)
+    if parse_error is not None:
+        return [], parse_error
+    reconciliations: list[BenchPromptTokenReconciliation] = []
+    first_error: str | None = None
+    for record in records:
+        metadata = record.get("metadata")
+        if not isinstance(metadata, dict):
+            return reconciliations, "AIPerf profiling record has no metadata"
+        if record.get("error") is not None or metadata.get("was_cancelled") is True:
+            continue
+        native_session_num = metadata.get("session_num")
+        if isinstance(native_session_num, bool) or not isinstance(native_session_num, int):
+            return reconciliations, "AIPerf profiling record has no integer session_num"
+        population_index = request.case.warmup_request_count + native_session_num
+        if population_index < 0 or population_index >= len(evidence_rows):
+            return reconciliations, (
+                f"AIPerf profiling session_num {native_session_num} has no assigned "
+                "synthetic population evidence"
+            )
+        evidence = evidence_rows[population_index]
+        planned = evidence.get("selected_prompt_tokens") if isinstance(evidence, dict) else None
+        if isinstance(planned, bool) or not isinstance(planned, int) or planned < 0:
+            return reconciliations, (
+                f"synthetic population entry {population_index} has no selected prompt-token target"
+            )
+        metrics = record.get("metrics")
+        observed_value: object = None
+        if isinstance(metrics, dict):
+            input_length = metrics.get("input_sequence_length")
+            if isinstance(input_length, dict):
+                observed_value = input_length.get("value")
+        observed = (
+            observed_value
+            if isinstance(observed_value, int) and not isinstance(observed_value, bool)
+            else None
+        )
+        reconciled = observed == planned
+        reconciliations.append(
+            BenchPromptTokenReconciliation(
+                population_index=population_index,
+                native_session_num=native_session_num,
+                planned_prompt_tokens=planned,
+                observed_prompt_tokens=observed,
+                reconciled=reconciled,
+            )
+        )
+        if not reconciled and first_error is None:
+            first_error = (
+                f"profiling population entry {population_index} planned {planned} prompt tokens, "
+                f"backend reported {observed!r}"
+            )
+    return reconciliations, first_error
 
 
 def population_identity_error(

@@ -13,7 +13,9 @@ fail() {
 fixture="${temporary}/repo"
 mkdir -p "${fixture}/scripts" "${fixture}/bin" "${fixture}/dist"
 cp "${root}/scripts/python-package-inventory.sh" "${fixture}/scripts/"
+cp "${root}/scripts/python_package_inventory.py" "${fixture}/scripts/"
 cp "${root}/scripts/bump-product-version.sh" "${fixture}/scripts/"
+cp "${root}/scripts/product_version.py" "${fixture}/scripts/"
 cp "${root}/scripts/check-product-release-version.sh" "${fixture}/scripts/"
 cp "${root}/scripts/prepare-python-package-release.sh" "${fixture}/scripts/"
 cp "${root}/scripts/python-package-release-metadata.py" "${fixture}/scripts/"
@@ -27,24 +29,37 @@ while IFS= read -r package; do
   cp "${root}/${path}" "${fixture}/${path}"
 done <<< "${all_packages}"
 
+while IFS= read -r manifest; do
+  mkdir -p "${fixture}/$(dirname "${manifest}")"
+  cp "${root}/${manifest}" "${fixture}/${manifest}"
+done < <(cd "${root}" && find crates -mindepth 2 -maxdepth 2 -name Cargo.toml -print | sort)
+
 while IFS= read -r path; do
   mkdir -p "${fixture}/$(dirname "${path}")"
   cp "${root}/${path}" "${fixture}/${path}"
 done <<'EOF'
-crates/inferlab/Cargo.toml
 .claude-plugin/marketplace.json
 plugins/inferlab/.claude-plugin/plugin.json
 plugins/inferlab/.codex-plugin/plugin.json
 plugins/inferlab/skills/inferlab/SKILL.md
+docs/workspace-authoring.md
+docs/backend-support.md
 protocol/fixtures/valid/plan-serve-response.json
 protocol/fixtures/valid/render-serve-response.json
 protocol/fixtures/valid/render-serve-response-launch-file.json
 EOF
 
+while IFS= read -r path; do
+  mkdir -p "${fixture}/$(dirname "${path}")"
+  cp "${root}/${path}" "${fixture}/${path}"
+done < <(cd "${root}" && find plugins/inferlab/skills/inferlab/references -type f -name '*.md' -print | sort)
+
 true_path="$(type -P true)"
 ln -s "${true_path}" "${fixture}/bin/cargo"
 cp "${root}/scripts/tests/fixtures/pixi-release.sh" "${fixture}/bin/pixi"
 chmod +x "${fixture}/bin/pixi"
+export INFERLAB_TEST_PIXI_PYTHON
+INFERLAB_TEST_PIXI_PYTHON="$(pixi run python -c 'import sys; print(sys.executable)')"
 
 workspace_inventory="$("${fixture}/scripts/python-package-inventory.sh" workspace-side)"
 release_owned_inventory="$("${fixture}/scripts/python-package-inventory.sh" release-owned)"
@@ -56,6 +71,20 @@ done <<< "${workspace_inventory}"
 protocol_fixtures=("${fixture}"/protocol/fixtures/valid/*-response*.json)
 workspace_hashes="$(sha256sum "${workspace_projects[@]}")"
 protocol_hashes="$(sha256sum "${protocol_fixtures[@]}")"
+product_projection_files=(
+  "${fixture}/Cargo.toml"
+  "${fixture}/.claude-plugin/marketplace.json"
+  "${fixture}/plugins/inferlab/.claude-plugin/plugin.json"
+  "${fixture}/plugins/inferlab/.codex-plugin/plugin.json"
+)
+while IFS= read -r manifest; do
+  product_projection_files+=("${fixture}/${manifest}")
+done < <(cd "${root}" && find crates -mindepth 2 -maxdepth 2 -name Cargo.toml -print | sort)
+while IFS= read -r package; do
+  product_projection_files+=("${fixture}/python/${package}/pyproject.toml")
+done <<< "${release_owned_inventory}"
+product_projection_hashes="$(sha256sum "${product_projection_files[@]}")"
+product_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "${fixture}/Cargo.toml" | head -1)"
 sdk_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' \
   "${fixture}/python/inferlab-adapter-sdk/pyproject.toml")"
 vllm_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' \
@@ -68,10 +97,10 @@ PATH="${fixture}/bin:${PATH}" \
 
 grep -Eq "^version = \"${target_product_version}\"$" "${fixture}/Cargo.toml" \
   || fail "product version was not updated"
-for dependency in inferlab-runtime inferlab-profiler inferlab-protocol inferlab-proxy inferlab-serve-domain; do
-  grep -Eq "^${dependency} = .*version = \"9\"" "${fixture}/crates/inferlab/Cargo.toml" \
-    || fail "${dependency} requirement did not follow the product major version"
-done
+while IFS= read -r dependency; do
+  echo "${dependency}" | grep -Eq 'version = "9"' \
+    || fail "internal Cargo requirement did not follow the product major version: ${dependency}"
+done < <(rg '^inferlab-[a-z-]+ = \{ path = .*version = ' "${fixture}/crates" -g Cargo.toml)
 while IFS= read -r package; do
   grep -Eq "^version = \"${target_product_version}\"$" \
     "${fixture}/python/${package}/pyproject.toml" \
@@ -94,15 +123,59 @@ printf '%s\n' "${protocol_hashes}" | sha256sum --check --quiet \
 grep -Eq "\"version\": \"${target_product_version}\"" \
   "${fixture}/plugins/inferlab/.codex-plugin/plugin.json" \
   || fail "embedded plugin did not follow the product version"
-for skill in plugins/inferlab/skills/inferlab/SKILL.md; do
-  grep -Fq "[${target_product_version} workspace authoring guide]" \
-    "${fixture}/${skill}" \
-    || fail "${skill} documentation link label did not follow the product version"
-  grep -Fq "/blob/v${target_product_version}/docs/workspace-authoring.md" \
-    "${fixture}/${skill}" \
-    || fail "${skill} documentation link did not follow the product version"
-done
-"${fixture}/scripts/check-product-release-version.sh" "v${target_product_version}"
+skill="plugins/inferlab/skills/inferlab/SKILL.md"
+grep -Fq '[workspace authoring guide](../../../../docs/workspace-authoring.md)' \
+  "${fixture}/${skill}" \
+  || fail "${skill} does not use the bundled workspace-authoring guide"
+grep -Fq '[backend support matrix](../../../../docs/backend-support.md)' \
+  "${fixture}/${skill}" \
+  || fail "${skill} does not use the bundled backend-support matrix"
+! grep -Eq '/blob/v[0-9]+\.[0-9]+\.[0-9]+/docs/' "${fixture}/${skill}" \
+  || fail "${skill} still makes documentation URLs a version projection"
+python3 - "${fixture}/plugins/inferlab/skills/inferlab" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+links = re.compile(r"\[[^]]+\]\(([^)]+)\)")
+files = [root / "SKILL.md", *sorted((root / "references").glob("*.md"))]
+for source in files:
+    for target in links.findall(source.read_text(encoding="utf-8")):
+        if target.startswith(("http://", "https://", "#")):
+            continue
+        path = (source.parent / target.split("#", 1)[0]).resolve()
+        if not path.is_file():
+            raise SystemExit(f"{source}: local skill reference does not exist: {target}")
+PY
+PATH="${fixture}/bin:${PATH}" \
+  "${fixture}/scripts/check-product-release-version.sh" "v${target_product_version}"
+
+PATH="${fixture}/bin:${PATH}" \
+  "${fixture}/scripts/bump-product-version.sh" "${product_version}" \
+  > "${temporary}/round-trip.out"
+printf '%s\n' "${product_projection_hashes}" | sha256sum --check --quiet \
+  || fail "a structured product-version projection did not round-trip exactly"
+
+bench_pyproject="${fixture}/python/inferlab-bench-runner/pyproject.toml"
+cp "${bench_pyproject}" "${temporary}/bench-pyproject.toml"
+sed -i \
+  "s/inferlab-measurement-sdk==${product_version}/inferlab-measurement-sdk==7.7.7/" \
+  "${bench_pyproject}"
+inconsistent_projection_hashes="$(sha256sum "${product_projection_files[@]}")"
+if PATH="${fixture}/bin:${PATH}" \
+  "${fixture}/scripts/bump-product-version.sh" "${target_product_version}" \
+  > "${temporary}/inconsistent.out" 2>&1; then
+  fail "product bump accepted inconsistent product-owned dependency metadata"
+fi
+grep -Fq "must select its product-owned dependency exactly at ${product_version}" \
+  "${temporary}/inconsistent.out" \
+  || fail "inconsistent product-owned dependency failure was not actionable"
+printf '%s\n' "${inconsistent_projection_hashes}" | sha256sum --check --quiet \
+  || fail "a failed product-version preflight partially updated a projection"
+cp "${temporary}/bench-pyproject.toml" "${bench_pyproject}"
 
 vllm_wheel="inferlab_integration_vllm-${vllm_version}-py3-none-any.whl"
 sdk_wheel="inferlab_adapter_sdk-${sdk_version}-py3-none-any.whl"

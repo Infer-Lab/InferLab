@@ -62,6 +62,11 @@ copy_python_tree \
 
 mkdir -p "${payload}/plugin"
 cp "${stage}/LICENSE" "${payload}/plugin/LICENSE"
+mkdir -p "${payload}/plugin/docs"
+cp \
+  "${stage}/docs/workspace-authoring.md" \
+  "${stage}/docs/backend-support.md" \
+  "${payload}/plugin/docs/"
 for directory in .claude-plugin .agents plugins; do
   copy_tree "${stage}/${directory}" "${payload}/plugin/${directory}"
 done

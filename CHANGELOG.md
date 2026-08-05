@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-05
+
+### Added
+
+- Serving Bench can materialize tokenizer-exact scalar prompts directly or
+  freeze locally rendered chat from the tokenizer default or a
+  definition-supplied template and kwargs. Both modes reconcile every
+  completed request with AIPerf's backend-observed input length and fail a
+  mismatch instead of reporting an inaccurate ISL.
+- Exact flat and locally rendered synthetic prompts accept either shared token
+  counts or per-entry ratios over one deterministic canonical prefix stream.
+  Fixed and distributed ISL populations support the complete range from zero
+  through full-prompt sharing while keeping declared geometry separate from
+  observed cache-read evidence.
+
+### Changed
+
+- Synthetic random and weighted-mixture Bench sources now require an explicit
+  prompt authority: `flat` and `rendered_chat` derive the completions route,
+  while `server_chat` retains structured messages and chat completions.
+  Dataset-backed requests and linear sessions remain server-rendered chat, and
+  the request endpoint is not an independently selectable Bench option.
+- Server-chat `shared_system_content` remains a pre-template compatibility
+  shape and cannot be combined with exact final-prompt prefix geometry. A
+  configured prefix ratio or full shared prompt does not by itself claim a
+  cache-hit percentage or decode-only execution.
+- The bundled agent skill now routes operators through an offline capability
+  map and focused references covering the complete CLI, workspace-authoring,
+  measurement, profiling, image, evidence, and plugin surfaces. CLI `--help`
+  also states command-specific dry-run, record, override, image,
+  profiling, and mutation boundaries at the point of use.
+
 ## [0.8.5] - 2026-08-05
 
 ### Changed

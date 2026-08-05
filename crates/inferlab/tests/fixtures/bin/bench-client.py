@@ -61,7 +61,7 @@ if args.prepare:
     materialization_identity = (
         catalog["materialization_identity"]
         if catalog is not None
-        else "inferlab-synthetic-prompt-target-v3"
+        else "inferlab-synthetic-prompt-authority-v4"
     )
     tpot_applicable = True
     if request_source is not None:
@@ -99,6 +99,7 @@ if args.prepare:
         "ineligible_reasons": {},
         "population": {
             "path": str(population_path),
+            "evidence_path": str(evidence_path),
             "sha256": population_digest.hexdigest(),
             "entries": required_entries,
             "tpot_applicable": tpot_applicable,

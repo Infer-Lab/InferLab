@@ -2,7 +2,7 @@
 
 use super::domain::{
     AggregateSloBound, BenchDatasetCatalog, BenchDatasetFilter, BenchSessionDatasetCatalog,
-    DatasetCacheState, ResolvedAggregateSlo, ResolvedBenchDefinition, ResolvedBenchPrefixSharing,
+    DatasetCacheState, ResolvedAggregateSlo, ResolvedBenchDefinition, ResolvedBenchPrompt,
     ResolvedBenchRandomShape, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
     ResolvedBenchSloPolicy, ResolvedBenchSource,
 };
@@ -22,9 +22,9 @@ use crate::server::ServerRecord;
 use crate::toml_override::InvocationOverride;
 use crate::toolchain::{self, InstalledBenchToolchain, InstalledEvalToolchain};
 use crate::workspace::{
-    AggregateSlo, BenchDefinition, BenchRequestSource, BenchSessionSource, BenchTpotApplicability,
-    EvalDefinition, RequestRate, WorkloadSuiteDefinition, WorkspaceConfig, WorkspaceSnapshot,
-    validate_bench, validate_eval,
+    AggregateSlo, BenchDefinition, BenchPrompt, BenchRequestSource, BenchSessionSource,
+    BenchTpotApplicability, EvalDefinition, RequestRate, WorkloadSuiteDefinition, WorkspaceConfig,
+    WorkspaceSnapshot, validate_bench, validate_eval,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -593,13 +593,19 @@ fn resolve_bench_definition(
             timeout_seconds,
             ..
         } => {
-            let source = match (request_source, session_source) {
-                (Some(request_source), None) => ResolvedBenchSource::Requests {
-                    request_source: resolve_bench_request_source(request_source)?,
-                },
-                (None, Some(session_source)) => ResolvedBenchSource::Sessions {
-                    session_source: resolve_bench_session_source(session_source)?,
-                },
+            let (source, prompt) = match (request_source, session_source) {
+                (Some(request_source), None) => (
+                    ResolvedBenchSource::Requests {
+                        request_source: resolve_bench_request_source(request_source)?,
+                    },
+                    resolved_request_source_prompt(request_source),
+                ),
+                (None, Some(session_source)) => (
+                    ResolvedBenchSource::Sessions {
+                        session_source: resolve_bench_session_source(session_source)?,
+                    },
+                    ResolvedBenchPrompt::from_definition(&BenchPrompt::ServerChat),
+                ),
                 _ => {
                     return Err(InferlabError::InvalidConfig {
                         message:
@@ -610,6 +616,7 @@ fn resolve_bench_definition(
             };
             Ok(ResolvedBenchDefinition {
                 source,
+                prompt,
                 server_metrics: *server_metrics,
                 seed: *seed,
                 request_body: request_body.clone(),
@@ -631,6 +638,7 @@ fn resolve_bench_definition(
             source: ResolvedBenchSource::Requests {
                 request_source: resolve_bench_request_source(request_source)?,
             },
+            prompt: resolved_request_source_prompt(request_source),
             server_metrics: *server_metrics,
             seed: *seed,
             request_body: request_body.clone(),
@@ -638,6 +646,18 @@ fn resolve_bench_definition(
             timeout_seconds: *timeout_seconds,
             reset_prefix_cache: *reset_prefix_cache,
         }),
+    }
+}
+
+fn resolved_request_source_prompt(source: &BenchRequestSource) -> ResolvedBenchPrompt {
+    match source {
+        BenchRequestSource::Random { prompt, .. }
+        | BenchRequestSource::RandomMixture { prompt, .. } => {
+            ResolvedBenchPrompt::from_definition(prompt)
+        }
+        BenchRequestSource::Dataset { .. } => {
+            ResolvedBenchPrompt::from_definition(&BenchPrompt::ServerChat)
+        }
     }
 }
 
@@ -689,37 +709,22 @@ fn resolve_bench_request_source(
 ) -> Result<ResolvedBenchRequestSource, InferlabError> {
     match source {
         BenchRequestSource::Random {
+            prompt: _,
             input_tokens,
             output_tokens,
             prefix_sharing,
+            shared_system_content,
+        } => Ok(ResolvedBenchRequestSource::Random {
+            input_tokens: input_tokens.clone(),
+            output_tokens: output_tokens.clone(),
+            prefix_sharing: prefix_sharing.clone(),
+            shared_system_content: shared_system_content.clone(),
+        }),
+        BenchRequestSource::RandomMixture {
+            prompt: _,
+            shapes,
+            prefix_sharing,
         } => {
-            let prefix_sharing = match prefix_sharing {
-                Some(sharing) => {
-                    let fixed_input =
-                        input_tokens
-                            .fixed_value()
-                            .ok_or_else(|| InferlabError::InvalidConfig {
-                                message:
-                                    "resolved Bench prefix sharing requires fixed input_tokens"
-                                        .to_owned(),
-                            })?;
-                    let shared_prefix_tokens =
-                        (f64::from(fixed_input) * sharing.shared_prefix_ratio).floor() as u32;
-                    Some(ResolvedBenchPrefixSharing {
-                        shared_prefix_ratio: sharing.shared_prefix_ratio,
-                        shared_prefix_tokens,
-                        unique_suffix_tokens: fixed_input - shared_prefix_tokens,
-                    })
-                }
-                None => None,
-            };
-            Ok(ResolvedBenchRequestSource::Random {
-                input_tokens: input_tokens.clone(),
-                output_tokens: output_tokens.clone(),
-                prefix_sharing,
-            })
-        }
-        BenchRequestSource::RandomMixture { shapes } => {
             let total_weight = shapes.iter().try_fold(0_u64, |total, shape| {
                 total.checked_add(u64::from(shape.weight)).ok_or_else(|| {
                     InferlabError::InvalidConfig {
@@ -739,6 +744,7 @@ fn resolve_bench_request_source(
                     })
                     .collect(),
                 total_weight,
+                prefix_sharing: prefix_sharing.clone(),
             })
         }
         BenchRequestSource::Dataset {
@@ -1024,13 +1030,16 @@ pub fn resolved_request_count(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedBenchPrefixSharing, ResolvedBenchRequestSource, apply_bench_overrides,
+        ResolvedBenchPrompt, ResolvedBenchRequestSource, apply_bench_overrides,
         required_population_count, resolve_bench_definition, resolve_bench_execution,
         resolve_bench_request_source,
     };
     use crate::toml_override::InvocationOverride;
+    use crate::workload::domain::{
+        BenchPromptRoute, BenchRenderingAuthority, BenchRequestRepresentation,
+    };
     use crate::workspace::{
-        BenchDefinition, BenchPrefixSharing, BenchRandomShape, BenchRequestSource,
+        BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchRandomShape, BenchRequestSource,
         BenchTokenSelector, validate_bench,
     };
 
@@ -1038,13 +1047,16 @@ mod tests {
     fn synthetic_request_sources_resolve_effective_prefix_and_total_weight()
     -> Result<(), Box<dyn std::error::Error>> {
         let prefix = resolve_bench_request_source(&BenchRequestSource::Random {
+            prompt: BenchPrompt::Flat,
             input_tokens: BenchTokenSelector::Fixed(8000),
             output_tokens: BenchTokenSelector::Fixed(1000),
-            prefix_sharing: Some(BenchPrefixSharing {
+            prefix_sharing: Some(BenchPrefixSharing::Ratio {
                 shared_prefix_ratio: 0.75,
             }),
+            shared_system_content: None,
         })?;
         let mixture = resolve_bench_request_source(&BenchRequestSource::RandomMixture {
+            prompt: BenchPrompt::ServerChat,
             shapes: vec![
                 BenchRandomShape {
                     input_tokens: 1024,
@@ -1057,15 +1069,24 @@ mod tests {
                     weight: 3,
                 },
             ],
+            prefix_sharing: None,
         })?;
+        let prompt = ResolvedBenchPrompt::from_definition(&BenchPrompt::Flat);
 
+        assert!(matches!(
+            prompt,
+            ResolvedBenchPrompt {
+                definition: BenchPrompt::Flat,
+                request_representation: BenchRequestRepresentation::FlatPrompt,
+                route: BenchPromptRoute::Completions,
+                rendering_authority: BenchRenderingAuthority::LocalFlat,
+            }
+        ));
         assert!(matches!(
             prefix,
             ResolvedBenchRequestSource::Random {
-                prefix_sharing: Some(ResolvedBenchPrefixSharing {
+                prefix_sharing: Some(BenchPrefixSharing::Ratio {
                     shared_prefix_ratio: 0.75,
-                    shared_prefix_tokens: 6000,
-                    unique_suffix_tokens: 2000,
                 }),
                 ..
             }

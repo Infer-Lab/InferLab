@@ -17,6 +17,7 @@ from inferlab_measurement_sdk import (
     BenchLoadInputRequestRateLimited,
     BenchLoadInputUnboundedRequestRate,
     BenchNativeInvocation,
+    BenchPromptRouteInput,
     BenchRequestSloInput,
     BenchRequestSourceInputDataset,
     BenchRequestSourceInputRandom,
@@ -167,16 +168,29 @@ def inference_request_config(request: BenchClientRequest) -> JsonObject:
     definition_body: JsonObject = {
         key: plain_setting(value) for key, value in request.definition.request_body.items()
     }
-    selected_path = request.endpoint.chat_completions_path
+    selected_name, selected_path, _ = selected_endpoint(request)
+    prompt = request.definition.prompt.root
     return {
         "schema_version": 1,
-        "selected_named_route": "chat_completions_path",
+        "selected_named_route": selected_name,
         "effective_public_url": endpoint_url(request.endpoint, selected_path),
+        "prompt_authority": {
+            "kind": prompt.kind,
+            "request_representation": prompt.request_representation.value,
+            "route": prompt.route.value,
+            "rendering_authority": prompt.rendering_authority.value,
+        },
         "definition_request_body": definition_body,
         "aiperf_client_defaults": aiperf_client_defaults(request),
         "effective_request_body": effective_request_body(request),
         "replaced_defaults": replaced_defaults(aiperf_client_defaults(request), definition_body),
     }
+
+
+def selected_endpoint(request: BenchClientRequest) -> tuple[str, str, str]:
+    if request.definition.prompt.root.route == BenchPromptRouteInput.completions:
+        return "completions_path", request.endpoint.completions_path, "completions"
+    return "chat_completions_path", request.endpoint.chat_completions_path, "chat"
 
 
 def aiperf_slos(slo: BenchRequestSloInput) -> JsonObject:
@@ -259,24 +273,22 @@ def resolve_aiperf_population(request: BenchClientRequest) -> AiperfRequestPopul
         output_tokens = fixed_tokens(source.output_tokens)
         if input_tokens is None or output_tokens is None:
             raise ValueError("variable random shapes require a materialized population")
+        if source.prefix_sharing is not None or source.shared_system_content is not None:
+            raise ValueError("synthetic sharing requires a materialized population")
         dataset: JsonObject = {
             "type": "synthetic",
             "entries": entries,
             "randomSeed": request.definition.seed,
             "sampling": "sequential",
             "prompts": {
-                "isl": source.prefix_sharing.unique_suffix_tokens
-                if source.prefix_sharing is not None
-                else input_tokens,
+                "isl": input_tokens,
                 "osl": output_tokens,
             },
         }
-        if source.prefix_sharing is not None:
-            dataset["prefixPrompts"] = {
-                "sharedSystemLength": source.prefix_sharing.shared_prefix_tokens
-            }
         tpot_applicable = output_tokens >= 2
     elif isinstance(source, BenchRequestSourceInputRandomMixture):
+        if source.prefix_sharing is not None:
+            raise ValueError("synthetic sharing requires a materialized population")
         if source.total_weight <= 0:
             raise ValueError("random_mixture Bench request has no positive total weight")
         probabilities: list[JsonObject] = [
@@ -311,16 +323,16 @@ def aiperf_config(
     population = population or resolve_aiperf_population(request)
     endpoint = request.endpoint
     definition = request.definition
-    selected_path = endpoint.chat_completions_path
+    _, selected_path, endpoint_type = selected_endpoint(request)
     url, aiperf_path = aiperf_endpoint_route(request, selected_path)
     endpoint_extra = effective_request_body(request)
     chat_template = endpoint_extra.get("chat_template")
-    if isinstance(chat_template, str):
+    if endpoint_type == "chat" and isinstance(chat_template, str):
         endpoint_extra["chat_template"] = "{{ " + json.dumps(chat_template) + " }}"
     endpoint_config: JsonObject = {
         "url": url,
         "path": aiperf_path,
-        "type": "chat",
+        "type": endpoint_type,
         "streaming": True,
         "timeout": deadline.remaining(),
         "useServerTokenCount": True,

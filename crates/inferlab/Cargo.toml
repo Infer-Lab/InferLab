@@ -26,11 +26,11 @@ clap.workspace = true
 crossterm.workspace = true
 flate2.workspace = true
 fs2.workspace = true
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.8" }
-inferlab-profiler = { path = "../inferlab-profiler", version = "0.8" }
-inferlab-proxy = { path = "../inferlab-proxy", version = "0.8" }
-inferlab-runtime = { path = "../inferlab-runtime", version = "0.8" }
-inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.8" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.9" }
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.9" }
+inferlab-proxy = { path = "../inferlab-proxy", version = "0.9" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.9" }
+inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.9" }
 humantime.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true

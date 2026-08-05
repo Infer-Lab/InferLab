@@ -490,13 +490,19 @@ const fn default_inter_turn_delay_scale() -> f64 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BenchRequestSource {
     Random {
+        prompt: BenchPrompt,
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_sharing: Option<BenchPrefixSharing>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shared_system_content: Option<BenchSharedSystemContent>,
     },
     RandomMixture {
+        prompt: BenchPrompt,
         shapes: Vec<BenchRandomShape>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_sharing: Option<BenchPrefixSharing>,
     },
     Dataset {
         dataset: String,
@@ -506,6 +512,19 @@ pub enum BenchRequestSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u32>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BenchPrompt {
+    Flat,
+    RenderedChat {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_template: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        chat_template_kwargs: BTreeMap<String, JsonValue>,
+    },
+    ServerChat,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -560,10 +579,10 @@ impl Serialize for BenchTokenSelector {
 }
 
 impl BenchTokenSelector {
-    pub const fn fixed_value(&self) -> Option<u32> {
+    pub const fn minimum(&self) -> u32 {
         match self {
-            Self::Fixed(value) => Some(*value),
-            Self::InclusiveUniform { .. } => None,
+            Self::Fixed(value) => *value,
+            Self::InclusiveUniform { min, .. } => *min,
         }
     }
 
@@ -577,9 +596,17 @@ impl BenchTokenSelector {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BenchPrefixSharing {
-    pub shared_prefix_ratio: f64,
+#[serde(untagged)]
+pub enum BenchPrefixSharing {
+    Tokens { shared_prefix_tokens: u32 },
+    Ratio { shared_prefix_ratio: f64 },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum BenchSharedSystemContent {
+    Tokens { tokens: u32 },
+    Ratio { ratio: f64 },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -594,7 +621,7 @@ impl BenchRequestSource {
     pub fn tpot_applicability(&self) -> BenchTpotApplicability {
         match self {
             Self::Random { output_tokens, .. } => output_tokens.tpot_applicability(),
-            Self::RandomMixture { shapes } => shapes
+            Self::RandomMixture { shapes, .. } => shapes
                 .first()
                 .map_or(BenchTpotApplicability::Inapplicable, |shape| {
                     BenchTpotApplicability::from_output_tokens(shape.output_tokens)

@@ -104,6 +104,7 @@ fn weighted_random_mixture_fixture_round_trips() -> Result<(), Box<dyn Error>> {
     let BenchRequestSourceInput::RandomMixture {
         shapes,
         total_weight,
+        ..
     } = request
         .definition
         .request_source

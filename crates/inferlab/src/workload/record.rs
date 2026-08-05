@@ -7,15 +7,15 @@ pub(super) use crate::record::write_json;
 use crate::record::{RECORD_FILE, RECORDS_DIR, now_unix_ms, validate_record_id};
 use crate::workload::adaptive::AdaptiveTerminationReason;
 use crate::workload::domain::{
-    BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchPrefixSharing,
-    ResolvedBenchRandomShape, WorkloadHttpMethod,
+    BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchRandomShape, WorkloadHttpMethod,
 };
 use crate::workload::{BenchPlan, ResolvedWorkloadPlan};
-use crate::workspace::BenchTokenSelector;
+use crate::workspace::{BenchPrefixSharing, BenchSharedSystemContent, BenchTokenSelector};
 use inferlab_profiler::record::CaptureRecord;
 use inferlab_protocol::{
-    BenchNativeInvocation, BenchPopulationPreparationResult, BenchSessionResultEvidence,
-    EvalFailureKind, EvalMetricGate, EvalNormalizedMetric, EvalTrialSummary, RawArtifact,
+    BenchNativeInvocation, BenchPopulationPreparationResult, BenchPromptTokenReconciliation,
+    BenchSessionResultEvidence, EvalFailureKind, EvalMetricGate, EvalNormalizedMetric,
+    EvalTrialSummary, RawArtifact,
 };
 use inferlab_runtime::operation_bound::OperationTimingEvidence;
 use serde::{Deserialize, Serialize};
@@ -116,13 +116,17 @@ pub enum BenchRequestSourceEvidence {
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
         #[serde(default)]
-        prefix_sharing: Option<ResolvedBenchPrefixSharing>,
+        prefix_sharing: Option<BenchPrefixSharing>,
+        #[serde(default)]
+        shared_system_content: Option<BenchSharedSystemContent>,
         #[serde(default)]
         preparation: Option<BenchPopulationPreparationEvidence>,
     },
     RandomMixture {
         shapes: Vec<ResolvedBenchRandomShape>,
         total_weight: u64,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharing>,
         #[serde(default)]
         preparation: Option<BenchPopulationPreparationEvidence>,
     },
@@ -301,6 +305,8 @@ pub struct BenchCaseEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<BenchSessionResultEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_invocations: Vec<BenchNativeInvocation>,
 }
 
@@ -340,7 +346,7 @@ pub struct WorkloadRecord {
 }
 
 impl WorkloadRecord {
-    const SCHEMA_VERSION: u32 = 10;
+    const SCHEMA_VERSION: u32 = 11;
 }
 
 pub(super) struct WorkloadRecordSession {

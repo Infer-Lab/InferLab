@@ -544,7 +544,7 @@ timeout_seconds = 900
 
 [benches.c8k1k]
 kind = \"serving\"
-request_source = { kind = \"random\", input_tokens = 8192, output_tokens = 1024 }
+request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }
 concurrency = [1, 4]
 prompts_per_concurrency = 4
 request_rates = [1.0, \"inf\"]
@@ -555,7 +555,7 @@ timeout_seconds = 900
 
 [benches.adaptive-c8k1k]
 kind = \"adaptive-serving\"
-request_source = { kind = \"random\", input_tokens = 8192, output_tokens = 1024 }
+request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }
 initial_request_rates = [1.0, 4.0]
 aggregate_slos = [
     { metric = \"request_throughput\", at_least = 1.0 },
@@ -2543,6 +2543,15 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
     assert_eq!(
         bench["client"]["effective_definition"]["request_body"],
         serde_json::json!({"temperature": 1.0})
+    );
+    assert_eq!(
+        bench["client"]["effective_definition"]["prompt"],
+        serde_json::json!({
+            "kind": "server_chat",
+            "request_representation": "structured_messages",
+            "route": "chat_completions",
+            "rendering_authority": "server"
+        })
     );
     assert_eq!(bench["client"]["tpot_applicability"], "applicable");
     assert_eq!(

@@ -15,6 +15,7 @@ python-build = "1.*"
 hatchling = ">=1.27,<2"
 packaging = ">=24,<27"
 uv = "0.*"
+tomlkit = "0.*"
 
 [pypi-dependencies]
 inferlab-adapter-sdk = { path = "python/inferlab-adapter-sdk", editable = true }

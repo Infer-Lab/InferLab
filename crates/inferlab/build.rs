@@ -139,7 +139,17 @@ fn plugin_sources(manifest_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dy
     }
 
     let repository = manifest_dir.join("../..");
-    let mut sources = vec![(PathBuf::from("LICENSE"), repository.join("LICENSE"))];
+    let mut sources = vec![
+        (PathBuf::from("LICENSE"), repository.join("LICENSE")),
+        (
+            PathBuf::from("docs/workspace-authoring.md"),
+            repository.join("docs/workspace-authoring.md"),
+        ),
+        (
+            PathBuf::from("docs/backend-support.md"),
+            repository.join("docs/backend-support.md"),
+        ),
+    ];
     for top in [".claude-plugin", ".agents", "plugins"] {
         let root = repository.join(top);
         println!("cargo:rerun-if-changed={}", root.display());

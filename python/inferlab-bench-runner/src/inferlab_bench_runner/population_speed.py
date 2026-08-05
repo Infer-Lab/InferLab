@@ -165,6 +165,7 @@ def prepare_speed_bench_population(
         ineligible_reasons=ineligible_reasons,
         population=BenchPopulationInput(
             path=str(population_path),
+            evidence_path=str(evidence_path),
             sha256=population_digest.hexdigest(),
             entries=required,
             tpot_applicable=True,

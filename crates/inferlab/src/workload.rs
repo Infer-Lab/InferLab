@@ -35,7 +35,7 @@ mod tests {
         let both = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 session_source = { dataset = "sharegpt", max_input_tokens = 8192 }
 concurrency = [1]
 sessions_per_concurrency = 1
@@ -69,7 +69,7 @@ timeout_seconds = 60
         let adaptive = toml::from_str::<BenchDefinition>(
             r#"
 kind = "adaptive-serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 session_source = { dataset = "sharegpt", max_input_tokens = 8192 }
 initial_request_rates = [1.0]
 request_count = 1

@@ -10,11 +10,21 @@ OUT="${1:?usage: pack-plugin.sh <out.tar.gz>}"
 tar --sort=name \
     --owner=root --group=root --numeric-owner \
     --mtime='2026-01-01 00:00:00 UTC' \
-    -cf - LICENSE .claude-plugin/ .agents/ plugins/ | gzip -n > "$OUT"
+    -cf - \
+    LICENSE \
+    docs/workspace-authoring.md \
+    docs/backend-support.md \
+    .claude-plugin/ \
+    .agents/ \
+    plugins/ \
+  | gzip -n > "$OUT"
 
 # License retention (RFC-0001:C-LICENSE-RETENTION): the plugin package packs
 # the notice, asserted here.
 tar -tzf "$OUT" | grep -q '^LICENSE$'
 tar -tzf "$OUT" | grep -q '^plugins/inferlab/skills/inferlab/SKILL.md$'
+tar -tzf "$OUT" | grep -q '^plugins/inferlab/skills/inferlab/references/capability-map.md$'
+tar -tzf "$OUT" | grep -q '^docs/workspace-authoring.md$'
+tar -tzf "$OUT" | grep -q '^docs/backend-support.md$'
 tar -tzf "$OUT" | grep -q '^.claude-plugin/marketplace.json$'
 tar -tzf "$OUT" | grep -q '^.agents/plugins/marketplace.json$'

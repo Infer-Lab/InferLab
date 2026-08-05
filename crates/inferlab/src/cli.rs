@@ -17,11 +17,15 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod help;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "inferlab",
     version,
-    about = "Inference optimization control plane"
+    about = "Inference optimization control plane",
+    long_about = help::ROOT,
+    after_long_help = help::ROOT_EXAMPLES
 )]
 pub struct Cli {
     /// Workspace root. By default InferLab searches the current directory and its parents.
@@ -35,6 +39,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Observe the current workspace in a view-only terminal interface.
+    #[command(long_about = help::TUI, after_long_help = help::TUI_KEYS)]
     Tui(TuiArgs),
     /// Maintain the committed workspace.
     #[command(subcommand)]
@@ -52,8 +57,10 @@ enum Command {
     #[command(subcommand)]
     Recipe(RecipeCommand),
     /// Run one named Bench against an explicit managed server.
+    #[command(long_about = help::BENCH)]
     Bench(BenchArgs),
     /// Execute one command inside a selected stack realization.
+    #[command(long_about = help::RUN, after_long_help = help::RUN_EXAMPLES)]
     Run(RunArgs),
     /// Produce and validate runtime images from the workspace.
     #[command(subcommand)]
@@ -82,12 +89,16 @@ struct TuiArgs {
 enum AgentCommand {
     /// Install the plugin. Defaults to the package embedded in this binary;
     /// `--from-checkout` overrides the source.
+    #[command(long_about = help::AGENT_INSTALL)]
     Install(AgentInstallArgs),
     /// Update the installed plugin through its marketplace.
+    #[command(long_about = help::AGENT_UPDATE)]
     Update(AgentSelectArgs),
     /// Uninstall the plugin.
+    #[command(long_about = help::AGENT_UNINSTALL)]
     Uninstall(AgentSelectArgs),
     /// Diagnose native agent CLIs and registered InferLab marketplace sources.
+    #[command(long_about = help::AGENT_DOCTOR)]
     Doctor(AgentSelectArgs),
 }
 
@@ -114,8 +125,10 @@ struct AgentSelectArgs {
 #[derive(Debug, Subcommand)]
 enum ScratchpadCommand {
     /// Append an entry to the workspace journal.
+    #[command(long_about = help::SCRATCHPAD_NOTE)]
     Note(ScratchpadNoteArgs),
     /// Render the journal chronologically, leading with the recent tail.
+    #[command(long_about = help::SCRATCHPAD_SHOW)]
     Show(ScratchpadShowArgs),
 }
 
@@ -152,6 +165,7 @@ struct ScratchpadShowArgs {
 #[derive(Debug, Subcommand)]
 enum ImageCommand {
     /// Resolve, assemble, inspect, export on request, and validate one image.
+    #[command(long_about = help::IMAGE_BUILD, after_long_help = help::IMAGE_BUILD_EXAMPLES)]
     Build(ImageBuildArgs),
 }
 
@@ -286,18 +300,21 @@ struct StackStatusArgs {
 #[derive(Debug, Subcommand)]
 enum StackCommand {
     /// Report whether selected stack realizations are confirmed usable.
+    #[command(long_about = help::STACK_STATUS)]
     Status(StackStatusArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum ToolchainCommand {
     /// Install the Eval and Bench runtimes fixed by this InferLab release.
+    #[command(long_about = help::TOOLCHAIN_INSTALL)]
     Install,
 }
 
 #[derive(Debug, Subcommand)]
 enum ServeCommand {
     /// Resolve and start one named server.
+    #[command(long_about = help::SERVE_START, after_long_help = help::SERVE_START_EXAMPLES)]
     Start(ServeStartArgs),
     /// Inspect one managed server record and its observed process state.
     Status(RecordArgs),
@@ -310,6 +327,7 @@ enum ServeCommand {
 #[derive(Debug, Subcommand)]
 enum RecipeCommand {
     /// Resolve and run one recipe as a closed loop.
+    #[command(long_about = help::RECIPE_RUN, after_long_help = help::RECIPE_RUN_EXAMPLES)]
     Run(RecipeRunArgs),
 }
 
@@ -332,10 +350,8 @@ struct SelectionArgs {
     #[arg(long, value_name = "PLACEMENT")]
     placement: Option<String>,
 
-    /// Apply a typed TOML patch, for example
-    /// `server.readiness_timeout_seconds=1800`. Recipe runs also accept
-    /// selected measurement paths such as `evals.gsm8k.limit=100`.
-    #[arg(long = "set", value_name = "PATH=VALUE")]
+    /// Apply a typed invocation patch. May be repeated.
+    #[arg(long = "set", value_name = "PATH=VALUE", long_help = help::SELECTION_OVERRIDE)]
     overrides: Vec<String>,
 
     /// Alternate machine-local bindings file.
@@ -353,7 +369,7 @@ struct SelectionArgs {
     #[arg(long, value_name = "EXTERNAL_IMAGE", conflicts_with = "image")]
     external_image: Option<String>,
 
-    /// Resolve and validate without launching a server or measurement.
+    /// Resolve and validate without launching a server or running a measurement.
     #[arg(long)]
     dry_run: bool,
 }
@@ -376,7 +392,9 @@ struct RecipeRunArgs {
 /// exclusive group, an explicit stack belongs to the local realization
 /// only, and mounts and device selections exist only where a container does.
 #[derive(Debug, Args)]
-#[command(group = clap::ArgGroup::new("container-image").args(["image", "external_image"]))]
+#[command(
+    group = clap::ArgGroup::new("container-image").args(["image", "external_image"])
+)]
 struct RunArgs {
     /// Workspace stack to activate. Defaults to the single declared stack;
     /// required when the workspace declares more than one.
@@ -423,8 +441,8 @@ struct BenchArgs {
     #[arg(long, value_name = "SERVER_RECORD_ID")]
     serve: String,
 
-    /// Override one typed Bench field with a TOML value.
-    #[arg(long = "set", value_name = "PATH=VALUE")]
+    /// Override one typed Bench field. May be repeated.
+    #[arg(long = "set", value_name = "PATH=VALUE", long_help = help::BENCH_OVERRIDE)]
     overrides: Vec<String>,
 
     /// Capture this Bench with Nsight Systems.

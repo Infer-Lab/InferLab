@@ -25,7 +25,7 @@ from .aiperf import (
 from .population import load_chat_tokenizer
 from .result_metrics import NORMALIZATION_SCHEMA, normalize_summary
 from .result_policy import request_slo_evidence, warmup_counts, warmup_error
-from .result_population import population_identity_error
+from .result_population import population_identity_error, prompt_token_reconciliation
 from .result_records import request_counts
 from .result_sessions import session_result_evidence
 
@@ -82,6 +82,9 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         ) = request_slo_evidence(records_path, request.case.request_count, request_slo, summary)
     phase_error = warmup_error(warmup_counts(raw_records_path, request.case.warmup_request_count))
     identity_error = population_identity_error(request, records_path, raw_records_path)
+    prompt_reconciliation, prompt_reconciliation_error = prompt_token_reconciliation(
+        request, records_path
+    )
     session_evidence = None
     session_error: str | None = None
     if request.definition.session_source is not None:
@@ -113,6 +116,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         or count_error is not None
         or phase_error is not None
         or identity_error is not None
+        or prompt_reconciliation_error is not None
         or session_error is not None
         or summary_error is not None
     ):
@@ -130,6 +134,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = phase_error
         elif identity_error is not None:
             reason = identity_error
+        elif prompt_reconciliation_error is not None:
+            reason = prompt_reconciliation_error
         elif session_error is not None:
             reason = session_error
         else:
@@ -140,6 +146,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = f"{reason}; {phase_error}"
         if identity_error is not None and identity_error != reason:
             reason = f"{reason}; {identity_error}"
+        if prompt_reconciliation_error is not None and prompt_reconciliation_error != reason:
+            reason = f"{reason}; {prompt_reconciliation_error}"
         if session_error is not None and session_error != reason:
             reason = f"{reason}; {session_error}"
         return BenchClientResult(
@@ -151,6 +159,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             metrics={},
             request_slo=request_slo_result,
             session_evidence=session_evidence,
+            prompt_token_reconciliation=prompt_reconciliation,
             native_command=command,
             native_exit_code=native_exit_code,
             raw_artifacts=artifacts,
@@ -203,6 +212,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         metrics=metrics,
         request_slo=request_slo_result,
         session_evidence=session_evidence,
+        prompt_token_reconciliation=prompt_reconciliation,
         native_command=command,
         native_exit_code=native_exit_code,
         report_invocations=report_invocations,

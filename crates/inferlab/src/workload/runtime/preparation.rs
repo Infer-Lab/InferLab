@@ -12,6 +12,7 @@ use crate::InferlabError;
 use crate::progress::{Phase, Progress};
 use crate::workload::plan::session_population_layout;
 use crate::workload::wire;
+use crate::workspace::BenchPrompt;
 use inferlab_protocol::{
     BenchPopulationPreparationRequest, BenchPopulationPreparationResult, ClientStatus,
     ProtocolVersion,
@@ -36,12 +37,14 @@ pub(super) fn prepare_bench_request_source(
                 input_tokens,
                 output_tokens,
                 prefix_sharing,
+                shared_system_content,
             } => {
                 let preparation = run_population_preparation(plan, session, progress, None)?;
                 session.set_bench_request_source(BenchRequestSourceEvidence::Random {
                     input_tokens,
                     output_tokens,
                     prefix_sharing,
+                    shared_system_content,
                     preparation: Some(preparation.0.clone()),
                 })?;
                 finish_population_preparation(
@@ -55,11 +58,13 @@ pub(super) fn prepare_bench_request_source(
             ResolvedBenchRequestSource::RandomMixture {
                 shapes,
                 total_weight,
+                prefix_sharing,
             } => {
                 let preparation = run_population_preparation(plan, session, progress, None)?;
                 session.set_bench_request_source(BenchRequestSourceEvidence::RandomMixture {
                     shapes,
                     total_weight,
+                    prefix_sharing,
                     preparation: Some(preparation.0.clone()),
                 })?;
                 finish_population_preparation(
@@ -195,7 +200,7 @@ pub(super) fn run_population_preparation(
             .log(session.absolute(&paths.stderr)),
     )?;
     let (request_source, session_source) =
-        wire::bench_source_inputs(&plan.client.effective_definition);
+        wire::bench_source_inputs(&plan.client.effective_definition)?;
     let request = BenchPopulationPreparationRequest {
         protocol_version: ProtocolVersion::V7,
         model: wire::model_input(&plan.client.model),
@@ -203,6 +208,7 @@ pub(super) fn run_population_preparation(
         transformers_version: plan.client.toolchain.transformers_version.clone(),
         request_source,
         session_source,
+        prompt: wire::prompt_input(&plan.client.effective_definition.prompt)?,
         source_path,
         required_entries: plan.client.required_population_count,
         seed: plan.client.effective_definition.seed,
@@ -249,11 +255,19 @@ pub(super) fn finish_population_preparation(
             message: "population preparation returned no result".to_owned(),
         })?;
     validate_population_preparation(plan, expected_materialization_identity, result)?;
+    let evidence_path =
+        result
+            .evidence_path
+            .as_ref()
+            .ok_or_else(|| InferlabError::DatasetPreparation {
+                message: "successful population preparation omitted its evidence path".to_owned(),
+            })?;
     plan.client.population = result
         .population
         .as_ref()
         .map(|population| BenchPopulation {
             path: population.path.clone(),
+            evidence_path: evidence_path.clone(),
             sha256: population.sha256.clone(),
             entries: population.entries,
             tpot_applicable: population.tpot_applicable,
@@ -591,13 +605,26 @@ pub(super) fn validate_population_preparation(
             ),
         });
     }
-    let synthetic = matches!(
-        &plan.client.effective_definition.source,
-        ResolvedBenchSource::Requests {
-            request_source: ResolvedBenchRequestSource::Random { .. }
-                | ResolvedBenchRequestSource::RandomMixture { .. }
-        }
-    );
+    let (synthetic, prefix_declared, shared_system_declared) =
+        match &plan.client.effective_definition.source {
+            ResolvedBenchSource::Requests {
+                request_source:
+                    ResolvedBenchRequestSource::Random {
+                        prefix_sharing,
+                        shared_system_content,
+                        ..
+                    },
+            } => (
+                true,
+                prefix_sharing.is_some(),
+                shared_system_content.is_some(),
+            ),
+            ResolvedBenchSource::Requests {
+                request_source: ResolvedBenchRequestSource::RandomMixture { prefix_sharing, .. },
+            } => (true, prefix_sharing.is_some(), false),
+            _ => (false, false, false),
+        };
+    let synthetic_prompt = synthetic.then_some(&plan.client.effective_definition.prompt.definition);
     match (synthetic, result.prompt_token_targeting.as_ref()) {
         (true, Some(targeting)) => {
             let Some(total_entries) = targeting
@@ -626,12 +653,28 @@ pub(super) fn validate_population_preparation(
                         template.sha256
                             == format!("{:x}", Sha256::digest(template.content.as_bytes()))
                     });
+            let template_policy_valid = match synthetic_prompt {
+                Some(BenchPrompt::Flat) => {
+                    targeting.exact_entries == population.entries
+                        && targeting.fallback_entries == 0
+                        && targeting.projection_template.is_none()
+                }
+                Some(BenchPrompt::RenderedChat { .. }) => {
+                    targeting.exact_entries == population.entries
+                        && targeting.fallback_entries == 0
+                        && targeting.projection_template.is_some()
+                }
+                Some(BenchPrompt::ServerChat) => {
+                    targeting.exact_entries == 0 || targeting.projection_template.is_some()
+                }
+                None => false,
+            };
             if total_entries != population.entries
                 || fallback_reason_entries != Some(targeting.fallback_entries)
                 || !valid_token_summary(&targeting.selected_prompt_tokens)
                 || !valid_token_summary(&targeting.pre_template_content_tokens)
                 || result.input_tokens.as_ref() != Some(&targeting.selected_prompt_tokens)
-                || (targeting.exact_entries > 0 && targeting.projection_template.is_none())
+                || !template_policy_valid
                 || !projection_template_valid
             {
                 return Err(InferlabError::DatasetPreparation {
@@ -651,6 +694,35 @@ pub(super) fn validate_population_preparation(
             });
         }
         (false, None) => {}
+    }
+    match (prefix_declared, result.prefix_geometry.as_ref()) {
+        (true, Some(summary))
+            if valid_token_summary_allow_zero(&summary.shared_prefix_tokens)
+                && valid_token_summary_allow_zero(&summary.unique_suffix_tokens)
+                && summary.maximum_shared_prefix_tokens == summary.shared_prefix_tokens.maximum
+                && summary.full_prompt_entries <= population.entries
+                && summary.canonical_prefix_sha256.len() == 64 => {}
+        (false, None) => {}
+        _ => {
+            return Err(InferlabError::DatasetPreparation {
+                message: "synthetic prefix-geometry summary is not reconciled".to_owned(),
+            });
+        }
+    }
+    match (
+        shared_system_declared,
+        result.shared_system_content.as_ref(),
+    ) {
+        (true, Some(summary))
+            if valid_token_summary(&summary.system_content_tokens)
+                && valid_token_summary(&summary.user_content_tokens)
+                && summary.canonical_system_content_sha256.len() == 64 => {}
+        (false, None) => {}
+        _ => {
+            return Err(InferlabError::DatasetPreparation {
+                message: "synthetic shared-system-content summary is not reconciled".to_owned(),
+            });
+        }
     }
     let session_backed = matches!(
         plan.client.effective_definition.source,
@@ -710,12 +782,25 @@ pub(super) fn validate_population_preparation(
             message: "successful population preparation omitted its evidence artifact".to_owned(),
         });
     }
+    if result.evidence_path.as_ref() != Some(&population.evidence_path) {
+        return Err(InferlabError::DatasetPreparation {
+            message: "request population and preparation result disagree on evidence path"
+                .to_owned(),
+        });
+    }
     Ok(())
 }
 
 fn valid_token_summary(summary: &inferlab_protocol::BenchTokenCountSummary) -> bool {
     summary.minimum > 0
         && summary.maximum >= summary.minimum
+        && summary.mean.is_finite()
+        && summary.mean >= f64::from(summary.minimum)
+        && summary.mean <= f64::from(summary.maximum)
+}
+
+fn valid_token_summary_allow_zero(summary: &inferlab_protocol::BenchTokenCountSummary) -> bool {
+    summary.maximum >= summary.minimum
         && summary.mean.is_finite()
         && summary.mean >= f64::from(summary.minimum)
         && summary.mean <= f64::from(summary.maximum)

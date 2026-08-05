@@ -12,9 +12,9 @@ It does not read local bindings or inspect a stack realization. Use
 `inferlab workspace show --json` when another tool needs the canonical merged
 definition.
 
-## Upgrading to 0.8
+## Upgrading to 0.9
 
-InferLab 0.8 retains adapter protocol version 7. Existing workspaces must
+InferLab 0.9 retains adapter protocol version 7. Existing workspaces must
 update their exact package pins to `inferlab-adapter-sdk==0.6.1` and version
 `0.5.2` of the selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration.
 A Specialized Engine workspace uses
@@ -25,14 +25,11 @@ lock becomes the new workspace authority. The product-owned
 toolchain and must not be added to a serving workspace.
 
 Serving Bench continues to use a Bench definition rather than an
-engine-specific benchmark configuration. New definitions may select variable
-random shapes, release-catalog SPEED-Bench profiles, or linear sessions. Every
-Bench request remains structured chat: an optional `chat_template` or
-`chat_template_kwargs` is sent only as an ordinary `request_body` member for
-the model server to interpret. InferLab may project that effective template
-locally to make a synthetic complete-prompt ISL exact, but never sends the
-projection as a completion prompt; an unavailable or unsatisfiable projection
-is retained and identified as fallback in the record.
+engine-specific benchmark configuration. Synthetic definitions now choose one
+explicit prompt authority: exact flat prompts, exact locally rendered chat, or
+server-rendered structured chat. Existing synthetic definitions must add a
+`prompt` table; dataset and linear-session sources remain server-rendered chat.
+The request route follows that authority and cannot be selected independently.
 
 Workspaces upgrading from 0.5 or earlier must replace the former
 `routing_backend` field because protocol version 7 does not interpret
@@ -309,6 +306,127 @@ replicas. Replica and rank numbers are derived from list order. The derived
 `gateway` placement is instead one process-only binding and accepts only one
 direct `machine`, an empty `devices` list, and an optional `endpoint_port`.
 
+## Workload profiling
+
+Profiling is prepared on a server and requested on a selected Eval or Bench; it
+is not a separate workload kind. Enable capture-target preparation on the
+server, a server case, or an invocation patch:
+
+```toml
+[servers.example]
+profiling = true
+capture_arm_deadline_seconds = 60
+capture_control_deadline_seconds = 60
+capture_finalization_deadline_seconds = 300
+```
+
+`capture_arm_deadline_seconds` is one budget for preparing and arming every
+selected rank target. `capture_control_deadline_seconds` covers the complete
+HTTP response for each framework range action.
+`capture_finalization_deadline_seconds` is one budget for session inspection,
+any required collection stop, asynchronous report completion, and report
+coverage across all targets. Capture-armed readiness is unbounded overall but
+retains `readiness_attempt_timeout_seconds` on every blocking attempt, so
+process exit and operator interruption remain observable.
+
+Managed Nsight Systems defaults use the `nsys` executable and the `cuda,nvtx`
+trace set. A server may replace the dedicated fields or add launch/start
+options and environment; role declarations merge after the common layer:
+
+```toml
+[servers.example.profiler.nsys]
+executable = "/opt/nsight-systems/bin/nsys"
+trace = ["cuda", "nvtx", "osrt"]
+launch_options = []
+start_options = []
+sampling = "none"
+context_switch = "none"
+
+[servers.example.profiler.nsys.env]
+PATH = "/opt/nsight-systems/bin:/usr/bin"
+```
+
+`executable`, `trace`, `sampling`, and `context_switch` replace their common
+values. Role option lists append after server lists, and role environment
+entries win by key. The effective environment applies to launch, collection
+start, session inspection, and collection stop; only the launch invocation
+passes it onward to the wrapped server. InferLab rejects options that attempt
+to replace managed session, report, range, export, overwrite, or launch-wait
+facts.
+
+Request capture with repeatable `recipe run --capture <WORKLOAD_ID>` or with
+`bench --capture` against a server started with profiling enabled. A positive
+AIPerf warmup drains before the framework capture window opens. The window
+closes at client completion, and complete report coverage may establish a
+successful capture even when a framework stop action failed. Image-backed
+server launches reject profiling because InferLab has no in-container profiler
+contract.
+
+## Runtime images and ad-hoc execution
+
+A runtime image definition selects one stack, a base image that InferLab
+resolves to an immutable per-platform digest, one or more platforms, an
+optional subset of the stack's `source_paths`, and recipe-referenced
+validations:
+
+```toml
+[images.vllm-runtime]
+stack = "vllm"
+base_image = "example.com/micromamba:1.0"
+platforms = ["linux/amd64"]
+packages = ["upstream/vllm"]
+
+[[images.vllm-runtime.validations]]
+recipe = "smoke"
+server_case = "tp1"
+```
+
+Omitting `packages` selects every stack source path. A validation names only a
+recipe and optional server case; it does not restate model, placement, server,
+or measurement facts. Builds require a clean workspace. Local bindings
+currently expose one builder kind:
+
+```toml
+[builders.local]
+kind = "local-docker"
+```
+
+`inferlab image build <IMAGE>` resolves, assembles, inspects, optionally
+exports unique OCI archives with `--export <DIR>`, and runs every eligible
+validation as one recorded closed loop. `--builder`, `--placement`, `--local`,
+and `--dry-run` retain their owning selection semantics. Built images remain in
+local builder storage and are never pushed by this workflow.
+
+Portable contexts and image metadata exclude model locators, builder hosts,
+workspace paths, placements, and other machine-private facts. Per-machine
+container bindings may pass environment values by name, grant absolute device
+paths, lift the memlock limit, and add only `IPC_LOCK`, `SYS_NICE`, or
+`SYS_PTRACE`; InferLab never requests privileged mode:
+
+```toml
+[machines.local.container]
+pass_env = ["HF_TOKEN"]
+devices = ["/dev/infiniband"]
+memlock_unlimited = true
+capabilities = ["IPC_LOCK", "SYS_NICE"]
+```
+
+A workspace may also declare a digest-pinned image it did not build:
+
+```toml
+[external_images.official]
+reference = "example.com/vllm@sha256:<64-hex-digest>"
+integration = "vllm"
+```
+
+Select a successful build record with `--image` or the declared artifact with
+`--external-image`, never both. External images are probed on every launch
+machine and are not pulled automatically. Use `inferlab run` for unrecorded
+stack or image probes; container mode exposes no mount or device implicitly,
+so declare repeatable `--mount PATH[:rw]` and `--devices INDEX[,INDEX...]` as
+needed. Never invoke a binary directly through `.pixi/envs/<env>/bin/`, which
+would bypass the activation used by product launches.
+
 ## Invocation patches
 
 Use repeatable `--set` for temporary typed changes. Values use TOML syntax and
@@ -424,7 +542,7 @@ A concurrency Bench may run a native warmup phase before its profiled phase:
 ```toml
 [benches.random-8k1k]
 kind = "serving"
-request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024 }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8192, output_tokens = 1024 }
 concurrency = [1, 8]
 prompts_per_concurrency = 4
 warmup_prompts_per_concurrency = 2
@@ -477,7 +595,7 @@ latency bound passes, then gate the case with `minimum_good_request_ratio`.
 ```toml
 [benches.saturation]
 kind = "adaptive-serving"
-request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024 }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8192, output_tokens = 1024 }
 initial_request_rates = [1.0, 4.0]
 aggregate_slos = [
   { metric = "request_throughput", at_least = 1.0 },
@@ -498,54 +616,56 @@ override recipe-specific SLO values without changing the stored definition.
 
 ## Serving Bench request sources
 
-Every serving Bench selects one closed request source. A random source declares
-the desired complete profiling prompt shape:
+Every serving Bench selects one closed request source. A synthetic random
+source declares both its prompt authority and desired complete profiling prompt
+shape. Use `flat` for tokenizer-exact scalar prompts sent to completions:
 
 ```toml
-request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024 }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8192, output_tokens = 1024 }
 ```
 
 Either random length may instead use an inclusive uniform selector:
 
 ```toml
-request_source = { kind = "random", input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = { kind = "inclusive_uniform", min = 900, max = 1100 } }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = { kind = "inclusive_uniform", min = 900, max = 1100 } }
 ```
 
 InferLab draws ISL and OSL independently from the closed integer intervals
 under the Bench seed, then freezes the realized population before requests
 start. Extending a case preserves the existing sequence prefix. An OSL interval
-cannot span both one token and two-or-more tokens, and uniform ISL is not
-combined with prefix sharing.
+cannot span both one token and two-or-more tokens.
 
-For synthetic sources, `input_tokens` targets the complete prompt length after
-chat-template application. Population preparation evaluates the full local
-template projection with the resolved model tokenizer and generation marker,
-then adjusts only generated message content until that projection has exactly
-the selected length. This projection sizes content only: the request remains
-structured messages and the server still applies its template. If the default
-or request-body template cannot be projected, or no exact generated length can
-be constructed, InferLab keeps the unadjusted selected content length and
-records the entry as fallback with its reason.
-
-A fixed random shape may reserve one system-message content prefix shared by
-every request and an independently generated user suffix:
+Use `rendered_chat` to freeze either the model tokenizer's default chat template
+or one definition-supplied template and kwargs. InferLab renders the complete
+prompt once during population preparation, verifies its exact final token
+length, and sends the resulting scalar prompt to completions. Template controls
+for this mode belong only to `prompt`; duplicating them in `request_body` is a
+validation error. Failure to resolve or satisfy the template is fatal rather
+than a fallback.
 
 ```toml
-request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+request_source = { kind = "random", prompt = { kind = "rendered_chat", chat_template = "{% for message in messages %}{{ message.content }}{% endfor %}", chat_template_kwargs = { enable_thinking = false } }, input_tokens = 8192, output_tokens = 1024 }
 ```
 
-InferLab floors `input_tokens * shared_prefix_ratio` to obtain the shared
-system-content budget. Exact targeting keeps that prefix unchanged and adjusts
-only the user suffix. The ratio is therefore relative to the desired complete
-prompt target, not the final pre-template content length. It controls a planned
-cacheable-content budget; it does not guarantee the observed
-`prompt_cache_read_ratio`, which still depends on backend cache policy, block
-alignment, concurrency, and the first uncached request.
+Flat and rendered-chat sources may declare exact final-prompt prefix geometry
+as fixed tokens or a per-entry ratio:
+
+```toml
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+```
+
+For selected input length `I`, a ratio resolves to
+`floor(I * shared_prefix_ratio)` shared tokens and an `I - shared` independently
+generated suffix. Fixed tokens and equivalent ratios produce the same seeded
+population. All entries use nested prefixes of one canonical stream, including
+distributed ISL. Both `0.0` (independent flat prompts) and `1.0` (full-prompt
+sharing) are valid. This is prompt geometry, not a requested or observed cache
+hit percentage; backend cache-read metrics remain separate evidence.
 
 Use `random_mixture` when one Bench should sample several exact ISL/OSL pairs:
 
 ```toml
-request_source = { kind = "random_mixture", shapes = [
+request_source = { kind = "random_mixture", prompt = { kind = "flat" }, shapes = [
   { input_tokens = 1024, output_tokens = 128, weight = 7 },
   { input_tokens = 8192, output_tokens = 1024, weight = 3 },
 ] }
@@ -558,25 +678,35 @@ must either all equal one or all be at least two so TPOT applicability remains
 unambiguous. Every case starts from the same deterministic source sequence;
 its warmup and profiling phases consume consecutive, non-overlapping entries.
 
-Serving Bench always keeps inputs as structured messages and uses the resolved
-chat-completions route. The model server applies its effective chat template;
-InferLab does not expose a sibling workspace `chat_template` field, render a
-flat prompt, or fall back to completions. Backend-specific server controls such
-as `chat_template` and `chat_template_kwargs` may remain ordinary
-non-structural members of `request_body` and are forwarded under their real
-JSON names. Their support is backend-owned; InferLab records that they were
-sent without claiming that an unsupported backend applied them.
+Use `server_chat` when the server must retain chat-template authority. Requests
+stay as structured messages and use chat completions. Template controls may be
+sent under their real backend-owned names in `request_body`; InferLab locally
+projects the effective template only to target and explain ISL. If projection
+is unavailable or exact targeting is unsatisfiable, the unadjusted content is
+sent and the fallback is recorded.
+
+```toml
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 8192, output_tokens = 1024, shared_system_content = { ratio = 0.75 } }
+request_body = { chat_template_kwargs = { enable_thinking = false } }
+```
+
+`shared_system_content` is a server-chat compatibility shape: it reserves
+pre-template system-message content and an independent user suffix. Its ratio
+must be strictly between zero and one. It is not exact final-prompt prefix
+geometry, cannot be combined with `prefix_sharing`, and cannot be declared on a
+weighted mixture.
 
 Synthetic population evidence records the selected complete-prompt target,
-realized pre-template content length, local prediction, exact or fallback
-outcome, and fallback reason. When template resolution succeeds, the record
-also preserves whether the concrete projection template came from
-`request_body` or the tokenizer default, together with its exact content and
-SHA-256 digest. Native request identities reconcile warmup and profiling
-requests to their frozen population entries. Dataset admission bounds remain
-pre-template message-content limits and do not rewrite source content. Neither
-local value nor the locally resolved template replaces the model input observed
-by the server. A successful Bench separately reports `mean_prompt_tokens`,
+request representation, prompt kind, realized pre-template content length,
+local prediction, exact or fallback outcome, and template content and digest
+when one is frozen or projected. Prefix evidence preserves the declaration,
+resolved prefix and suffix lengths, canonical-stream digest, and exact frozen
+population. Native request identities reconcile warmup and profiling requests
+to their frozen population entries. For flat and rendered-chat prompts, every
+completed profiling request must also reconcile the selected ISL with AIPerf's
+backend-observed `input_sequence_length`; a mismatch fails the case. Dataset
+admission bounds remain pre-template message-content limits and do not rewrite
+source content. A successful Bench separately reports `mean_prompt_tokens`,
 `min_prompt_tokens`, `max_prompt_tokens`, `stddev_prompt_tokens`, and the
 `p50`/`p90`/`p95`/`p99` prompt-token metrics from AIPerf's backend-observed
 `input_sequence_length`. Those values include the server-side template and are

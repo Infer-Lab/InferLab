@@ -29,6 +29,12 @@
       ],
       "total_weight": 10
     },
+    "prompt": {
+      "kind": "server_chat",
+      "request_representation": "structured_messages",
+      "route": "chat_completions",
+      "rendering_authority": "server"
+    },
     "server_metrics": false,
     "seed": 7,
     "timeout_seconds": 120

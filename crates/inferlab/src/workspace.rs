@@ -16,14 +16,15 @@ pub use composition::{
     discover_workspace, load_workspace, load_workspace_config, workspace_summary,
 };
 pub(crate) use composition::{snapshot_workspace, workspace_identity};
+#[cfg(test)]
+pub(crate) use definitions::BenchRandomShape;
 pub use definitions::{
     AggregateSlo, BenchDefinition, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
     BenchTpotApplicability, EvalDefinition, EvalTaskSource, JsonValue, ModelDefinition,
     RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition,
     StackDefinition, WorkloadSuiteDefinition, WorkspaceConfig,
 };
-#[cfg(test)]
-pub(crate) use definitions::{BenchPrefixSharing, BenchRandomShape};
+pub(crate) use definitions::{BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent};
 pub(crate) use definitions::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,
     DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS, DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS,
@@ -148,7 +149,7 @@ gateway_backend = "gateway"
         let result = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 aggregate_slos = []
 concurrency = [1]
 prompts_per_concurrency = 1
@@ -266,7 +267,7 @@ timeout_seconds = 60
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = { kind = "inclusive_uniform", min = 900, max = 1100 } }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = { kind = "inclusive_uniform", min = 900, max = 1100 } }
 concurrency = [1]
 prompts_per_concurrency = 2
 timeout_seconds = 60
@@ -278,12 +279,12 @@ timeout_seconds = 60
     }
 
     #[test]
-    fn uniform_random_rejects_mixed_tpot_and_shared_prefix_input()
+    fn uniform_random_rejects_mixed_tpot_and_accepts_distributed_prefix_input()
     -> Result<(), Box<dyn std::error::Error>> {
         let mixed = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = { kind = "inclusive_uniform", min = 1, max = 2 } }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = { kind = "inclusive_uniform", min = 1, max = 2 } }
 concurrency = [1]
 prompts_per_concurrency = 1
 timeout_seconds = 60
@@ -292,7 +293,7 @@ timeout_seconds = 60
         let shared = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = { kind = "inclusive_uniform", min = 64, max = 128 }, output_tokens = 32, prefix_sharing = { shared_prefix_ratio = 0.5 } }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 64, max = 128 }, output_tokens = 32, prefix_sharing = { shared_prefix_ratio = 0.5 } }
 concurrency = [1]
 prompts_per_concurrency = 1
 timeout_seconds = 60
@@ -302,14 +303,8 @@ timeout_seconds = 60
         let Err(mixed_error) = validate_bench("mixed-tpot", &mixed) else {
             return Err(std::io::Error::other("uniform OSL spanning one must fail").into());
         };
-        let Err(shared_error) = validate_bench("uniform-prefix", &shared) else {
-            return Err(std::io::Error::other("uniform ISL with prefix sharing must fail").into());
-        };
+        validate_bench("uniform-prefix", &shared)?;
         assert!(mixed_error.to_string().contains("TPOT"), "{mixed_error}");
-        assert!(
-            shared_error.to_string().contains("prefix sharing"),
-            "{shared_error}"
-        );
         Ok(())
     }
 
@@ -319,7 +314,7 @@ timeout_seconds = 60
         let Err(error) = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 chat_template = "templates/qwen.jinja"
 concurrency = [1]
 prompts_per_concurrency = 1
@@ -338,7 +333,7 @@ timeout_seconds = 60
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 concurrency = [1]
 prompts_per_concurrency = 1
 timeout_seconds = 60
@@ -364,7 +359,7 @@ chat_template = "{% for message in messages %}{{ message.content }}{% endfor %}"
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 server_metrics = true
 concurrency = [1]
 prompts_per_concurrency = 1
@@ -398,7 +393,7 @@ timeout_seconds = 60
         let invalid = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 server_metrics = true
 aggregate_slos = [{ metric = "acceptance_rate", at_least = 0.5 }]
 concurrency = [1]
@@ -419,7 +414,7 @@ timeout_seconds = 60
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 8000, output_tokens = 1000, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8000, output_tokens = 1000, prefix_sharing = { shared_prefix_ratio = 0.75 } }
 concurrency = [1]
 prompts_per_concurrency = 2
 timeout_seconds = 60
@@ -433,38 +428,93 @@ timeout_seconds = 60
         assert!(matches!(
             request_source,
             Some(BenchRequestSource::Random {
+                prompt: BenchPrompt::Flat,
                 input_tokens: BenchTokenSelector::Fixed(8000),
                 output_tokens: BenchTokenSelector::Fixed(1000),
-                prefix_sharing: Some(BenchPrefixSharing {
+                prefix_sharing: Some(BenchPrefixSharing::Ratio {
                     shared_prefix_ratio: 0.75,
                 }),
+                shared_system_content: None,
             })
         ));
         Ok(())
     }
 
     #[test]
-    fn random_request_source_rejects_a_ratio_that_resolves_to_no_shared_tokens()
+    fn random_request_source_accepts_a_ratio_that_resolves_to_zero_shared_tokens()
     -> Result<(), Box<dyn std::error::Error>> {
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random", input_tokens = 1, output_tokens = 1, prefix_sharing = { shared_prefix_ratio = 0.5 } }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 1, output_tokens = 1, prefix_sharing = { shared_prefix_ratio = 0.5 } }
 concurrency = [1]
 prompts_per_concurrency = 1
 timeout_seconds = 60
 "#,
         )?;
-        let Err(error) = validate_bench("empty-prefix", &definition) else {
-            return Err(std::io::Error::other(
-                "a shared-prefix ratio resolving to zero tokens must be rejected",
-            )
-            .into());
-        };
+        validate_bench("empty-prefix", &definition)?;
+        Ok(())
+    }
 
+    #[test]
+    fn synthetic_prompt_authority_and_prefix_geometry_validate_as_one_source_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rendered = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", prompt = { kind = "rendered_chat", chat_template = "{{ messages }}", chat_template_kwargs = { enable_thinking = false } }, shapes = [
+  { input_tokens = 8, output_tokens = 2, weight = 1 },
+  { input_tokens = 12, output_tokens = 2, weight = 1 },
+], prefix_sharing = { shared_prefix_tokens = 8 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("rendered", &rendered)?;
+
+        let server_chat = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = { kind = "inclusive_uniform", min = 8, max = 12 }, output_tokens = 2, shared_system_content = { ratio = 0.5 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("server-chat", &server_chat)?;
+
+        let local_template_conflict = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8, output_tokens = 2 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+[request_body]
+chat_template = "{{ messages }}"
+"#,
+        )?;
+        let error = validate_bench("local-conflict", &local_template_conflict)
+            .err()
+            .ok_or("local prompt accepted a request-body chat template")?;
         assert!(
-            error.to_string().contains("shared prefix"),
-            "unexpected error: {error}"
+            error.to_string().contains("local rendering authority"),
+            "{error}"
+        );
+
+        let missing_prompt = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        );
+        assert!(
+            missing_prompt.is_err(),
+            "synthetic prompt kind must be explicit"
         );
         Ok(())
     }
@@ -475,7 +525,7 @@ timeout_seconds = 60
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random_mixture", shapes = [
+request_source = { kind = "random_mixture", prompt = { kind = "server_chat" }, shapes = [
   { input_tokens = 1024, output_tokens = 128, weight = 7 },
   { input_tokens = 8192, output_tokens = 1024, weight = 3 },
 ] }
@@ -498,7 +548,7 @@ timeout_seconds = 60
         );
         assert!(matches!(
             request_source,
-            BenchRequestSource::RandomMixture { shapes }
+            BenchRequestSource::RandomMixture { shapes, .. }
                 if shapes
                     == vec![
                         BenchRandomShape {
@@ -522,7 +572,7 @@ timeout_seconds = 60
         let duplicate = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random_mixture", shapes = [
+request_source = { kind = "random_mixture", prompt = { kind = "server_chat" }, shapes = [
   { input_tokens = 1024, output_tokens = 128, weight = 7 },
   { input_tokens = 1024, output_tokens = 128, weight = 3 },
 ] }
@@ -534,7 +584,7 @@ timeout_seconds = 60
         let mixed_tpot = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
-request_source = { kind = "random_mixture", shapes = [
+request_source = { kind = "random_mixture", prompt = { kind = "server_chat" }, shapes = [
   { input_tokens = 1024, output_tokens = 1, weight = 1 },
   { input_tokens = 8192, output_tokens = 2, weight = 1 },
 ] }

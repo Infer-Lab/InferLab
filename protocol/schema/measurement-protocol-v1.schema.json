@@ -205,6 +205,13 @@
         "normalization_schema": {
           "type": "string"
         },
+        "prompt_token_reconciliation": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BenchPromptTokenReconciliation"
+          }
+        },
         "raw_artifacts": {
           "type": "array",
           "items": {
@@ -379,6 +386,9 @@
       "description": "The workload shape a Bench client drives, shared across its load cases.",
       "type": "object",
       "properties": {
+        "prompt": {
+          "$ref": "#/$defs/BenchPromptInput"
+        },
         "request_body": {
           "type": "object",
           "additionalProperties": {
@@ -440,6 +450,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "prompt",
         "seed",
         "timeout_seconds"
       ]
@@ -578,6 +589,9 @@
           "format": "uint32",
           "minimum": 0
         },
+        "evidence_path": {
+          "type": "string"
+        },
         "path": {
           "type": "string"
         },
@@ -598,6 +612,7 @@
       "additionalProperties": false,
       "required": [
         "path",
+        "evidence_path",
         "sha256",
         "entries",
         "tpot_applicable"
@@ -612,6 +627,9 @@
         },
         "model": {
           "$ref": "#/$defs/MeasurementModelInput"
+        },
+        "prompt": {
+          "$ref": "#/$defs/BenchPromptInput"
         },
         "protocol_version": {
           "$ref": "#/$defs/ProtocolVersion"
@@ -675,6 +693,7 @@
         "model",
         "tokenizer_backend",
         "transformers_version",
+        "prompt",
         "required_entries",
         "seed",
         "artifact_dir"
@@ -753,6 +772,17 @@
             }
           ]
         },
+        "prefix_geometry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchPrefixGeometrySummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "prompt_token_targeting": {
           "anyOf": [
             {
@@ -774,6 +804,17 @@
           "format": "uint32",
           "minimum": 0
         },
+        "shared_system_content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchSharedSystemContentSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "status": {
           "$ref": "#/$defs/ClientStatus"
         }
@@ -789,30 +830,169 @@
         "ineligible_entries"
       ]
     },
-    "BenchPrefixSharingInput": {
-      "description": "The effective split between one shared system-message prefix and each\nrequest's independently generated user suffix.",
+    "BenchPrefixGeometrySummary": {
+      "description": "Resolved exact final-prompt prefix geometry across one frozen population.",
       "type": "object",
       "properties": {
-        "shared_prefix_ratio": {
-          "type": "number",
-          "format": "double"
+        "canonical_prefix_sha256": {
+          "type": "string"
+        },
+        "full_prompt_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maximum_shared_prefix_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
         },
         "shared_prefix_tokens": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
+          "$ref": "#/$defs/BenchTokenCountSummary"
         },
         "unique_suffix_tokens": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
+          "$ref": "#/$defs/BenchTokenCountSummary"
         }
       },
       "additionalProperties": false,
       "required": [
-        "shared_prefix_ratio",
         "shared_prefix_tokens",
-        "unique_suffix_tokens"
+        "unique_suffix_tokens",
+        "maximum_shared_prefix_tokens",
+        "canonical_prefix_sha256",
+        "full_prompt_entries"
+      ]
+    },
+    "BenchPrefixSharingInput": {
+      "description": "One declared exact final-prompt prefix geometry.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "shared_prefix_tokens": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "shared_prefix_tokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "shared_prefix_ratio": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "shared_prefix_ratio"
+          ]
+        }
+      ]
+    },
+    "BenchPromptInput": {
+      "description": "The frozen prompt representation, route, and rendering authority for a\nserving Bench population.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "flat"
+            },
+            "rendering_authority": {
+              "$ref": "#/$defs/BenchRenderingAuthorityInput"
+            },
+            "request_representation": {
+              "$ref": "#/$defs/BenchRequestRepresentationInput"
+            },
+            "route": {
+              "$ref": "#/$defs/BenchPromptRouteInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request_representation",
+            "route",
+            "rendering_authority"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "chat_template": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "chat_template_kwargs": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              },
+              "default": {}
+            },
+            "kind": {
+              "type": "string",
+              "const": "rendered_chat"
+            },
+            "rendering_authority": {
+              "$ref": "#/$defs/BenchRenderingAuthorityInput"
+            },
+            "request_representation": {
+              "$ref": "#/$defs/BenchRequestRepresentationInput"
+            },
+            "route": {
+              "$ref": "#/$defs/BenchPromptRouteInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request_representation",
+            "route",
+            "rendering_authority"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "server_chat"
+            },
+            "rendering_authority": {
+              "$ref": "#/$defs/BenchRenderingAuthorityInput"
+            },
+            "request_representation": {
+              "$ref": "#/$defs/BenchRequestRepresentationInput"
+            },
+            "route": {
+              "$ref": "#/$defs/BenchPromptRouteInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request_representation",
+            "route",
+            "rendering_authority"
+          ]
+        }
+      ]
+    },
+    "BenchPromptRouteInput": {
+      "description": "The named OpenAI-compatible endpoint family derived from prompt authority.",
+      "type": "string",
+      "enum": [
+        "completions",
+        "chat_completions"
       ]
     },
     "BenchPromptTemplateProjection": {
@@ -841,7 +1021,48 @@
       "type": "string",
       "enum": [
         "request_body",
+        "prompt_table",
         "tokenizer_default"
+      ]
+    },
+    "BenchPromptTokenReconciliation": {
+      "description": "One synthetic profiling request's planned-to-observed prompt-token check.",
+      "type": "object",
+      "properties": {
+        "native_session_num": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "observed_prompt_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "planned_prompt_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "population_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reconciled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "population_index",
+        "native_session_num",
+        "planned_prompt_tokens",
+        "reconciled"
       ]
     },
     "BenchPromptTokenTargetingSummary": {
@@ -918,6 +1139,23 @@
         "input_tokens",
         "output_tokens",
         "weight"
+      ]
+    },
+    "BenchRenderingAuthorityInput": {
+      "description": "The owner that turns semantic prompt input into the final prompt tokens.",
+      "type": "string",
+      "enum": [
+        "local_flat",
+        "local_template",
+        "server"
+      ]
+    },
+    "BenchRequestRepresentationInput": {
+      "description": "The request payload representation frozen by prompt resolution.",
+      "type": "string",
+      "enum": [
+        "flat_prompt",
+        "structured_messages"
       ]
     },
     "BenchRequestSloInput": {
@@ -1039,6 +1277,17 @@
                 }
               ],
               "default": null
+            },
+            "shared_system_content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BenchSharedSystemContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "additionalProperties": false,
@@ -1055,6 +1304,17 @@
             "kind": {
               "type": "string",
               "const": "random_mixture"
+            },
+            "prefix_sharing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BenchPrefixSharingInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "shapes": {
               "type": "array",
@@ -1545,6 +1805,57 @@
         "native_session_num",
         "request_start_ns",
         "native_artifact_name"
+      ]
+    },
+    "BenchSharedSystemContentInput": {
+      "description": "One pre-template shared system-content declaration for server-rendered\nsynthetic chat.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ratio": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "ratio"
+          ]
+        }
+      ]
+    },
+    "BenchSharedSystemContentSummary": {
+      "description": "Resolved pre-template shared system-content shape across one frozen\nserver-chat population.",
+      "type": "object",
+      "properties": {
+        "canonical_system_content_sha256": {
+          "type": "string"
+        },
+        "system_content_tokens": {
+          "$ref": "#/$defs/BenchTokenCountSummary"
+        },
+        "user_content_tokens": {
+          "$ref": "#/$defs/BenchTokenCountSummary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "system_content_tokens",
+        "user_content_tokens",
+        "canonical_system_content_sha256"
       ]
     },
     "BenchTokenCountSummary": {

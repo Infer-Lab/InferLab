@@ -1,9 +1,10 @@
 //! Domain validation for the portable workspace catalog.
 
 use super::definitions::{
-    AggregateSlo, BenchDefinition, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
-    BenchTpotApplicability, EvalDefinition, EvalTaskSource, JsonValue, ProfilerEscapes,
-    RequestRate, RequestSlo, WorkspaceConfig,
+    AggregateSlo, BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchRequestSource,
+    BenchSessionSource, BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability,
+    EvalDefinition, EvalTaskSource, JsonValue, ProfilerEscapes, RequestRate, RequestSlo,
+    WorkspaceConfig,
 };
 use super::invalid;
 use super::source::{is_safe_relative, reject_symlink_components};
@@ -853,9 +854,11 @@ pub(super) fn validate_bench_common(
         None => {}
         Some(request_source) => match request_source {
             BenchRequestSource::Random {
+                prompt,
                 input_tokens,
                 output_tokens,
                 prefix_sharing,
+                shared_system_content,
             } => {
                 validate_bench_token_selector(id, "request_source.input_tokens", input_tokens)?;
                 validate_bench_token_selector(id, "request_source.output_tokens", output_tokens)?;
@@ -865,27 +868,20 @@ pub(super) fn validate_bench_common(
                         "bench {id:?} request_source.output_tokens must not span TPOT-inapplicable and TPOT-applicable values"
                     ));
                 }
-                if let Some(prefix_sharing) = prefix_sharing {
-                    let Some(input_tokens) = input_tokens.fixed_value() else {
-                        return invalid(format!(
-                            "bench {id:?} request_source prefix sharing requires fixed input_tokens"
-                        ));
-                    };
-                    let ratio = prefix_sharing.shared_prefix_ratio;
-                    if !(ratio.is_finite() && ratio > 0.0 && ratio < 1.0) {
-                        return invalid(format!(
-                            "bench {id:?} request_source.prefix_sharing.shared_prefix_ratio must be finite and in (0, 1)"
-                        ));
-                    }
-                    let shared_prefix_tokens = (f64::from(input_tokens) * ratio).floor() as u32;
-                    if shared_prefix_tokens == 0 {
-                        return invalid(format!(
-                            "bench {id:?} request_source shared prefix must resolve to at least one token"
-                        ));
-                    }
-                }
+                validate_synthetic_prompt(
+                    id,
+                    prompt,
+                    prefix_sharing.as_ref(),
+                    shared_system_content.as_ref(),
+                    input_tokens.minimum(),
+                    request_body,
+                )?;
             }
-            BenchRequestSource::RandomMixture { shapes } => {
+            BenchRequestSource::RandomMixture {
+                prompt,
+                shapes,
+                prefix_sharing,
+            } => {
                 if shapes.len() < 2 {
                     return invalid(format!(
                         "bench {id:?} request_source random_mixture requires at least two shapes"
@@ -932,6 +928,19 @@ pub(super) fn validate_bench_common(
                         ));
                     }
                 }
+                let minimum_input = shapes
+                    .iter()
+                    .map(|shape| shape.input_tokens)
+                    .min()
+                    .unwrap_or(0);
+                validate_synthetic_prompt(
+                    id,
+                    prompt,
+                    prefix_sharing.as_ref(),
+                    None,
+                    minimum_input,
+                    request_body,
+                )?;
             }
             BenchRequestSource::Dataset {
                 dataset,
@@ -972,6 +981,82 @@ pub(super) fn validate_bench_common(
         ));
     }
     require_positive("timeout_seconds", id, timeout_seconds)
+}
+
+fn validate_synthetic_prompt(
+    id: &str,
+    prompt: &BenchPrompt,
+    prefix_sharing: Option<&BenchPrefixSharing>,
+    shared_system_content: Option<&BenchSharedSystemContent>,
+    minimum_input_tokens: u32,
+    request_body: &BTreeMap<String, JsonValue>,
+) -> Result<(), InferlabError> {
+    let locally_rendered = matches!(prompt, BenchPrompt::Flat | BenchPrompt::RenderedChat { .. });
+    if locally_rendered {
+        for member in ["chat_template", "chat_template_kwargs"] {
+            if request_body.contains_key(member) {
+                return invalid(format!(
+                    "bench {id:?} request_body.{member} conflicts with request_source.prompt local rendering authority"
+                ));
+            }
+        }
+        if shared_system_content.is_some() {
+            return invalid(format!(
+                "bench {id:?} request_source.shared_system_content requires prompt.kind = \"server_chat\""
+            ));
+        }
+    } else if prefix_sharing.is_some() {
+        return invalid(format!(
+            "bench {id:?} request_source.prefix_sharing requires prompt.kind = \"flat\" or \"rendered_chat\""
+        ));
+    }
+
+    if let Some(sharing) = prefix_sharing {
+        match sharing {
+            BenchPrefixSharing::Tokens {
+                shared_prefix_tokens,
+            } if *shared_prefix_tokens > minimum_input_tokens => {
+                return invalid(format!(
+                    "bench {id:?} request_source.prefix_sharing.shared_prefix_tokens must not exceed the minimum input-token target {minimum_input_tokens}"
+                ));
+            }
+            BenchPrefixSharing::Ratio {
+                shared_prefix_ratio,
+            } if !shared_prefix_ratio.is_finite()
+                || *shared_prefix_ratio < 0.0
+                || *shared_prefix_ratio > 1.0 =>
+            {
+                return invalid(format!(
+                    "bench {id:?} request_source.prefix_sharing.shared_prefix_ratio must be finite and in [0, 1]"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(sharing) = shared_system_content {
+        match sharing {
+            BenchSharedSystemContent::Tokens { tokens }
+                if *tokens == 0 || *tokens >= minimum_input_tokens =>
+            {
+                return invalid(format!(
+                    "bench {id:?} request_source.shared_system_content.tokens must be positive and less than every input-token target"
+                ));
+            }
+            BenchSharedSystemContent::Ratio { ratio }
+                if !ratio.is_finite()
+                    || *ratio <= 0.0
+                    || *ratio >= 1.0
+                    || (f64::from(minimum_input_tokens) * ratio).floor() < 1.0 =>
+            {
+                return invalid(format!(
+                    "bench {id:?} request_source.shared_system_content.ratio must be finite in (0, 1) and resolve to a positive system-content length for every input target"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_bench_session_source(

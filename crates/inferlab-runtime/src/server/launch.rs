@@ -10,7 +10,7 @@ use super::{
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::plan::{CommandPlan, LaunchFilePlan, LaunchPlan};
 use crate::shell::{shell_quote, shell_quote_path};
-use crate::ssh::{ssh_argv, ssh_output};
+use crate::ssh::{ssh_argv, ssh_output, ssh_output_with_input};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::fs::File;
@@ -18,8 +18,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::thread;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 const HANDLE_MARKER: &str = "INFERLAB_HANDLE\t";
@@ -333,42 +332,6 @@ pub(super) fn remote_launch_file_script(
         target = shell_quote_path(target),
         digest = shell_quote(&launch_file.sha256),
     ))
-}
-
-fn ssh_output_with_input(
-    target: &str,
-    script: &str,
-    input: &[u8],
-) -> Result<Output, ServerLaunchError> {
-    let argv = ssh_argv(target, script);
-    let mut command = Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    command_output_with_input(command, input).map_err(|source| ServerLaunchError::SshInput {
-        target: target.to_owned(),
-        source,
-    })
-}
-
-pub(super) fn command_output_with_input(mut command: Command, input: &[u8]) -> io::Result<Output> {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("child stdin was not piped"))?;
-    thread::scope(|scope| {
-        let writer = scope.spawn(move || stdin.write_all(input));
-        let output = child.wait_with_output();
-        let write_result = writer
-            .join()
-            .map_err(|_| io::Error::other("child stdin writer panicked"))?;
-        let output = output?;
-        write_result?;
-        Ok(output)
-    })
 }
 
 fn parse_ssh_handle(

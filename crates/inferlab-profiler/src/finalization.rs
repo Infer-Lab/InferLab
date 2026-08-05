@@ -1,12 +1,14 @@
 use crate::plan::{ProfilerFinalization, ProfilerTargetRecord};
 use crate::record::{CaptureActionRecord, CaptureRangeEndRecord, CollectionFinalizationOutcome};
 use crate::transport;
+use inferlab_runtime::operation_bound::OperationBound;
 use serde::Deserialize;
 use std::path::Path;
-use std::time::Duration;
 
-const PROFILER_FINALIZATION_DEADLINE: Duration = Duration::from_secs(300);
 const NSYS_INACTIVE_SESSION_STATE: &str = "Launched";
+pub const MEASUREMENT_FINALIZATION_START: &str =
+    "after_measurement_business_terminal_before_profiler_finalization";
+pub const SERVER_FINALIZATION_START: &str = "before_server_profiler_finalization";
 
 #[derive(Debug, Deserialize)]
 struct NsysSessionRecord {
@@ -29,17 +31,23 @@ enum SessionInspectionError {
 pub fn finalize_target(
     target: &ProfilerTargetRecord,
     range_end: Option<CaptureRangeEndRecord>,
+    bound: &OperationBound,
+    start_boundary: &str,
 ) -> CaptureActionRecord {
     match target.finalization {
-        ProfilerFinalization::NsysStop => finalize_nsys_session(target, range_end),
+        ProfilerFinalization::NsysStop => {
+            finalize_nsys_session(target, range_end, bound, start_boundary)
+        }
     }
 }
 
 fn finalize_nsys_session(
     target: &ProfilerTargetRecord,
     range_end: Option<CaptureRangeEndRecord>,
+    bound: &OperationBound,
+    start_boundary: &str,
 ) -> CaptureActionRecord {
-    let inspection = transport::inspect_collection_state(target, PROFILER_FINALIZATION_DEADLINE);
+    let inspection = transport::inspect_collection_state(target, bound, start_boundary);
     let observed = observed_session_state(&inspection, &target.session);
     let (observed_state, inspection_error) = match observed {
         Ok(state) => (state, None),
@@ -71,7 +79,7 @@ fn finalize_nsys_session(
         };
     }
 
-    let stop = transport::stop_collection(target, PROFILER_FINALIZATION_DEADLINE);
+    let stop = transport::stop_collection(target, bound, start_boundary);
     let succeeded = stop.succeeded();
     let error = (!succeeded).then(|| {
         let stop_error = stop
@@ -101,8 +109,18 @@ fn finalize_nsys_session(
     }
 }
 
-pub(crate) fn verify_report(target: &ProfilerTargetRecord, path: &Path) -> CaptureActionRecord {
-    transport::verify_report(target, path)
+pub(crate) fn verify_report(
+    target: &ProfilerTargetRecord,
+    path: &Path,
+    bound: &OperationBound,
+    start_boundary: &str,
+    wait_for_completion: bool,
+) -> CaptureActionRecord {
+    if wait_for_completion {
+        transport::verify_report(target, path, bound, start_boundary)
+    } else {
+        transport::check_report(target, path, bound, start_boundary)
+    }
 }
 
 fn observed_session_state(

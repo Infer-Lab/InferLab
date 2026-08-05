@@ -102,7 +102,10 @@ pub struct ServerPlan {
     pub topology: ServeTopology,
     pub profiling: bool,
     pub readiness_timeout_seconds: u64,
+    pub readiness_attempt_timeout_seconds: u64,
+    pub capture_arm_deadline_seconds: u64,
     pub capture_control_deadline_seconds: u64,
+    pub capture_finalization_deadline_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
     /// The closed frontend boundary: logical components, their explicit
@@ -186,6 +189,10 @@ pub struct CommonDeclarationPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_attempt_timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_arm_deadline_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pd_router_backend: Option<String>,
@@ -195,6 +202,8 @@ pub struct CommonDeclarationPlan {
     pub profiling: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_control_deadline_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_finalization_deadline_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "parallelism_is_empty")]
     pub parallelism: Parallelism,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -10,6 +10,7 @@ pub enum ReadinessPlan {
         /// `None` when the server is capture-armed: readiness remains
         /// unbounded while process exit and interruption still terminate it.
         timeout_seconds: Option<u64>,
+        attempt_timeout_seconds: u64,
     },
     HttpTargetRegistry {
         readiness_path: String,
@@ -21,8 +22,12 @@ pub enum ReadinessPlan {
         target_bootstrap_port_field: String,
         expected_targets: Vec<TargetRegistryExpectedTarget>,
         timeout_seconds: Option<u64>,
+        attempt_timeout_seconds: u64,
     },
-    ProcessAlive,
+    ProcessAlive {
+        timeout_seconds: Option<u64>,
+        attempt_timeout_seconds: u64,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -6,9 +6,11 @@ use crate::execution::{
 };
 use crate::toml_override::{ExactTomlOverride, InvocationOverride, apply_toml_patch};
 use crate::workspace::{
-    DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS, JsonValue, LoadedWorkspace, ModelDefinition,
-    ModelWeightBinding, PlacementBinding, RecipeDefinition, ServerCaseDefinition, ServerDefinition,
-    StackDefinition, WorkloadSuiteDefinition,
+    DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,
+    DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS, DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS,
+    JsonValue, LoadedWorkspace, ModelDefinition, ModelWeightBinding, PlacementBinding,
+    RecipeDefinition, ServerCaseDefinition, ServerDefinition, StackDefinition,
+    WorkloadSuiteDefinition,
 };
 use inferlab_protocol::{
     KvTransferMechanism, Parallelism, ServeRoleInput, ServeRoleKind, ServeTopology, SettingValue,
@@ -21,6 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct ServerOverridePatch {
     pub(super) topology: Option<ServeTopology>,
     pub(super) readiness_timeout_seconds: Option<u64>,
+    pub(super) readiness_attempt_timeout_seconds: Option<u64>,
+    pub(super) capture_arm_deadline_seconds: Option<u64>,
+    pub(super) capture_control_deadline_seconds: Option<u64>,
+    pub(super) capture_finalization_deadline_seconds: Option<u64>,
     pub(super) gateway_backend: Option<String>,
     pub(super) pd_router_backend: Option<String>,
     pub(super) kv_transfer: Option<KvTransferMechanism>,
@@ -73,11 +79,14 @@ pub(super) struct WorkflowSelection<'a> {
 pub(super) struct EffectiveServerInput {
     pub(super) topology: ServeTopology,
     pub(super) readiness_timeout_seconds: u64,
+    pub(super) readiness_attempt_timeout_seconds: u64,
     pub(super) gateway_backend: Option<String>,
     pub(super) pd_router_backend: Option<String>,
     pub(super) kv_transfer: Option<KvTransferMechanism>,
     pub(super) profiling: bool,
+    pub(super) capture_arm_deadline_seconds: u64,
     pub(super) capture_control_deadline_seconds: u64,
+    pub(super) capture_finalization_deadline_seconds: u64,
     pub(super) override_patches: Vec<IndexedServerOverride>,
     pub(super) role_resolutions: Vec<ResolvedRoleInput>,
     pub(super) declarations: Vec<ServerDeclarationPlan>,
@@ -166,11 +175,14 @@ fn server_declarations(
         },
         common: CommonDeclarationPlan {
             readiness_timeout_seconds: Some(server.readiness_timeout_seconds),
+            readiness_attempt_timeout_seconds: server.readiness_attempt_timeout_seconds,
+            capture_arm_deadline_seconds: server.capture_arm_deadline_seconds,
             gateway_backend: server.gateway_backend.clone(),
             pd_router_backend: server.pd_router_backend.clone(),
             kv_transfer: server.kv_transfer,
             profiling: server.profiling,
             capture_control_deadline_seconds: server.capture_control_deadline_seconds,
+            capture_finalization_deadline_seconds: server.capture_finalization_deadline_seconds,
             parallelism: server.parallelism.clone(),
             settings: declaration_settings("server common", &server.settings)?,
         },
@@ -203,11 +215,14 @@ fn server_declarations(
             },
             common: CommonDeclarationPlan {
                 readiness_timeout_seconds: case.readiness_timeout_seconds,
+                readiness_attempt_timeout_seconds: case.readiness_attempt_timeout_seconds,
+                capture_arm_deadline_seconds: case.capture_arm_deadline_seconds,
                 gateway_backend: case.gateway_backend.clone(),
                 pd_router_backend: case.pd_router_backend.clone(),
                 kv_transfer: case.kv_transfer,
                 profiling: case.profiling,
-                capture_control_deadline_seconds: None,
+                capture_control_deadline_seconds: case.capture_control_deadline_seconds,
+                capture_finalization_deadline_seconds: case.capture_finalization_deadline_seconds,
                 parallelism: case.parallelism.clone(),
                 settings: declaration_settings("case common", &case.settings)?,
             },
@@ -238,11 +253,14 @@ fn server_declarations(
             source: DeclarationSource::Invocation { index },
             common: CommonDeclarationPlan {
                 readiness_timeout_seconds: patch.readiness_timeout_seconds,
+                readiness_attempt_timeout_seconds: patch.readiness_attempt_timeout_seconds,
+                capture_arm_deadline_seconds: patch.capture_arm_deadline_seconds,
                 gateway_backend: patch.gateway_backend.clone(),
                 pd_router_backend: patch.pd_router_backend.clone(),
                 kv_transfer: patch.kv_transfer,
                 profiling: patch.profiling,
-                capture_control_deadline_seconds: None,
+                capture_control_deadline_seconds: patch.capture_control_deadline_seconds,
+                capture_finalization_deadline_seconds: patch.capture_finalization_deadline_seconds,
                 parallelism: patch.parallelism.clone(),
                 settings: declaration_settings("invocation common", &patch.settings)?,
             },
@@ -447,9 +465,6 @@ pub(super) fn resolve_effective_server_input(
     let server = selection.server;
     let case = selection.case;
     let topology = server.topology;
-    let capture_control_deadline_seconds = server
-        .capture_control_deadline_seconds
-        .unwrap_or(DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS);
     let mut override_patches = Vec::new();
     let selected_roles = role_declarations(server, topology)?
         .into_iter()
@@ -496,6 +511,31 @@ pub(super) fn resolve_effective_server_input(
                 message: "readiness_timeout_seconds must be nonzero".to_owned(),
             });
         }
+        if patch.readiness_attempt_timeout_seconds == Some(0) {
+            return Err(InferlabError::InvalidConfig {
+                message: "readiness_attempt_timeout_seconds must be nonzero".to_owned(),
+            });
+        }
+        for (name, value) in [
+            (
+                "capture_arm_deadline_seconds",
+                patch.capture_arm_deadline_seconds,
+            ),
+            (
+                "capture_control_deadline_seconds",
+                patch.capture_control_deadline_seconds,
+            ),
+            (
+                "capture_finalization_deadline_seconds",
+                patch.capture_finalization_deadline_seconds,
+            ),
+        ] {
+            if value == Some(0) {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!("{name} must be nonzero"),
+                });
+            }
+        }
         for id in patch.roles.keys() {
             if !selected_roles.contains(id) {
                 return Err(InferlabError::InvalidConfig {
@@ -513,6 +553,18 @@ pub(super) fn resolve_effective_server_input(
     }
     let effective_server = compose_server_definition(server, case, &override_patches)?;
     let readiness_timeout_seconds = effective_server.readiness_timeout_seconds;
+    let readiness_attempt_timeout_seconds = effective_server
+        .readiness_attempt_timeout_seconds
+        .unwrap_or(DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS);
+    let capture_arm_deadline_seconds = effective_server
+        .capture_arm_deadline_seconds
+        .unwrap_or(DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS);
+    let capture_control_deadline_seconds = effective_server
+        .capture_control_deadline_seconds
+        .unwrap_or(DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS);
+    let capture_finalization_deadline_seconds = effective_server
+        .capture_finalization_deadline_seconds
+        .unwrap_or(DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS);
     let gateway_backend = effective_server.gateway_backend.clone();
     let pd_router_backend = effective_server.pd_router_backend.clone();
     let kv_transfer = effective_server.kv_transfer;
@@ -555,11 +607,14 @@ pub(super) fn resolve_effective_server_input(
     Ok(EffectiveServerInput {
         topology,
         readiness_timeout_seconds,
+        readiness_attempt_timeout_seconds,
         gateway_backend,
         pd_router_backend,
         kv_transfer,
         profiling,
+        capture_arm_deadline_seconds,
         capture_control_deadline_seconds,
+        capture_finalization_deadline_seconds,
         override_patches,
         role_resolutions,
         declarations,

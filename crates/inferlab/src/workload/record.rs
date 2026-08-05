@@ -340,7 +340,7 @@ pub struct WorkloadRecord {
 }
 
 impl WorkloadRecord {
-    const SCHEMA_VERSION: u32 = 9;
+    const SCHEMA_VERSION: u32 = 10;
 }
 
 pub(super) struct WorkloadRecordSession {

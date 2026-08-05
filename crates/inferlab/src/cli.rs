@@ -702,9 +702,12 @@ fn run_image_build(
     args: ImageBuildArgs,
     progress: &Progress,
 ) -> Result<(), InferlabError> {
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::ImageInterrupt { source })?;
     progress.phase(Phase::named("resolution"))?;
     let workspace = load_workspace(root.to_path_buf(), args.local.as_deref())?;
     let tool = crate::image::tool::DockerBuilderTool;
+    let adapter = ProcessAdapterClient::new(workspace.local.adapter.process_timeout());
     let resolved = crate::image::resolve_image(
         &workspace,
         &crate::image::ImageBuildRequest {
@@ -714,7 +717,7 @@ fn run_image_build(
             export: args.export.as_deref(),
         },
         &tool,
-        &ProcessAdapterClient,
+        &adapter,
     )?;
     if args.dry_run {
         return write_json(&resolved.dry_run_plan());
@@ -875,6 +878,8 @@ fn run_selection(
     captures: &[String],
     progress: &Progress,
 ) -> Result<(), InferlabError> {
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::ServerInterrupt { source })?;
     progress.phase(Phase::named("resolution"))?;
     let workspace = load_workspace(root.to_path_buf(), local.as_deref())?;
     let server_id = match workflow {
@@ -920,15 +925,10 @@ fn run_selection(
         |image_id: String, explicit_entrypoint: bool| crate::adapter::ImageAdapterClient {
             image_id,
             device: workspace.local.adapter.image_device,
-            timeout: workspace
-                .local
-                .adapter
-                .image_timeout_seconds
-                .map_or(crate::adapter::IMAGE_ADAPTER_TIMEOUT, |seconds| {
-                    std::time::Duration::from_secs(seconds)
-                }),
+            timeout: workspace.local.adapter.image_timeout(),
             explicit_entrypoint,
         };
+    let process_adapter = ProcessAdapterClient::new(workspace.local.adapter.process_timeout());
     progress.phase(Phase::named("local and remote preflight"))?;
     let resolved = if let Some(image) = &image {
         resolve(
@@ -943,7 +943,7 @@ fn run_selection(
             &image_client(external.reference.clone(), true),
         )?
     } else {
-        resolve(&workspace, &request, &ProcessAdapterClient)?
+        resolve(&workspace, &request, &process_adapter)?
     };
     if selection.dry_run {
         write_json(&resolved.dry_run_plan())

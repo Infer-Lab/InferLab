@@ -1,15 +1,18 @@
 use crate::error::ProfilerError;
 use crate::plan::{
-    CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan,
-    NsysEscapes, PreparedProcess, ProcessCapturePlan, ProcessPreparation, ProfilerControl,
-    ProfilerFinalization, WindowControlKind, compile_plan, prepare_process,
+    CaptureDeadlines, CaptureWindowActionPlan, CaptureWindowControlEndpointPlan,
+    CaptureWindowHttpMethodPlan, NsysEscapes, PreparedProcess, ProcessCapturePlan,
+    ProcessPreparation, ProfilerControl, ProfilerFinalization, WindowControlKind, compile_plan,
+    prepare_process,
 };
 use crate::record::CaptureActionRecord;
 use crate::transport;
+use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::plan::{CommandPlan, LaunchPlan, ProcessEndpointPlan};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 struct ProcessFixture {
     command: CommandPlan,
@@ -67,7 +70,6 @@ fn prepare_fixture(
         launch: &process.launch,
         capture: Some(&process.capture),
         control_endpoint: Some(&process.endpoint),
-        control_deadline_seconds: 60,
     })
 }
 
@@ -154,7 +156,8 @@ fn escapes_splice_ahead_of_the_managed_start_tail() -> Result<(), Box<dyn Error>
     let target = prepare_fixture("serve", &process)?
         .target
         .ok_or("missing profiler target")?;
-    let action = transport::arm_range_collection(&target, Path::new("/profiles/trace"), 2);
+    let bound = OperationBound::finite(Duration::from_secs(1));
+    let action = transport::arm_range_collection(&target, Path::new("/profiles/trace"), 2, &bound);
     let CaptureActionRecord::Command { argv, .. } = action else {
         return Err("profiler start fixture returned non-command evidence".into());
     };
@@ -191,6 +194,11 @@ fn static_range_plan_maps_windows_to_one_based_reports() -> Result<(), Box<dyn E
         "bench-c8k1k",
         &["c1".to_owned(), "c32".to_owned()],
         &[target],
+        CaptureDeadlines {
+            capture_arm_deadline_seconds: 60,
+            capture_control_deadline_seconds: 60,
+            capture_finalization_deadline_seconds: 300,
+        },
     )?;
     assert_eq!(plan.control, WindowControlKind::FrameworkRange);
     assert_eq!(plan.windows[0].range_index, Some(1));

@@ -14,11 +14,6 @@ use inferlab_runtime::operation_bound::{
     OperationBound, OperationTerminalCause, OperationTimingEvidence,
 };
 
-const ADAPTER_TIMEOUT: Duration = Duration::from_secs(30);
-/// An image-backed adapter pays container start-up on top of framework
-/// import, so it gets a wider deadline than a host-launched one.
-pub(crate) const IMAGE_ADAPTER_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// The committed framework-free Pixi environment an external-image launch
 /// lowers from ([[RFC-0006:C-INTEGRATIONS]]).
 const ADAPTER_ENVIRONMENT: &str = "adapter";
@@ -65,10 +60,16 @@ pub(crate) fn project_setting_values(
     })
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProcessAdapterClient;
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessAdapterClient {
+    timeout: Duration,
+}
 
 impl ProcessAdapterClient {
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
     fn invoke(
         &self,
         workspace_root: &Path,
@@ -92,7 +93,7 @@ impl ProcessAdapterClient {
             workspace_root,
             integration,
             &launcher,
-            ADAPTER_TIMEOUT,
+            self.timeout,
             request,
         )
     }

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- InferLab 0.8.4 supersedes the halted aggregate 0.8.3 product release. The
+  already-published 0.8.3 crates remain immutable, but no `v0.8.3` product tag
+  or GitHub Release was created; the governed time-control corrections below
+  ship together under the 0.8.4 product identity.
+
+### Fixed
+
+- Readiness status, HTTP, and target-registry attempts now use the resolved
+  `readiness_attempt_timeout_seconds` value (30 seconds by default), capped by
+  the readiness operation's remaining budget. This removes the hidden 250 ms
+  HTTP cap while keeping capture-armed readiness interruptible between bounded
+  attempts.
+- Prefix-cache reset and prompt-logprob tokenizer/HTTP probes now consume their
+  measurement case's remaining budget instead of acquiring shorter hidden
+  two-second or 30-second caps.
+- Profiler arming and finalization now consume one resolved budget across all
+  targets and commands; framework window control consumes complete HTTP
+  responses without a shorter connection cap, and report verification waits
+  for asynchronous publication within the shared finalization budget.
+- SSH invocations retain noninteractive login initialization while leaving
+  connection and keepalive policy to the selected OpenSSH target configuration.
+  Remote preflight and launch delivery remain unbounded by arbitrary terminal
+  timeouts but now respond to operator interruption and reap their process group;
+  bounded lifecycle and cleanup calls continue consuming their owning budgets.
+- Machine-local adapter bindings can set `adapter.timeout_seconds` for
+  process-backed plan/render invocations independently of
+  `adapter.image_timeout_seconds`; effective defaults remain 30 and 120 seconds
+  respectively, and adapter timing evidence records the selected budget.
+
 ## [0.8.3] - 2026-08-04
 
 ### Fixed

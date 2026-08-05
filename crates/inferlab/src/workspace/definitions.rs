@@ -109,12 +109,21 @@ pub struct ServerDefinition {
     pub model: String,
     pub topology: ServeTopology,
     pub readiness_timeout_seconds: u64,
-    /// Response deadline for framework window-control actions
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]); the readiness timeout does not
-    /// apply to capture-armed serving, but control actions still need a
-    /// bound because a lost window start silently shifts range identities.
+    #[serde(default)]
+    pub readiness_attempt_timeout_seconds: Option<u64>,
+    /// Shared deadline for profiler output preparation and collection arming
+    /// across every selected target ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[serde(default)]
+    pub capture_arm_deadline_seconds: Option<u64>,
+    /// Complete response deadline for each framework window-control action;
+    /// the readiness timeout does not apply to capture-armed serving, but a
+    /// lost window start silently shifts range identities.
     #[serde(default)]
     pub capture_control_deadline_seconds: Option<u64>,
+    /// Shared deadline for collection finalization and report verification
+    /// across every selected target.
+    #[serde(default)]
+    pub capture_finalization_deadline_seconds: Option<u64>,
     #[serde(default)]
     pub gateway_backend: Option<String>,
     #[serde(default)]
@@ -139,7 +148,10 @@ pub struct ServerDefinition {
     pub default_case: Option<String>,
 }
 
+pub(crate) const DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS: u64 = 30;
+pub(crate) const DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS: u64 = 60;
 pub(crate) const DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS: u64 = 60;
+pub(crate) const DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -724,6 +736,10 @@ pub struct RecipeDefinition {
 #[serde(default, deny_unknown_fields)]
 pub struct ServerCaseDefinition {
     pub readiness_timeout_seconds: Option<u64>,
+    pub readiness_attempt_timeout_seconds: Option<u64>,
+    pub capture_arm_deadline_seconds: Option<u64>,
+    pub capture_control_deadline_seconds: Option<u64>,
+    pub capture_finalization_deadline_seconds: Option<u64>,
     pub gateway_backend: Option<String>,
     pub pd_router_backend: Option<String>,
     pub kv_transfer: Option<KvTransferMechanism>,

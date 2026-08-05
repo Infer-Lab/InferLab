@@ -3,16 +3,22 @@ use crate::plan::{
     ProfilerTargetRecord, env_prefix,
 };
 use crate::record::{CaptureActionRecord, CaptureHttpFailureKind};
-use inferlab_runtime::operation_bound::{OperationBound, OperationTerminalCause};
+use inferlab_runtime::operation_bound::{OperationBound, OperationTerminalCause, Remaining};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
 
-const PROFILER_ARM_COMMAND_DEADLINE: Duration = Duration::from_secs(60);
-const PROFILER_REPORT_VERIFICATION_DEADLINE: Duration = Duration::from_secs(30);
+const INITIAL_REPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_REPORT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const ARM_START_BOUNDARY: &str = "before_profiler_arm";
+const CONTROL_START_BOUNDARY: &str = "before_profiler_window_control_request";
 
-pub(crate) fn prepare_output(target: &ProfilerTargetRecord, parent: &Path) -> CaptureActionRecord {
+pub(crate) fn prepare_output(
+    target: &ProfilerTargetRecord,
+    parent: &Path,
+    bound: &OperationBound,
+) -> CaptureActionRecord {
     command_action(
         target,
         "prepare-output",
@@ -21,7 +27,8 @@ pub(crate) fn prepare_output(target: &ProfilerTargetRecord, parent: &Path) -> Ca
             "-p".to_owned(),
             parent.display().to_string(),
         ],
-        PROFILER_ARM_COMMAND_DEADLINE,
+        bound,
+        ARM_START_BOUNDARY,
         CommandActionMode::Operation,
     )
 }
@@ -30,17 +37,47 @@ pub(crate) fn arm_range_collection(
     target: &ProfilerTargetRecord,
     output: &Path,
     range_count: usize,
+    bound: &OperationBound,
 ) -> CaptureActionRecord {
     command_action(
         target,
         "start-range-collection",
         nsys_start_argv(target, output, range_count),
-        PROFILER_ARM_COMMAND_DEADLINE,
+        bound,
+        ARM_START_BOUNDARY,
         CommandActionMode::Operation,
     )
 }
 
-pub(crate) fn verify_report(target: &ProfilerTargetRecord, path: &Path) -> CaptureActionRecord {
+pub(crate) fn verify_report(
+    target: &ProfilerTargetRecord,
+    path: &Path,
+    bound: &OperationBound,
+    start_boundary: &str,
+) -> CaptureActionRecord {
+    let mut poll_interval = INITIAL_REPORT_POLL_INTERVAL;
+    loop {
+        let action = check_report(target, path, bound, start_boundary);
+        if action.succeeded() || bound.is_expired() {
+            return action;
+        }
+        match bound.remaining() {
+            Remaining::Finite(remaining) => std::thread::sleep(remaining.min(poll_interval)),
+            Remaining::Expired => {}
+            Remaining::Unbounded => std::thread::sleep(poll_interval),
+        }
+        poll_interval = poll_interval
+            .saturating_mul(2)
+            .min(MAX_REPORT_POLL_INTERVAL);
+    }
+}
+
+pub(crate) fn check_report(
+    target: &ProfilerTargetRecord,
+    path: &Path,
+    bound: &OperationBound,
+    start_boundary: &str,
+) -> CaptureActionRecord {
     command_action(
         target,
         "verify-report",
@@ -49,14 +86,16 @@ pub(crate) fn verify_report(target: &ProfilerTargetRecord, path: &Path) -> Captu
             "-f".to_owned(),
             path.display().to_string(),
         ],
-        PROFILER_REPORT_VERIFICATION_DEADLINE,
+        bound,
+        start_boundary,
         CommandActionMode::Cleanup,
     )
 }
 
 pub(crate) fn inspect_collection_state(
     target: &ProfilerTargetRecord,
-    deadline: Duration,
+    bound: &OperationBound,
+    start_boundary: &str,
 ) -> CaptureActionRecord {
     let mut argv = env_prefix(&target.escapes.env);
     argv.extend([
@@ -69,14 +108,16 @@ pub(crate) fn inspect_collection_state(
         target,
         "inspect-collection-state",
         argv,
-        deadline,
+        bound,
+        start_boundary,
         CommandActionMode::Cleanup,
     )
 }
 
 pub(crate) fn stop_collection(
     target: &ProfilerTargetRecord,
-    deadline: Duration,
+    bound: &OperationBound,
+    start_boundary: &str,
 ) -> CaptureActionRecord {
     let mut argv = env_prefix(&target.escapes.env);
     argv.extend([
@@ -88,32 +129,38 @@ pub(crate) fn stop_collection(
         target,
         "stop-collection",
         argv,
-        deadline,
+        bound,
+        start_boundary,
         CommandActionMode::Cleanup,
     )
 }
 
-pub(crate) fn start_windows(targets: &[ProfilerTargetRecord]) -> Vec<CaptureActionRecord> {
+pub(crate) fn start_windows(
+    targets: &[ProfilerTargetRecord],
+    deadline_seconds: u64,
+) -> Vec<CaptureActionRecord> {
     let process_ids = targets
         .iter()
         .map(|target| match &target.control {
             ProfilerControl::Http { process_id, .. } => process_id.as_str(),
         })
         .collect::<BTreeSet<_>>();
-    window_actions_for(targets, true, &process_ids)
+    window_actions_for(targets, true, &process_ids, deadline_seconds)
 }
 
 pub(crate) fn stop_windows(
     targets: &[ProfilerTargetRecord],
     process_ids: &BTreeSet<&str>,
+    deadline_seconds: u64,
 ) -> Vec<CaptureActionRecord> {
-    window_actions_for(targets, false, process_ids)
+    window_actions_for(targets, false, process_ids, deadline_seconds)
 }
 
 fn window_actions_for(
     targets: &[ProfilerTargetRecord],
     start: bool,
     process_ids: &BTreeSet<&str>,
+    deadline_seconds: u64,
 ) -> Vec<CaptureActionRecord> {
     let mut seen = BTreeSet::new();
     targets
@@ -123,7 +170,6 @@ fn window_actions_for(
                 process_id,
                 start: start_action,
                 stop: stop_action,
-                deadline_seconds,
                 ..
             } if process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone()) => {
                 let action = if start { start_action } else { stop_action };
@@ -131,7 +177,7 @@ fn window_actions_for(
                     process_id,
                     if start { "start-range" } else { "stop-range" },
                     action,
-                    *deadline_seconds,
+                    deadline_seconds,
                 ))
             }
             _ => None,
@@ -148,10 +194,11 @@ fn http_action(
     let url = action.effective_url.clone();
     let deadline = Duration::from_secs(deadline_seconds);
     let bound = OperationBound::finite(deadline);
-    let result = (|| {
+    let result: Result<reqwest::StatusCode, CaptureHttpError> = (|| {
+        let timeout = finite_remaining(&bound)?;
         let client = reqwest::blocking::Client::builder()
-            .timeout(deadline)
-            .connect_timeout(deadline.min(Duration::from_secs(2)))
+            .timeout(timeout)
+            .connect_timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
@@ -167,9 +214,15 @@ fn http_action(
             }
             (CaptureWindowHttpMethodPlan::Post, None) => client.post(&url),
         };
-        request
+        let response = request
+            .timeout(finite_remaining(&bound)?)
             .send()
-            .map_err(|source| CaptureHttpError::Request { source })
+            .map_err(|source| CaptureHttpError::Request { source })?;
+        let status = response.status();
+        response
+            .bytes()
+            .map_err(|source| CaptureHttpError::Request { source })?;
+        Ok(status)
     })();
     match result {
         Ok(response) => CaptureActionRecord::Http {
@@ -179,13 +232,13 @@ fn http_action(
             path: Some(action.path.clone()),
             url,
             body: action.body.clone(),
-            status: Some(response.status().as_u16()),
+            status: Some(response.as_u16()),
             failure_kind: None,
             error: None,
-            succeeded: response.status().is_success(),
+            succeeded: response.is_success(),
             timing: bound.timing(
-                &format!("before_profiler_{operation}"),
-                if response.status().is_success() {
+                CONTROL_START_BOUNDARY,
+                if response.is_success() {
                     OperationTerminalCause::Succeeded
                 } else {
                     OperationTerminalCause::Failed
@@ -204,7 +257,7 @@ fn http_action(
             error: Some(error.record_message()),
             succeeded: false,
             timing: bound.timing(
-                &format!("before_profiler_{operation}"),
+                CONTROL_START_BOUNDARY,
                 if bound.is_expired() {
                     OperationTerminalCause::TimedOut
                 } else {
@@ -217,6 +270,8 @@ fn http_action(
 
 #[derive(Debug, thiserror::Error)]
 enum CaptureHttpError {
+    #[error("profiler control deadline expired")]
+    Deadline,
     #[error("failed to serialize profiler control request: {source}")]
     Serialization {
         #[source]
@@ -232,6 +287,7 @@ enum CaptureHttpError {
 impl CaptureHttpError {
     fn failure_kind(&self) -> CaptureHttpFailureKind {
         match self {
+            Self::Deadline => CaptureHttpFailureKind::Deadline,
             Self::Serialization { .. } => CaptureHttpFailureKind::Serialization,
             Self::Request { source } if source.is_timeout() => CaptureHttpFailureKind::Deadline,
             Self::Request { source } if source.is_connect() || source.is_builder() => {
@@ -247,6 +303,13 @@ impl CaptureHttpError {
         } else {
             self.to_string()
         }
+    }
+}
+
+fn finite_remaining(bound: &OperationBound) -> Result<Duration, CaptureHttpError> {
+    match bound.remaining() {
+        Remaining::Finite(remaining) => Ok(remaining),
+        Remaining::Expired | Remaining::Unbounded => Err(CaptureHttpError::Deadline),
     }
 }
 
@@ -280,11 +343,11 @@ fn command_action(
     target: &ProfilerTargetRecord,
     operation: &str,
     argv: Vec<String>,
-    deadline: Duration,
+    bound: &OperationBound,
+    start_boundary: &str,
     mode: CommandActionMode,
 ) -> CaptureActionRecord {
-    let bound = OperationBound::finite(deadline);
-    let output = target_output(target, &argv, &bound, mode);
+    let output = target_output(target, &argv, bound, mode);
     match output {
         Ok(output) => CaptureActionRecord::Command {
             target_id: target.process_id.clone(),
@@ -295,7 +358,7 @@ fn command_action(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             succeeded: output.status.success(),
             timing: bound.timing(
-                &format!("before_profiler_{operation}"),
+                start_boundary,
                 if output.status.success() {
                     OperationTerminalCause::Succeeded
                 } else {
@@ -305,11 +368,7 @@ fn command_action(
             cleanup: None,
         },
         Err(error) => {
-            let mut timing = bound.timing(
-                &format!("before_profiler_{operation}"),
-                error.terminal_cause,
-            );
-            timing.elapsed_ms = error.operation_elapsed_ms;
+            let timing = bound.timing(start_boundary, error.terminal_cause);
             CaptureActionRecord::Command {
                 target_id: target.process_id.clone(),
                 operation: operation.to_owned(),
@@ -337,7 +396,6 @@ pub(crate) struct TargetCommandError {
     #[source]
     failure: TargetCommandFailure,
     terminal_cause: OperationTerminalCause,
-    operation_elapsed_ms: u64,
     cleanup: Option<inferlab_runtime::container::CommandCleanupEvidence>,
 }
 
@@ -397,30 +455,23 @@ pub(crate) fn target_output(
             stdout,
             stderr,
         }),
-        Ok(inferlab_runtime::container::BoundedWait::Expired {
-            operation_elapsed_ms,
-            cleanup,
-            ..
-        }) => Err(TargetCommandError {
-            failure: TargetCommandFailure::Deadline,
-            terminal_cause: OperationTerminalCause::TimedOut,
-            operation_elapsed_ms,
-            cleanup,
-        }),
-        Ok(inferlab_runtime::container::BoundedWait::Interrupted {
-            operation_elapsed_ms,
-            cleanup,
-            ..
-        }) => Err(TargetCommandError {
-            failure: TargetCommandFailure::Interrupted,
-            terminal_cause: OperationTerminalCause::Interrupted,
-            operation_elapsed_ms,
-            cleanup: Some(cleanup),
-        }),
+        Ok(inferlab_runtime::container::BoundedWait::Expired { cleanup, .. }) => {
+            Err(TargetCommandError {
+                failure: TargetCommandFailure::Deadline,
+                terminal_cause: OperationTerminalCause::TimedOut,
+                cleanup,
+            })
+        }
+        Ok(inferlab_runtime::container::BoundedWait::Interrupted { cleanup, .. }) => {
+            Err(TargetCommandError {
+                failure: TargetCommandFailure::Interrupted,
+                terminal_cause: OperationTerminalCause::Interrupted,
+                cleanup: Some(cleanup),
+            })
+        }
         Err(inferlab_runtime::container::BoundedError::Launch(source)) => Err(TargetCommandError {
             failure: TargetCommandFailure::Launch { source },
             terminal_cause: OperationTerminalCause::Failed,
-            operation_elapsed_ms: bound.elapsed_ms(),
             cleanup: None,
         }),
         Err(
@@ -429,17 +480,13 @@ pub(crate) fn target_output(
         ) => Err(TargetCommandError {
             failure: TargetCommandFailure::Io { source },
             terminal_cause: OperationTerminalCause::Failed,
-            operation_elapsed_ms: bound.elapsed_ms(),
             cleanup: None,
         }),
         Err(inferlab_runtime::container::BoundedError::WaitCleanup {
-            source,
-            operation_elapsed_ms,
-            cleanup,
+            source, cleanup, ..
         }) => Err(TargetCommandError {
             failure: TargetCommandFailure::WaitCleanup { source },
             terminal_cause: OperationTerminalCause::Failed,
-            operation_elapsed_ms,
             cleanup: Some(cleanup),
         }),
     }
@@ -458,7 +505,10 @@ fn ssh_control_script(cwd: &Path, argv: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandActionMode, command_action, ssh_control_script};
+    use super::{
+        ARM_START_BOUNDARY, CommandActionMode, command_action, http_action, ssh_control_script,
+    };
+    use crate::finalization::MEASUREMENT_FINALIZATION_START;
     use crate::plan::{
         CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan,
         NsysEscapes, ProfilerControl, ProfilerFinalization, ProfilerLaunch, ProfilerTargetRecord,
@@ -466,8 +516,12 @@ mod tests {
     };
     use crate::record::CaptureActionRecord;
     use inferlab_protocol::EndpointAssignment;
-    use inferlab_runtime::operation_bound::{OperationBudgetEvidence, OperationTerminalCause};
+    use inferlab_runtime::operation_bound::{
+        OperationBound, OperationBudgetEvidence, OperationTerminalCause,
+    };
     use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -497,7 +551,6 @@ mod tests {
                 },
                 start: action.clone(),
                 stop: action,
-                deadline_seconds: 60,
             },
             supported_window_controls: vec![WindowControlKind::FrameworkRange],
             command_cwd,
@@ -511,11 +564,13 @@ mod tests {
     fn finalization_command_records_its_own_deadline_after_business_work()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
+        let bound = OperationBound::finite(Duration::from_millis(50));
         let action = command_action(
             &target(temp.path().to_path_buf()),
             "fixture-finalization",
             vec!["sh".to_owned(), "-c".to_owned(), "sleep 5".to_owned()],
-            Duration::from_millis(50),
+            &bound,
+            MEASUREMENT_FINALIZATION_START,
             CommandActionMode::Cleanup,
         );
         let CaptureActionRecord::Command {
@@ -535,6 +590,110 @@ mod tests {
                 && cleanup.trigger == inferlab_runtime::container::CommandCleanupTrigger::Deadline
                 && cleanup.kill_attempted
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn sequential_arm_commands_share_one_owner_budget() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let target = target(temp.path().to_path_buf());
+        let bound = OperationBound::finite(Duration::from_millis(150));
+        let first = command_action(
+            &target,
+            "fixture-arm-one",
+            vec!["sh".to_owned(), "-c".to_owned(), "sleep 0.1".to_owned()],
+            &bound,
+            ARM_START_BOUNDARY,
+            CommandActionMode::Operation,
+        );
+        let second = command_action(
+            &target,
+            "fixture-arm-two",
+            vec!["sh".to_owned(), "-c".to_owned(), "sleep 0.1".to_owned()],
+            &bound,
+            ARM_START_BOUNDARY,
+            CommandActionMode::Operation,
+        );
+
+        assert!(first.succeeded());
+        assert!(!second.succeeded());
+        Ok(())
+    }
+
+    #[test]
+    fn sequential_finalization_commands_share_one_owner_budget() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let target = target(temp.path().to_path_buf());
+        let bound = OperationBound::finite(Duration::from_millis(150));
+        let first = command_action(
+            &target,
+            "fixture-finalize-one",
+            vec!["sh".to_owned(), "-c".to_owned(), "sleep 0.1".to_owned()],
+            &bound,
+            MEASUREMENT_FINALIZATION_START,
+            CommandActionMode::Cleanup,
+        );
+        let second = command_action(
+            &target,
+            "fixture-finalize-two",
+            vec!["sh".to_owned(), "-c".to_owned(), "sleep 0.1".to_owned()],
+            &bound,
+            MEASUREMENT_FINALIZATION_START,
+            CommandActionMode::Cleanup,
+        );
+
+        assert!(first.succeeded());
+        assert!(!second.succeeded());
+        Ok(())
+    }
+
+    #[test]
+    fn control_request_deadline_covers_the_complete_response_body() -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 1_024];
+            let _ = stream.read(&mut request)?;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")?;
+            std::thread::sleep(Duration::from_millis(2_100));
+            stream.write_all(b"x")
+        });
+        let action = CaptureWindowActionPlan {
+            method: CaptureWindowHttpMethodPlan::Post,
+            path: "/profile".to_owned(),
+            body: None,
+            effective_url: format!("http://{address}/profile"),
+        };
+
+        let record = http_action("serve", "start-range", &action, 3);
+
+        assert!(record.succeeded());
+        let CaptureActionRecord::Http { timing, .. } = record else {
+            return Err("control fixture returned non-HTTP evidence".into());
+        };
+        assert!(timing.elapsed_ms >= 2_000);
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn report_verification_waits_for_async_completion_within_the_owner_budget()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let target = target(temp.path().to_path_buf());
+        let report = temp.path().join("trace.1.nsys-rep");
+        let publication = report.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(publication, b"fixture")
+        });
+
+        let bound = OperationBound::finite(Duration::from_secs(1));
+        let record = super::verify_report(&target, &report, &bound, MEASUREMENT_FINALIZATION_START);
+
+        writer.join().map_err(|_| "report writer panicked")??;
+        assert!(record.succeeded());
         Ok(())
     }
 

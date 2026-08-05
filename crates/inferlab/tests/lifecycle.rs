@@ -251,6 +251,14 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     assert_eq!(started["status"], "running");
     assert!(started["resolved"]["recipe"].is_null());
     assert_eq!(started["resolved"]["stack"]["id"], "vllm");
+    let adapter_operations = started["adapter_operations"]
+        .as_array()
+        .ok_or("missing adapter operation evidence")?;
+    assert_eq!(adapter_operations.len(), 2);
+    assert!(adapter_operations.iter().all(|operation| {
+        operation["timing"]["budget"]["kind"] == "finite"
+            && operation["timing"]["budget"]["configured_ms"] == 30_000
+    }));
     assert_eq!(
         started["resolved"]["stack"]["source_paths"][0],
         "vendor/vllm"
@@ -499,6 +507,102 @@ fn remote_machine_realizations_run_declared_checks_before_launch() -> Result<(),
     }
 
     workspace.run_json(&["serve", "stop", id])?;
+    Ok(())
+}
+
+#[test]
+fn local_adapter_timeout_is_effective_for_plan_and_render_evidence() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let local = workspace.root.path().join(".inferlab/local.toml");
+    let mut bindings = fs::read_to_string(&local)?;
+    bindings.push_str("\n[adapter]\ntimeout_seconds = 7\n");
+    fs::write(local, bindings)?;
+
+    let started = workspace.run_json(&["serve", "start", "dsv4-qualify"])?;
+    let operations = started["adapter_operations"]
+        .as_array()
+        .ok_or("missing adapter operation evidence")?;
+    assert_eq!(operations.len(), 2);
+    assert_eq!(operations[0]["operation"], "plan_serve");
+    assert_eq!(operations[1]["operation"], "render_serve");
+    assert!(operations.iter().all(|operation| {
+        operation["timing"]["budget"]["kind"] == "finite"
+            && operation["timing"]["budget"]["configured_ms"] == 7_000
+            && operation["timing"]["start_boundary"] == "before_adapter_process_launch"
+            && operation["timing"]["terminal_cause"] == "succeeded"
+    }));
+
+    workspace.run_json(&[
+        "serve",
+        "stop",
+        started["id"].as_str().ok_or("missing server record id")?,
+    ])?;
+    Ok(())
+}
+
+#[test]
+fn interruption_during_remote_preflight_reaps_the_ssh_process() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_ssh_pair()?;
+    let control = tempfile::tempdir()?;
+    let marker = control.path().join("ssh-preflight.pid");
+    let mut command = workspace.command(&["serve", "start", "dsv4-qualify", "--dry-run"]);
+    let mut child = command
+        .env("FAKE_SSH_HANG_PREFLIGHT", &marker)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let marker_deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.is_file() {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            return Err(format!(
+                "serve start exited before remote preflight: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        if Instant::now() >= marker_deadline {
+            let _ = child.kill();
+            return Err("remote preflight did not reach the blocking SSH fixture".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let ssh_pid = fs::read_to_string(&marker)?;
+    let signal = Command::new("kill")
+        .args(["-TERM", "--", &child.id().to_string()])
+        .output()?;
+    if !signal.status.success() {
+        let _ = child.kill();
+        return Err(format!(
+            "failed to interrupt remote preflight: {}",
+            String::from_utf8_lossy(&signal.stderr)
+        )
+        .into());
+    }
+
+    let exit_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= exit_deadline {
+            let _ = child.kill();
+            return Err("interrupted remote preflight did not finish within five seconds".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+
+    let ssh_status = Command::new("kill")
+        .args(["-0", "--", ssh_pid.trim()])
+        .output()?;
+    assert!(
+        !ssh_status.status.success(),
+        "interrupted SSH process {ssh_pid:?} was not reaped"
+    );
     Ok(())
 }
 
@@ -994,6 +1098,10 @@ case "$command" in
   *) operation=status ;;
 esac
 printf '%s %s\n' "$target" "$operation" >> "$FAKE_SSH_EVENTS"
+if [ "$operation" = preflight ] && [ -n "${FAKE_SSH_HANG_PREFLIGHT:-}" ]; then
+  printf '%s' "$$" > "$FAKE_SSH_HANG_PREFLIGHT"
+  sleep 3600
+fi
 printf 'fixture login banner\n'
 eval "exec bash -c $command"
 "#;

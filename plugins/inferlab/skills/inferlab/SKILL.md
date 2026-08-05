@@ -30,6 +30,15 @@ hand-compose framework commands, processes, or measurements.
   `evals.<ID>.*` and `benches.<ID>.*` fields. Backend settings use
   `server.settings.<KEY>` or `server.roles.<ROLE>.settings.<KEY>`; core server
   fields keep their own typed paths.
+- **Deadlines follow their owning workflow.** Server declarations, cases, and
+  invocation overrides may set `readiness_attempt_timeout_seconds` for each
+  blocking readiness attempt. Profiled servers additionally own
+  `capture_arm_deadline_seconds`, `capture_control_deadline_seconds`, and
+  `capture_finalization_deadline_seconds`. Machine-local adapter process and
+  image deadlines remain separate as `timeout_seconds` and
+  `image_timeout_seconds` under `[adapter]` in `.inferlab/local.toml`.
+  Cleanup grace, polling cadence, and OpenSSH connection policy are not
+  workspace settings.
 - **One thing owns each fact.** Workspace facts are committed TOML under
   `.inferlab/workspace.toml` (+ `.inferlab/workspace.d/*.toml`); private facts
   live only in local bindings (`--local <FILE>` selects an alternate bindings
@@ -133,7 +142,7 @@ member fails validation. For a concurrency Bench,
 requests before profiling; warmup is excluded from normalized metrics. Use
 `output_tokens = 1` for a prefill-dominant Bench; TPOT is then inapplicable and
 omitted. See the
-[0.8.3 workspace authoring guide](https://github.com/Infer-Lab/InferLab/blob/v0.8.3/docs/workspace-authoring.md)
+[0.8.4 workspace authoring guide](https://github.com/Infer-Lab/InferLab/blob/v0.8.4/docs/workspace-authoring.md)
 for task-source, request-body, warmup, request-source, metric, and SLO examples.
 
 **Closed loop.** `inferlab recipe run <RECIPE> --case <CASE>` starts the

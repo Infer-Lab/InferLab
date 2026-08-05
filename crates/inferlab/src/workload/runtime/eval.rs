@@ -109,8 +109,8 @@ pub(super) fn execute_eval(
 ) -> Result<bool, InferlabError> {
     let paths = session.case_paths("eval")?;
     let mut capture = if plan.capture {
-        let targets = match crate::server::running_profiler_targets(root, server_record_id) {
-            Ok(targets) => targets,
+        let selection = match crate::server::running_profiler_selection(root, server_record_id) {
+            Ok(selection) => selection,
             Err(error) => {
                 let message = error.to_string();
                 session.record_mut().capture = Some(
@@ -123,7 +123,7 @@ pub(super) fn execute_eval(
             server_record_id,
             &session.record_mut().id,
             &["eval".to_owned()],
-            targets,
+            selection,
         ) {
             Ok(capture) => Some(capture),
             Err(record) => {

@@ -235,11 +235,7 @@ pub(crate) fn apply_external(
     let probe = crate::adapter::probe_external_framework(
         &external.reference,
         adapter.image_device,
-        adapter
-            .image_timeout_seconds
-            .map_or(crate::adapter::IMAGE_ADAPTER_TIMEOUT, |seconds| {
-                std::time::Duration::from_secs(seconds)
-            }),
+        adapter.image_timeout(),
         &framework,
     )?;
     containerize(execution, &external.reference, machines, true);

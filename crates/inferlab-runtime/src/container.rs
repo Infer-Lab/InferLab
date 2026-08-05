@@ -450,10 +450,10 @@ pub enum RemovalFailure {
 
 /// `docker rm -f` on the container's launch machine, always under
 /// [`REMOVAL_TIMEOUT`]: the SSH client itself runs through the bounded
-/// invocation, because the transport's connect and keepalive options
-/// detect dead connections but cannot bound a live connection to a wedged
-/// remote daemon. A container the daemon no longer knows is the
-/// confirmation, not a failure ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+/// invocation, because transport liveness configuration cannot bound a live
+/// connection to a wedged remote daemon. A container the daemon no longer
+/// knows is the confirmation, not a failure
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub fn remove_container(target: Option<&str>, container: &str) -> Removal {
     let bound = OperationBound::finite(REMOVAL_TIMEOUT);
     let argv = match target {

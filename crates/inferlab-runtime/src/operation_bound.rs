@@ -91,6 +91,13 @@ impl OperationBound {
         duration_millis(started_at.elapsed())
     }
 
+    pub(crate) fn configured_ms(&self) -> Option<u64> {
+        match &self.0 {
+            BoundKind::Finite { budget, .. } => Some(duration_millis(*budget)),
+            BoundKind::Unbounded { .. } => None,
+        }
+    }
+
     pub fn timing(
         &self,
         start_boundary: &str,
@@ -164,6 +171,12 @@ impl AttemptBound {
             BoundKind::Finite { budget, .. } => Some(duration_millis(*budget)),
             BoundKind::Unbounded { .. } => None,
         }
+    }
+
+    /// Preserve this attempt's original clock while passing it to a child
+    /// operation that consumes an `OperationBound`.
+    pub fn into_operation_bound(self) -> OperationBound {
+        OperationBound(self.0)
     }
 
     fn remaining_at(&self, now: Instant) -> Remaining {

@@ -105,7 +105,6 @@ pub struct ProcessPreparation<'a> {
     pub launch: &'a LaunchPlan,
     pub capture: Option<&'a ProcessCapturePlan>,
     pub control_endpoint: Option<&'a ProcessEndpointPlan>,
-    pub control_deadline_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -157,13 +156,7 @@ pub enum ProfilerControl {
         endpoint: EndpointAssignment,
         start: CaptureWindowActionPlan,
         stop: CaptureWindowActionPlan,
-        #[serde(default = "default_control_deadline")]
-        deadline_seconds: u64,
     },
-}
-
-const fn default_control_deadline() -> u64 {
-    60
 }
 
 pub struct PreparedProcess {
@@ -222,7 +215,6 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
         },
         start: requirement.start.clone(),
         stop: requirement.stop.clone(),
-        deadline_seconds: input.control_deadline_seconds,
     };
     Ok(PreparedProcess {
         command: CommandPlan {
@@ -298,9 +290,23 @@ fn sanitize_segment(value: &str) -> String {
 pub struct CapturePlanRecord {
     pub server_record_id: String,
     pub workload_id: String,
+    pub deadlines: CaptureDeadlines,
     pub control: WindowControlKind,
     pub windows: Vec<CaptureWindowPlan>,
     pub targets: Vec<CaptureTargetPlan>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureDeadlines {
+    pub capture_arm_deadline_seconds: u64,
+    pub capture_control_deadline_seconds: u64,
+    pub capture_finalization_deadline_seconds: u64,
+}
+
+pub struct CaptureSelection {
+    pub targets: Vec<ProfilerTargetRecord>,
+    pub deadlines: CaptureDeadlines,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -329,6 +335,7 @@ pub(crate) fn compile_plan(
     workload_id: &str,
     window_ids: &[String],
     targets: &[ProfilerTargetRecord],
+    deadlines: CaptureDeadlines,
 ) -> Result<CapturePlanRecord, ProfilerError> {
     if targets.is_empty() {
         return Err(ProfilerError::NoTargets);
@@ -379,6 +386,7 @@ pub(crate) fn compile_plan(
     Ok(CapturePlanRecord {
         server_record_id: server_record_id.to_owned(),
         workload_id: workload_id.to_owned(),
+        deadlines,
         control,
         windows,
         targets,

@@ -86,9 +86,24 @@ pub(super) fn validate_workspace(
                 "server {id:?} readiness_timeout_seconds must be nonzero"
             ));
         }
+        if server.readiness_attempt_timeout_seconds == Some(0) {
+            return invalid(format!(
+                "server {id:?} readiness_attempt_timeout_seconds must be nonzero"
+            ));
+        }
         if server.capture_control_deadline_seconds == Some(0) {
             return invalid(format!(
                 "server {id:?} capture_control_deadline_seconds must be nonzero"
+            ));
+        }
+        if server.capture_arm_deadline_seconds == Some(0) {
+            return invalid(format!(
+                "server {id:?} capture_arm_deadline_seconds must be nonzero"
+            ));
+        }
+        if server.capture_finalization_deadline_seconds == Some(0) {
+            return invalid(format!(
+                "server {id:?} capture_finalization_deadline_seconds must be nonzero"
             ));
         }
         if server.topology == ServeTopology::Single
@@ -137,6 +152,29 @@ pub(super) fn validate_workspace(
                 return invalid(format!(
                     "server case {case_id:?} readiness_timeout_seconds must be nonzero"
                 ));
+            }
+            if case.readiness_attempt_timeout_seconds == Some(0) {
+                return invalid(format!(
+                    "server case {case_id:?} readiness_attempt_timeout_seconds must be nonzero"
+                ));
+            }
+            for (name, value) in [
+                (
+                    "capture_arm_deadline_seconds",
+                    case.capture_arm_deadline_seconds,
+                ),
+                (
+                    "capture_control_deadline_seconds",
+                    case.capture_control_deadline_seconds,
+                ),
+                (
+                    "capture_finalization_deadline_seconds",
+                    case.capture_finalization_deadline_seconds,
+                ),
+            ] {
+                if value == Some(0) {
+                    return invalid(format!("server case {case_id:?} {name} must be nonzero"));
+                }
             }
             if server.topology == ServeTopology::Single
                 && (case.pd_router_backend.is_some() || case.kv_transfer.is_some())

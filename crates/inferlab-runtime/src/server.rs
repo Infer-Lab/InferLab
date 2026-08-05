@@ -20,16 +20,13 @@ use cleanup::removal_summary;
 #[cfg(test)]
 use cleanup::terminate_local;
 #[cfg(test)]
-use launch::{
-    command_output_with_input, materialize_local_launch_files, remote_launch_file_script,
-    spawn_local,
-};
+use launch::{materialize_local_launch_files, remote_launch_file_script, spawn_local};
 #[cfg(test)]
 use observation::{run_status_command, verified_local_status};
 #[cfg(test)]
 use readiness::{
-    HttpTargetRegistryProbe, READINESS_ATTEMPT_CAP, match_target_registry, probe_http,
-    probe_http_json, wait_http_target_registry_ready,
+    HttpTargetRegistryProbe, match_target_registry, probe_http, probe_http_json,
+    wait_http_target_registry_ready, wait_process_alive_ready,
 };
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -230,6 +227,7 @@ pub enum ReadinessEvidence {
     ProcessAlive {
         ready_unix_ms: u64,
         timing: OperationTimingEvidence,
+        diagnostic_attempts: Vec<ReadinessAttemptEvidence>,
     },
 }
 
@@ -291,12 +289,6 @@ pub enum ServerLaunchError {
     },
     #[error(transparent)]
     Ssh(#[from] crate::ssh::SshError),
-    #[error("failed to send launch file input over SSH to {target:?}: {source}")]
-    SshInput {
-        target: String,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("{operation} exited with {status}: {diagnostics}")]
     Exit {
         operation: String,
@@ -424,6 +416,7 @@ pub trait ReadinessObserver {
         handle: &ProcessHandle,
         endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
+        bound: &OperationBound,
         on_probe_failure: &mut dyn FnMut(&str),
     ) -> Result<ReadinessEvidence, ReadinessFailure>;
 }
@@ -515,6 +508,7 @@ pub struct SystemProcessRuntime;
 mod tests {
     use super::*;
     use crate::plan::LaunchFilePlan;
+    use std::cell::Cell;
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -522,7 +516,7 @@ mod tests {
     #[test]
     fn expired_readiness_owner_prevents_a_fresh_network_attempt() {
         let bound = OperationBound::finite(Duration::ZERO);
-        let error = probe_http("127.0.0.1", 9, "/ready", &bound)
+        let error = probe_http("127.0.0.1", 9, "/ready", &bound, 30)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
@@ -552,7 +546,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let error = probe_http("127.0.0.1", port, "/ready", &OperationBound::unbounded())
+        let error = probe_http("127.0.0.1", port, "/ready", &OperationBound::unbounded(), 1)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
@@ -563,8 +557,82 @@ mod tests {
 
         assert!(error.contains("deadline expired"), "{error}");
         assert!(
-            elapsed < Duration::from_secs(1),
-            "a 250ms attempt lasted {elapsed:?}"
+            elapsed < Duration::from_secs(2),
+            "a one-second attempt lasted {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn finite_readiness_accepts_a_response_after_250_milliseconds() -> Result<(), String> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
+        let server = thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            thread::sleep(Duration::from_millis(350));
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .map_err(|error| error.to_string())
+        });
+
+        let started = Instant::now();
+        probe_http(
+            "127.0.0.1",
+            port,
+            "/ready",
+            &OperationBound::finite(Duration::from_secs(2)),
+            1,
+        )
+        .map_err(|error| error.to_string())?;
+        let elapsed = started.elapsed();
+        server
+            .join()
+            .map_err(|_| "delayed readiness fixture panicked".to_owned())??;
+
+        assert!(elapsed >= Duration::from_millis(250), "elapsed {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "elapsed {elapsed:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_attempt_deadline_includes_the_complete_response_body() -> Result<(), String> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
+        let server = thread::spawn(move || -> Result<(), String> {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx")
+                .map_err(|error| error.to_string())?;
+            thread::sleep(Duration::from_millis(1_500));
+            Ok(())
+        });
+
+        let started = Instant::now();
+        let error = probe_http("127.0.0.1", port, "/ready", &OperationBound::unbounded(), 1)
+            .err()
+            .map(|error| error.to_string());
+        let elapsed = started.elapsed();
+        server
+            .join()
+            .map_err(|_| "readiness body fixture panicked".to_owned())??;
+
+        assert!(
+            error.is_some_and(|error| error == "readiness operation deadline expired"),
+            "readiness accepted an incomplete response body"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "elapsed {elapsed:?}"
         );
         Ok(())
     }
@@ -600,6 +668,7 @@ mod tests {
             "/workers",
             "target registry",
             &OperationBound::unbounded(),
+            1,
         )
         .err()
         .map(|error| error.to_string())
@@ -611,8 +680,8 @@ mod tests {
 
         assert!(error.contains("deadline expired"), "{error}");
         assert!(
-            elapsed < Duration::from_secs(1),
-            "a 250ms registry attempt lasted {elapsed:?}"
+            elapsed < Duration::from_secs(2),
+            "a one-second registry attempt lasted {elapsed:?}"
         );
         Ok(())
     }
@@ -663,6 +732,51 @@ mod tests {
     }
 
     #[test]
+    fn finite_readiness_retries_an_expired_process_status_attempt() -> Result<(), String> {
+        let calls = Cell::new(0_u32);
+        let mut failures = Vec::new();
+        let bound = OperationBound::finite(Duration::from_secs(3));
+        let evidence = wait_process_alive_ready(
+            |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    thread::sleep(Duration::from_millis(1_050));
+                    ProcessStatus {
+                        queried: false,
+                        alive: false,
+                        error: Some("process status attempt deadline expired".to_owned()),
+                    }
+                } else {
+                    alive_status()
+                }
+            },
+            1,
+            &bound,
+            &mut |failure| failures.push(failure.to_owned()),
+        )
+        .map_err(|failure| failure.message)?;
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(failures, ["process status attempt deadline expired"]);
+        let ReadinessEvidence::ProcessAlive {
+            timing,
+            diagnostic_attempts,
+            ..
+        } = evidence
+        else {
+            return Err("process-alive readiness returned the wrong evidence kind".to_owned());
+        };
+        assert_eq!(
+            timing.start_boundary,
+            "after_process_spawn_before_readiness_attempt"
+        );
+        assert_eq!(diagnostic_attempts.len(), 1);
+        assert!(diagnostic_attempts[0].succeeded);
+        assert!((1..=1_000).contains(&diagnostic_attempts[0].effective_bound_ms));
+        Ok(())
+    }
+
+    #[test]
     fn unbounded_process_status_command_does_not_acquire_a_timeout() -> Result<(), String> {
         let output = run_status_command(
             &["sh", "-c", "sleep 0.1; printf alive"],
@@ -687,9 +801,30 @@ mod tests {
     }
 
     fn run_script_with_input(script: &str, input: &[u8]) -> Result<Output, String> {
-        let mut command = Command::new("bash");
-        command.args(["-c", script]);
-        command_output_with_input(command, input).map_err(|error| error.to_string())
+        match crate::container::run_with_bound(
+            &["bash", "-c", script],
+            None,
+            Some(input),
+            &OperationBound::unbounded(),
+            None,
+        ) {
+            Ok(crate::container::BoundedWait::Exited {
+                status,
+                stdout,
+                stderr,
+            }) => Ok(Output {
+                status,
+                stdout,
+                stderr,
+            }),
+            Ok(crate::container::BoundedWait::Expired { .. }) => {
+                Err("unbounded launch-file fixture expired".to_owned())
+            }
+            Ok(crate::container::BoundedWait::Interrupted { .. }) => {
+                Err("launch-file fixture was interrupted".to_owned())
+            }
+            Err(_) => Err("launch-file fixture failed".to_owned()),
+        }
     }
 
     fn target_registry_endpoint(
@@ -936,11 +1071,13 @@ mod tests {
             },
         ];
 
+        let bound = OperationBound::unbounded();
         let evidence = wait_http_target_registry_ready(
             |_| alive_status(),
             &endpoint,
             target_registry_probe(&expected),
-            None,
+            1,
+            &bound,
             &mut |_| {},
         )
         .map_err(|failure| failure.message)?;
@@ -983,11 +1120,9 @@ mod tests {
             timing.terminal_cause,
             crate::operation_bound::OperationTerminalCause::Succeeded
         );
-        assert_eq!(diagnostic_attempts.len(), 2);
+        assert_eq!(diagnostic_attempts.len(), 3);
         assert!(diagnostic_attempts.iter().all(|attempt| {
-            attempt.succeeded
-                && (1..=crate::operation_bound::duration_millis(READINESS_ATTEMPT_CAP))
-                    .contains(&attempt.effective_bound_ms)
+            attempt.succeeded && (1..=1_000).contains(&attempt.effective_bound_ms)
         }));
         assert_eq!(
             matched_targets,
@@ -1006,6 +1141,59 @@ mod tests {
                 },
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn finite_target_registry_attempts_record_the_resolved_attempt_budget() -> Result<(), String> {
+        let (endpoint, server) = target_registry_endpoint(
+            serde_json::json!({
+                "workers": [{
+                    "url": "http://decode:30001",
+                    "worker_type": "decode",
+                    "is_healthy": true
+                }]
+            })
+            .to_string(),
+        )?;
+        let expected = vec![TargetRegistryExpectedTarget {
+            url: "http://decode:30001".to_owned(),
+            role: "decode".to_owned(),
+            bootstrap_port: None,
+        }];
+
+        let bound = OperationBound::finite(Duration::from_secs(2));
+        let evidence = wait_http_target_registry_ready(
+            |_| alive_status(),
+            &endpoint,
+            target_registry_probe(&expected),
+            1,
+            &bound,
+            &mut |_| {},
+        )
+        .map_err(|failure| failure.message)?;
+        server
+            .join()
+            .map_err(|_| "target registry fixture panicked".to_owned())??;
+
+        let ReadinessEvidence::HttpTargetRegistry {
+            timing,
+            diagnostic_attempts,
+            ..
+        } = evidence
+        else {
+            return Err("target registry readiness returned the wrong evidence kind".to_owned());
+        };
+        assert_eq!(
+            timing.budget,
+            crate::operation_bound::OperationBudgetEvidence::Finite {
+                configured_ms: 2_000,
+            }
+        );
+        assert_eq!(diagnostic_attempts.len(), 3);
+        assert!(diagnostic_attempts.iter().all(|attempt| {
+            attempt.succeeded && (1..=1_000).contains(&attempt.effective_bound_ms)
+        }));
         Ok(())
     }
 
@@ -1036,11 +1224,13 @@ mod tests {
         ];
 
         let mut probe_failures = Vec::new();
+        let bound = OperationBound::finite(Duration::from_secs(1));
         let failure = match wait_http_target_registry_ready(
             |_| alive_status(),
             &endpoint,
             target_registry_probe(&expected),
-            Some(1),
+            1,
+            &bound,
             &mut |failure| probe_failures.push(failure.to_owned()),
         ) {
             Err(failure) => failure,

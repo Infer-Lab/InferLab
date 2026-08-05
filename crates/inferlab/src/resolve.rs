@@ -241,7 +241,10 @@ pub fn resolve<C: AdapterClient>(
             topology,
             profiling,
             readiness_timeout_seconds: effective.readiness_timeout_seconds,
+            readiness_attempt_timeout_seconds: effective.readiness_attempt_timeout_seconds,
+            capture_arm_deadline_seconds: effective.capture_arm_deadline_seconds,
             capture_control_deadline_seconds: effective.capture_control_deadline_seconds,
+            capture_finalization_deadline_seconds: effective.capture_finalization_deadline_seconds,
             kv_transfer: effective.kv_transfer,
             frontend,
             profiler_escapes: profiler_escapes_plan(server),
@@ -892,7 +895,7 @@ mod tests {
             prefill_bootstrap_port: "bootstrap".to_owned(),
         }));
 
-        let readiness = readiness_plan(&probe, 900, false, &allocations)?;
+        let readiness = readiness_plan(&probe, 900, 30, false, &allocations)?;
         assert!(matches!(
             &readiness,
             ReadinessPlan::HttpTargetRegistry { .. }

@@ -16,7 +16,6 @@ pub use composition::{
     discover_workspace, load_workspace, load_workspace_config, workspace_summary,
 };
 pub(crate) use composition::{snapshot_workspace, workspace_identity};
-pub(crate) use definitions::DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS;
 pub use definitions::{
     AggregateSlo, BenchDefinition, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
     BenchTpotApplicability, EvalDefinition, EvalTaskSource, JsonValue, ModelDefinition,
@@ -25,6 +24,10 @@ pub use definitions::{
 };
 #[cfg(test)]
 pub(crate) use definitions::{BenchPrefixSharing, BenchRandomShape};
+pub(crate) use definitions::{
+    DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,
+    DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS, DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS,
+};
 #[cfg(test)]
 pub(crate) use local::LocalBindings;
 pub(crate) use local::MANAGED_CONTAINER_ENV;

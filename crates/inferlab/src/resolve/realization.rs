@@ -342,6 +342,7 @@ pub(super) fn realize_runtime(
             readiness: readiness_plan(
                 requirement.readiness(),
                 effective.readiness_timeout_seconds,
+                effective.readiness_attempt_timeout_seconds,
                 effective.profiling,
                 allocations,
             )?,

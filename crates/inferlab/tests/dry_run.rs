@@ -8,6 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const WORKSPACE: &str = include_str!("fixtures/dsv4-workspace.toml");
@@ -140,7 +141,12 @@ impl TestWorkspace {
             r#"#!/usr/bin/env python3
 import hashlib
 import json
+import os
 import sys
+import time
+
+if os.environ.get("FIXTURE_ADAPTER_HANG"):
+    time.sleep(3600)
 
 request = json.load(sys.stdin)
 input = request["input"]
@@ -809,7 +815,18 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
     );
     assert!(serve["server"].get("parallelism").is_none());
     assert!(serve["server"].get("settings").is_none());
+    assert_eq!(serve["server"]["readiness_attempt_timeout_seconds"], 30);
+    assert_eq!(serve["server"]["capture_arm_deadline_seconds"], 60);
     assert_eq!(serve["server"]["capture_control_deadline_seconds"], 60);
+    assert_eq!(
+        serve["server"]["capture_finalization_deadline_seconds"],
+        300
+    );
+    assert!(
+        serve["server"]["declarations"][0]["common"]
+            .get("readiness_attempt_timeout_seconds")
+            .is_none()
+    );
     assert_eq!(
         serve["server"]["declarations"][0]["source"],
         serde_json::json!({"kind": "server", "id": "dsv4-qualify"})
@@ -2252,13 +2269,13 @@ fn explicit_case_and_server_override_preserve_ordered_declarations() -> Result<(
 }
 
 #[test]
-fn readiness_timeout_uses_the_server_case_and_invocation_patch_precedence()
+fn runtime_deadlines_use_the_server_case_and_invocation_patch_precedence()
 -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let path = workspace.root.path().join(".inferlab/workspace.toml");
     let config = fs::read_to_string(&path)?.replace(
         "[servers.dsv4-qualify.cases.tp4.parallelism.outer]",
-        "[servers.dsv4-qualify.cases.tp4]\nreadiness_timeout_seconds = 1200\n\n\
+        "[servers.dsv4-qualify.cases.tp4]\nreadiness_timeout_seconds = 1200\nreadiness_attempt_timeout_seconds = 45\ncapture_arm_deadline_seconds = 46\ncapture_control_deadline_seconds = 47\ncapture_finalization_deadline_seconds = 48\n\n\
          [servers.dsv4-qualify.cases.tp4.parallelism.outer]",
     );
     fs::write(path, config)?;
@@ -2272,6 +2289,13 @@ fn readiness_timeout_uses_the_server_case_and_invocation_patch_precedence()
         "--dry-run",
     ])?;
     assert_eq!(case_plan["server"]["readiness_timeout_seconds"], 1200);
+    assert_eq!(case_plan["server"]["readiness_attempt_timeout_seconds"], 45);
+    assert_eq!(case_plan["server"]["capture_arm_deadline_seconds"], 46);
+    assert_eq!(case_plan["server"]["capture_control_deadline_seconds"], 47);
+    assert_eq!(
+        case_plan["server"]["capture_finalization_deadline_seconds"],
+        48
+    );
     assert_eq!(
         case_plan["server"]["declarations"][1]["source"],
         serde_json::json!({"kind": "case", "id": "tp4"})
@@ -2279,6 +2303,22 @@ fn readiness_timeout_uses_the_server_case_and_invocation_patch_precedence()
     assert_eq!(
         case_plan["server"]["declarations"][1]["common"]["readiness_timeout_seconds"],
         1200
+    );
+    assert_eq!(
+        case_plan["server"]["declarations"][1]["common"]["readiness_attempt_timeout_seconds"],
+        45
+    );
+    assert_eq!(
+        case_plan["server"]["declarations"][1]["common"]["capture_arm_deadline_seconds"],
+        46
+    );
+    assert_eq!(
+        case_plan["server"]["declarations"][1]["common"]["capture_control_deadline_seconds"],
+        47
+    );
+    assert_eq!(
+        case_plan["server"]["declarations"][1]["common"]["capture_finalization_deadline_seconds"],
+        48
     );
 
     let invocation_plan = workspace.run_json(&[
@@ -2289,17 +2329,151 @@ fn readiness_timeout_uses_the_server_case_and_invocation_patch_precedence()
         "tp4",
         "--set",
         "server.readiness_timeout_seconds=1800",
+        "--set",
+        "server.readiness_attempt_timeout_seconds=75",
+        "--set",
+        "server.capture_arm_deadline_seconds=76",
+        "--set",
+        "server.capture_control_deadline_seconds=77",
+        "--set",
+        "server.capture_finalization_deadline_seconds=78",
         "--dry-run",
     ])?;
     assert_eq!(invocation_plan["server"]["readiness_timeout_seconds"], 1800);
+    assert_eq!(
+        invocation_plan["server"]["readiness_attempt_timeout_seconds"],
+        75
+    );
+    assert_eq!(
+        invocation_plan["server"]["capture_arm_deadline_seconds"],
+        76
+    );
+    assert_eq!(
+        invocation_plan["server"]["capture_control_deadline_seconds"],
+        77
+    );
+    assert_eq!(
+        invocation_plan["server"]["capture_finalization_deadline_seconds"],
+        78
+    );
     assert_eq!(
         invocation_plan["server"]["declarations"][2]["source"],
         serde_json::json!({"kind": "invocation", "index": 0})
     );
     assert_eq!(
+        invocation_plan["server"]["declarations"][3]["source"],
+        serde_json::json!({"kind": "invocation", "index": 1})
+    );
+    assert_eq!(
         invocation_plan["server"]["declarations"][2]["common"]["readiness_timeout_seconds"],
         1800
     );
+    assert_eq!(
+        invocation_plan["server"]["declarations"][3]["common"]["readiness_attempt_timeout_seconds"],
+        75
+    );
+    assert_eq!(
+        invocation_plan["server"]["declarations"][4]["common"]["capture_arm_deadline_seconds"],
+        76
+    );
+    assert_eq!(
+        invocation_plan["server"]["declarations"][5]["common"]["capture_control_deadline_seconds"],
+        77
+    );
+    assert_eq!(
+        invocation_plan["server"]["declarations"][6]["common"]["capture_finalization_deadline_seconds"],
+        78
+    );
+    Ok(())
+}
+
+#[test]
+fn readiness_attempt_timeout_must_be_positive() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--set",
+        "server.readiness_attempt_timeout_seconds=0",
+        "--dry-run",
+    ])?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("readiness_attempt_timeout_seconds must be nonzero")
+    );
+    Ok(())
+}
+
+#[test]
+fn local_adapter_timeout_must_be_positive() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let local = workspace.root.path().join(".inferlab/local.toml");
+    let mut bindings = fs::read_to_string(&local)?;
+    bindings.push_str("\n[adapter]\ntimeout_seconds = 0\n");
+    fs::write(local, bindings)?;
+
+    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostics.contains("adapter timeout_seconds must be positive"),
+        "{diagnostics}"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_adapter_timeout_bounds_the_process_invocation() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let local = workspace.root.path().join(".inferlab/local.toml");
+    let mut bindings = fs::read_to_string(&local)?;
+    bindings.push_str("\n[adapter]\ntimeout_seconds = 1\n");
+    fs::write(local, bindings)?;
+
+    let started = Instant::now();
+    let output = workspace
+        .command()
+        .env("FIXTURE_ADAPTER_HANG", "1")
+        .args(["serve", "start", "dsv4-qualify", "--dry-run"])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostics.contains("integration \"vllm\" did not finish within 1 seconds"),
+        "{diagnostics}"
+    );
+    assert!(elapsed >= Duration::from_millis(900), "elapsed {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "elapsed {elapsed:?}");
+    Ok(())
+}
+
+#[test]
+fn profiler_deadlines_must_be_positive() -> Result<(), Box<dyn Error>> {
+    for field in [
+        "capture_arm_deadline_seconds",
+        "capture_control_deadline_seconds",
+        "capture_finalization_deadline_seconds",
+    ] {
+        let workspace = TestWorkspace::new()?;
+        let output = workspace.run(&[
+            "serve",
+            "start",
+            "dsv4-qualify",
+            "--set",
+            &format!("server.{field}=0"),
+            "--dry-run",
+        ])?;
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(&format!("{field} must be nonzero"))
+        );
+    }
     Ok(())
 }
 

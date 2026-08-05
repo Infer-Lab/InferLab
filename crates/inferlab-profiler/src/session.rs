@@ -1,12 +1,14 @@
 use crate::error::ProfilerError;
 use crate::finalization;
-use crate::plan::{CapturePlanRecord, ProfilerTargetRecord, compile_plan};
+use crate::plan::{CapturePlanRecord, CaptureSelection, ProfilerTargetRecord, compile_plan};
 use crate::record::{
     CaptureActionRecord, CaptureRangeEndRecord, CaptureRecord, CaptureReportRecord, CaptureStatus,
     CaptureWindowRecord,
 };
 use crate::transport;
+use inferlab_runtime::operation_bound::OperationBound;
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 pub struct CaptureSession {
     targets: Vec<ProfilerTargetRecord>,
@@ -20,14 +22,18 @@ impl CaptureSession {
         server_record_id: &str,
         workload_id: &str,
         window_ids: &[String],
-        targets: Vec<ProfilerTargetRecord>,
+        selection: CaptureSelection,
     ) -> Result<Self, Box<CaptureRecord>> {
-        let plan =
-            compile_plan(server_record_id, workload_id, window_ids, &targets).map_err(|error| {
-                Box::new(CaptureRecord::failed(format!("profiling failed: {error}")))
-            })?;
+        let plan = compile_plan(
+            server_record_id,
+            workload_id,
+            window_ids,
+            &selection.targets,
+            selection.deadlines,
+        )
+        .map_err(|error| Box::new(CaptureRecord::failed(format!("profiling failed: {error}"))))?;
         let mut session = Self {
-            targets,
+            targets: selection.targets,
             record: CaptureRecord {
                 status: CaptureStatus::Running,
                 plan: Some(plan.clone()),
@@ -40,21 +46,25 @@ impl CaptureSession {
             plan,
             stop_failure: None,
         };
-        if let Err(message) = session.arm_range_collection() {
+        let arm_bound = OperationBound::finite(Duration::from_secs(
+            session.plan.deadlines.capture_arm_deadline_seconds,
+        ));
+        if let Err(message) = session.arm_range_collection(&arm_bound) {
             session.fail(message);
-            session.finalize_collections();
+            let finalization_bound = session.finalization_bound();
+            session.finalize_collections(&finalization_bound);
             return Err(Box::new(session.record));
         }
         Ok(session)
     }
 
-    fn arm_range_collection(&mut self) -> Result<(), String> {
+    fn arm_range_collection(&mut self, bound: &OperationBound) -> Result<(), String> {
         for (target, plan) in self.targets.iter().zip(&self.plan.targets) {
             let parent = plan
                 .output_base
                 .parent()
                 .ok_or_else(|| format!("capture output {:?} has no parent", plan.output_base))?;
-            let mkdir = transport::prepare_output(target, parent);
+            let mkdir = transport::prepare_output(target, parent, bound);
             let mkdir_ok = mkdir.succeeded();
             let mkdir_error = mkdir.error();
             self.record.arm.push(mkdir);
@@ -69,7 +79,7 @@ impl CaptureSession {
                     target.process_id
                 )
             })?;
-            let start = transport::arm_range_collection(target, &plan.output_base, count);
+            let start = transport::arm_range_collection(target, &plan.output_base, count, bound);
             let start_ok = start.succeeded();
             let start_error = start.error();
             self.record.arm.push(start);
@@ -173,7 +183,10 @@ impl CaptureSession {
     }
 
     fn start_window(&self) -> Vec<CaptureActionRecord> {
-        transport::start_windows(&self.targets)
+        transport::start_windows(
+            &self.targets,
+            self.plan.deadlines.capture_control_deadline_seconds,
+        )
     }
 
     fn stop_window(&self, start: &[CaptureActionRecord]) -> Vec<CaptureActionRecord> {
@@ -186,13 +199,18 @@ impl CaptureSession {
                 | CaptureActionRecord::CollectionFinalization { .. } => None,
             })
             .collect::<BTreeSet<_>>();
-        transport::stop_windows(&self.targets, &started)
+        transport::stop_windows(
+            &self.targets,
+            &started,
+            self.plan.deadlines.capture_control_deadline_seconds,
+        )
     }
 
     #[must_use]
     pub fn finish(mut self) -> CaptureRecord {
-        self.finalize_collections();
-        self.verify_reports();
+        let finalization_bound = self.finalization_bound();
+        self.finalize_collections(&finalization_bound);
+        self.verify_reports(&finalization_bound);
         if self.record.error.is_none()
             && self.record.windows.iter().all(|window| window.succeeded)
             && self.record.reports.iter().all(|report| report.verified)
@@ -204,10 +222,21 @@ impl CaptureSession {
         self.record
     }
 
-    fn finalize_collections(&mut self) {
+    fn finalization_bound(&self) -> OperationBound {
+        OperationBound::finite(Duration::from_secs(
+            self.plan.deadlines.capture_finalization_deadline_seconds,
+        ))
+    }
+
+    fn finalize_collections(&mut self, bound: &OperationBound) {
         let mut failure = None;
         for target in &self.targets {
-            let action = finalization::finalize_target(target, self.range_end_for(target));
+            let action = finalization::finalize_target(
+                target,
+                self.range_end_for(target),
+                bound,
+                finalization::MEASUREMENT_FINALIZATION_START,
+            );
             if !action.succeeded() && failure.is_none() {
                 failure = Some(action.error().unwrap_or_else(|| {
                     format!("failed to finalize target {:?}", target.process_id)
@@ -256,11 +285,34 @@ impl CaptureSession {
             })
     }
 
-    fn verify_reports(&mut self) {
+    fn verify_reports(&mut self, bound: &OperationBound) {
         let mut failure = None;
         for (target, target_plan) in self.targets.iter().zip(&self.plan.targets) {
+            let control_process_id = match &target.control {
+                crate::plan::ProfilerControl::Http { process_id, .. } => process_id,
+            };
             for (window, path) in self.plan.windows.iter().zip(&target_plan.reports) {
-                let verification = finalization::verify_report(target, path);
+                let wait_for_completion = self
+                    .record
+                    .windows
+                    .iter()
+                    .find(|record| record.id == window.id)
+                    .is_some_and(|record| {
+                        record.start.iter().any(|action| {
+                            matches!(
+                                action,
+                                CaptureActionRecord::Http { process_id, .. }
+                                    if process_id == control_process_id
+                            )
+                        })
+                    });
+                let verification = finalization::verify_report(
+                    target,
+                    path,
+                    bound,
+                    finalization::MEASUREMENT_FINALIZATION_START,
+                    wait_for_completion,
+                );
                 let verified = verification.succeeded();
                 if !verified && failure.is_none() {
                     let mut message = format!(
@@ -304,13 +356,15 @@ impl CaptureSession {
 mod tests {
     use super::CaptureSession;
     use crate::plan::{
-        CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan,
-        NsysEscapes, ProfilerControl, ProfilerFinalization, ProfilerLaunch, ProfilerTargetRecord,
-        WindowControlKind, compile_plan,
+        CaptureDeadlines, CaptureWindowActionPlan, CaptureWindowControlEndpointPlan,
+        CaptureWindowHttpMethodPlan, NsysEscapes, ProfilerControl, ProfilerFinalization,
+        ProfilerLaunch, ProfilerTargetRecord, WindowControlKind, compile_plan,
     };
     use crate::record::{CaptureRecord, CaptureStatus};
     use inferlab_protocol::EndpointAssignment;
+    use inferlab_runtime::operation_bound::OperationBound;
     use std::error::Error;
+    use std::time::Duration;
 
     #[test]
     fn missing_range_report_is_capture_failure_evidence() -> Result<(), Box<dyn Error>> {
@@ -344,7 +398,6 @@ mod tests {
                     body: None,
                     effective_url: "http://127.0.0.1:1/stop_profile".to_owned(),
                 },
-                deadline_seconds: 60,
             },
             supported_window_controls: vec![WindowControlKind::FrameworkRange],
             command_cwd: temp.path().to_path_buf(),
@@ -357,6 +410,11 @@ mod tests {
             "bench",
             &["c1".to_owned()],
             std::slice::from_ref(&target),
+            CaptureDeadlines {
+                capture_arm_deadline_seconds: 60,
+                capture_control_deadline_seconds: 60,
+                capture_finalization_deadline_seconds: 1,
+            },
         )?;
         let mut capture = CaptureSession {
             targets: vec![target],
@@ -373,7 +431,8 @@ mod tests {
             stop_failure: None,
         };
 
-        capture.verify_reports();
+        let bound = OperationBound::finite(Duration::from_millis(50));
+        capture.verify_reports(&bound);
 
         assert_eq!(capture.record.status, CaptureStatus::Failed);
         assert!(!capture.record.reports[0].verified);

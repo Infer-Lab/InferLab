@@ -672,13 +672,7 @@ fn validate(
     let adapter = ImageAdapterClient {
         image_id: image.image_id.clone(),
         device: workspace.local.adapter.image_device,
-        timeout: workspace
-            .local
-            .adapter
-            .image_timeout_seconds
-            .map_or(crate::adapter::IMAGE_ADAPTER_TIMEOUT, |seconds| {
-                std::time::Duration::from_secs(seconds)
-            }),
+        timeout: workspace.local.adapter.image_timeout(),
         explicit_entrypoint: false,
     };
     let resolved = match resolve(

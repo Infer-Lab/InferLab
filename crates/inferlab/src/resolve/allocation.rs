@@ -490,6 +490,7 @@ pub(super) fn pixi_command(environment: &str, process: Vec<String>) -> Vec<Strin
 pub(super) fn readiness_plan(
     probe: &ReadinessProbe,
     timeout: u64,
+    attempt_timeout: u64,
     capture_armed: bool,
     allocations: &[ResolvedProcessAllocation],
 ) -> Result<ReadinessPlan, InferlabError> {
@@ -501,6 +502,7 @@ pub(super) fn readiness_plan(
             // startup unpredictably, and the wait still terminates on process
             // death or interruption.
             timeout_seconds: (!capture_armed).then_some(timeout),
+            attempt_timeout_seconds: attempt_timeout,
         }),
         ReadinessProbe::HttpTargetRegistry(registry) => {
             let expected_targets = allocations
@@ -567,9 +569,13 @@ pub(super) fn readiness_plan(
                 target_bootstrap_port_field: registry.target_bootstrap_port_field.clone(),
                 expected_targets,
                 timeout_seconds: (!capture_armed).then_some(timeout),
+                attempt_timeout_seconds: attempt_timeout,
             })
         }
-        ReadinessProbe::ProcessAlive => Ok(ReadinessPlan::ProcessAlive),
+        ReadinessProbe::ProcessAlive => Ok(ReadinessPlan::ProcessAlive {
+            timeout_seconds: (!capture_armed).then_some(timeout),
+            attempt_timeout_seconds: attempt_timeout,
+        }),
     }
 }
 

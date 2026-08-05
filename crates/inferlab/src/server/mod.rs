@@ -7,6 +7,7 @@ use crate::execution::{ProcessPlan, ResolvedExecution};
 use crate::progress::{Phase, Progress};
 use crate::workspace::WorkspaceSnapshot;
 use fs2::FileExt;
+use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::server::{
     CleanupEvidence, CleanupTrigger, ProcessCleanup, ProcessHandle, ProcessObserver, ProcessSpec,
     ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind, ServerRuntime,
@@ -17,6 +18,7 @@ use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub use record::{ServerRecord, ServerStatus};
 
@@ -120,18 +122,32 @@ pub(crate) fn require_running(report: &ServerStatusReport) -> Result<(), Inferla
     Ok(())
 }
 
-pub(crate) fn running_profiler_targets(
+pub(crate) fn running_profiler_selection(
     root: &Path,
     id: &str,
-) -> Result<Vec<inferlab_profiler::plan::ProfilerTargetRecord>, InferlabError> {
+) -> Result<inferlab_profiler::plan::CaptureSelection, InferlabError> {
     let report = status(root, id)?;
     require_running(&report)?;
-    Ok(report
+    let deadlines = inferlab_profiler::plan::CaptureDeadlines {
+        capture_arm_deadline_seconds: report.record.resolved.server.capture_arm_deadline_seconds,
+        capture_control_deadline_seconds: report
+            .record
+            .resolved
+            .server
+            .capture_control_deadline_seconds,
+        capture_finalization_deadline_seconds: report
+            .record
+            .resolved
+            .server
+            .capture_finalization_deadline_seconds,
+    };
+    let targets = report
         .record
         .process_evidence
         .into_values()
         .filter_map(|process| process.profiler)
-        .collect())
+        .collect();
+    Ok(inferlab_profiler::plan::CaptureSelection { targets, deadlines })
 }
 
 pub(crate) fn logs_with_progress(
@@ -430,7 +446,6 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                 launch: &process.launch,
                 capture: process.capture_target.as_ref(),
                 control_endpoint,
-                control_deadline_seconds: resolved.server.capture_control_deadline_seconds,
             },
         ) {
             Ok(prepared) => prepared,
@@ -527,6 +542,17 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
         fail_if_startup_interrupted(&mut session, runtime, &started, Some(&process.id))?;
     }
 
+    // One readiness owner starts only after every process has spawned and
+    // remains authoritative across every process readiness wait. Capture-
+    // armed startup is intentionally unbounded; ordinary startup uses the
+    // server's one resolved readiness budget.
+    let readiness_bound = if resolved.server.profiling {
+        OperationBound::unbounded()
+    } else {
+        OperationBound::finite(Duration::from_secs(
+            resolved.server.readiness_timeout_seconds,
+        ))
+    };
     for (process_index, (context, handle)) in process_contexts.iter().zip(&handles).enumerate() {
         let process = context.process;
         fail_if_startup_interrupted(&mut session, runtime, &started, Some(&process.id))?;
@@ -541,6 +567,7 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
             handle,
             &process.endpoint,
             &process.readiness,
+            &readiness_bound,
             &mut on_probe_failure,
         ) {
             Ok(readiness) => {
@@ -631,8 +658,23 @@ fn rollback_started<R: ProcessCleanup + ProcessObserver>(
     started: &[String],
 ) -> Result<bool, InferlabError> {
     let mut verified = true;
+    if started.iter().any(|process_id| {
+        session
+            .process(process_id)
+            .is_ok_and(|process| process.profiler.is_some())
+    }) {
+        let finalization_bound = OperationBound::finite(Duration::from_secs(
+            session
+                .record()
+                .resolved
+                .server
+                .capture_finalization_deadline_seconds,
+        ));
+        for process_id in started.iter().rev() {
+            verified &= finalize_profiler_process(session, process_id, &finalization_bound)?;
+        }
+    }
     for process_id in started.iter().rev() {
-        verified &= finalize_profiler_process(session, process_id)?;
         let handle = session.process(process_id)?.handle.clone();
         if let Some(handle) = handle {
             let mut ignore_container_removal = |_container: &str| {};
@@ -797,29 +839,45 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
     let mut all_verified = true;
     let mut first_error = None;
     let process_total = process_order.len();
-    for (process_index, process_id) in process_order.iter().rev().enumerate() {
-        let position = process_index + 1;
-        if session.process(process_id)?.profiler.is_some() {
+    if process_order.iter().any(|process_id| {
+        session
+            .process(process_id)
+            .is_ok_and(|process| process.profiler.is_some())
+    }) {
+        let finalization_bound = OperationBound::finite(Duration::from_secs(
+            session
+                .record()
+                .resolved
+                .server
+                .capture_finalization_deadline_seconds,
+        ));
+        for (process_index, process_id) in process_order.iter().rev().enumerate() {
+            if session.process(process_id)?.profiler.is_none() {
+                continue;
+            }
             progress.phase(Phase::named("profiler finalization").item(
                 process_id,
-                position,
+                process_index + 1,
                 process_total,
             ))?;
-        }
-        if !finalize_profiler_process(&mut session, process_id)? {
-            all_verified = false;
-            let error = session
-                .process(process_id)?
-                .profiler_finalization
-                .as_ref()
-                .and_then(inferlab_profiler::record::CaptureActionRecord::error);
-            if first_error.is_none() {
-                first_error = Some(match error {
-                    Some(error) => error,
-                    None => format!("failed to finalize profiler for process {process_id:?}"),
-                });
+            if !finalize_profiler_process(&mut session, process_id, &finalization_bound)? {
+                all_verified = false;
+                let error = session
+                    .process(process_id)?
+                    .profiler_finalization
+                    .as_ref()
+                    .and_then(inferlab_profiler::record::CaptureActionRecord::error);
+                if first_error.is_none() {
+                    first_error = Some(match error {
+                        Some(error) => error,
+                        None => format!("failed to finalize profiler for process {process_id:?}"),
+                    });
+                }
             }
         }
+    }
+    for (process_index, process_id) in process_order.iter().rev().enumerate() {
+        let position = process_index + 1;
         let Some(handle) = session.process(process_id)?.handle.clone() else {
             let message = format!("unfinished process {process_id:?} has no typed runtime handle");
             session
@@ -921,11 +979,17 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
 fn finalize_profiler_process(
     session: &mut ServerRecordSession,
     process_id: &str,
+    bound: &OperationBound,
 ) -> Result<bool, InferlabError> {
     let Some(target) = session.process(process_id)?.profiler.clone() else {
         return Ok(true);
     };
-    let action = inferlab_profiler::finalization::finalize_target(&target, None);
+    let action = inferlab_profiler::finalization::finalize_target(
+        &target,
+        None,
+        bound,
+        inferlab_profiler::finalization::SERVER_FINALIZATION_START,
+    );
     let succeeded = action.succeeded();
     session.process_mut(process_id)?.profiler_finalization = Some(action);
     Ok(succeeded)
@@ -975,6 +1039,7 @@ mod tests {
         terminated: RefCell<Vec<u32>>,
         status_calls: Cell<usize>,
         bounded_status_calls: Cell<usize>,
+        readiness_bounds: RefCell<Vec<usize>>,
     }
 
     impl ProcessLauncher for FakeRuntime {
@@ -1057,13 +1122,17 @@ mod tests {
             _handle: &ProcessHandle,
             _endpoint: &ProcessEndpointPlan,
             _readiness: &ReadinessPlan,
+            bound: &inferlab_runtime::operation_bound::OperationBound,
             _on_probe_failure: &mut dyn FnMut(&str),
         ) -> Result<ReadinessEvidence, ReadinessFailure> {
-            let bound = inferlab_runtime::operation_bound::OperationBound::unbounded();
+            self.readiness_bounds
+                .borrow_mut()
+                .push(std::ptr::from_ref(bound).addr());
             Ok(ReadinessEvidence::ProcessAlive {
                 ready_unix_ms: 1,
+                diagnostic_attempts: Vec::new(),
                 timing: bound.timing(
-                    "before_process_alive_check",
+                    "after_process_spawn_before_readiness_attempt",
                     inferlab_runtime::operation_bound::OperationTerminalCause::Succeeded,
                 ),
             })
@@ -1153,7 +1222,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 5);
+        assert_eq!(value["schema_version"], 6);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1205,7 +1274,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 3; expected 5"),
+                .contains("unsupported schema version 3; expected 6"),
             "{error}"
         );
         Ok(())
@@ -1225,6 +1294,7 @@ mod tests {
             terminated: RefCell::new(Vec::new()),
             status_calls: Cell::new(0),
             bounded_status_calls: Cell::new(0),
+            readiness_bounds: RefCell::new(Vec::new()),
         };
 
         let result =
@@ -1271,6 +1341,7 @@ mod tests {
             terminated: RefCell::new(Vec::new()),
             status_calls: Cell::new(0),
             bounded_status_calls: Cell::new(0),
+            readiness_bounds: RefCell::new(Vec::new()),
         };
         let record =
             start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
@@ -1290,6 +1361,25 @@ mod tests {
         assert!(report.observed_alive);
         assert_eq!(runtime.status_calls.get(), 0);
         assert_eq!(runtime.bounded_status_calls.get(), process_count);
+        Ok(())
+    }
+
+    #[test]
+    fn multi_process_start_uses_one_readiness_owner() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = FakeRuntime {
+            spawn_results: RefCell::new(VecDeque::from([Ok(fake_handle(61)), Ok(fake_handle(62))])),
+            terminated: RefCell::new(Vec::new()),
+            status_calls: Cell::new(0),
+            bounded_status_calls: Cell::new(0),
+            readiness_bounds: RefCell::new(Vec::new()),
+        };
+
+        start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
+
+        let readiness_bounds = runtime.readiness_bounds.borrow();
+        assert_eq!(readiness_bounds.len(), 2);
+        assert_eq!(readiness_bounds[0], readiness_bounds[1]);
         Ok(())
     }
 
@@ -1333,7 +1423,10 @@ mod tests {
                 cwd: std::env::temp_dir(),
             },
             launch_files: Vec::new(),
-            readiness: ReadinessPlan::ProcessAlive,
+            readiness: ReadinessPlan::ProcessAlive {
+                timeout_seconds: Some(60),
+                attempt_timeout_seconds: 30,
+            },
             endpoint: ProcessEndpointPlan {
                 host: "127.0.0.1".to_owned(),
                 port: 8000 + index as u16,
@@ -1374,8 +1467,11 @@ mod tests {
                 declarations: Vec::new(),
                 topology: ServeTopology::PrefillDecode,
                 readiness_timeout_seconds: 60,
+                readiness_attempt_timeout_seconds: 30,
                 profiling: false,
+                capture_arm_deadline_seconds: 60,
                 capture_control_deadline_seconds: 60,
+                capture_finalization_deadline_seconds: 300,
                 kv_transfer: None,
                 frontend: None,
                 profiler_escapes: None,

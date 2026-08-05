@@ -90,6 +90,28 @@ The sole `tp2` case is selected automatically, so this server does not need a
 multiple cases must declare `default_case`; the operator may always select a
 different one with `--case`.
 
+`readiness_timeout_seconds` owns the complete ordinary server-readiness wait.
+Each blocking process-status or HTTP attempt within that wait is capped by
+`readiness_attempt_timeout_seconds`, which defaults to 30 seconds. Profiled
+servers use separate budgets for preparing and arming all targets, controlling
+one framework capture window, and finalizing all reports:
+
+```toml
+[servers.example]
+readiness_attempt_timeout_seconds = 30
+capture_arm_deadline_seconds = 60
+capture_control_deadline_seconds = 60
+capture_finalization_deadline_seconds = 300
+```
+
+These values may be declared on the server, patched by a selected server case,
+or overridden for one invocation with paths such as
+`--set server.readiness_attempt_timeout_seconds=45`. Capture-armed readiness
+remains unbounded overall but retains the bounded attempt deadline so process
+exit and operator interruption can be observed. Cleanup grace and polling
+cadence are product policy rather than workspace settings; SSH connection and
+keepalive policy remain in the selected OpenSSH target configuration.
+
 Framework settings belong under `settings`, either on the server or on a
 canonical role. Integrations validate their typed fields. `extra_args` remains
 the explicit backend escape hatch and is replaced as one complete array by a
@@ -178,6 +200,19 @@ machines = ["local"]
 Published workspaces should provide this shape as
 `.inferlab/local.example.toml`; operators copy it to the ignored local file and
 replace the generic values.
+
+Adapter invocation deadlines are machine-local because process startup and
+container startup costs vary by site. The two paths remain independent:
+
+```toml
+[adapter]
+timeout_seconds = 30       # process-backed plan/render; default 30
+image_timeout_seconds = 120 # image-backed plan/render; default 120
+```
+
+Both values must be positive when declared. `image_device` is a separate,
+optional workaround for container runtimes that cannot create a device-less
+adapter container; it does not affect process-backed lowering.
 
 Use explicit rank placement when replicas span machines, roles use different
 device counts, or the same model has different locators on each machine. This

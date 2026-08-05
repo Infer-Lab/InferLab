@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(5);
-pub(super) const READINESS_ATTEMPT_CAP: Duration = Duration::from_millis(250);
+const READINESS_START_BOUNDARY: &str = "after_process_spawn_before_readiness_attempt";
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ReadinessProbeError {
@@ -72,7 +72,7 @@ pub(super) fn timed_readiness_failure(
     terminal_cause: OperationTerminalCause,
     diagnostic_attempts: Vec<ReadinessAttemptEvidence>,
 ) -> ReadinessFailure {
-    failure.timing = Some(bound.timing("before_readiness_wait", terminal_cause));
+    failure.timing = Some(bound.timing(READINESS_START_BOUNDARY, terminal_cause));
     failure.diagnostic_attempts = diagnostic_attempts;
     failure
 }
@@ -82,15 +82,13 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
     handle: &ProcessHandle,
     endpoint: &ProcessEndpointPlan,
     path: &str,
-    timeout_seconds: Option<u64>,
+    attempt_timeout_seconds: u64,
+    bound: &OperationBound,
     on_probe_failure: &mut dyn FnMut(&str),
 ) -> Result<ReadinessEvidence, ReadinessFailure> {
     // A capture-armed server carries no readiness deadline
     // ([[RFC-0004:C-WORKLOAD-PROFILING]]); the loop still terminates on
     // readiness, process-group exit, or interruption.
-    let bound = timeout_seconds
-        .map(|seconds| OperationBound::finite(Duration::from_secs(seconds)))
-        .unwrap_or_else(OperationBound::unbounded);
     let url = format!("http://{}:{}{}", endpoint.host, endpoint.port, path);
     let mut attempts = 0_u32;
     let mut diagnostic_attempts = Vec::new();
@@ -101,37 +99,10 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
     // interval.
     let mut probe_interval = POLL_INTERVAL;
     loop {
-        ensure_readiness_active(&bound, timeout_seconds, "no readiness probe completed").map_err(
-            |failure| {
-                timed_readiness_failure(
-                    failure,
-                    &bound,
-                    OperationTerminalCause::TimedOut,
-                    diagnostic_attempts.clone(),
-                )
-            },
-        )?;
-        if interrupt::received() {
-            return Err(timed_readiness_failure(
-                readiness_failure(
-                    ReadinessFailureKind::Interrupted,
-                    "server startup was interrupted".to_owned(),
-                ),
-                &bound,
-                OperationTerminalCause::Interrupted,
-                diagnostic_attempts,
-            ));
-        }
-        let status = runtime.status_with_bound(handle, &bound);
-        ensure_readiness_active(
-            &bound,
-            timeout_seconds,
-            "the server process status attempt did not complete in time",
-        )
-        .map_err(|failure| {
+        ensure_readiness_active(bound, "no readiness probe completed").map_err(|failure| {
             timed_readiness_failure(
                 failure,
-                &bound,
+                bound,
                 OperationTerminalCause::TimedOut,
                 diagnostic_attempts.clone(),
             )
@@ -142,7 +113,45 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
                     ReadinessFailureKind::Interrupted,
                     "server startup was interrupted".to_owned(),
                 ),
-                &bound,
+                bound,
+                OperationTerminalCause::Interrupted,
+                diagnostic_attempts,
+            ));
+        }
+        let status_attempt = readiness_attempt(bound, attempt_timeout_seconds);
+        let status_effective_bound_ms = status_attempt.configured_ms().unwrap_or_default();
+        let status_bound = status_attempt.into_operation_bound();
+        let status = runtime.status_with_bound(handle, &status_bound);
+        diagnostic_attempts = vec![process_status_evidence(&status, status_effective_bound_ms)];
+        if !status.queried && status_bound.is_expired() && !bound.is_expired() {
+            let last_error = status
+                .error
+                .as_deref()
+                .unwrap_or("process status attempt deadline expired");
+            on_probe_failure(last_error);
+            sleep_within_readiness(bound, probe_interval);
+            probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
+            continue;
+        }
+        ensure_readiness_active(
+            bound,
+            "the server process status attempt did not complete in time",
+        )
+        .map_err(|failure| {
+            timed_readiness_failure(
+                failure,
+                bound,
+                OperationTerminalCause::TimedOut,
+                diagnostic_attempts.clone(),
+            )
+        })?;
+        if interrupt::received() {
+            return Err(timed_readiness_failure(
+                readiness_failure(
+                    ReadinessFailureKind::Interrupted,
+                    "server startup was interrupted".to_owned(),
+                ),
+                bound,
                 OperationTerminalCause::Interrupted,
                 diagnostic_attempts,
             ));
@@ -150,39 +159,44 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
         ensure_alive(status).map_err(|failure| {
             timed_readiness_failure(
                 failure,
-                &bound,
+                bound,
                 OperationTerminalCause::Failed,
                 diagnostic_attempts.clone(),
             )
         })?;
         attempts = attempts.saturating_add(1);
-        let attempt = probe_http_attempt(&endpoint.host, endpoint.port, path, &bound);
+        let attempt = probe_http_attempt(
+            &endpoint.host,
+            endpoint.port,
+            path,
+            bound,
+            attempt_timeout_seconds,
+        );
         let effective_bound_ms = attempt.effective_bound_ms;
         let last_error = match attempt.outcome {
             Ok(()) => {
-                diagnostic_attempts = vec![ReadinessAttemptEvidence {
+                diagnostic_attempts.push(ReadinessAttemptEvidence {
                     operation: "http_readiness".to_owned(),
                     effective_bound_ms,
                     succeeded: true,
                     error: None,
-                }];
+                });
                 let ready_unix_ms = unix_time_millis().map_err(|failure| {
                     timed_readiness_failure(
                         failure,
-                        &bound,
+                        bound,
                         OperationTerminalCause::Failed,
                         diagnostic_attempts.clone(),
                     )
                 })?;
                 ensure_readiness_active(
-                    &bound,
-                    timeout_seconds,
+                    bound,
                     "the readiness response completed after the deadline",
                 )
                 .map_err(|failure| {
                     timed_readiness_failure(
                         failure,
-                        &bound,
+                        bound,
                         OperationTerminalCause::TimedOut,
                         diagnostic_attempts.clone(),
                     )
@@ -192,24 +206,24 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
                     attempts,
                     ready_unix_ms,
                     timing: bound
-                        .timing("before_readiness_wait", OperationTerminalCause::Succeeded),
+                        .timing(READINESS_START_BOUNDARY, OperationTerminalCause::Succeeded),
                     diagnostic_attempts,
                 });
             }
             Err(error) => {
                 let error = error.to_string();
-                diagnostic_attempts = vec![ReadinessAttemptEvidence {
+                diagnostic_attempts.push(ReadinessAttemptEvidence {
                     operation: "http_readiness".to_owned(),
                     effective_bound_ms,
                     succeeded: false,
                     error: Some(error.clone()),
-                }];
+                });
                 error
             }
         };
         on_probe_failure(&last_error);
         if bound.is_expired() {
-            let timeout_seconds = timeout_seconds.unwrap_or_default();
+            let timeout_seconds = readiness_timeout_seconds(bound);
             return Err(timed_readiness_failure(
                 readiness_failure(
                     ReadinessFailureKind::Timeout,
@@ -217,12 +231,12 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
                         "server did not become ready within {timeout_seconds} seconds; last probe error: {last_error}"
                     ),
                 ),
-                &bound,
+                bound,
                 OperationTerminalCause::TimedOut,
                 diagnostic_attempts,
             ));
         }
-        sleep_within_readiness(&bound, probe_interval);
+        sleep_within_readiness(bound, probe_interval);
         probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
     }
 }
@@ -246,9 +260,30 @@ fn sleep_within_readiness(bound: &OperationBound, cadence: Duration) {
     }
 }
 
+fn process_status_evidence(
+    status: &ProcessStatus,
+    effective_bound_ms: u64,
+) -> ReadinessAttemptEvidence {
+    let succeeded = status.queried && status.alive;
+    ReadinessAttemptEvidence {
+        operation: "process_status".to_owned(),
+        effective_bound_ms,
+        succeeded,
+        error: if succeeded {
+            None
+        } else {
+            Some(
+                status
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "server process group is not alive".to_owned()),
+            )
+        },
+    }
+}
+
 fn ensure_readiness_active(
     bound: &OperationBound,
-    timeout_seconds: Option<u64>,
     last_error: &str,
 ) -> Result<(), ReadinessFailure> {
     if !bound.is_expired() {
@@ -258,9 +293,13 @@ fn ensure_readiness_active(
         ReadinessFailureKind::Timeout,
         format!(
             "server did not become ready within {} seconds; last probe error: {last_error}",
-            timeout_seconds.unwrap_or_default()
+            readiness_timeout_seconds(bound)
         ),
     ))
+}
+
+fn readiness_timeout_seconds(bound: &OperationBound) -> u64 {
+    bound.configured_ms().unwrap_or_default() / 1_000
 }
 
 fn attempt_remaining(attempt: &AttemptBound) -> Result<Duration, ReadinessProbeError> {
@@ -275,12 +314,10 @@ pub(super) fn wait_http_target_registry_ready(
     status: impl Fn(&OperationBound) -> ProcessStatus,
     endpoint: &ProcessEndpointPlan,
     probe: HttpTargetRegistryProbe<'_>,
-    timeout_seconds: Option<u64>,
+    attempt_timeout_seconds: u64,
+    bound: &OperationBound,
     on_probe_failure: &mut dyn FnMut(&str),
 ) -> Result<ReadinessEvidence, ReadinessFailure> {
-    let bound = timeout_seconds
-        .map(|seconds| OperationBound::finite(Duration::from_secs(seconds)))
-        .unwrap_or_else(OperationBound::unbounded);
     let readiness_url = format!(
         "http://{}:{}{}",
         endpoint.host, endpoint.port, probe.readiness_path
@@ -293,37 +330,10 @@ pub(super) fn wait_http_target_registry_ready(
     let mut diagnostic_attempts = Vec::new();
     let mut probe_interval = POLL_INTERVAL;
     loop {
-        ensure_readiness_active(&bound, timeout_seconds, "no readiness probe completed").map_err(
-            |failure| {
-                timed_readiness_failure(
-                    failure,
-                    &bound,
-                    OperationTerminalCause::TimedOut,
-                    diagnostic_attempts.clone(),
-                )
-            },
-        )?;
-        if interrupt::received() {
-            return Err(timed_readiness_failure(
-                readiness_failure(
-                    ReadinessFailureKind::Interrupted,
-                    "server startup was interrupted".to_owned(),
-                ),
-                &bound,
-                OperationTerminalCause::Interrupted,
-                diagnostic_attempts,
-            ));
-        }
-        let process_status = status(&bound);
-        ensure_readiness_active(
-            &bound,
-            timeout_seconds,
-            "the server process status attempt did not complete in time",
-        )
-        .map_err(|failure| {
+        ensure_readiness_active(bound, "no readiness probe completed").map_err(|failure| {
             timed_readiness_failure(
                 failure,
-                &bound,
+                bound,
                 OperationTerminalCause::TimedOut,
                 diagnostic_attempts.clone(),
             )
@@ -334,7 +344,48 @@ pub(super) fn wait_http_target_registry_ready(
                     ReadinessFailureKind::Interrupted,
                     "server startup was interrupted".to_owned(),
                 ),
-                &bound,
+                bound,
+                OperationTerminalCause::Interrupted,
+                diagnostic_attempts,
+            ));
+        }
+        let status_attempt = readiness_attempt(bound, attempt_timeout_seconds);
+        let status_effective_bound_ms = status_attempt.configured_ms().unwrap_or_default();
+        let status_bound = status_attempt.into_operation_bound();
+        let process_status = status(&status_bound);
+        diagnostic_attempts = vec![process_status_evidence(
+            &process_status,
+            status_effective_bound_ms,
+        )];
+        if !process_status.queried && status_bound.is_expired() && !bound.is_expired() {
+            let last_error = process_status
+                .error
+                .as_deref()
+                .unwrap_or("process status attempt deadline expired");
+            on_probe_failure(last_error);
+            sleep_within_readiness(bound, probe_interval);
+            probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
+            continue;
+        }
+        ensure_readiness_active(
+            bound,
+            "the server process status attempt did not complete in time",
+        )
+        .map_err(|failure| {
+            timed_readiness_failure(
+                failure,
+                bound,
+                OperationTerminalCause::TimedOut,
+                diagnostic_attempts.clone(),
+            )
+        })?;
+        if interrupt::received() {
+            return Err(timed_readiness_failure(
+                readiness_failure(
+                    ReadinessFailureKind::Interrupted,
+                    "server startup was interrupted".to_owned(),
+                ),
+                bound,
                 OperationTerminalCause::Interrupted,
                 diagnostic_attempts,
             ));
@@ -342,23 +393,33 @@ pub(super) fn wait_http_target_registry_ready(
         ensure_alive(process_status).map_err(|failure| {
             timed_readiness_failure(
                 failure,
-                &bound,
+                bound,
                 OperationTerminalCause::Failed,
                 diagnostic_attempts.clone(),
             )
         })?;
         attempts = attempts.saturating_add(1);
-        let public_attempt =
-            probe_http_attempt(&endpoint.host, endpoint.port, probe.readiness_path, &bound);
+        let public_attempt = probe_http_attempt(
+            &endpoint.host,
+            endpoint.port,
+            probe.readiness_path,
+            bound,
+            attempt_timeout_seconds,
+        );
         let public_effective_bound_ms = public_attempt.effective_bound_ms;
         let last_error = match public_attempt.outcome {
             Ok(()) => {
-                let registry_attempt =
-                    probe_target_registry_attempt(&endpoint.host, endpoint.port, &probe, &bound);
+                let registry_attempt = probe_target_registry_attempt(
+                    &endpoint.host,
+                    endpoint.port,
+                    &probe,
+                    bound,
+                    attempt_timeout_seconds,
+                );
                 let registry_effective_bound_ms = registry_attempt.effective_bound_ms;
                 match registry_attempt.outcome {
                     Ok(matched_targets) => {
-                        diagnostic_attempts = vec![
+                        diagnostic_attempts.extend([
                             ReadinessAttemptEvidence {
                                 operation: "public_http_readiness".to_owned(),
                                 effective_bound_ms: public_effective_bound_ms,
@@ -371,24 +432,23 @@ pub(super) fn wait_http_target_registry_ready(
                                 succeeded: true,
                                 error: None,
                             },
-                        ];
+                        ]);
                         let ready_unix_ms = unix_time_millis().map_err(|failure| {
                             timed_readiness_failure(
                                 failure,
-                                &bound,
+                                bound,
                                 OperationTerminalCause::Failed,
                                 diagnostic_attempts.clone(),
                             )
                         })?;
                         ensure_readiness_active(
-                            &bound,
-                            timeout_seconds,
+                            bound,
                             "the target registry response completed after the deadline",
                         )
                         .map_err(|failure| {
                             timed_readiness_failure(
                                 failure,
-                                &bound,
+                                bound,
                                 OperationTerminalCause::TimedOut,
                                 diagnostic_attempts.clone(),
                             )
@@ -399,14 +459,16 @@ pub(super) fn wait_http_target_registry_ready(
                             attempts,
                             ready_unix_ms,
                             matched_targets,
-                            timing: bound
-                                .timing("before_readiness_wait", OperationTerminalCause::Succeeded),
+                            timing: bound.timing(
+                                READINESS_START_BOUNDARY,
+                                OperationTerminalCause::Succeeded,
+                            ),
                             diagnostic_attempts,
                         });
                     }
                     Err(error) => {
                         let error = error.to_string();
-                        diagnostic_attempts = vec![
+                        diagnostic_attempts.extend([
                             ReadinessAttemptEvidence {
                                 operation: "public_http_readiness".to_owned(),
                                 effective_bound_ms: public_effective_bound_ms,
@@ -419,25 +481,25 @@ pub(super) fn wait_http_target_registry_ready(
                                 succeeded: false,
                                 error: Some(error.clone()),
                             },
-                        ];
+                        ]);
                         error
                     }
                 }
             }
             Err(error) => {
                 let error = error.to_string();
-                diagnostic_attempts = vec![ReadinessAttemptEvidence {
+                diagnostic_attempts.push(ReadinessAttemptEvidence {
                     operation: "public_http_readiness".to_owned(),
                     effective_bound_ms: public_effective_bound_ms,
                     succeeded: false,
                     error: Some(error.clone()),
-                }];
+                });
                 format!("public readiness probe failed: {error}")
             }
         };
         on_probe_failure(&last_error);
         if bound.is_expired() {
-            let timeout_seconds = timeout_seconds.unwrap_or_default();
+            let timeout_seconds = readiness_timeout_seconds(bound);
             return Err(timed_readiness_failure(
                 readiness_failure(
                     ReadinessFailureKind::Timeout,
@@ -445,12 +507,12 @@ pub(super) fn wait_http_target_registry_ready(
                         "server did not become ready within {timeout_seconds} seconds; last probe error: {last_error}"
                     ),
                 ),
-                &bound,
+                bound,
                 OperationTerminalCause::TimedOut,
                 diagnostic_attempts,
             ));
         }
-        sleep_within_readiness(&bound, probe_interval);
+        sleep_within_readiness(bound, probe_interval);
         probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
     }
 }
@@ -460,9 +522,16 @@ fn probe_target_registry_attempt(
     port: u16,
     probe: &HttpTargetRegistryProbe<'_>,
     bound: &OperationBound,
+    attempt_timeout_seconds: u64,
 ) -> ProbeAttempt<Vec<TargetRegistryMatchEvidence>> {
-    let response =
-        probe_http_json_attempt(host, port, probe.registry_path, "target registry", bound);
+    let response = probe_http_json_attempt(
+        host,
+        port,
+        probe.registry_path,
+        "target registry",
+        bound,
+        attempt_timeout_seconds,
+    );
     let effective_bound_ms = response.effective_bound_ms;
     let outcome = response
         .outcome
@@ -579,14 +648,19 @@ struct ProbeAttempt<T> {
     outcome: Result<T, ReadinessProbeError>,
 }
 
+fn readiness_attempt(bound: &OperationBound, attempt_timeout_seconds: u64) -> AttemptBound {
+    bound.attempt(Some(Duration::from_secs(attempt_timeout_seconds)))
+}
+
 #[cfg(test)]
 pub(super) fn probe_http(
     host: &str,
     port: u16,
     path: &str,
     bound: &OperationBound,
+    attempt_timeout_seconds: u64,
 ) -> Result<(), ReadinessProbeError> {
-    probe_http_attempt(host, port, path, bound).outcome
+    probe_http_attempt(host, port, path, bound, attempt_timeout_seconds).outcome
 }
 
 fn probe_http_attempt(
@@ -594,24 +668,28 @@ fn probe_http_attempt(
     port: u16,
     path: &str,
     bound: &OperationBound,
+    attempt_timeout_seconds: u64,
 ) -> ProbeAttempt<()> {
-    let attempt = bound.attempt(Some(READINESS_ATTEMPT_CAP));
+    let attempt = readiness_attempt(bound, attempt_timeout_seconds);
     let effective_bound_ms = attempt.configured_ms().unwrap_or_default();
     let outcome = (|| {
         let url = format!("http://{host}:{port}{path}");
         let timeout = attempt_remaining(&attempt)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
-            .connect_timeout(timeout.min(Duration::from_secs(2)))
+            .connect_timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
             .map_err(|source| readiness_request_error("readiness", source))?;
-        let response = client
+        let mut response = client
             .get(&url)
             .send()
             .map_err(|source| readiness_request_error("readiness", source))?;
         let status = response.status().as_u16();
+        response
+            .copy_to(&mut std::io::sink())
+            .map_err(|source| readiness_request_error("readiness", source))?;
         if (200..300).contains(&status) {
             Ok(())
         } else {
@@ -634,8 +712,9 @@ pub(super) fn probe_http_json(
     path: &str,
     label: &str,
     bound: &OperationBound,
+    attempt_timeout_seconds: u64,
 ) -> Result<serde_json::Value, ReadinessProbeError> {
-    probe_http_json_attempt(host, port, path, label, bound).outcome
+    probe_http_json_attempt(host, port, path, label, bound, attempt_timeout_seconds).outcome
 }
 
 fn probe_http_json_attempt(
@@ -644,15 +723,16 @@ fn probe_http_json_attempt(
     path: &str,
     label: &str,
     bound: &OperationBound,
+    attempt_timeout_seconds: u64,
 ) -> ProbeAttempt<serde_json::Value> {
-    let attempt = bound.attempt(Some(READINESS_ATTEMPT_CAP));
+    let attempt = readiness_attempt(bound, attempt_timeout_seconds);
     let effective_bound_ms = attempt.configured_ms().unwrap_or_default();
     let outcome = (|| {
         let url = format!("http://{host}:{port}{path}");
         let timeout = attempt_remaining(&attempt)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
-            .connect_timeout(timeout.min(Duration::from_secs(2)))
+            .connect_timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
@@ -715,50 +795,115 @@ pub(super) fn unix_time_millis() -> Result<u64, ReadinessFailure> {
         })
 }
 
+pub(super) fn wait_process_alive_ready(
+    status: impl Fn(&OperationBound) -> ProcessStatus,
+    attempt_timeout_seconds: u64,
+    bound: &OperationBound,
+    on_probe_failure: &mut dyn FnMut(&str),
+) -> Result<ReadinessEvidence, ReadinessFailure> {
+    loop {
+        ensure_readiness_active(bound, "no process status attempt completed").map_err(
+            |failure| {
+                timed_readiness_failure(
+                    failure,
+                    bound,
+                    OperationTerminalCause::TimedOut,
+                    Vec::new(),
+                )
+            },
+        )?;
+        if interrupt::received() {
+            return Err(timed_readiness_failure(
+                readiness_failure(
+                    ReadinessFailureKind::Interrupted,
+                    "server startup was interrupted".to_owned(),
+                ),
+                bound,
+                OperationTerminalCause::Interrupted,
+                Vec::new(),
+            ));
+        }
+        let attempt = readiness_attempt(bound, attempt_timeout_seconds);
+        let effective_bound_ms = attempt.configured_ms().unwrap_or_default();
+        let attempt_bound = attempt.into_operation_bound();
+        let process_status = status(&attempt_bound);
+        let diagnostic_attempts =
+            vec![process_status_evidence(&process_status, effective_bound_ms)];
+        if !process_status.queried && attempt_bound.is_expired() && !bound.is_expired() {
+            on_probe_failure(
+                process_status
+                    .error
+                    .as_deref()
+                    .unwrap_or("process status attempt deadline expired"),
+            );
+            sleep_within_readiness(bound, POLL_INTERVAL);
+            continue;
+        }
+        ensure_readiness_active(
+            bound,
+            "the server process status attempt did not complete in time",
+        )
+        .map_err(|failure| {
+            timed_readiness_failure(
+                failure,
+                bound,
+                OperationTerminalCause::TimedOut,
+                diagnostic_attempts.clone(),
+            )
+        })?;
+        ensure_alive(process_status).map_err(|failure| {
+            timed_readiness_failure(
+                failure,
+                bound,
+                OperationTerminalCause::Failed,
+                diagnostic_attempts.clone(),
+            )
+        })?;
+        return Ok(ReadinessEvidence::ProcessAlive {
+            ready_unix_ms: unix_time_millis().map_err(|failure| {
+                timed_readiness_failure(
+                    failure,
+                    bound,
+                    OperationTerminalCause::Failed,
+                    diagnostic_attempts.clone(),
+                )
+            })?,
+            timing: bound.timing(READINESS_START_BOUNDARY, OperationTerminalCause::Succeeded),
+            diagnostic_attempts,
+        });
+    }
+}
+
 impl ReadinessObserver for SystemProcessRuntime {
     fn wait_ready(
         &self,
         handle: &ProcessHandle,
         endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
+        bound: &OperationBound,
         on_probe_failure: &mut dyn FnMut(&str),
     ) -> Result<ReadinessEvidence, ReadinessFailure> {
         match readiness {
-            ReadinessPlan::ProcessAlive => {
-                let bound = OperationBound::unbounded();
-                ensure_alive(self.status(handle)).map_err(|failure| {
-                    timed_readiness_failure(
-                        failure,
-                        &bound,
-                        OperationTerminalCause::Failed,
-                        Vec::new(),
-                    )
-                })?;
-                Ok(ReadinessEvidence::ProcessAlive {
-                    ready_unix_ms: unix_time_millis().map_err(|failure| {
-                        timed_readiness_failure(
-                            failure,
-                            &bound,
-                            OperationTerminalCause::Failed,
-                            Vec::new(),
-                        )
-                    })?,
-                    timing: bound.timing(
-                        "before_process_alive_check",
-                        OperationTerminalCause::Succeeded,
-                    ),
-                })
-            }
+            ReadinessPlan::ProcessAlive {
+                attempt_timeout_seconds,
+                ..
+            } => wait_process_alive_ready(
+                |bound| self.status_with_bound(handle, bound),
+                *attempt_timeout_seconds,
+                bound,
+                on_probe_failure,
+            ),
             ReadinessPlan::Http {
                 path,
-                timeout_seconds,
+                attempt_timeout_seconds,
                 ..
             } => wait_http_ready(
                 self,
                 handle,
                 endpoint,
                 path,
-                *timeout_seconds,
+                *attempt_timeout_seconds,
+                bound,
                 on_probe_failure,
             ),
             ReadinessPlan::HttpTargetRegistry {
@@ -770,7 +915,7 @@ impl ReadinessObserver for SystemProcessRuntime {
                 target_healthy_field,
                 target_bootstrap_port_field,
                 expected_targets,
-                timeout_seconds,
+                attempt_timeout_seconds,
                 ..
             } => wait_http_target_registry_ready(
                 |bound| self.status_with_bound(handle, bound),
@@ -785,7 +930,8 @@ impl ReadinessObserver for SystemProcessRuntime {
                     target_bootstrap_port_field,
                     expected_targets,
                 },
-                *timeout_seconds,
+                *attempt_timeout_seconds,
+                bound,
                 on_probe_failure,
             ),
         }

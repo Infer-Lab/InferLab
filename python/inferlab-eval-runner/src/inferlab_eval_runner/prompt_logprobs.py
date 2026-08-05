@@ -305,7 +305,7 @@ def run_prompt_logprob_probe(
 ) -> PromptLogprobProbeRun:
     deadline = deadline or CaseDeadline(request.case_budget_seconds)
     started = time.monotonic()
-    timeout_seconds = deadline.remaining(30.0)
+    timeout_seconds = deadline.remaining()
     request_body: JsonObject = {
         "model": request.model.served_name,
         "prompt": PROMPT_LOGPROB_PROBE_PROMPT,
@@ -398,7 +398,7 @@ def run_prompt_logprob_probe(
 
     http_started = time.monotonic()
     try:
-        timeout_seconds = deadline.remaining(30.0)
+        timeout_seconds = deadline.remaining()
         evidence["effective_timeout_seconds"] = timeout_seconds
         status, raw_response = post_prompt_logprob_probe(
             endpoint_url(request.endpoint, request.endpoint.completions_path),

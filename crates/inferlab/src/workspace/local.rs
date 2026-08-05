@@ -7,6 +7,10 @@ use crate::InferlabError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Duration;
+
+const DEFAULT_ADAPTER_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_IMAGE_ADAPTER_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,18 +29,33 @@ pub struct LocalBindings {
     pub adapter: AdapterBinding,
 }
 
-/// Machine-private facts for containerized integration lowering
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): a wider deadline for unusually slow
-/// hosts, and — only for a host whose container runtime rejects device-less
-/// container creation — one workaround device. The adapter container
-/// requests no device when none is declared.
+/// Machine-private facts for process- and image-backed integration lowering
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]), including their independent deadlines
+/// and the optional device workaround for container runtimes that reject
+/// device-less creation.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterBinding {
     #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
     pub image_device: Option<u32>,
     #[serde(default)]
     pub image_timeout_seconds: Option<u64>,
+}
+
+impl AdapterBinding {
+    pub(crate) fn process_timeout(&self) -> Duration {
+        self.timeout_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_ADAPTER_TIMEOUT)
+    }
+
+    pub(crate) fn image_timeout(&self) -> Duration {
+        self.image_timeout_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_IMAGE_ADAPTER_TIMEOUT)
+    }
 }
 
 /// A machine-private image builder declaration. Only a local Docker daemon is
@@ -258,6 +277,11 @@ pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), Infer
         if !local.placements.contains_key(default_placement) {
             return invalid(format!("unknown default placement {default_placement:?}"));
         }
+    }
+    if local.adapter.timeout_seconds == Some(0) {
+        return invalid(
+            "adapter timeout_seconds must be positive; omit it for the default deadline".to_owned(),
+        );
     }
     if local.adapter.image_timeout_seconds == Some(0) {
         return invalid(

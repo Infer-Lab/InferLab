@@ -57,6 +57,19 @@ impl TestWorkspace {
         fs::write(manifest, text)?;
         Ok(())
     }
+
+    fn configure_capture_finalization_deadline(&self, seconds: u64) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?.replacen(
+            "readiness_timeout_seconds = 900",
+            &format!(
+                "readiness_timeout_seconds = 900\ncapture_finalization_deadline_seconds = {seconds}"
+            ),
+            1,
+        );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
 }
 
 #[test]
@@ -79,6 +92,14 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
     let bench = workspace.load_record(bench_id)?;
     assert_eq!(bench["capture"]["status"], "succeeded");
     assert_eq!(bench["capture"]["plan"]["control"], "framework-range");
+    assert_eq!(
+        bench["capture"]["plan"]["deadlines"],
+        serde_json::json!({
+            "capture_arm_deadline_seconds": 60,
+            "capture_control_deadline_seconds": 60,
+            "capture_finalization_deadline_seconds": 300,
+        })
+    );
     assert_eq!(
         bench["capture"]["windows"].as_array().map(Vec::len),
         Some(4)
@@ -112,11 +133,17 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
     let server_evidence = process_evidence(&server, "server")?;
     assert_eq!(server_ranks[0].role_id, "serve");
     assert_eq!(server_evidence["profiler"]["executable"], "nsys");
-    // The undeclared server fact resolves to the clause default
-    // ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     assert_eq!(
-        server_evidence["profiler"]["control"]["deadline_seconds"],
+        server["resolved"]["server"]["capture_arm_deadline_seconds"],
         60
+    );
+    assert_eq!(
+        server["resolved"]["server"]["capture_control_deadline_seconds"],
+        60
+    );
+    assert_eq!(
+        server["resolved"]["server"]["capture_finalization_deadline_seconds"],
+        300
     );
     let control = &server_evidence["profiler"]["control"];
     let endpoint = &server_ranks[0].rank.endpoint;
@@ -203,6 +230,7 @@ fn captured_bench_opens_the_window_after_warmup_and_before_profiling() -> Result
 #[test]
 fn captured_bench_keeps_the_window_closed_when_warmup_fails() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
+    workspace.configure_capture_finalization_deadline(1)?;
     workspace.configure_c8k_warmup()?;
     workspace.append_manifest(
         "\n[servers.dsv4-qualify.profiler.nsys.env]\n\
@@ -721,6 +749,7 @@ fn capture_armed_readiness_fails_immediately_on_process_exit() -> Result<(), Box
 fn capture_control_deadline_bounds_slow_window_starts() -> Result<(), Box<dyn Error>> {
     let slow = TestWorkspace::new()?;
     slow.configure_capture_deadline(1)?;
+    slow.configure_capture_finalization_deadline(1)?;
     let output = slow
         .command()
         .env("FIXTURE_START_PROFILE_DELAY_SECONDS", "2")
@@ -798,6 +827,7 @@ fn failed_window_stop_is_adjudicated_by_report_coverage() -> Result<(), Box<dyn 
 fn failed_window_stop_with_missing_report_fails_with_both_evidences() -> Result<(), Box<dyn Error>>
 {
     let workspace = TestWorkspace::new()?;
+    workspace.configure_capture_finalization_deadline(1)?;
     let output = workspace
         .command()
         .env("FIXTURE_STOP_PROFILE_FAIL", "1")

@@ -86,7 +86,7 @@ In a workspace (see [`docs/rfc/`](docs/rfc/) for the full contract, starting at 
 ```sh
 pixi install --locked --all                 # realize every stack's selected Pixi environment
 inferlab workspace show                     # validate and browse public definitions
-inferlab stack status                       # confirm each stack realization
+inferlab stack status                       # confirm environments and run declared stack checks
 inferlab toolchain install                  # measurement runtimes (only for lm-eval/Bench measurements)
 inferlab tui                                # observe this workspace; never starts or changes work
 

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-04
+
+### Fixed
+
+- `inferlab stack status` now runs each confirmed stack's declared local
+  realization checks and reports structured check evidence plus overall
+  readiness. Its existing `status` field remains the manifest-and-lock Pixi
+  environment confirmation state; failed checks and check-launch errors leave
+  the realization unchanged and make the command unsuccessful.
+- Workspace source digests now encode each initialized recursive submodule's
+  path and effective commit directly, so local branch, tag, and `git describe`
+  presentation state cannot change source identity. Workspaces containing
+  submodules receive a one-time source-digest re-key.
+- SSH lifecycle commands now retain their own exit status after interactive
+  login environment initialization, so a failing Bash logout hook cannot make
+  a live remote server appear to have exited.
+
 ## [0.8.2] - 2026-08-02
 
 ### Fixed

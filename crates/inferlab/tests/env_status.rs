@@ -6,7 +6,6 @@
 
 use serde_json::Value;
 use std::error::Error;
-use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -57,7 +56,22 @@ impl StatusWorkspace {
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FAKE_PIXI_LOG"
-exit "${FAKE_PIXI_PROBE_EXIT:-0}"
+case "$*" in
+  *" -- true") exit "${FAKE_PIXI_PROBE_EXIT:-0}" ;;
+esac
+if [ -n "${FAKE_PIXI_CHECK_STDOUT:-}" ]; then
+  printf '%s\n' "$FAKE_PIXI_CHECK_STDOUT"
+fi
+if [ -n "${FAKE_PIXI_CHECK_STDERR:-}" ]; then
+  printf '%s\n' "$FAKE_PIXI_CHECK_STDERR" >&2
+fi
+if [ "${FAKE_PIXI_REMOVE_AFTER_CHECK:-0}" = "1" ]; then
+  /bin/rm -f "$0"
+fi
+if [ "${FAKE_PIXI_CHECK_SIGNAL:-}" = "TERM" ]; then
+  kill -TERM $$
+fi
+exit "${FAKE_PIXI_CHECK_EXIT:-0}"
 "#,
         )?;
 
@@ -73,18 +87,39 @@ exit "${FAKE_PIXI_PROBE_EXIT:-0}"
     }
 
     fn run_with_env(&self, envs: &[(&str, &str)], args: &[&str]) -> Result<Output, Box<dyn Error>> {
-        let mut path = OsString::from(&self.bin);
-        path.push(":");
-        path.push(std::env::var_os("PATH").unwrap_or_default());
         let mut command = Command::new(env!("CARGO_BIN_EXE_inferlab"));
         command
             .current_dir(self.root.path())
-            .env("PATH", path)
+            .env("PATH", &self.bin)
             .env("FAKE_PIXI_LOG", &self.pixi_log);
         for (name, value) in envs {
             command.env(name, value);
         }
         Ok(command.args(args).output()?)
+    }
+
+    fn declare_check(
+        &self,
+        stack: &str,
+        id: &str,
+        script: &str,
+        repair_hint: Option<&str>,
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_path = self.root.path().join(".inferlab/workspace.toml");
+        let mut workspace = fs::read_to_string(&workspace_path)?;
+        workspace.push_str(&format!(
+            "\n[[stacks.{stack}.checks]]\nid = \"{id}\"\nscript = \"{script}\"\n"
+        ));
+        if let Some(repair_hint) = repair_hint {
+            workspace.push_str(&format!("repair_hint = \"{repair_hint}\"\n"));
+        }
+        fs::write(workspace_path, workspace)?;
+        let script_path = self.root.path().join(script);
+        if let Some(parent) = script_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(script_path, "print('fixture check')\n")?;
+        Ok(())
     }
 
     fn pixi_argv(&self) -> String {
@@ -123,8 +158,99 @@ fn stack_status_reports_confirmed_and_exits_zero_without_local_bindings()
     assert_eq!(report[0]["stack"], "vllm");
     assert_eq!(report[0]["pixi_environment"], "vllm");
     assert_eq!(report[0]["status"], "confirmed");
-    assert!(report[0]["diagnostics"].is_null());
-    assert!(report[0]["install_command"].is_null());
+    let entry = report[0]
+        .as_object()
+        .ok_or("report entry must be an object")?;
+    assert!(!entry.contains_key("diagnostics"));
+    assert!(!entry.contains_key("install_command"));
+    assert_eq!(report[0]["checks"]["state"], "not-declared");
+    assert_eq!(report[0]["checks"]["evidence"], Value::Array(Vec::new()));
+    let checks = report[0]["checks"]
+        .as_object()
+        .ok_or("checks must be an object")?;
+    assert!(!checks.contains_key("error"));
+    assert_eq!(report[0]["ready"], true);
+    Ok(())
+}
+
+#[test]
+fn stack_status_runs_declared_checks_and_reports_completed_evidence() -> Result<(), Box<dyn Error>>
+{
+    let workspace = StatusWorkspace::new(&["vllm"])?;
+    workspace.declare_check("vllm", "native-schema", "checks/native_schema.py", None)?;
+
+    let output = workspace.run_with_env(
+        &[("FAKE_PIXI_CHECK_STDOUT", "native schema is current")],
+        &["stack", "status"],
+    )?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report = stdout_json(&output)?;
+    assert_eq!(report[0]["status"], "confirmed");
+    assert_eq!(report[0]["checks"]["state"], "passed");
+    assert_eq!(report[0]["checks"]["evidence"][0]["id"], "native-schema");
+    assert_eq!(
+        report[0]["checks"]["evidence"][0]["realization"],
+        "local-workspace"
+    );
+    assert_eq!(report[0]["checks"]["evidence"][0]["outcome"], "passed");
+    assert_eq!(
+        report[0]["checks"]["evidence"][0]["output"],
+        "native schema is current\n"
+    );
+    assert!(report[0]["checks"]["evidence"][0]["repair_hint"].is_null());
+    assert!(report[0]["checks"]["error"].is_null());
+    assert_eq!(report[0]["ready"], true);
+    Ok(())
+}
+
+#[test]
+fn stack_status_preserves_complete_check_output() -> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["vllm"])?;
+    workspace.declare_check("vllm", "verbose", "checks/verbose.py", None)?;
+    let stdout = "x".repeat(5000);
+    let stderr_text = "stderr keeps trailing spaces  ";
+
+    let output = workspace.run_with_env(
+        &[
+            ("FAKE_PIXI_CHECK_STDOUT", &stdout),
+            ("FAKE_PIXI_CHECK_STDERR", stderr_text),
+        ],
+        &["stack", "status"],
+    )?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report = stdout_json(&output)?;
+    assert_eq!(
+        report[0]["checks"]["evidence"][0]["output"],
+        format!("{stdout}\n{stderr_text}\n")
+    );
+    Ok(())
+}
+
+#[test]
+fn stack_status_reruns_declared_checks_when_confirmation_is_cached() -> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["vllm"])?;
+    workspace.declare_check("vllm", "native-schema", "checks/native_schema.py", None)?;
+
+    let first = workspace.run(&["stack", "status"])?;
+    assert!(first.status.success(), "{}", stderr(&first));
+    let second = workspace.run(&["stack", "status"])?;
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(
+        workspace
+            .pixi_argv()
+            .lines()
+            .filter(|line| line.contains("checks/native_schema.py"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        workspace
+            .pixi_argv()
+            .lines()
+            .filter(|line| line.ends_with("-- true"))
+            .count(),
+        1
+    );
     Ok(())
 }
 
@@ -213,6 +339,7 @@ fn a_lock_change_invalidates_the_confirmation_and_reruns_the_probe() -> Result<(
 fn env_status_reports_never_installed_and_not_usable_and_exits_nonzero()
 -> Result<(), Box<dyn Error>> {
     let workspace = StatusWorkspace::new(&["vllm", "sglang"])?;
+    workspace.declare_check("vllm", "native-schema", "checks/native_schema.py", None)?;
     fs::remove_dir_all(workspace.root.path().join(".pixi/envs/vllm"))?;
 
     let output = workspace.run_with_env(&[("FAKE_PIXI_PROBE_EXIT", "1")], &["stack", "status"])?;
@@ -231,6 +358,10 @@ fn env_status_reports_never_installed_and_not_usable_and_exits_nonzero()
         .as_str()
         .ok_or("install_command must be a string")?;
     assert!(vllm_install_command.contains("vllm"));
+    assert_eq!(vllm["checks"]["state"], "skipped");
+    assert_eq!(vllm["checks"]["evidence"], Value::Array(Vec::new()));
+    assert_eq!(vllm["ready"], false);
+    assert!(!workspace.pixi_argv().contains("checks/native_schema.py"));
 
     let sglang = by_stack("sglang")?;
     assert_eq!(sglang["status"], "not-usable");
@@ -239,6 +370,8 @@ fn env_status_reports_never_installed_and_not_usable_and_exits_nonzero()
         .as_str()
         .ok_or("install_command must be a string")?;
     assert!(sglang_install_command.contains("sglang"));
+    assert_eq!(sglang["checks"]["state"], "not-declared");
+    assert_eq!(sglang["ready"], false);
 
     // No marker persists for either failure: a future check must retry
     // rather than trust a failed probe.
@@ -249,6 +382,139 @@ fn env_status_reports_never_installed_and_not_usable_and_exits_nonzero()
             .join(".inferlab/cache/environments/sglang/confirmed.json")
             .exists()
     );
+    Ok(())
+}
+
+#[test]
+fn stack_status_stops_at_the_first_failed_check_and_reports_its_repair_hint()
+-> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["vllm"])?;
+    workspace.declare_check(
+        "vllm",
+        "native-schema",
+        "checks/native_schema.py",
+        Some("pixi run rebuild-native"),
+    )?;
+    workspace.declare_check("vllm", "later-check", "checks/later.py", None)?;
+
+    let output = workspace.run_with_env(
+        &[
+            ("FAKE_PIXI_CHECK_EXIT", "9"),
+            ("FAKE_PIXI_CHECK_STDOUT", "native schema is stale"),
+        ],
+        &["stack", "status"],
+    )?;
+    assert!(!output.status.success());
+    let report = stdout_json(&output)?;
+    assert_eq!(report[0]["status"], "confirmed");
+    assert_eq!(report[0]["checks"]["state"], "failed");
+    assert_eq!(
+        report[0]["checks"]["evidence"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(report[0]["checks"]["evidence"][0]["id"], "native-schema");
+    assert_eq!(report[0]["checks"]["evidence"][0]["outcome"], "failed");
+    assert_eq!(
+        report[0]["checks"]["evidence"][0]["repair_hint"],
+        "pixi run rebuild-native"
+    );
+    assert!(report[0]["checks"]["error"].is_null());
+    assert_eq!(report[0]["ready"], false);
+    assert!(!workspace.pixi_argv().contains("checks/later.py"));
+    assert!(stderr(&output).contains("not ready"));
+    Ok(())
+}
+
+#[test]
+fn stack_status_continues_after_an_earlier_stack_check_fails() -> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["a", "b"])?;
+    workspace.declare_check("a", "native-schema", "checks/native_schema.py", None)?;
+
+    let output = workspace.run_with_env(&[("FAKE_PIXI_CHECK_EXIT", "1")], &["stack", "status"])?;
+    assert!(!output.status.success());
+    let report = stdout_json(&output)?;
+    let entries = report.as_array().ok_or("report must be a JSON array")?;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(report[0]["stack"], "a");
+    assert_eq!(report[0]["checks"]["state"], "failed");
+    assert_eq!(report[1]["stack"], "b");
+    assert_eq!(report[1]["status"], "confirmed");
+    assert_eq!(report[1]["checks"]["state"], "not-declared");
+    assert_eq!(report[1]["ready"], true);
+    Ok(())
+}
+
+#[test]
+fn stack_status_reports_check_launch_errors_without_losing_json_output()
+-> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["vllm"])?;
+    workspace.declare_check("vllm", "imports", "checks/imports.py", None)?;
+    workspace.declare_check("vllm", "native-schema", "checks/native_schema.py", None)?;
+
+    let output = workspace.run_with_env(
+        &[
+            ("FAKE_PIXI_CHECK_STDOUT", "completed before launch error"),
+            ("FAKE_PIXI_REMOVE_AFTER_CHECK", "1"),
+        ],
+        &["stack", "status"],
+    )?;
+    assert!(!output.status.success());
+    let report = stdout_json(&output)?;
+    assert_eq!(report[0]["status"], "confirmed");
+    assert_eq!(report[0]["checks"]["state"], "error");
+    assert_eq!(
+        report[0]["checks"]["evidence"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(report[0]["checks"]["evidence"][0]["id"], "imports");
+    assert_eq!(report[0]["checks"]["evidence"][0]["outcome"], "passed");
+    assert_eq!(report[0]["checks"]["error"]["id"], "native-schema");
+    assert!(report[0]["checks"]["error"]["diagnostics"].is_string());
+    assert_eq!(report[0]["ready"], false);
+    Ok(())
+}
+
+#[test]
+fn stack_status_reports_signaled_checks_as_errors_without_outcome_evidence()
+-> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["vllm"])?;
+    workspace.declare_check("vllm", "native-schema", "checks/native_schema.py", None)?;
+
+    let output =
+        workspace.run_with_env(&[("FAKE_PIXI_CHECK_SIGNAL", "TERM")], &["stack", "status"])?;
+    assert!(!output.status.success());
+    let report = stdout_json(&output)?;
+    assert_eq!(report[0]["status"], "confirmed");
+    assert_eq!(report[0]["checks"]["state"], "error");
+    assert_eq!(report[0]["checks"]["evidence"], Value::Array(Vec::new()));
+    assert_eq!(report[0]["checks"]["error"]["id"], "native-schema");
+    assert!(
+        report[0]["checks"]["error"]["diagnostics"]
+            .as_str()
+            .is_some_and(|text| text.contains("signal"))
+    );
+    assert_eq!(report[0]["ready"], false);
+    Ok(())
+}
+
+#[test]
+fn stack_status_reports_every_stack_when_pixi_confirmation_cannot_launch()
+-> Result<(), Box<dyn Error>> {
+    let workspace = StatusWorkspace::new(&["a", "b"])?;
+    fs::remove_file(workspace.bin.join("pixi"))?;
+
+    let output = workspace.run(&["stack", "status"])?;
+    assert!(!output.status.success());
+    let report = stdout_json(&output)?;
+    let entries = report.as_array().ok_or("report must be a JSON array")?;
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert_eq!(entry["status"], "not-usable");
+        assert!(entry["diagnostics"].is_string());
+        assert!(entry["install_command"].is_string());
+        assert_eq!(entry["checks"]["state"], "not-declared");
+        assert_eq!(entry["ready"], false);
+    }
     Ok(())
 }
 

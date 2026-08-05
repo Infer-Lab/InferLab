@@ -50,9 +50,11 @@ inferlab toolchain install               # eval/bench measurement runtimes (only
 `pixi install --locked` with no `--environment`/`--all` only realizes Pixi's
 implicit `default` environment, not every named environment selected by the
 workspace's stacks — pass `--all`, or `--environment <PIXI_ENV>` for one.
-`inferlab stack status` confirms the result without requiring local bindings,
-so it's the right first InferLab command in a fresh checkout: it reports each stack as `confirmed`,
-`never-installed`, or `not-usable`, and exits nonzero if any isn't confirmed.
+`inferlab stack status` checks the result without requiring local bindings, so
+it's the right first InferLab command in a fresh checkout. Each stack retains
+its Pixi environment status (`confirmed`, `never-installed`, or `not-usable`)
+and also reports declared-check evidence plus an overall `ready` value. The
+command exits nonzero if any selected stack isn't ready.
 `toolchain install` adds only the eval/bench measurement runtimes and is
 needed only when you run an lm-eval or Bench measurement. Bind your local
 facts in `.inferlab/local.toml` before the first resolving command. The
@@ -61,16 +63,16 @@ them with this machine's model locators, machines, devices, ports, and
 placements. A missing bindings file fails with guidance naming what belongs
 there.
 
-Declared stack checks run automatically before launches; a failing
-check prints a `repair_hint` you can usually run verbatim (e.g.
-`pixi run <task>`).
+For a confirmed environment, declared stack checks run on every `stack status`
+invocation as well as before launches; a failing check prints a `repair_hint`
+you can usually run verbatim (e.g. `pixi run <task>`).
 
 ## Command Map
 
 ```
 inferlab workspace show [--json]             # validate/browse the public catalog; no local bindings needed
 inferlab workspace lock                    # re-lock the committed Pixi workspace
-inferlab stack status [STACK]              # is a stack realization confirmed usable? (no local bindings needed)
+inferlab stack status [STACK]              # is a stack realization ready? (no local bindings needed)
 inferlab toolchain install                 # install the measurement toolchains
 inferlab serve start <SERVER> [--case C] [--placement P]  # start a long-running server
 inferlab serve status|logs|stop <ID>       # inspect / log paths / finalize it
@@ -131,7 +133,7 @@ member fails validation. For a concurrency Bench,
 requests before profiling; warmup is excluded from normalized metrics. Use
 `output_tokens = 1` for a prefill-dominant Bench; TPOT is then inapplicable and
 omitted. See the
-[0.8.2 workspace authoring guide](https://github.com/Infer-Lab/InferLab/blob/v0.8.2/docs/workspace-authoring.md)
+[0.8.3 workspace authoring guide](https://github.com/Infer-Lab/InferLab/blob/v0.8.3/docs/workspace-authoring.md)
 for task-source, request-body, warmup, request-source, metric, and SLO examples.
 
 **Closed loop.** `inferlab recipe run <RECIPE> --case <CASE>` starts the

@@ -11,6 +11,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod status;
+
 const PIXI_MANIFEST: &str = "pixi.toml";
 const PIXI_LOCK: &str = "pixi.lock";
 pub(crate) const PIXI_ENVS_DIR: &str = ".pixi/envs";
@@ -82,6 +84,28 @@ pub struct EnvironmentCheckEvidence {
     pub log: Option<PathBuf>,
 }
 
+/// One local check for which an exit status and complete output were observed.
+#[derive(Debug)]
+pub struct CompletedLocalCheck {
+    pub id: String,
+    pub outcome: CheckOutcome,
+    pub output: String,
+    pub repair_hint: Option<String>,
+}
+
+impl CompletedLocalCheck {
+    pub fn into_record_evidence(self) -> EnvironmentCheckEvidence {
+        EnvironmentCheckEvidence {
+            id: self.id,
+            realization: CheckRealization::LocalWorkspace,
+            machine: None,
+            outcome: self.outcome,
+            output: Some(self.output),
+            log: None,
+        }
+    }
+}
+
 /// A failed local-realization check: local failure means drift, so the
 /// declared repair hint goes to the operator who owns the environment.
 #[derive(Clone, Debug)]
@@ -106,43 +130,127 @@ impl LocalCheckFailure {
     }
 }
 
+/// A declared check attempt that did not produce an exit status.
+#[derive(Debug)]
+pub enum LocalCheckExecutionFailure {
+    Launch {
+        id: String,
+        source: std::io::Error,
+    },
+    NoExitCode {
+        id: String,
+        status: std::process::ExitStatus,
+        stdout: String,
+        stderr: String,
+    },
+}
+
+impl LocalCheckExecutionFailure {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Launch { id, .. } | Self::NoExitCode { id, .. } => id,
+        }
+    }
+
+    pub fn diagnostics(&self) -> String {
+        match self {
+            Self::Launch { id, source } => {
+                format!("environment check {id:?} failed to launch through pixi: {source}")
+            }
+            Self::NoExitCode {
+                id,
+                status,
+                stdout,
+                stderr,
+            } => format!(
+                "environment check {id:?} produced no numeric exit code ({status}); stdout: \
+                 {stdout}; stderr: {stderr}"
+            ),
+        }
+    }
+
+    pub fn into_inferlab_error(self) -> InferlabError {
+        match self {
+            Self::Launch { source, .. } => InferlabError::LaunchPixi {
+                action: "environment check",
+                source,
+            },
+            Self::NoExitCode {
+                status,
+                stdout,
+                stderr,
+                ..
+            } => InferlabError::PixiExit {
+                action: "environment check",
+                status,
+                stdout,
+                stderr,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LocalCheckConclusion {
+    Passed,
+    Failed(LocalCheckFailure),
+    ExecutionError(LocalCheckExecutionFailure),
+}
+
+#[derive(Debug)]
+pub struct LocalCheckRun {
+    pub completed: Vec<CompletedLocalCheck>,
+    pub conclusion: LocalCheckConclusion,
+}
+
 /// Resolve declared checks and image postprocess steps to content
 /// identities, failing when a declared script is missing.
 pub fn plan_environment_checks(
     root: &Path,
     definition: &StackDefinition,
 ) -> Result<(Vec<PlannedEnvironmentCheck>, Vec<PlannedEnvironmentScript>), InferlabError> {
-    let digest_of = |script: &Path| -> Result<String, InferlabError> {
-        let bytes = fs::read(root.join(script)).map_err(|source| InferlabError::Read {
-            path: root.join(script),
-            source,
-        })?;
-        Ok(sha256(&bytes))
-    };
-    let mut checks = Vec::with_capacity(definition.checks.len());
-    for check in &definition.checks {
-        checks.push(PlannedEnvironmentCheck {
-            id: check.id.clone(),
-            script: check.script.clone(),
-            sha256: digest_of(&check.script)?,
-            repair_hint: check.repair_hint.clone(),
-        });
-    }
+    let checks = plan_stack_checks(root, definition)?;
     let mut postprocess = Vec::with_capacity(definition.image_postprocess.len());
     for step in &definition.image_postprocess {
         postprocess.push(PlannedEnvironmentScript {
             id: step.id.clone(),
             script: step.script.clone(),
-            sha256: digest_of(&step.script)?,
+            sha256: environment_script_digest(root, &step.script)?,
         });
     }
     Ok((checks, postprocess))
 }
 
+pub fn plan_stack_checks(
+    root: &Path,
+    definition: &StackDefinition,
+) -> Result<Vec<PlannedEnvironmentCheck>, InferlabError> {
+    let mut checks = Vec::with_capacity(definition.checks.len());
+    for check in &definition.checks {
+        checks.push(PlannedEnvironmentCheck {
+            id: check.id.clone(),
+            script: check.script.clone(),
+            sha256: environment_script_digest(root, &check.script)?,
+            repair_hint: check.repair_hint.clone(),
+        });
+    }
+    Ok(checks)
+}
+
+fn environment_script_digest(root: &Path, script: &Path) -> Result<String, InferlabError> {
+    let path = root.join(script);
+    let bytes = fs::read(&path).map_err(|source| InferlabError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(sha256(&bytes))
+}
+
 /// Execute the declared checks against the local workspace realization
 /// ([[RFC-0002:C-ENVIRONMENT-CHECKS]]): the environment's own interpreter
 /// runs each script from the workspace root, stopping at the first failure.
-/// Evidence covers every check that executed; Inferlab never mutates the
+/// Completed evidence covers every check that produced an exit status; a
+/// launch error remains a separate conclusion. Inferlab never mutates the
 /// local environment itself.
 pub fn run_local_checks(
     root: &Path,
@@ -150,11 +258,11 @@ pub fn run_local_checks(
     checks: &[PlannedEnvironmentCheck],
     progress: &Progress,
     phase_name: &str,
-) -> Result<(Vec<EnvironmentCheckEvidence>, Option<LocalCheckFailure>), InferlabError> {
-    let mut evidence = Vec::new();
+) -> Result<LocalCheckRun, InferlabError> {
+    let mut completed = Vec::new();
     for (index, check) in checks.iter().enumerate() {
         progress.phase(Phase::named(phase_name).item(&check.id, index + 1, checks.len()))?;
-        let output = Command::new("pixi")
+        let output = match Command::new("pixi")
             .current_dir(root)
             .args(["run", "--locked", "--no-install", "--executable", "-e"])
             .arg(pixi_environment)
@@ -162,44 +270,66 @@ pub fn run_local_checks(
             .arg("python")
             .arg(&check.script)
             .output()
-            .map_err(|source| InferlabError::LaunchPixi {
-                action: "environment check",
-                source,
-            })?;
-        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
+        {
+            Ok(output) => output,
+            Err(source) => {
+                return Ok(LocalCheckRun {
+                    completed,
+                    conclusion: LocalCheckConclusion::ExecutionError(
+                        LocalCheckExecutionFailure::Launch {
+                            id: check.id.clone(),
+                            source,
+                        },
+                    ),
+                });
             }
-            combined.push_str(stderr.trim_end());
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if output.status.code().is_none() {
+            return Ok(LocalCheckRun {
+                completed,
+                conclusion: LocalCheckConclusion::ExecutionError(
+                    LocalCheckExecutionFailure::NoExitCode {
+                        id: check.id.clone(),
+                        status: output.status,
+                        stdout,
+                        stderr,
+                    },
+                ),
+            });
         }
-        let combined = tail(&combined, 4096);
+        let combined = format!("{stdout}{stderr}");
         let passed = output.status.success();
-        evidence.push(EnvironmentCheckEvidence {
+        completed.push(CompletedLocalCheck {
             id: check.id.clone(),
-            realization: CheckRealization::LocalWorkspace,
-            machine: None,
             outcome: if passed {
                 CheckOutcome::Passed
             } else {
                 CheckOutcome::Failed
             },
-            output: Some(combined.clone()),
-            log: None,
+            output: combined.clone(),
+            repair_hint: if passed {
+                None
+            } else {
+                check.repair_hint.clone()
+            },
         });
         if !passed {
-            return Ok((
-                evidence,
-                Some(LocalCheckFailure {
+            return Ok(LocalCheckRun {
+                completed,
+                conclusion: LocalCheckConclusion::Failed(LocalCheckFailure {
                     id: check.id.clone(),
                     repair_hint: check.repair_hint.clone(),
                     output: combined,
                 }),
-            ));
+            });
         }
     }
-    Ok((evidence, None))
+    Ok(LocalCheckRun {
+        completed,
+        conclusion: LocalCheckConclusion::Passed,
+    })
 }
 
 pub(crate) fn tail(text: &str, limit: usize) -> String {
@@ -393,71 +523,6 @@ fn write_confirmation_marker(
     let bytes = serde_json::to_vec_pretty(&marker)
         .map_err(|source| InferlabError::EncodeOutput { source })?;
     atomic_write(&path, &bytes, None)
-}
-
-/// One declared stack's local realization state, reported by `stack status`
-/// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]).
-#[derive(Debug, Serialize)]
-pub struct EnvironmentStatusReport {
-    pub stack: String,
-    pub pixi_environment: String,
-    pub status: EnvironmentStatusKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub diagnostics: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub install_command: Option<String>,
-}
-
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum EnvironmentStatusKind {
-    Confirmed,
-    NeverInstalled,
-    NotUsable,
-}
-
-/// Report each named stack's confirmation state without installing
-/// packages or updating the manifest or lock
-/// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]). `stacks` pairs a workspace
-/// stack identifier with the Pixi environment it selects.
-pub(crate) fn status_with_progress(
-    root: &Path,
-    stacks: &[(String, String)],
-    progress: &Progress,
-) -> Result<Vec<EnvironmentStatusReport>, InferlabError> {
-    stacks
-        .iter()
-        .enumerate()
-        .map(|(index, (stack, pixi_environment))| {
-            progress.phase(Phase::named("environment realization inspection").item(
-                stack,
-                index + 1,
-                stacks.len(),
-            ))?;
-            let install_command = format!("pixi install --locked --environment {pixi_environment}");
-            let (status, diagnostics, install_command) =
-                match check_environment(root, pixi_environment)? {
-                    EnvironmentCheck::Confirmed => (EnvironmentStatusKind::Confirmed, None, None),
-                    EnvironmentCheck::NeverInstalled => (
-                        EnvironmentStatusKind::NeverInstalled,
-                        None,
-                        Some(install_command),
-                    ),
-                    EnvironmentCheck::NotUsable(diagnostics) => (
-                        EnvironmentStatusKind::NotUsable,
-                        Some(diagnostics),
-                        Some(install_command),
-                    ),
-                };
-            Ok(EnvironmentStatusReport {
-                stack: stack.clone(),
-                pixi_environment: pixi_environment.clone(),
-                status,
-                diagnostics,
-                install_command,
-            })
-        })
-        .collect()
 }
 
 pub(crate) fn lock_workspace_with_progress(

@@ -658,7 +658,7 @@ fn run_stack_status(
 ) -> Result<(), InferlabError> {
     progress.phase(Phase::named("environment realization inspection"))?;
     let config = load_workspace_config(root)?;
-    let selected: Vec<(String, String)> = match args.stack.as_deref() {
+    let selected: Vec<environment::status::StackStatusRequest> = match args.stack.as_deref() {
         Some(id) => {
             let definition = config
                 .stacks
@@ -669,21 +669,29 @@ fn run_stack_status(
                         config.stacks.keys().collect::<Vec<_>>()
                     ),
                 })?;
-            vec![(id.to_owned(), definition.pixi_environment.clone())]
+            vec![environment::status::StackStatusRequest {
+                stack: id.to_owned(),
+                pixi_environment: definition.pixi_environment.clone(),
+                checks: environment::plan_stack_checks(root, definition)?,
+            }]
         }
         None => config
             .stacks
             .iter()
-            .map(|(id, definition)| (id.clone(), definition.pixi_environment.clone()))
-            .collect(),
+            .map(|(id, definition)| {
+                Ok(environment::status::StackStatusRequest {
+                    stack: id.clone(),
+                    pixi_environment: definition.pixi_environment.clone(),
+                    checks: environment::plan_stack_checks(root, definition)?,
+                })
+            })
+            .collect::<Result<Vec<_>, InferlabError>>()?,
     };
-    let reports = environment::status_with_progress(root, &selected, progress)?;
-    let unconfirmed = reports
-        .iter()
-        .any(|report| report.status != environment::EnvironmentStatusKind::Confirmed);
+    let reports = environment::status::status_with_progress(root, &selected, progress)?;
+    let not_ready = reports.iter().any(|report| !report.ready);
     write_json(&reports)?;
-    if unconfirmed {
-        Err(InferlabError::StackStatusUnconfirmed)
+    if not_ready {
+        Err(InferlabError::StackStatusNotReady)
     } else {
         Ok(())
     }

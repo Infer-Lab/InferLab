@@ -631,7 +631,11 @@ inferlab recipe run smoke --dry-run
 inferlab recipe run smoke
 ```
 
-`workspace show` validates the public catalog. `stack status` checks the
-selected Pixi realizations. Dry-run then resolves local placement, effective
-settings, endpoints, device assignments, commands, environment, and override
-provenance without launching or writing an execution record.
+`workspace show` validates the public catalog. `stack status` separately
+reports each selected Pixi environment's manifest-and-lock confirmation,
+executes that stack's declared checks against a confirmed local realization,
+and reports overall readiness. A failed check reports its captured output and
+declared repair hint but does not repair or otherwise mutate the realization.
+Dry-run then resolves local placement, effective settings, endpoints, device
+assignments, commands, environment, and override provenance without launching
+or writing an execution record.

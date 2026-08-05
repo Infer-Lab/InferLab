@@ -70,7 +70,7 @@ pub fn run<T: BuilderTool>(
         )?;
         // Even an infrastructure failure (Pixi unavailable) must finalize
         // the record rather than leave it Running.
-        let (evidence, failure) = match environment::run_local_checks(
+        let run = match environment::run_local_checks(
             &workspace.root,
             &pixi_environment,
             &checks,
@@ -83,21 +83,33 @@ pub fn run<T: BuilderTool>(
                 return Err(error);
             }
         };
-        store.record_mut().environment_checks = evidence;
+        store.record_mut().environment_checks = run
+            .completed
+            .into_iter()
+            .map(environment::CompletedLocalCheck::into_record_evidence)
+            .collect();
         store.rewrite()?;
-        if let Some(failure) = failure {
-            // A drifted local realization aborts through the ordinary failed
-            // report: the record finalizes, stdout keeps the single
-            // machine-readable report, and the operator gets the repair hint.
-            let message = failure.message(&pixi_environment);
-            progress.phase(Phase::named("package-build preflight failed").current_item(message))?;
-            let status = ImageStatus::Failed;
-            let manifest = store.finish(status)?;
-            return Ok(ImageBuildReport {
-                record_id: store.record().id.clone(),
-                status,
-                manifest,
-            });
+        match run.conclusion {
+            environment::LocalCheckConclusion::Passed => {}
+            environment::LocalCheckConclusion::Failed(failure) => {
+                // A drifted local realization aborts through the ordinary failed
+                // report: the record finalizes, stdout keeps the single
+                // machine-readable report, and the operator gets the repair hint.
+                let message = failure.message(&pixi_environment);
+                progress
+                    .phase(Phase::named("package-build preflight failed").current_item(message))?;
+                let status = ImageStatus::Failed;
+                let manifest = store.finish(status)?;
+                return Ok(ImageBuildReport {
+                    record_id: store.record().id.clone(),
+                    status,
+                    manifest,
+                });
+            }
+            environment::LocalCheckConclusion::ExecutionError(failure) => {
+                store.finish(ImageStatus::Failed)?;
+                return Err(failure.into_inferlab_error());
+            }
         }
     }
 

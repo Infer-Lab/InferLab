@@ -235,7 +235,7 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
     {
         // Even an infrastructure failure (Pixi unavailable) must finalize
         // the record rather than leave it Starting.
-        let (evidence, failure) = match crate::environment::run_local_checks(
+        let run = match crate::environment::run_local_checks(
             root,
             &stack.pixi_environment,
             &stack.checks,
@@ -254,17 +254,34 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                 return Err(lifecycle_error(&session, message));
             }
         };
-        session.record_mut().environment_checks = evidence;
+        session.record_mut().environment_checks = run
+            .completed
+            .into_iter()
+            .map(crate::environment::CompletedLocalCheck::into_record_evidence)
+            .collect();
         session.rewrite()?;
-        if let Some(failure) = failure {
-            let message = failure.message(&stack.pixi_environment);
-            session.record_mut().failure = Some(FailureEvidence {
-                phase: FailurePhase::Preflight,
-                process_id: None,
-                message: message.clone(),
-            });
-            persist_failed(&mut session, true)?;
-            return Err(lifecycle_error(&session, message));
+        match run.conclusion {
+            crate::environment::LocalCheckConclusion::Passed => {}
+            crate::environment::LocalCheckConclusion::Failed(failure) => {
+                let message = failure.message(&stack.pixi_environment);
+                session.record_mut().failure = Some(FailureEvidence {
+                    phase: FailurePhase::Preflight,
+                    process_id: None,
+                    message: message.clone(),
+                });
+                persist_failed(&mut session, true)?;
+                return Err(lifecycle_error(&session, message));
+            }
+            crate::environment::LocalCheckConclusion::ExecutionError(failure) => {
+                let message = failure.diagnostics();
+                session.record_mut().failure = Some(FailureEvidence {
+                    phase: FailurePhase::Preflight,
+                    process_id: None,
+                    message: message.clone(),
+                });
+                persist_failed(&mut session, true)?;
+                return Err(lifecycle_error(&session, message));
+            }
         }
 
         // Each remote machine hosts its own installation of the same lock —

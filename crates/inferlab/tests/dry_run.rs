@@ -2946,6 +2946,50 @@ fn workspace_with_file_submodule() -> Result<(TestWorkspace, tempfile::TempDir),
     Ok((workspace, origin))
 }
 
+#[test]
+fn submodule_local_refs_do_not_change_source_digest() -> Result<(), Box<dyn Error>> {
+    let (workspace, _origin) = workspace_with_file_submodule()?;
+    let submodule = workspace.root.path().join("vendor/flashinfer");
+    let baseline = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+
+    TestWorkspace::git(&submodule, &["tag", "local-presentation-only"])?;
+    let tagged = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+
+    assert_eq!(baseline["workspace"]["dirty"], false);
+    assert_eq!(tagged["workspace"]["dirty"], false);
+    assert_eq!(
+        baseline["workspace"]["source_digest"], tagged["workspace"]["source_digest"],
+        "a local ref must not enter workspace source identity"
+    );
+
+    TestWorkspace::git(
+        &submodule,
+        &[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Inferlab Test",
+            "commit",
+            "-qm",
+            "different effective submodule head",
+            "--allow-empty",
+        ],
+    )?;
+    let moved = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    assert_ne!(
+        tagged["workspace"]["source_digest"], moved["workspace"]["source_digest"],
+        "the effective submodule HEAD must remain part of workspace source identity"
+    );
+
+    TestWorkspace::git(&submodule, &["tag", "moved-presentation-only"])?;
+    let moved_tagged = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    assert_eq!(
+        moved["workspace"]["source_digest"], moved_tagged["workspace"]["source_digest"],
+        "local refs must stay outside identity when the submodule HEAD differs from its gitlink"
+    );
+    Ok(())
+}
+
 /// A submodule untracked entry enters the source digest classified as the
 /// top level classifies it ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): a regular
 /// file and a same-content symlink at the same path digest differently, and

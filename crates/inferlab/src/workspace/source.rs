@@ -614,6 +614,10 @@ pub(crate) fn workspace_mutations(
         .collect())
 }
 
+/// Build one canonical byte stream for local snapshots and remote preflight.
+/// `git submodule status` is deliberately not an identity input: it appends a
+/// local-ref-dependent `git describe` label. The existing recursive `foreach`
+/// traversal instead frames each checked-out submodule path and effective HEAD.
 pub(crate) fn source_digest_script(exclusions: &[PathBuf]) -> String {
     let pathspecs = source_pathspecs(exclusions);
     let status_flags_z = git_status_flags_z();
@@ -623,7 +627,7 @@ untracked=$(mktemp)
 trap 'rm -f "$untracked"' EXIT
 {{
 printf 'revision\0'; git rev-parse HEAD
-printf 'submodules\0'; git submodule status --recursive
+printf 'submodules\0'
 printf 'status\0'; git status {status_flags_z} -- {pathspecs}
 printf 'diff\0'; git diff --binary --submodule=diff HEAD -- {pathspecs}
 printf 'untracked\0'
@@ -636,7 +640,7 @@ while IFS= read -r -d '' path; do
     printf 'file\0'; sha256sum < "$path"
   fi
 done < "$untracked"
-git submodule foreach --quiet --recursive 'set -eu; printf "submodule-worktree\0%s\0" "$displaypath"; git status {status_flags_z}; git diff --binary HEAD; untracked=$(mktemp); trap "rm -f \"$untracked\"" EXIT; git ls-files --others --exclude-standard -z > "$untracked"; xargs -0 -r sh -c '\''set -eu; for path in "$@"; do printf "%s\0" "$path"; if [ -L "$path" ]; then printf "link\0"; readlink -- "$path"; elif [ -f "$path" ]; then printf "file\0"; sha256sum < "$path"; fi; done'\'' classify < "$untracked"'
+git submodule foreach --quiet --recursive 'set -eu; submodule_head=$(git rev-parse HEAD); printf "submodule-worktree\0%s\0%s\0" "$displaypath" "$submodule_head"; git status {status_flags_z}; git diff --binary HEAD; untracked=$(mktemp); trap "rm -f \"$untracked\"" EXIT; git ls-files --others --exclude-standard -z > "$untracked"; xargs -0 -r sh -c '\''set -eu; for path in "$@"; do printf "%s\0" "$path"; if [ -L "$path" ]; then printf "link\0"; readlink -- "$path"; elif [ -f "$path" ]; then printf "file\0"; sha256sum < "$path"; fi; done'\'' classify < "$untracked"'
 }} | sha256sum | awk '{{print $1}}'"#
     )
 }

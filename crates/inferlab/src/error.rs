@@ -162,8 +162,8 @@ pub enum InferlabError {
         diagnostics: String,
     },
 
-    #[error("one or more stacks are not confirmed usable; see the status report")]
-    StackStatusUnconfirmed,
+    #[error("one or more stacks are not ready; see the status report")]
+    StackStatusNotReady,
 
     #[error("the Inferlab measurement toolchain does not support this host platform: {platform}")]
     UnsupportedToolchainPlatform { platform: String },
@@ -513,7 +513,7 @@ impl InferlabError {
             | Self::EnvironmentIo { .. }
             | Self::EnvironmentRestore { .. }
             | Self::PixiEnvironmentUnavailable { .. }
-            | Self::StackStatusUnconfirmed => "E1007",
+            | Self::StackStatusNotReady => "E1007",
             Self::UnsupportedToolchainPlatform { .. }
             | Self::ToolchainIo { .. }
             | Self::ToolchainHeld { .. }

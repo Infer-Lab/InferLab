@@ -117,7 +117,8 @@ sed -i \
 printf '\n[project.optional-dependencies]\ntest = ["inferlab-adapter-sdk==%s"]\n' \
   "${sdk_version}" >> "${vllm_pyproject}"
 if PATH="${fixture}/bin:${PATH}" \
-  "${fixture}/scripts/prepare-python-package-release.sh" inferlab-integration-vllm \
+  "${fixture}/scripts/prepare-python-package-release.sh" \
+    inferlab-integration-vllm "${temporary}/candidates" \
   > "${temporary}/non-exact.out" 2>&1; then
   fail "publication preparation accepted a non-exact runtime SDK dependency"
 fi
@@ -130,11 +131,19 @@ grep -q 'exact inferlab-adapter-sdk runtime dependency' \
 cp "${temporary}/vllm-pyproject.toml" "${vllm_pyproject}"
 
 PATH="${fixture}/bin:${PATH}" \
-  "${fixture}/scripts/prepare-python-package-release.sh" inferlab-integration-vllm \
+  "${fixture}/scripts/prepare-python-package-release.sh" \
+    inferlab-integration-vllm "${temporary}/candidates" \
   > "${temporary}/release.out"
 
-grep -Fq "twine upload dist/${vllm_wheel}" "${temporary}/release.out" \
-  || fail "publication output did not select the requested wheel"
+test -f "${temporary}/candidates/${vllm_wheel}" \
+  || fail "candidate staging omitted the requested wheel"
+test -f "${temporary}/candidates/${vllm_wheel}.sha256" \
+  || fail "candidate staging omitted the requested wheel checksum"
+grep -Fq 'registry upload is emitted only after aggregate Release finalization' \
+  "${temporary}/release.out" \
+  || fail "candidate staging did not preserve registry-last ordering"
+! grep -Fq 'twine upload' "${temporary}/release.out" \
+  || fail "candidate staging emitted a premature package-index command"
 ! grep -Fq 'gh release create' "${temporary}/release.out" \
   || fail "package-only publication still emits a package-scoped GitHub release"
 ! grep -Fq "inferlab-integration-vllm-v${vllm_version}" "${temporary}/release.out" \
@@ -145,7 +154,8 @@ test -f "${fixture}/dist/${vllm_wheel}.sha256" \
   || fail "publication preparation did not write the selected wheel checksum"
 
 if PATH="${fixture}/bin:${PATH}" \
-  "${fixture}/scripts/prepare-python-package-release.sh" inferlab-measurement-sdk \
+  "${fixture}/scripts/prepare-python-package-release.sh" \
+    inferlab-measurement-sdk "${temporary}/candidates" \
   > "${temporary}/invalid.out" 2>&1; then
   fail "publication preparation accepted the internal measurement SDK"
 fi

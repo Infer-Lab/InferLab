@@ -3,13 +3,14 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 package="${1:-}"
+candidates="${2:-}"
 
 fail() {
   echo "prepare-python-package-release: $1" >&2
   exit 1
 }
 
-test "$#" -eq 1 || fail "usage: $0 PACKAGE"
+test "$#" -eq 2 || fail "usage: $0 PACKAGE CANDIDATES"
 
 cd "${root}"
 workspace_inventory="$(scripts/python-package-inventory.sh workspace-side)"
@@ -46,9 +47,15 @@ wheel="${matches[0]}"
 wheel_basename="$(basename "${wheel}")"
 (cd dist && sha256sum "${wheel_basename}" > "${wheel_basename}.sha256")
 
+mkdir -p "${candidates}"
+candidate_wheel="${candidates}/${wheel_basename}"
+candidate_checksum="${candidate_wheel}.sha256"
+if [ -e "${candidate_wheel}" ] && ! cmp -s "${wheel}" "${candidate_wheel}"; then
+  fail "candidate ${candidate_wheel} already exists with different contents"
+fi
+cp "${wheel}" "${candidate_wheel}"
+cp "${wheel}.sha256" "${candidate_checksum}"
+
 echo
-echo "== publication commands (ADR-0008: operator-performed, not run here) =="
-echo "# package index (wheel only):"
-printf 'twine upload %q\n' "${wheel}"
-echo
-echo "== stopping before package-index publication; the act remains operator-performed (ADR-0008) =="
+printf 'staged candidate wheel: %s\n' "${candidate_wheel}"
+echo "registry upload is emitted only after aggregate Release finalization"

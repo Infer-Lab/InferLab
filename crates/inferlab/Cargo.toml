@@ -33,7 +33,7 @@ inferlab-runtime = { path = "../inferlab-runtime", version = "0.8" }
 inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.8" }
 humantime.workspace = true
 ratatui.workspace = true
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

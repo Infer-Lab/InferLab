@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-08-05
+
 ### Changed
 
-- InferLab 0.8.4 supersedes the halted aggregate 0.8.3 product release. The
-  already-published 0.8.3 crates remain immutable, but no `v0.8.3` product tag
-  or GitHub Release was created; the governed time-control corrections below
-  ship together under the 0.8.4 product identity.
+- InferLab 0.8.5 supersedes the halted aggregate 0.8.3 and 0.8.4 product
+  releases. Their already-published crates remain immutable, but neither
+  version received a product tag or GitHub Release; the governed time-control
+  corrections below ship together under the 0.8.5 product identity.
+- Product tags now stage qualified repository assets in a draft GitHub Release.
+  Manual finalization adds and downloads the exact closed workspace-wheel
+  inventory, publishes the verified aggregate Release, and only then unlocks
+  manual crates.io and Python package-index publication commands.
 
 ### Fixed
 
@@ -21,9 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the readiness operation's remaining budget. This removes the hidden 250 ms
   HTTP cap while keeping capture-armed readiness interruptible between bounded
   attempts.
-- Prefix-cache reset and prompt-logprob tokenizer/HTTP probes now consume their
-  measurement case's remaining budget instead of acquiring shorter hidden
-  two-second or 30-second caps.
+- Prefix-cache reset now enforces one measurement-case deadline across client
+  initialization, connection, response headers, and complete response-body
+  consumption. A transport failure observed only after that deadline can no
+  longer replace the case timeout. Prompt-logprob tokenizer and HTTP probes
+  likewise consume their measurement case's remaining budget instead of
+  acquiring a hidden 30-second cap.
 - Profiler arming and finalization now consume one resolved budget across all
   targets and commands; framework window control consumes complete HTTP
   responses without a shorter connection cap, and report verification waits

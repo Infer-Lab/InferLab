@@ -117,10 +117,45 @@ def test_weighted_random_mixture_fixture_round_trips() -> None:
     assert BenchClientRequest.model_validate(request.model_dump()) == request
 
 
+def test_agentic_bench_fixtures_round_trip() -> None:
+    request = BenchClientRequest.model_validate(
+        load_json(FIXTURES / "valid" / "bench-client-request-agentic.json")
+    )
+    assert request.definition.agentic_source is not None
+    assert request.definition.agentic_source.catalog.scenario == "inferencex-agentx-mvp"
+
+    result = inferlab_measurement_sdk.BenchClientResult.model_validate(
+        load_json(FIXTURES / "valid" / "bench-client-result-agentic.json")
+    )
+    assert result.agentic_evidence is not None
+    assert result.agentic_evidence.run is not None
+    assert result.agentic_evidence.run.submission_valid
+    assert result.agentic_evidence.run.branch_stats.children_spawned == 1
+
+    failed = inferlab_measurement_sdk.BenchClientResult.model_validate(
+        load_json(FIXTURES / "valid" / "bench-client-result-agentic-source-failed.json")
+    )
+    assert failed.status is inferlab_measurement_sdk.ClientStatus.failed
+    assert failed.agentic_evidence is not None
+    assert (
+        failed.agentic_evidence.source.observed_sha256
+        != failed.agentic_evidence.source.expected_sha256
+    )
+    assert failed.agentic_evidence.run is None
+
+
 def test_generated_schema_classifies_measurement_fixtures() -> None:
     bench_request = load_json(FIXTURES / "valid" / "bench-client-request-random-mixture.json")
+    agentic_request = load_json(FIXTURES / "valid" / "bench-client-request-agentic.json")
+    agentic_result = load_json(FIXTURES / "valid" / "bench-client-result-agentic.json")
+    agentic_source_failure = load_json(
+        FIXTURES / "valid" / "bench-client-result-agentic-source-failed.json"
+    )
     eval_request = load_json(FIXTURES / "valid" / "eval-client-request-bundled.json")
     validator = Draft202012Validator(load_json(SCHEMA))
 
     validator.validate({"bench_client_request": bench_request})
+    validator.validate({"bench_client_request": agentic_request})
+    validator.validate({"bench_client_result": agentic_result})
+    validator.validate({"bench_client_result": agentic_source_failure})
     validator.validate({"eval_client_request": eval_request})

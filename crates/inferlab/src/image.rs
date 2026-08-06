@@ -7,13 +7,13 @@
 //! the assembly deduplication key.
 
 mod entrypoint;
-pub mod launch;
+pub(crate) mod launch;
 mod materialization;
 mod package_closure;
 mod portable_context;
-pub mod record;
-pub mod runtime;
-pub mod tool;
+pub(crate) mod record;
+pub(crate) mod runtime;
+pub(crate) mod tool;
 
 use crate::InferlabError;
 use crate::adapter::AdapterClient;
@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tool::BuilderTool;
 
-pub struct ImageBuildRequest<'a> {
+pub(crate) struct ImageBuildRequest<'a> {
     pub image: &'a str,
     pub builder: Option<&'a str>,
     pub placement: Option<&'a str>,
@@ -35,7 +35,7 @@ pub struct ImageBuildRequest<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ResolvedImageBuild {
+pub(crate) struct ResolvedImageBuild {
     pub workspace: WorkspaceSnapshot,
     pub image: ImagePlan,
     pub builder: BuilderPlan,
@@ -56,20 +56,20 @@ pub struct ResolvedImageBuild {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SkippedPlatform {
+pub(crate) struct SkippedPlatform {
     pub platform: String,
     pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ResolutionObservation {
+pub(crate) struct ResolutionObservation {
     pub fact: String,
     pub argv: Vec<String>,
     pub value: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ImagePlan {
+pub(crate) struct ImagePlan {
     pub id: String,
     pub stack: String,
     pub pixi_environment: String,
@@ -90,7 +90,7 @@ pub struct ImagePlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct BuilderPlan {
+pub(crate) struct BuilderPlan {
     pub name: String,
     pub kind: BuilderKind,
     pub host_platform: String,
@@ -99,7 +99,7 @@ pub struct BuilderPlan {
 /// One deduplicated image assembly: every requested (platform, coordinate)
 /// pair with the same closure digest and platform consumes this single result.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AssemblyPlan {
+pub(crate) struct AssemblyPlan {
     pub platform: String,
     pub base_image_digest: String,
     pub content_closure: BTreeMap<String, String>,
@@ -110,7 +110,7 @@ pub struct AssemblyPlan {
 
 /// One requested (platform, validation coordinate) pair.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ValidationPlan {
+pub(crate) struct ValidationPlan {
     pub recipe: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_case: Option<String>,
@@ -122,13 +122,13 @@ pub struct ValidationPlan {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
-pub enum EligibilityPlan {
+pub(crate) enum EligibilityPlan {
     Eligible,
     Ineligible { reason: String },
 }
 
 #[derive(Debug, Serialize)]
-pub struct ImageDryRunPlan<'a> {
+pub(crate) struct ImageDryRunPlan<'a> {
     pub workflow: &'static str,
     pub dry_run: bool,
     pub workspace: &'a WorkspaceSnapshot,
@@ -143,7 +143,7 @@ pub struct ImageDryRunPlan<'a> {
 }
 
 impl ResolvedImageBuild {
-    pub fn dry_run_plan(&self) -> ImageDryRunPlan<'_> {
+    pub(crate) fn dry_run_plan(&self) -> ImageDryRunPlan<'_> {
         ImageDryRunPlan {
             workflow: "image-build",
             dry_run: true,
@@ -159,7 +159,7 @@ impl ResolvedImageBuild {
     }
 }
 
-pub fn resolve_image<T: BuilderTool, C: AdapterClient>(
+pub(crate) fn resolve_image<T: BuilderTool, C: AdapterClient>(
     workspace: &LoadedWorkspace,
     request: &ImageBuildRequest<'_>,
     tool: &T,

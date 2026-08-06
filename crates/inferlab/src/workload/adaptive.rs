@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProbeClassification {
+pub(super) enum ProbeClassification {
     Feasible,
     Below,
     Above,
@@ -8,26 +8,26 @@ pub enum ProbeClassification {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AdaptiveTerminationReason {
+pub(crate) enum AdaptiveTerminationReason {
     SearchBudgetExhausted,
     RateResolutionReached,
     NoDistinctDirectionalProbe,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Observation {
+pub(super) struct Observation {
     pub rate: f64,
     pub classification: ProbeClassification,
 }
 
-pub struct AdaptiveRatePlanner {
+pub(super) struct AdaptiveRatePlanner {
     initial_rates: Vec<f64>,
     max_search_steps: u32,
     min_rate_resolution: Option<f64>,
 }
 
 impl AdaptiveRatePlanner {
-    pub fn new(
+    pub(super) fn new(
         mut initial_rates: Vec<f64>,
         max_search_steps: u32,
         min_rate_resolution: Option<f64>,
@@ -41,7 +41,7 @@ impl AdaptiveRatePlanner {
         }
     }
 
-    pub fn next_rate(&self, observations: &[Observation]) -> Option<f64> {
+    pub(super) fn next_rate(&self, observations: &[Observation]) -> Option<f64> {
         for rate in &self.initial_rates {
             if !observed(observations, *rate) {
                 return Some(*rate);
@@ -73,7 +73,7 @@ impl AdaptiveRatePlanner {
         (doubled.is_finite() && !observed(observations, doubled)).then_some(doubled)
     }
 
-    pub fn selected_rate(&self, observations: &[Observation]) -> Option<f64> {
+    pub(super) fn selected_rate(&self, observations: &[Observation]) -> Option<f64> {
         observations
             .iter()
             .filter(|observation| observation.classification == ProbeClassification::Feasible)
@@ -81,7 +81,7 @@ impl AdaptiveRatePlanner {
             .max_by(f64::total_cmp)
     }
 
-    pub fn boundary_bracketed(&self, observations: &[Observation]) -> bool {
+    pub(super) fn boundary_bracketed(&self, observations: &[Observation]) -> bool {
         self.selected_rate(observations).is_some_and(|selected| {
             observations.iter().any(|observation| {
                 observation.rate > selected
@@ -90,7 +90,10 @@ impl AdaptiveRatePlanner {
         })
     }
 
-    pub fn termination_reason(&self, observations: &[Observation]) -> AdaptiveTerminationReason {
+    pub(super) fn termination_reason(
+        &self,
+        observations: &[Observation],
+    ) -> AdaptiveTerminationReason {
         if self.automatic_steps(observations) >= self.max_search_steps {
             return AdaptiveTerminationReason::SearchBudgetExhausted;
         }

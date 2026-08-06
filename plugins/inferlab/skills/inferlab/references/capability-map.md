@@ -26,61 +26,46 @@ workspace-scoped commands read it; `agent` and `license` do not discover a
 workspace. Stateful selection commands expose only their typed options; do not
 invent generic config, endpoint, or engine-argument switches.
 
-## Workspace And Local Authorities
+## Workspace Authoring Authority
 
 | Surface | Covered facts | Owning reference |
 | --- | --- | --- |
-| `models`, `stacks` | Served names, integration, Pixi environment, source paths, checks, image postprocessing | [Workspaces and stacks](workspaces-and-stacks.md) |
-| `servers`, server cases | Topology, frontend backends, KV transfer, roles, replicas, parallelism, settings, readiness, profiling | [Serving and recipes](serving-and-recipes.md), [Profiling](profiling.md) |
-| `evals`, `benches` | Smoke and lm-eval, static and adaptive serving Bench, load, sources, metrics, SLOs | [Measurements](measurements.md) |
-| `workload_suites`, `recipes` | Ordered measurement selection, gate, and server composition | [Serving and recipes](serving-and-recipes.md) |
-| `images`, `external_images` | Generated runtime images and digest-pinned images InferLab did not build | [Images and ad-hoc execution](images-and-run.md) |
-| local `model_weights`, `machines`, `placements` | Private locators, launch targets, devices, ports, caches, rank and replica placement | [Workspaces and stacks](workspaces-and-stacks.md) |
-| local `builders`, `adapter`, machine `container` | Local Docker builder, adapter deadlines/device workaround, container environment and hardware grants | [Images and ad-hoc execution](images-and-run.md) |
+| `models`, `stacks`, `servers`, cases, `workload_suites`, `recipes` | Public definitions, topology, placement-independent server behavior, readiness, and composition | [Workspace definitions and placement](workspace-definition.md) |
+| local `model_weights`, `machines`, `placements`, `adapter` | Private locators, launch targets, devices, ports, caches, deadlines, ranks, and replicas | [Workspace definitions and placement](workspace-definition.md) |
+| profiling, `images`, `external_images`, local `builders`, machine `container` | Profiler settings, runtime-image inputs, builders, container grants, and invocation patches | [Execution authoring](execution-authoring.md) |
+| `evals`, `benches` | Eval, Bench, load, sources, sessions, prompt authority, metrics, and SLOs | [Measurement authoring](measurement-authoring.md) |
+
+The [workspace-authoring index](workspace-authoring.md) routes every authoring
+task to one of these three authorities. Operational references describe how to
+run and diagnose the resolved definitions; they do not define a second schema.
 
 ## Measurement Coverage
 
-The [measurement reference](measurements.md) covers all supported combinations:
+The [measurement-authoring reference](measurement-authoring.md) owns exact
+definition semantics. Its supported areas are lm-eval and smoke workloads,
+static and adaptive serving load, deterministic synthetic and pinned dataset
+sources, dependent sessions, prompt authority and prefix geometry, normalized
+metrics, server exports, SLOs, and the closed SemiAnalysis AgentX trace-replay
+profiles. AgentX uses AIPerf's release-pinned tree scheduler; it does not add a
+general InferLab DAG runtime.
 
-- built-in smoke and lm-eval tasks from a pinned name, release-bundled task, or
-  workspace YAML; request bodies, few-shot, limits, trials, seeds, concurrency,
-  metrics, filters, thresholds, and task-directed completion/chat routes;
-- static concurrency and request-rate cases, unbounded and stochastic load,
-  request-count or duration bounds, warmup, prefix-cache reset, server metrics,
-  aggregate SLOs, request SLOs, goodput, and adaptive rate search;
-- deterministic synthetic fixed or inclusive-uniform ISL/OSL, weighted shape
-  mixtures, ShareGPT independent requests, first-turn SPEED-Bench profiles, and
-  dependent linear ShareGPT sessions with inter-turn delay controls;
-- synthetic `flat`, `rendered_chat`, and `server_chat` prompt authority; custom
-  local templates and kwargs; exact token- or ratio-based final-prompt prefix
-  geometry including zero and full sharing; and server-chat-only pre-template
-  shared system content; and
-- normalized throughput, prompt-token, latency, TTFT, TPOT, cache-read,
-  good-request, goodput, and SPEED acceptance evidence together with the native
-  AIPerf artifacts.
-
-`prefix_sharing` declares prompt geometry. It does not declare cache state or a
-cache-hit percentage. Full sharing (`1.0` or all input tokens) is supported as
-geometry, but a decode-only claim still requires observed cache-read evidence.
-Controlled cache starts and required per-request cache-read observations are
-not part of the execution surface carried by this plugin version.
+Prefix geometry describes the frozen request population. Cache-read metrics
+describe observed server behavior; neither substitutes for the other.
 
 ## Cross-Cutting Workflows
 
 - Dry-run and typed overrides: [Serving and recipes](serving-and-recipes.md) and
-  [Measurements](measurements.md).
+  [Execution authoring](execution-authoring.md).
 - Local, SSH, multi-rank, multi-replica, and prefill/decode placement:
-  [Workspaces and stacks](workspaces-and-stacks.md) and
-  [Serving and recipes](serving-and-recipes.md).
-- Workload-attached Nsight Systems capture, profiler escapes, warmup boundary,
-  framework range control, finalization, and report verification:
-  [Profiling](profiling.md).
-- Built-image and declared external-image launches, container grants, OCI
-  export, and unrecorded probes: [Images and ad-hoc execution](images-and-run.md).
+  [Workspace definitions and placement](workspace-definition.md).
+- Workload-attached capture definitions: [Execution authoring](execution-authoring.md).
+  Capture execution and evidence: [Profiling](profiling.md).
+- Runtime-image and container definitions: [Execution authoring](execution-authoring.md).
+  Build, selection, and probes: [Images and ad-hoc execution](images-and-run.md).
 - Source identity, effective-value records, cleanup, TUI observations, metric
   comparisons, scratchpad links, stable error codes, and privacy:
   [Evidence and diagnosis](evidence-and-diagnosis.md).
 
-Consult the release's backend support matrix before claiming a topology,
-endpoint, profiling path, parallelism mode, or hardware/model combination is
-qualified. “Supported” and “Qualified” are not interchangeable.
+Consult the bundled backend support matrix before claiming a topology, endpoint,
+profiling path, parallelism mode, or hardware/model combination is qualified.
+“Supported” and “Qualified” are not interchangeable.

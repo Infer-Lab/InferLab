@@ -8,6 +8,53 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
+class BenchAgenticAcquisitionOutcome(StrEnum):
+    reused = 'reused'
+    downloaded = 'downloaded'
+
+
+class BenchAgenticBranchStats(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    children_completed: Annotated[int, Field(ge=0)]
+    children_delayed: Annotated[int, Field(ge=0)]
+    children_errored: Annotated[int, Field(ge=0)]
+    children_spawned: Annotated[int, Field(ge=0)]
+    children_truncated: Annotated[int, Field(ge=0)]
+    joins_suppressed: Annotated[int, Field(ge=0)]
+    parents_failed_due_to_child_error: Annotated[int, Field(ge=0)]
+    parents_resumed: Annotated[int, Field(ge=0)]
+    parents_suspended: Annotated[int, Field(ge=0)]
+
+
+class BenchAgenticRunEvidence(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    aggregate_artifact: str
+    branch_stats: BenchAgenticBranchStats
+    cache_bust_records: Annotated[int, Field(ge=0)]
+    context_overflow_count: Annotated[int, Field(ge=0)]
+    distinct_runtime_conversations: Annotated[int, Field(ge=0)]
+    distinct_source_traces: Annotated[int, Field(ge=0)]
+    distinct_transport_requests: Annotated[int, Field(ge=0)]
+    native_run_id: str
+    ordinary_failure_count: Annotated[int, Field(ge=0)]
+    profiling_began_after_warmup_and_drain: bool
+    profiling_records: Annotated[int, Field(ge=0)]
+    raw_records_artifact: str
+    scenario: str
+    source_coordinate_records: Annotated[int, Field(ge=0)]
+    submission_invalid_reasons: list[str] = []
+    submission_valid: bool
+    unavailable_dimensions: list[str] = []
+    warmup_error_records: Annotated[int, Field(ge=0)]
+    warmup_records: Annotated[int, Field(ge=0)]
+    warmup_source_coordinate_records: Annotated[int, Field(ge=0)]
+    warmup_succeeded: bool
+
+
 class BenchDatasetCacheState(StrEnum):
     missing = 'missing'
     present = 'present'
@@ -461,10 +508,80 @@ class SettingValue(
     ]
 
 
+class BenchAgenticCatalogInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    aiperf_loader: str
+    aiperf_revision: str
+    aiperf_version: str
+    approximate_bytes: Annotated[int, Field(ge=0)]
+    cache_bust: str
+    cache_path: str
+    cache_state: BenchDatasetCacheState
+    cache_warmup_seconds: Annotated[int, Field(ge=0)]
+    concurrency_semantics: str
+    dataset_configuration_timeout_seconds: Annotated[int, Field(ge=0)]
+    dataset_entries: Annotated[int, Field(ge=0)]
+    default_duration_seconds: Annotated[int, Field(ge=0)]
+    failure_threshold: float
+    filename: str
+    global_idle_gap_cap_seconds: float
+    gpu_telemetry: bool
+    ignore_eos: bool
+    inferencex_reference: str
+    inferencex_repository: str
+    inferencex_revision: str
+    license: str
+    materialization_identity: str
+    minimum_duration_seconds: Annotated[int, Field(ge=0)]
+    replay_semantics: str
+    repository: str
+    required_artifacts: list[str]
+    revision: str
+    scenario: str
+    server_metric_slice_seconds: Annotated[int, Field(ge=0)]
+    service_profile_configuration_timeout_seconds: Annotated[int, Field(ge=0)]
+    sha256: str
+    source_format: str
+    streaming: bool
+    trace_count: Annotated[int, Field(ge=0)]
+    trajectory_start_max: float
+    trajectory_start_min: float
+    unavailable_dimensions: list[str]
+    use_server_token_count: bool
+    warmup_grace_seconds: Annotated[int, Field(ge=0)]
+
+
+class BenchAgenticSourceInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    catalog: BenchAgenticCatalogInput
+    dataset: str
+    profile: str
+
+
+class BenchAgenticSourceVerification(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    acquisition_outcome: BenchAgenticAcquisitionOutcome | None = None
+    cache_path: str | None = None
+    cache_state_before: BenchDatasetCacheState
+    expected_revision: str
+    expected_sha256: str
+    filename: str
+    observed_revision: str | None = None
+    observed_sha256: str | None = None
+    repository: str
+
+
 class BenchCaseInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    duration_seconds: Annotated[int | None, Field(ge=0)] = None
     load_shape: BenchLoadInput
     request_count: Annotated[int, Field(ge=0)]
     session_count: Annotated[int | None, Field(ge=0)] = None
@@ -714,10 +831,19 @@ class EvalMetricGate(BaseModel):
     threshold: float
 
 
+class BenchAgenticResultEvidence(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    run: BenchAgenticRunEvidence | None = None
+    source: BenchAgenticSourceVerification
+
+
 class BenchClientResult(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    agentic_evidence: BenchAgenticResultEvidence | None = None
     completed_requests: Annotated[int, Field(ge=0)]
     error: str | None = None
     failed_requests: Annotated[int, Field(ge=0)]
@@ -843,6 +969,7 @@ class BenchDefinitionInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    agentic_source: BenchAgenticSourceInput | None = None
     prompt: BenchPromptInput
     request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
     request_slo: BenchRequestSloInput | None = None

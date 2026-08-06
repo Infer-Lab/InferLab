@@ -1,4 +1,4 @@
-"""Launch the pinned AIPerf CLI with InferLab's bounded 0.11 shim."""
+"""Launch the pinned AIPerf CLI with InferLab's bounded compatibility shim."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from typing import Protocol, cast
 
 from .aiperf_phase_barrier import (
     PROFILE_BARRIER_ENV,
-    Aiperf011ProfileBarrierStrategy,
+    AiperfAgenticProfileBarrierStrategy,
+    AiperfProfileBarrierStrategy,
 )
 
-SUPPORTED_AIPERF_VERSION = "0.11.0"
+SUPPORTED_AIPERF_VERSION = "0.12.0"
 
 
 class PluginRegistry(Protocol):
@@ -33,9 +34,12 @@ def _register_profile_barrier() -> None:
     enum_module = import_module("aiperf.plugin.enums")
     registry = cast(PluginRegistry, plugin_module.plugins)
     category = enum_module.PluginType.TIMING_STRATEGY
-    registry.register(category, "request_rate", Aiperf011ProfileBarrierStrategy)
-    if registry.get_class(category, "request_rate") is not Aiperf011ProfileBarrierStrategy:
+    registry.register(category, "request_rate", AiperfProfileBarrierStrategy)
+    registry.register(category, "agentic_replay", AiperfAgenticProfileBarrierStrategy)
+    if registry.get_class(category, "request_rate") is not AiperfProfileBarrierStrategy:
         raise RuntimeError("AIPerf did not activate InferLab's profile barrier strategy")
+    if registry.get_class(category, "agentic_replay") is not AiperfAgenticProfileBarrierStrategy:
+        raise RuntimeError("AIPerf did not activate InferLab's AgentX profile barrier strategy")
 
 
 def main() -> None:

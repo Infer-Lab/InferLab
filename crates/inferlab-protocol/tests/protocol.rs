@@ -1,9 +1,10 @@
 use inferlab_protocol::{
-    AdapterRequest, AdapterResponse, AdapterResult, BenchClientRequest, BenchRequestSourceInput,
-    EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
-    EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID,
-    PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe, RenderInputDeclaration, SettingValue,
-    SuppliedRenderInput, TargetEndpointScheme, measurement_schema, protocol_schema,
+    AdapterRequest, AdapterResponse, AdapterResult, BenchClientRequest, BenchClientResult,
+    BenchRequestSourceInput, EvalClientRequest, EvalClientResult, EvalDefinitionInput,
+    EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput,
+    MEASUREMENT_SCHEMA_ID, PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe,
+    RenderInputDeclaration, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
+    measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -72,6 +73,18 @@ const VALID_BENCH_CLIENT_REQUEST_RANDOM_MIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/bench-client-request-random-mixture.json"
 ));
+const VALID_BENCH_CLIENT_REQUEST_AGENTIC: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-request-agentic.json"
+));
+const VALID_BENCH_CLIENT_RESULT_AGENTIC: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-result-agentic.json"
+));
+const VALID_BENCH_CLIENT_RESULT_AGENTIC_SOURCE_FAILED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-result-agentic-source-failed.json"
+));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/schema/adapter-protocol-v7.schema.json"
@@ -119,6 +132,57 @@ fn weighted_random_mixture_fixture_round_trips() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
         request
+    );
+    Ok(())
+}
+
+#[test]
+fn agentic_bench_fixtures_round_trip() -> Result<(), Box<dyn Error>> {
+    let request: BenchClientRequest = serde_json::from_str(VALID_BENCH_CLIENT_REQUEST_AGENTIC)?;
+    let source = request
+        .definition
+        .agentic_source
+        .as_ref()
+        .ok_or("AgentX fixture omitted its agentic source")?;
+    assert_eq!(source.catalog.scenario, "inferencex-agentx-mvp");
+    assert_eq!(request.case.duration_seconds, Some(900));
+
+    let result: BenchClientResult = serde_json::from_str(VALID_BENCH_CLIENT_RESULT_AGENTIC)?;
+    let evidence = result
+        .agentic_evidence
+        .as_ref()
+        .ok_or("AgentX result fixture omitted its evidence")?;
+    let run = evidence
+        .run
+        .as_ref()
+        .ok_or("AgentX result fixture omitted its run evidence")?;
+    assert!(run.submission_valid);
+    assert_eq!(run.branch_stats.children_spawned, 1);
+    assert_eq!(
+        serde_json::from_str::<BenchClientResult>(&serde_json::to_string(&result)?)?,
+        result
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_agentic_source_fixture_preserves_partial_evidence() -> Result<(), Box<dyn Error>> {
+    let result: BenchClientResult =
+        serde_json::from_str(VALID_BENCH_CLIENT_RESULT_AGENTIC_SOURCE_FAILED)?;
+    let evidence = result
+        .agentic_evidence
+        .as_ref()
+        .ok_or("failed AgentX fixture omitted its source evidence")?;
+
+    assert_eq!(result.status, inferlab_protocol::ClientStatus::Failed);
+    assert_ne!(
+        evidence.source.observed_sha256,
+        Some(evidence.source.expected_sha256.clone())
+    );
+    assert!(evidence.run.is_none());
+    assert_eq!(
+        serde_json::from_str::<BenchClientResult>(&serde_json::to_string(&result)?)?,
+        result
     );
     Ok(())
 }

@@ -10,6 +10,9 @@ fail() {
   exit 1
 }
 
+test ! -e "${root}/docs/workspace-authoring.md" \
+  || fail "the obsolete aggregate workspace-authoring document still exists"
+
 fixture="${temporary}/repo"
 mkdir -p "${fixture}/scripts" "${fixture}/bin" "${fixture}/dist"
 cp "${root}/scripts/python-package-inventory.sh" "${fixture}/scripts/"
@@ -42,7 +45,6 @@ done <<'EOF'
 plugins/inferlab/.claude-plugin/plugin.json
 plugins/inferlab/.codex-plugin/plugin.json
 plugins/inferlab/skills/inferlab/SKILL.md
-docs/workspace-authoring.md
 docs/backend-support.md
 protocol/fixtures/valid/plan-serve-response.json
 protocol/fixtures/valid/render-serve-response.json
@@ -124,9 +126,16 @@ grep -Eq "\"version\": \"${target_product_version}\"" \
   "${fixture}/plugins/inferlab/.codex-plugin/plugin.json" \
   || fail "embedded plugin did not follow the product version"
 skill="plugins/inferlab/skills/inferlab/SKILL.md"
-grep -Fq '[workspace authoring guide](../../../../docs/workspace-authoring.md)' \
+grep -Fq '[Workspace authoring](references/workspace-authoring.md)' \
   "${fixture}/${skill}" \
   || fail "${skill} does not use the bundled workspace-authoring guide"
+authoring_index="${fixture}/plugins/inferlab/skills/inferlab/references/workspace-authoring.md"
+for reference in workspace-definition.md execution-authoring.md measurement-authoring.md; do
+  test -f "${fixture}/plugins/inferlab/skills/inferlab/references/${reference}" \
+    || fail "the bundled workspace-authoring guide is missing ${reference}"
+  grep -Fq "(${reference})" "${authoring_index}" \
+    || fail "the bundled workspace-authoring index does not route to ${reference}"
+done
 grep -Fq '[backend support matrix](../../../../docs/backend-support.md)' \
   "${fixture}/${skill}" \
   || fail "${skill} does not use the bundled backend-support matrix"

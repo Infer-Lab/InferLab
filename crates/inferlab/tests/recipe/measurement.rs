@@ -142,7 +142,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("smoke Eval has no record id")?;
     let eval = workspace.load_record(eval_id)?;
-    assert_eq!(eval["schema_version"], 11);
+    assert_eq!(eval["schema_version"], 12);
     assert_eq!(eval["kind"], "eval");
     assert_eq!(eval["resolved"]["execution"]["kind"], "native_openai_smoke");
     assert_eq!(eval["cases"][0]["process"], Value::Null);

@@ -21,7 +21,7 @@ use inferlab_runtime::operation_bound::{
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Duration;
 
-pub fn run_bench_case(
+pub(super) fn run_bench_case(
     plan: &BenchPlan,
     case: &BenchCasePlan,
     session: &WorkloadRecordSession,
@@ -98,7 +98,11 @@ pub fn run_bench_case(
     let adjudicated = match capture {
         Some(capture)
             if case.warmup_request_count > 0
-                || case.warmup_session_count.is_some_and(|count| count > 0) =>
+                || case.warmup_session_count.is_some_and(|count| count > 0)
+                || matches!(
+                    &plan.client.effective_definition.source,
+                    ResolvedBenchSource::Agentic { .. }
+                ) =>
         {
             run_captured_after_warmup(
                 plan,
@@ -166,6 +170,9 @@ pub fn run_bench_case(
             session: result
                 .as_ref()
                 .and_then(|result| result.session_evidence.clone()),
+            agentic: result
+                .as_ref()
+                .and_then(|result| result.agentic_evidence.clone()),
             prompt_token_reconciliation: result.as_ref().map_or_else(Vec::new, |result| {
                 result.prompt_token_reconciliation.clone()
             }),
@@ -311,6 +318,7 @@ fn failed_case(
             failed_requests: None,
             normalization_schema: None,
             session: None,
+            agentic: None,
             prompt_token_reconciliation: Vec::new(),
             report_invocations: Vec::new(),
         },
@@ -363,5 +371,6 @@ fn bench_population_slice(
                     .collect(),
             })
         }
+        ResolvedBenchSource::Agentic { .. } => None,
     }
 }

@@ -8,7 +8,7 @@
 //! records, and the native CLI orchestration lives in the
 //! `agent-plugin-installer` crate.
 
-pub use agent_plugin_installer::AgentSelector;
+pub(crate) use agent_plugin_installer::AgentSelector;
 use agent_plugin_installer::{
     AgentPluginError, AgentPluginOperation, AgentRuntime, BatchFailure, BatchResult,
     BatchRuntimeOutcome, BatchStatus, DEFAULT_COMMAND_TIMEOUT, DoctorStatus, FailurePolicy,
@@ -39,14 +39,14 @@ const EMBEDDED_PLUGIN_TAR_GZ: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/inferlab-plugin.tar.gz"));
 
 #[derive(Debug, Serialize)]
-pub struct AgentReport {
+pub(crate) struct AgentReport {
     pub rows: Vec<AgentRow>,
 }
 
 impl AgentReport {
     /// The first failed row's message, if any — the caller emits the report
     /// and then still fails loudly ([[RFC-0008:C-AGENT-PLUGIN]]).
-    pub fn failure(&self) -> Option<String> {
+    pub(crate) fn failure(&self) -> Option<String> {
         self.rows
             .iter()
             .find(|row| row.status == "failed")
@@ -62,7 +62,7 @@ impl AgentReport {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AgentRow {
+pub(crate) struct AgentRow {
     pub agent: &'static str,
     pub operation: &'static str,
     pub status: &'static str,
@@ -72,7 +72,7 @@ pub struct AgentRow {
     pub message: Option<String>,
 }
 
-pub fn doctor(selector: AgentSelector) -> AgentReport {
+pub(crate) fn doctor(selector: AgentSelector) -> AgentReport {
     let rows = doctor_many(selector)
         .into_iter()
         .map(|mut outcome| {
@@ -333,7 +333,7 @@ fn render_agent_command(argv: &[String]) -> String {
 /// materialized under InferLab's versioned data directory and that durable
 /// directory takes the checkout's place
 /// ([[RFC-0008:C-AGENT-PLUGIN]]).
-pub fn install(selector: AgentSelector, checkout: Option<&Path>) -> AgentReport {
+pub(crate) fn install(selector: AgentSelector, checkout: Option<&Path>) -> AgentReport {
     let runtimes = selector.runtimes();
 
     let source = match checkout {
@@ -595,7 +595,7 @@ fn embedded_package_path() -> Result<PathBuf, String> {
 /// commands cannot perform this transition. Reuse the validated local install
 /// path to replace the registration and refresh the plugin, then expose the
 /// operator-requested update semantics in the report.
-pub fn update(selector: AgentSelector) -> AgentReport {
+pub(crate) fn update(selector: AgentSelector) -> AgentReport {
     let runtimes = selector.runtimes();
     let source = match materialize_embedded_package(runtimes) {
         Ok(path) => path,
@@ -639,7 +639,7 @@ pub fn update(selector: AgentSelector) -> AgentReport {
     report
 }
 
-pub fn uninstall(selector: AgentSelector) -> AgentReport {
+pub(crate) fn uninstall(selector: AgentSelector) -> AgentReport {
     from_batch(
         uninstall_many(
             selector,
@@ -685,8 +685,7 @@ fn package_gate(
     Some(AgentReport { rows })
 }
 
-/// The package paths one runtime needs before its native CLI may run; a
-/// missing path fails loudly naming it ([[RFC-0008:C-AGENT-PLUGIN]]).
+/// The package paths one runtime needs before its native CLI may run.
 fn package_requirements(runtime: AgentRuntime, checkout: &Path) -> Vec<PathBuf> {
     let marketplace = match runtime {
         AgentRuntime::Claude => ".claude-plugin/marketplace.json",
@@ -696,10 +695,15 @@ fn package_requirements(runtime: AgentRuntime, checkout: &Path) -> Vec<PathBuf> 
         AgentRuntime::Claude => "plugins/inferlab/.claude-plugin/plugin.json",
         AgentRuntime::Codex => "plugins/inferlab/.codex-plugin/plugin.json",
     };
+    let skill = checkout.join("plugins/inferlab/skills/inferlab");
     vec![
         checkout.join(marketplace),
         checkout.join(manifest),
-        checkout.join("plugins/inferlab/skills/inferlab/SKILL.md"),
+        skill.join("SKILL.md"),
+        skill.join("references/workspace-authoring.md"),
+        skill.join("references/workspace-definition.md"),
+        skill.join("references/execution-authoring.md"),
+        skill.join("references/measurement-authoring.md"),
     ]
 }
 
@@ -718,6 +722,40 @@ fn validate_package(runtime: AgentRuntime, checkout: &Path) -> Result<(), String
                 runtime.id(),
                 required.display()
             ));
+        }
+        let contents = fs::read(&required).map_err(|error| {
+            format!(
+                "plugin package for {} cannot read {}: {error}",
+                runtime.id(),
+                required.display()
+            )
+        })?;
+        if required
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            serde_json::from_slice::<serde_json::Value>(&contents).map_err(|error| {
+                format!(
+                    "plugin package for {}: {} is corrupted: invalid JSON: {error}",
+                    runtime.id(),
+                    required.display()
+                )
+            })?;
+        } else {
+            let text = std::str::from_utf8(&contents).map_err(|error| {
+                format!(
+                    "plugin package for {}: {} is corrupted: invalid UTF-8: {error}",
+                    runtime.id(),
+                    required.display()
+                )
+            })?;
+            if text.trim().is_empty() {
+                return Err(format!(
+                    "plugin package for {}: {} is corrupted: file is empty",
+                    runtime.id(),
+                    required.display()
+                ));
+            }
         }
     }
     Ok(())

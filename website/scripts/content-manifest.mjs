@@ -14,9 +14,24 @@ const fixedEntries = [
     description: 'Install InferLab and run the first workspace-oriented commands.',
   },
   {
-    source: 'docs/workspace-authoring.md',
-    target: 'src/content/docs/docs/guides/workspace-authoring.md',
-    description: 'Author versioned workspaces and machine-local bindings.',
+    source: 'plugins/inferlab/skills/inferlab/references/workspace-authoring.md',
+    target: 'src/content/docs/docs/guides/workspace-authoring/index.md',
+    description: 'Choose the focused authoring reference for an InferLab workspace task.',
+  },
+  {
+    source: 'plugins/inferlab/skills/inferlab/references/workspace-definition.md',
+    target: 'src/content/docs/docs/guides/workspace-authoring/workspace-definition.md',
+    description: 'Define, place, upgrade, and validate an InferLab workspace.',
+  },
+  {
+    source: 'plugins/inferlab/skills/inferlab/references/execution-authoring.md',
+    target: 'src/content/docs/docs/guides/workspace-authoring/execution-authoring.md',
+    description: 'Author profiling, runtime-image, and invocation-patch behavior.',
+  },
+  {
+    source: 'plugins/inferlab/skills/inferlab/references/measurement-authoring.md',
+    target: 'src/content/docs/docs/guides/workspace-authoring/measurement-authoring.md',
+    description: 'Author Eval, Bench, dataset, session, metric, and SLO behavior.',
   },
   {
     source: 'docs/tui.md',

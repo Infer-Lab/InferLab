@@ -1,20 +1,29 @@
 //! AIPerf result-envelope validation and InferLab SLO adjudication.
 
+#[cfg(test)]
+mod tests;
+
 use super::session::linear_session_result_error;
 use crate::bench_metric::BenchMetric;
-use crate::workload::domain::{AggregateSloBound, ResolvedBenchSloPolicy};
+use crate::workload::domain::{
+    AggregateSloBound, DatasetCacheState, ResolvedBenchAgenticSource, ResolvedBenchSloPolicy,
+};
 use crate::workload::record::{
     AggregateSloEvaluation, CaseSloEvaluation, RequestSloEvaluation, SloBoundDirection,
     SloEvaluationOutcome,
 };
 use crate::workspace::RequestSlo;
-use inferlab_protocol::{BenchClientResult, ClientStatus};
+use inferlab_protocol::{
+    BenchAgenticAcquisitionOutcome, BenchClientResult, BenchDatasetCacheState, ClientStatus,
+};
+use std::path::Path;
 
-pub fn bench_result_error(
+pub(crate) fn bench_result_error(
     result: &BenchClientResult,
     tpot_applicable: bool,
     speed_bench_server_metrics: bool,
     expected_sessions: Option<(u32, u32)>,
+    expected_agentic_source: Option<&ResolvedBenchAgenticSource>,
     request_count: u32,
     request_slo: Option<&RequestSlo>,
 ) -> Option<String> {
@@ -32,6 +41,11 @@ pub fn bench_result_error(
             result.normalization_schema
         ));
     }
+    if expected_sessions.is_some() && expected_agentic_source.is_some() {
+        return Some(
+            "Bench case cannot expect both linear-session and agentic evidence".to_owned(),
+        );
+    }
     if let Some((warmup_sessions, profiling_sessions)) = expected_sessions {
         let Some(session) = result.session_evidence.as_ref() else {
             return Some("Bench client omitted linear-session evidence".to_owned());
@@ -48,7 +62,21 @@ pub fn bench_result_error(
             ));
         }
     } else if result.session_evidence.is_some() {
-        return Some("Bench client returned session evidence for independent requests".to_owned());
+        return Some(
+            "Bench client returned linear-session evidence for a non-session case".to_owned(),
+        );
+    }
+    if let Some(source) = expected_agentic_source {
+        let Some(evidence) = result.agentic_evidence.as_deref() else {
+            return Some("Bench client omitted agentic evidence".to_owned());
+        };
+        if let Some(error) = agentic_result_error(result, evidence, source) {
+            return Some(format!(
+                "Bench client returned invalid agentic evidence: {error}"
+            ));
+        }
+    } else if result.agentic_evidence.is_some() {
+        return Some("Bench client returned agentic evidence for a non-agentic case".to_owned());
     }
     if speed_bench_server_metrics {
         let expected = [
@@ -154,6 +182,10 @@ pub fn bench_result_error(
         if !request_slo.minimum_good_request_ratio.is_finite() {
             return Some("resolved request-SLO ratio is not finite".to_owned());
         }
+    } else if expected_agentic_source.is_some() {
+        if result.completed_requests == 0 {
+            return Some("Bench client reported no completed agentic requests".to_owned());
+        }
     } else {
         if result.completed_requests == 0 {
             return Some("Bench client reported no completed requests".to_owned());
@@ -216,13 +248,126 @@ pub fn bench_result_error(
     None
 }
 
+fn agentic_result_error(
+    result: &BenchClientResult,
+    evidence: &inferlab_protocol::BenchAgenticResultEvidence,
+    source: &ResolvedBenchAgenticSource,
+) -> Option<String> {
+    let catalog = &source.catalog;
+    if evidence.source.repository != catalog.repository
+        || evidence.source.expected_revision != catalog.revision
+        || evidence.source.observed_revision.as_deref() != Some(catalog.revision.as_str())
+        || evidence.source.filename != catalog.filename
+        || evidence.source.expected_sha256 != catalog.sha256
+        || evidence.source.observed_sha256.as_deref() != Some(catalog.sha256.as_str())
+        || !evidence
+            .source
+            .cache_path
+            .as_deref()
+            .is_some_and(|path| same_cache_file(&catalog.cache_path, path))
+        || evidence.source.cache_state_before
+            != match catalog.cache_state {
+                DatasetCacheState::Missing => BenchDatasetCacheState::Missing,
+                DatasetCacheState::Present => BenchDatasetCacheState::Present,
+            }
+        || evidence.source.acquisition_outcome
+            != Some(match catalog.cache_state {
+                DatasetCacheState::Missing => BenchAgenticAcquisitionOutcome::Downloaded,
+                DatasetCacheState::Present => BenchAgenticAcquisitionOutcome::Reused,
+            })
+    {
+        return Some("source verification does not match the resolved release catalog".to_owned());
+    }
+    let Some(run) = evidence.run.as_deref() else {
+        return Some("successful agentic result omitted native run evidence".to_owned());
+    };
+    if run.scenario != catalog.scenario {
+        return Some("native scenario does not match the resolved release profile".to_owned());
+    }
+    if run.native_run_id.is_empty() {
+        return Some("native run identity is empty".to_owned());
+    }
+    if !run.warmup_succeeded
+        || run.warmup_error_records != 0
+        || !run.profiling_began_after_warmup_and_drain
+        || run.warmup_source_coordinate_records != run.warmup_records
+    {
+        return Some(
+            "native warmup outcome does not establish a clean profiling handoff".to_owned(),
+        );
+    }
+    if !run.submission_valid {
+        let reasons = if run.submission_invalid_reasons.is_empty() {
+            "unspecified".to_owned()
+        } else {
+            run.submission_invalid_reasons.join(", ")
+        };
+        return Some(format!("native scenario submission is invalid: {reasons}"));
+    }
+    if !run.submission_invalid_reasons.is_empty() {
+        return Some("valid native scenario includes invalidity reasons".to_owned());
+    }
+    if run.profiling_records == 0
+        || run.profiling_records != run.source_coordinate_records
+        || run.distinct_source_traces == 0
+        || run.distinct_runtime_conversations == 0
+        || run.distinct_transport_requests != run.profiling_records
+    {
+        return Some(
+            "profiling records and source/runtime coordinates do not reconcile".to_owned(),
+        );
+    }
+    if run.ordinary_failure_count > result.failed_requests
+        || run.context_overflow_count > run.profiling_records
+    {
+        return Some("failure classifications exceed native profiling counts".to_owned());
+    }
+    if run.unavailable_dimensions != catalog.unavailable_dimensions {
+        return Some("unavailable dimensions do not match the resolved release profile".to_owned());
+    }
+    let has_path = |path: &std::path::Path| {
+        result
+            .raw_artifacts
+            .iter()
+            .any(|artifact| artifact.path == path)
+    };
+    for required in &catalog.required_artifacts {
+        let present = match required.as_str() {
+            "aggregate" => has_path(&run.aggregate_artifact),
+            "records" => result
+                .raw_artifacts
+                .iter()
+                .any(|artifact| artifact.name == "aiperf_records"),
+            "raw_records" => has_path(&run.raw_records_artifact),
+            _ => false,
+        };
+        if !present {
+            return Some(format!("required native artifact {required:?} is absent"));
+        }
+    }
+    None
+}
+
+fn same_cache_file(expected: &Path, observed: &Path) -> bool {
+    if expected == observed {
+        return true;
+    }
+    let (Ok(expected), Ok(observed)) = (
+        std::fs::canonicalize(expected),
+        std::fs::canonicalize(observed),
+    ) else {
+        return false;
+    };
+    expected == observed
+}
+
 fn same_finite_value(left: f64, right: f64) -> bool {
     left.is_finite()
         && right.is_finite()
         && (left - right).abs() <= f64::EPSILON * left.abs().max(right.abs()).max(1.0) * 8.0
 }
 
-pub fn evaluate_case_slos(
+pub(crate) fn evaluate_case_slos(
     policy: &ResolvedBenchSloPolicy,
     result: &BenchClientResult,
 ) -> Result<Option<CaseSloEvaluation>, String> {

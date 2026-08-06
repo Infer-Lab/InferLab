@@ -1,8 +1,9 @@
 use super::domain::{
-    BenchDatasetCatalog, BenchPopulation, BenchPromptRoute, BenchRenderingAuthority,
-    BenchRequestRepresentation, DatasetCacheState, MeasurementModel, ResolvedBenchDefinition,
-    ResolvedBenchPrompt, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
-    ResolvedBenchSource, WorkloadEndpoint, WorkloadEndpointProtocol,
+    BenchAgenticCatalog, BenchDatasetCatalog, BenchPopulation, BenchPromptRoute,
+    BenchRenderingAuthority, BenchRequestRepresentation, DatasetCacheState, MeasurementModel,
+    ResolvedBenchAgenticSource, ResolvedBenchDefinition, ResolvedBenchPrompt,
+    ResolvedBenchRequestSource, ResolvedBenchSessionSource, ResolvedBenchSource, WorkloadEndpoint,
+    WorkloadEndpointProtocol,
 };
 use crate::InferlabError;
 use crate::adapter::project_setting_values;
@@ -12,14 +13,15 @@ use crate::workspace::{
     EvalTaskSource, RequestSlo,
 };
 use inferlab_protocol::{
-    BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
-    BenchDefinitionInput, BenchInclusiveUniformInput, BenchPopulationInput,
-    BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput, BenchRandomShapeInput,
-    BenchRenderingAuthorityInput, BenchRequestRepresentationInput, BenchRequestSloInput,
-    BenchRequestSourceInput, BenchSessionDatasetCatalogInput, BenchSessionSourceInput,
-    BenchSessionTemplateInput, BenchSharedSystemContentInput, BenchTokenDistributionKindInput,
-    BenchTokenSelectorInput, ClientEndpointInput, EndpointProtocol, EvalDefinitionInput,
-    EvalTaskSourceInput, MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
+    BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchDatasetCacheState,
+    BenchDatasetCatalogInput, BenchDatasetFilterInput, BenchDefinitionInput,
+    BenchInclusiveUniformInput, BenchPopulationInput, BenchPrefixSharingInput, BenchPromptInput,
+    BenchPromptRouteInput, BenchRandomShapeInput, BenchRenderingAuthorityInput,
+    BenchRequestRepresentationInput, BenchRequestSloInput, BenchRequestSourceInput,
+    BenchSessionDatasetCatalogInput, BenchSessionSourceInput, BenchSessionTemplateInput,
+    BenchSharedSystemContentInput, BenchTokenDistributionKindInput, BenchTokenSelectorInput,
+    ClientEndpointInput, EndpointProtocol, EvalDefinitionInput, EvalTaskSourceInput,
+    MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
 };
 use std::collections::BTreeMap;
 
@@ -49,7 +51,35 @@ pub(super) fn model_input(model: &MeasurementModel) -> MeasurementModelInput {
     }
 }
 
-pub(super) fn bench_source_inputs(
+struct BenchSourceInputs {
+    request: Option<BenchRequestSourceInput>,
+    session: Option<BenchSessionSourceInput>,
+    agentic: Option<BenchAgenticSourceInput>,
+}
+
+fn bench_source_inputs(
+    definition: &ResolvedBenchDefinition,
+) -> Result<BenchSourceInputs, InferlabError> {
+    match &definition.source {
+        ResolvedBenchSource::Requests { request_source } => Ok(BenchSourceInputs {
+            request: Some(bench_request_source_input(request_source)?),
+            session: None,
+            agentic: None,
+        }),
+        ResolvedBenchSource::Sessions { session_source } => Ok(BenchSourceInputs {
+            request: None,
+            session: Some(bench_session_source_input(session_source)),
+            agentic: None,
+        }),
+        ResolvedBenchSource::Agentic { agentic_source } => Ok(BenchSourceInputs {
+            request: None,
+            session: None,
+            agentic: Some(bench_agentic_source_input(agentic_source)),
+        }),
+    }
+}
+
+pub(super) fn bench_population_source_inputs(
     definition: &ResolvedBenchDefinition,
 ) -> Result<
     (
@@ -58,14 +88,14 @@ pub(super) fn bench_source_inputs(
     ),
     InferlabError,
 > {
-    match &definition.source {
-        ResolvedBenchSource::Requests { request_source } => {
-            Ok((Some(bench_request_source_input(request_source)?), None))
-        }
-        ResolvedBenchSource::Sessions { session_source } => {
-            Ok((None, Some(bench_session_source_input(session_source))))
-        }
+    let sources = bench_source_inputs(definition)?;
+    if sources.agentic.is_some() {
+        return Err(InferlabError::InvalidConfig {
+            message: "agentic sources are materialized by AIPerf and have no InferLab population preparation request"
+                .to_owned(),
+        });
     }
+    Ok((sources.request, sources.session))
 }
 
 pub(super) fn bench_request_body_input(
@@ -77,10 +107,11 @@ pub(super) fn bench_request_body_input(
 pub(super) fn bench_definition_input(
     definition: &ResolvedBenchDefinition,
 ) -> Result<BenchDefinitionInput, InferlabError> {
-    let (request_source, session_source) = bench_source_inputs(definition)?;
+    let sources = bench_source_inputs(definition)?;
     Ok(BenchDefinitionInput {
-        request_source,
-        session_source,
+        request_source: sources.request,
+        session_source: sources.session,
+        agentic_source: sources.agentic,
         prompt: prompt_input(&definition.prompt)?,
         server_metrics: definition.server_metrics,
         seed: definition.seed,
@@ -89,6 +120,62 @@ pub(super) fn bench_definition_input(
         timeout_seconds: definition.timeout_seconds,
         reset_prefix_cache: definition.reset_prefix_cache,
     })
+}
+
+fn bench_agentic_source_input(source: &ResolvedBenchAgenticSource) -> BenchAgenticSourceInput {
+    BenchAgenticSourceInput {
+        dataset: source.dataset.clone(),
+        profile: source.profile.clone(),
+        catalog: Box::new(bench_agentic_catalog_input(&source.catalog)),
+    }
+}
+
+fn bench_agentic_catalog_input(catalog: &BenchAgenticCatalog) -> BenchAgenticCatalogInput {
+    BenchAgenticCatalogInput {
+        repository: catalog.repository.clone(),
+        revision: catalog.revision.clone(),
+        filename: catalog.filename.clone(),
+        sha256: catalog.sha256.clone(),
+        cache_path: catalog.cache_path.clone(),
+        cache_state: match catalog.cache_state {
+            DatasetCacheState::Missing => BenchDatasetCacheState::Missing,
+            DatasetCacheState::Present => BenchDatasetCacheState::Present,
+        },
+        trace_count: catalog.trace_count,
+        approximate_bytes: catalog.approximate_bytes,
+        license: catalog.license.clone(),
+        source_format: catalog.source_format.clone(),
+        aiperf_loader: catalog.aiperf_loader.clone(),
+        materialization_identity: catalog.materialization_identity.clone(),
+        scenario: catalog.scenario.clone(),
+        concurrency_semantics: catalog.concurrency_semantics.clone(),
+        replay_semantics: catalog.replay_semantics.clone(),
+        cache_bust: catalog.cache_bust.clone(),
+        trajectory_start_min: catalog.trajectory_start_min,
+        trajectory_start_max: catalog.trajectory_start_max,
+        global_idle_gap_cap_seconds: catalog.global_idle_gap_cap_seconds,
+        cache_warmup_seconds: catalog.cache_warmup_seconds,
+        warmup_grace_seconds: catalog.warmup_grace_seconds,
+        dataset_configuration_timeout_seconds: catalog.dataset_configuration_timeout_seconds,
+        service_profile_configuration_timeout_seconds: catalog
+            .service_profile_configuration_timeout_seconds,
+        default_duration_seconds: catalog.default_duration_seconds,
+        minimum_duration_seconds: catalog.minimum_duration_seconds,
+        failure_threshold: catalog.failure_threshold,
+        dataset_entries: catalog.dataset_entries,
+        streaming: catalog.streaming,
+        ignore_eos: catalog.ignore_eos,
+        use_server_token_count: catalog.use_server_token_count,
+        gpu_telemetry: catalog.gpu_telemetry,
+        server_metric_slice_seconds: catalog.server_metric_slice_seconds,
+        required_artifacts: catalog.required_artifacts.clone(),
+        unavailable_dimensions: catalog.unavailable_dimensions.clone(),
+        inferencex_repository: catalog.inferencex_repository.clone(),
+        inferencex_revision: catalog.inferencex_revision.clone(),
+        inferencex_reference: catalog.inferencex_reference.clone(),
+        aiperf_revision: catalog.aiperf_revision.clone(),
+        aiperf_version: catalog.aiperf_version.clone(),
+    }
 }
 
 pub(super) fn bench_session_source_input(

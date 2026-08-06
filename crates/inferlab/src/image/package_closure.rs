@@ -13,10 +13,10 @@ use std::process::Command;
 /// crate version change. Enters both the wheel cache key and the image
 /// content closure, so a procedure change invalidates cached wheels and
 /// changes the closure digest together.
-pub const WHEEL_BUILD_EPOCH: u32 = 5;
+pub(super) const WHEEL_BUILD_EPOCH: u32 = 5;
 
 /// Map an OCI platform (`linux/amd64`) to the Pixi platform (`linux-64`).
-pub fn pixi_platform(oci_platform: &str) -> Result<&'static str, InferlabError> {
+pub(super) fn pixi_platform(oci_platform: &str) -> Result<&'static str, InferlabError> {
     match oci_platform {
         "linux/amd64" => Ok("linux-64"),
         "linux/arm64" => Ok("linux-aarch64"),
@@ -41,7 +41,10 @@ struct PixiListEntry {
 /// which is the only platform the local builder assembles. Entries without a
 /// registry hash are source-backed (editable path dependencies) and are
 /// either replaced by locally built wheels or deliberately excluded.
-pub fn locked_packages(root: &Path, environment: &str) -> Result<Vec<PackageSpec>, InferlabError> {
+pub(super) fn locked_packages(
+    root: &Path,
+    environment: &str,
+) -> Result<Vec<PackageSpec>, InferlabError> {
     let output = Command::new("pixi")
         .current_dir(root)
         .args(["list", "--json", "--environment", environment])
@@ -91,7 +94,7 @@ pub fn locked_packages(root: &Path, environment: &str) -> Result<Vec<PackageSpec
 /// committed source state, which the cache key already carries exactly.
 /// Unlike whole-file manifest digests, unrelated environments, platforms,
 /// tasks, and format churn leave this stable.
-pub fn locked_closure_digest(packages: &[PackageSpec]) -> String {
+pub(super) fn locked_closure_digest(packages: &[PackageSpec]) -> String {
     let canonical: Vec<String> = packages
         .iter()
         .filter(|package| !package.editable)
@@ -115,7 +118,7 @@ pub fn locked_closure_digest(packages: &[PackageSpec]) -> String {
 /// sit in the build environment with no other identity, so their tree content
 /// enters the cache key. Paths come from `pixi list` itself — the package
 /// authority — not from a second manifest parse.
-pub fn editable_identities(
+pub(super) fn editable_identities(
     root: &Path,
     packages: &[PackageSpec],
     source_paths: &[PathBuf],
@@ -203,7 +206,7 @@ fn tree_digest(path: &Path) -> Result<String, InferlabError> {
 }
 
 /// PEP 503 package-name normalization for wheel/lock comparisons.
-pub fn normalize_package_name(name: &str) -> String {
+pub(super) fn normalize_package_name(name: &str) -> String {
     let mut normalized = String::with_capacity(name.len());
     let mut previous_separator = false;
     for character in name.chars() {
@@ -221,7 +224,7 @@ pub fn normalize_package_name(name: &str) -> String {
 }
 
 #[derive(Clone, Debug)]
-pub struct PackageSpec {
+pub(super) struct PackageSpec {
     pub name: String,
     pub kind: PackageKind,
     pub url: Option<String>,
@@ -230,7 +233,7 @@ pub struct PackageSpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PackageKind {
+pub(super) enum PackageKind {
     Conda,
     Pypi,
 }

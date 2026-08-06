@@ -20,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub use record::{ServerRecord, ServerStatus};
+pub(crate) use record::{ServerRecord, ServerStatus};
 
 const STARTUP_INTERRUPTED: &str = "server startup was interrupted";
 const OPERATION_LOCK_FILE: &str = "operation.lock";
@@ -30,34 +30,34 @@ pub(crate) struct ServerOperationGuard {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ServerProcessStatusReport {
+pub(crate) struct ServerProcessStatusReport {
     pub id: String,
     pub observed_alive: bool,
     pub process_status: Option<ProcessStatus>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ServerStatusReport {
+pub(crate) struct ServerStatusReport {
     pub record: ServerRecord,
     pub observed_alive: bool,
     pub processes: Vec<ServerProcessStatusReport>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ServerProcessLogsReport {
+pub(crate) struct ServerProcessLogsReport {
     pub id: String,
     pub stdout: PathBuf,
     pub stderr: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ServerLogsReport {
+pub(crate) struct ServerLogsReport {
     pub id: String,
     pub record_dir: PathBuf,
     pub processes: Vec<ServerProcessLogsReport>,
 }
 
-pub fn start(
+pub(crate) fn start(
     root: &Path,
     resolved: ResolvedExecution,
     progress: &Progress,
@@ -76,7 +76,7 @@ pub(crate) fn start_for_recipe(
     start_with_runtime(root, resolved, Some(id), &SystemProcessRuntime, progress)
 }
 
-pub fn status(root: &Path, id: &str) -> Result<ServerStatusReport, InferlabError> {
+pub(crate) fn status(root: &Path, id: &str) -> Result<ServerStatusReport, InferlabError> {
     status_with_runtime(root, id, &SystemProcessRuntime, &Progress::silent(), None)
 }
 
@@ -158,7 +158,11 @@ pub(crate) fn logs_with_progress(
     logs_with_runtime(root, id, &SystemProcessRuntime, progress)
 }
 
-pub fn stop(root: &Path, id: &str, progress: &Progress) -> Result<ServerRecord, InferlabError> {
+pub(crate) fn stop(
+    root: &Path,
+    id: &str,
+    progress: &Progress,
+) -> Result<ServerRecord, InferlabError> {
     let _operation = acquire_operation(root, id)?;
     stop_with_runtime(root, id, &SystemProcessRuntime, progress)
 }

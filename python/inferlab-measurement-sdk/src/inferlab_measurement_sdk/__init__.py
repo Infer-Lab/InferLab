@@ -1,4 +1,11 @@
 from ._generated import (
+    BenchAgenticAcquisitionOutcome,
+    BenchAgenticBranchStats,
+    BenchAgenticCatalogInput,
+    BenchAgenticResultEvidence,
+    BenchAgenticRunEvidence,
+    BenchAgenticSourceInput,
+    BenchAgenticSourceVerification,
     BenchCaseInput,
     BenchClientRequest,
     BenchClientResult,
@@ -84,6 +91,13 @@ from .runtime import (
 )
 
 __all__ = [
+    "BenchAgenticAcquisitionOutcome",
+    "BenchAgenticBranchStats",
+    "BenchAgenticCatalogInput",
+    "BenchAgenticResultEvidence",
+    "BenchAgenticRunEvidence",
+    "BenchAgenticSourceInput",
+    "BenchAgenticSourceVerification",
     "BenchCaseInput",
     "BenchClientRequest",
     "BenchClientResult",

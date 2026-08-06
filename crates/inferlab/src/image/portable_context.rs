@@ -6,7 +6,7 @@ use crate::workspace::{LaunchBinding, LoadedWorkspace};
 /// Portable-output guard ([[RFC-0007:C-IMAGE-BUILD]]): rendered context text
 /// must not carry machine-private facts. Records keep exact values locally;
 /// artifacts that leave the machine must exclude them by construction.
-pub fn guard_portable_text(
+pub(super) fn guard_portable_text(
     label: &str,
     text: &str,
     workspace: &LoadedWorkspace,

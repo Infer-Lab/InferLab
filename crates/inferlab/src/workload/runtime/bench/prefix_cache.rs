@@ -4,7 +4,7 @@ use crate::workload::domain::{WorkloadEndpoint, WorkloadHttpAction};
 use crate::workload::record::PrefixCacheResetEvidence;
 use inferlab_runtime::operation_bound::{OperationBound, Remaining};
 
-pub fn reset_prefix_cache(
+pub(super) fn reset_prefix_cache(
     endpoint: &WorkloadEndpoint,
     action: &WorkloadHttpAction,
     bound: &OperationBound,

@@ -3,10 +3,12 @@
 import csv
 import json
 import math
+import os
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -62,11 +64,30 @@ class PreparedAiperfExecution:
     command: list[str]
     population: AiperfRequestPopulation
     profile_artifacts: AiperfProfileArtifacts
+    environment: dict[str, str]
 
 
 def profiling_config(request: BenchClientRequest) -> JsonObject:
     load = request.case.load_shape.root
     requests = request.case.request_count
+    agentic_source = request.definition.agentic_source
+    if agentic_source is not None:
+        if not isinstance(load, BenchLoadInputConcurrencyLimited):
+            raise ValueError("agentic replay requires concurrency-limited load")
+        if request.case.duration_seconds is None:
+            raise ValueError("agentic replay requires an effective duration")
+        policy = agentic_source.catalog
+        return {
+            "type": "concurrency",
+            "concurrency": load.concurrency,
+            "duration": request.case.duration_seconds,
+            "failedRequestThreshold": policy.failure_threshold,
+            "trajectoryStartMinRatio": policy.trajectory_start_min,
+            "trajectoryStartMaxRatio": policy.trajectory_start_max,
+            "systemIdleGapCapSeconds": policy.global_idle_gap_cap_seconds,
+            "agenticCacheWarmupDuration": policy.cache_warmup_seconds,
+            "agenticWarmupGracePeriod": policy.warmup_grace_seconds,
+        }
     if request.case.session_count is not None:
         if not isinstance(load, BenchLoadInputConcurrencyLimited):
             raise ValueError("linear sessions require concurrency-limited load")
@@ -233,8 +254,24 @@ def aiperf_endpoint_route(request: BenchClientRequest, selected_path: str) -> tu
 def resolve_aiperf_population(request: BenchClientRequest) -> AiperfRequestPopulation:
     source_input = request.definition.request_source
     session_source = request.definition.session_source
-    if (source_input is None) == (session_source is None):
+    agentic_source = request.definition.agentic_source
+    selected_sources = sum(
+        source is not None for source in (source_input, session_source, agentic_source)
+    )
+    if selected_sources != 1:
         raise ValueError("Bench request requires exactly one source boundary")
+    if agentic_source is not None:
+        if request.population is not None:
+            raise ValueError("agentic replay does not accept an InferLab population")
+        return AiperfRequestPopulation(
+            dataset={
+                "type": "public",
+                "dataset": agentic_source.catalog.aiperf_loader,
+                "entries": agentic_source.catalog.dataset_entries,
+                "sampling": "sequential",
+            },
+            tpot_applicable=False,
+        )
     if session_source is not None:
         _, entries = aiperf_session_population_layout(
             request.case.warmup_session_count or 0,
@@ -304,7 +341,11 @@ def resolve_aiperf_population(request: BenchClientRequest) -> AiperfRequestPopul
             "entries": entries,
             "randomSeed": request.definition.seed,
             "sampling": "sequential",
-            "prompts": {"sequenceDistribution": probabilities},
+            "prompts": {
+                "isl": source.shapes[0].input_tokens,
+                "osl": source.shapes[0].output_tokens,
+                "sequenceDistribution": probabilities,
+            },
         }
         tpot_applicable = bool(source.shapes and source.shapes[0].output_tokens >= 2)
     elif isinstance(source, BenchRequestSourceInputDataset):
@@ -357,6 +398,8 @@ def aiperf_config(
         "serverMetrics": {"enabled": False},
         "artifacts": artifacts,
     }
+    if definition.agentic_source is not None:
+        benchmark["scenario"] = definition.agentic_source.catalog.scenario
     if definition.server_metrics:
         if request.case.warmup_request_count != 0:
             raise ValueError("server metrics require a zero-warmup Bench case")
@@ -369,6 +412,10 @@ def aiperf_config(
             "formats": ["json"],
             "discovery": {"mode": "disabled"},
         }
+        if definition.agentic_source is not None:
+            artifacts["sliceDuration"] = (
+                definition.agentic_source.catalog.server_metric_slice_seconds
+            )
     if definition.request_slo is not None:
         benchmark["slos"] = aiperf_slos(definition.request_slo)
     warmup_sessions = request.case.warmup_session_count
@@ -440,7 +487,11 @@ def raw_artifacts(
     ]
 
 
-def run_aiperf(command: list[str], deadline: CaseDeadline) -> tuple[int, bool, bool]:
+def run_aiperf(
+    command: list[str],
+    deadline: CaseDeadline,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[int, bool, bool]:
     termination_requested = False
     timed_out = False
 
@@ -450,7 +501,18 @@ def run_aiperf(command: list[str], deadline: CaseDeadline) -> tuple[int, bool, b
 
     previous_handler = signal.signal(signal.SIGTERM, request_termination)
     try:
-        process = subprocess.Popen(command, stdout=sys.stderr, stderr=sys.stderr)
+        process_environment = None
+        if environment is not None:
+            process_environment = {**os.environ, **environment}
+        if process_environment is None:
+            process = subprocess.Popen(command, stdout=sys.stderr, stderr=sys.stderr)
+        else:
+            process = subprocess.Popen(
+                command,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                env=process_environment,
+            )
         while process.poll() is None and not termination_requested and not timed_out:
             try:
                 time.sleep(min(0.05, deadline.remaining()))
@@ -629,6 +691,17 @@ def prepare_aiperf_execution(
             raw_records=artifact_dir / f"{ARTIFACT_PREFIX}_raw.jsonl",
         )
     )
+    environment: dict[str, str] = {}
+    if request.definition.agentic_source is not None:
+        catalog = request.definition.agentic_source.catalog
+        environment = {
+            "AIPERF_DATASET_CONFIGURATION_TIMEOUT": str(
+                catalog.dataset_configuration_timeout_seconds
+            ),
+            "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT": str(
+                catalog.service_profile_configuration_timeout_seconds
+            ),
+        }
     return PreparedAiperfExecution(
         artifact_dir=artifact_dir,
         config_path=config_path,
@@ -637,4 +710,5 @@ def prepare_aiperf_execution(
         command=[*command_prefix, "profile", "--config", str(config_path)],
         population=population,
         profile_artifacts=profile_artifacts,
+        environment=environment,
     )

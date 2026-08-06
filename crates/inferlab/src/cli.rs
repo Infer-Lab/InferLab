@@ -57,7 +57,7 @@ enum Command {
     #[command(subcommand)]
     Recipe(RecipeCommand),
     /// Run one named Bench against an explicit managed server.
-    #[command(long_about = help::BENCH)]
+    #[command(long_about = help::BENCH, after_long_help = help::BENCH_EXAMPLES)]
     Bench(BenchArgs),
     /// Execute one command inside a selected stack realization.
     #[command(long_about = help::RUN, after_long_help = help::RUN_EXAMPLES)]
@@ -279,6 +279,10 @@ struct TrtllmProxyArgs {
 #[derive(Debug, Subcommand)]
 enum WorkspaceCommand {
     /// Validate and show the merged public workspace configuration.
+    #[command(
+        long_about = help::WORKSPACE_SHOW,
+        after_long_help = help::WORKSPACE_SHOW_EXAMPLES
+    )]
     Show(WorkspaceShowArgs),
     /// Produce the committed Pixi lock from a clean local prefix.
     Lock,

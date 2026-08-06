@@ -7,7 +7,7 @@ use super::super::client::{
 use super::super::{AcceptedClient, AdjudicatedClient};
 use super::result::bench_result_error;
 use crate::InferlabError;
-use crate::workload::domain::ResolvedBenchRequestSource;
+use crate::workload::domain::{ResolvedBenchRequestSource, ResolvedBenchSource};
 use crate::workload::record::{ClientCasePaths, WorkloadRecordSession};
 use crate::workload::wire;
 use crate::workload::{BenchCasePlan, BenchPlan, LoadShape};
@@ -17,7 +17,7 @@ use inferlab_protocol::{
 };
 use inferlab_runtime::operation_bound::OperationBound;
 
-pub fn run_bench_client(
+pub(super) fn run_bench_client(
     plan: &BenchPlan,
     case: &BenchCasePlan,
     session: &WorkloadRecordSession,
@@ -35,6 +35,7 @@ pub fn run_bench_client(
             load_shape: bench_load_input(&case.load_shape),
             request_count: case.request_count,
             warmup_request_count: case.warmup_request_count,
+            duration_seconds: case.duration_seconds,
             session_count: case.session_count,
             warmup_session_count: case.warmup_session_count,
         },
@@ -57,7 +58,7 @@ pub fn run_bench_client(
     ))
 }
 
-pub fn adjudicate_bench_client(
+pub(super) fn adjudicate_bench_client(
     mut accepted: AcceptedClient<BenchClientResult>,
     bound: &OperationBound,
     plan: &BenchPlan,
@@ -76,6 +77,10 @@ pub fn adjudicate_bench_client(
                 ),
             case.session_count
                 .map(|profiling| (case.warmup_session_count.unwrap_or_default(), profiling)),
+            match &plan.client.effective_definition.source {
+                ResolvedBenchSource::Agentic { agentic_source } => Some(agentic_source),
+                ResolvedBenchSource::Requests { .. } | ResolvedBenchSource::Sessions { .. } => None,
+            },
             case.request_count,
             plan.client.slo.request.as_ref(),
         )

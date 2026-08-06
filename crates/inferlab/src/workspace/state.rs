@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
-pub struct LoadedWorkspace {
+pub(crate) struct LoadedWorkspace {
     pub root: PathBuf,
     pub config: WorkspaceConfig,
     pub local: LocalBindings,
@@ -15,7 +15,7 @@ pub struct LoadedWorkspace {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkspaceSnapshot {
+pub(crate) struct WorkspaceSnapshot {
     pub revision: String,
     pub dirty: bool,
     pub source_digest: String,

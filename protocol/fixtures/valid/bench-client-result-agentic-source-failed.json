@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "status": "failed",
+  "completed_requests": 0,
+  "failed_requests": 0,
+  "normalization_schema": "aiperf-summary-v1",
+  "metrics": {},
+  "request_slo": null,
+  "session_evidence": null,
+  "agentic_evidence": {
+    "source": {
+      "repository": "semianalysisai/cc-traces-weka-062126-256k",
+      "expected_revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+      "observed_revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+      "filename": "traces.jsonl",
+      "expected_sha256": "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef",
+      "observed_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "cache_path": "/cache/huggingface/hub/datasets--semianalysisai--cc-traces-weka-062126-256k/snapshots/8fecd2fc56694469f758f0afbbb6335ad3043740/traces.jsonl",
+      "cache_state_before": "present",
+      "acquisition_outcome": "reused"
+    },
+    "run": null
+  },
+  "prompt_token_reconciliation": [],
+  "native_command": ["aiperf", "profile", "--scenario", "inferencex-agentx-mvp"],
+  "native_exit_code": null,
+  "report_invocations": [],
+  "raw_artifacts": [
+    {
+      "name": "aiperf_config",
+      "kind": "aiperf-config",
+      "path": "artifacts/aiperf-config.yaml"
+    }
+  ],
+  "error": "agentic source verification failed: content digest mismatch"
+}

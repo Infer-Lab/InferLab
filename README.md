@@ -106,8 +106,9 @@ those commands resolves and validates without launching or writing one.
 - [Product and documentation website](https://infer-lab.github.io/InferLab/):
   the searchable public entry point for current operator guidance, RFCs, and
   ADRs.
-- [Workspace authoring](docs/workspace-authoring.md): public definitions,
-  local bindings, heterogeneous P/D placement, typed patches, and dry-run.
+- [Workspace authoring](plugins/inferlab/skills/inferlab/references/workspace-authoring.md):
+  public definitions, local bindings, heterogeneous P/D placement, typed
+  patches, and dry-run.
 - [Backend support](docs/backend-support.md): maintained backend capabilities
   and integration package names.
 - [View-only TUI](docs/tui.md): workspace observation, source labels, views,

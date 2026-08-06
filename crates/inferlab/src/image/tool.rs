@@ -12,7 +12,7 @@ use std::process::Command;
 /// One executed native builder command, preserved as record evidence
 /// ([[RFC-0007:C-IMAGE-BUILD]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct NativeCommand {
+pub(crate) struct NativeCommand {
     pub argv: Vec<String>,
     /// Record-relative path of the streamed command log, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -20,24 +20,24 @@ pub struct NativeCommand {
 }
 
 #[derive(Clone, Debug)]
-pub struct BuildOutcome {
+pub(crate) struct BuildOutcome {
     pub image_id: String,
 }
 
 #[derive(Clone, Debug)]
-pub struct InspectOutcome {
+pub(crate) struct InspectOutcome {
     pub entrypoint: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ExportOutcome {
+pub(crate) struct ExportOutcome {
     pub archive_sha256: String,
 }
 
 /// Durable pre-execution command evidence ([[RFC-0007:C-IMAGE-BUILD]]): a
 /// pushed command is persisted before it runs, so a build killed mid-command
 /// still records exactly what was launched.
-pub trait CommandSink {
+pub(crate) trait CommandSink {
     fn push(&mut self, command: NativeCommand) -> Result<(), InferlabError>;
 }
 
@@ -45,12 +45,12 @@ pub trait CommandSink {
 /// exact command that produced it ([[RFC-0007:C-IMAGE-BUILD]]). Observations
 /// enter the resolved plan, so dry-run reports them and the durable record
 /// preserves them from creation; they are not external effects.
-pub struct Observed<T> {
+pub(crate) struct Observed<T> {
     pub value: T,
     pub command: NativeCommand,
 }
 
-pub trait BuilderTool {
+pub(crate) trait BuilderTool {
     fn host_platform(&self) -> Result<Observed<String>, InferlabError>;
     fn resolve_base_digest(
         &self,
@@ -83,7 +83,7 @@ pub trait BuilderTool {
 }
 
 /// The local Docker daemon builder ([[RFC-0007:C-IMAGE-BUILD]]).
-pub struct DockerBuilderTool;
+pub(crate) struct DockerBuilderTool;
 
 impl DockerBuilderTool {
     fn run(argv: &[String]) -> Result<(String, NativeCommand), InferlabError> {
@@ -118,7 +118,7 @@ fn argv(parts: &[&str]) -> Vec<String> {
 
 /// Run a long command with stdout and stderr streamed to a durable log file;
 /// on failure the error message carries the log tail.
-pub fn run_streamed(
+pub(crate) fn run_streamed(
     argv: &[String],
     cwd: Option<&Path>,
     log_path: &Path,

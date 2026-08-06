@@ -22,7 +22,7 @@ use std::path::Path;
 /// that qualified the image and the revision that launches it stays
 /// observable.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ImageLaunchPlan {
+pub(crate) struct ImageLaunchPlan {
     pub record_id: String,
     pub image_id: String,
     pub platform: String,
@@ -35,7 +35,7 @@ pub struct ImageLaunchPlan {
 /// the only qualification-adjacent evidence available and is filled during
 /// resolution.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExternalImagePlan {
+pub(crate) struct ExternalImagePlan {
     pub id: String,
     pub reference: String,
     pub digest: String,
@@ -50,7 +50,7 @@ pub struct ExternalImagePlan {
 /// stored record, before resolution begins: every fact these rejections need
 /// is already known, so an incompatible selection never reaches an
 /// integration invocation ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
-pub fn select(
+pub(crate) fn select(
     workspace: &LoadedWorkspace,
     server_id: &str,
     record_id: &str,
@@ -130,7 +130,7 @@ pub(crate) fn select_for_adhoc(root: &Path, record_id: &str) -> Result<String, I
 /// resolution begins ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): the declaration
 /// must exist, its integration claim must match the server stack's integration,
 /// and the image must already be present locally — Inferlab never pulls.
-pub fn select_external(
+pub(crate) fn select_external(
     workspace: &LoadedWorkspace,
     server_id: &str,
     external_id: &str,

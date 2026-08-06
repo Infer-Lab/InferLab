@@ -4,8 +4,10 @@ use schemars::generate::SchemaSettings;
 
 pub use wire::{
     AdapterError, AdapterErrorCode, AdapterProtocol, AdapterRequest, AdapterResponse,
-    AdapterResult, AllocationLaunch, BenchCaseInput, BenchClientRequest, BenchClientResult,
-    BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
+    AdapterResult, AllocationLaunch, BenchAgenticAcquisitionOutcome, BenchAgenticBranchStats,
+    BenchAgenticCatalogInput, BenchAgenticResultEvidence, BenchAgenticRunEvidence,
+    BenchAgenticSourceInput, BenchAgenticSourceVerification, BenchCaseInput, BenchClientRequest,
+    BenchClientResult, BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
     BenchDefinitionInput, BenchInclusiveUniformInput, BenchLoadInput, BenchNativeInvocation,
     BenchPopulationInput, BenchPopulationPreparationRequest, BenchPopulationPreparationResult,
     BenchPrefixGeometrySummary, BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput,

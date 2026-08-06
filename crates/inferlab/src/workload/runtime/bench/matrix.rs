@@ -9,7 +9,7 @@ use crate::workload::record::{WorkloadRecordSession, WorkloadStatus};
 use crate::workload::{BenchCasePlan, BenchPlan};
 use inferlab_runtime::interrupt;
 
-pub fn run_matrix_cases(
+pub(super) fn run_matrix_cases(
     plan: &BenchPlan,
     cases: &[BenchCasePlan],
     session: &mut WorkloadRecordSession,

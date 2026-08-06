@@ -12,7 +12,6 @@ tar --sort=name \
     --mtime='2026-01-01 00:00:00 UTC' \
     -cf - \
     LICENSE \
-    docs/workspace-authoring.md \
     docs/backend-support.md \
     .claude-plugin/ \
     .agents/ \
@@ -24,7 +23,8 @@ tar --sort=name \
 tar -tzf "$OUT" | grep -q '^LICENSE$'
 tar -tzf "$OUT" | grep -q '^plugins/inferlab/skills/inferlab/SKILL.md$'
 tar -tzf "$OUT" | grep -q '^plugins/inferlab/skills/inferlab/references/capability-map.md$'
-tar -tzf "$OUT" | grep -q '^docs/workspace-authoring.md$'
+tar -tzf "$OUT" | grep -q '^plugins/inferlab/skills/inferlab/references/workspace-authoring.md$'
+! tar -tzf "$OUT" | grep -q '^docs/workspace-authoring.md$'
 tar -tzf "$OUT" | grep -q '^docs/backend-support.md$'
 tar -tzf "$OUT" | grep -q '^.claude-plugin/marketplace.json$'
 tar -tzf "$OUT" | grep -q '^.agents/plugins/marketplace.json$'

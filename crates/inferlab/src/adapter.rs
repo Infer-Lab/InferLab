@@ -21,7 +21,7 @@ const ADAPTER_ENVIRONMENT: &str = "adapter";
 /// under, pointed at by PYTHONPATH.
 const ADAPTER_MOUNT_BASE: &str = "/inferlab-adapter";
 
-pub trait AdapterClient {
+pub(crate) trait AdapterClient {
     fn plan_serve(
         &self,
         workspace_root: &Path,
@@ -39,7 +39,7 @@ pub trait AdapterClient {
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError>;
 }
 
-pub struct AdapterLowering<T> {
+pub(crate) struct AdapterLowering<T> {
     pub output: T,
     pub request_sha256: String,
     pub response_sha256: String,
@@ -61,12 +61,12 @@ pub(crate) fn project_setting_values(
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ProcessAdapterClient {
+pub(crate) struct ProcessAdapterClient {
     timeout: Duration,
 }
 
 impl ProcessAdapterClient {
-    pub fn new(timeout: Duration) -> Self {
+    pub(crate) fn new(timeout: Duration) -> Self {
         Self { timeout }
     }
 
@@ -142,7 +142,7 @@ impl AdapterClient for ProcessAdapterClient {
 /// workspace pins is the one that lowers. The one-shot stdin/stdout JSON
 /// contract is unchanged.
 #[derive(Clone, Debug)]
-pub struct ImageAdapterClient {
+pub(crate) struct ImageAdapterClient {
     pub image_id: String,
     /// The integration computes on no devices, so no device is requested
     /// by default. A host whose container runtime rejects device-less
@@ -704,7 +704,7 @@ fn wrong_operation<T>(integration: &str) -> Result<T, InferlabError> {
 }
 
 #[must_use]
-pub fn executable_name(integration: &str) -> String {
+pub(crate) fn executable_name(integration: &str) -> String {
     format!("inferlab-adapter-{integration}")
 }
 

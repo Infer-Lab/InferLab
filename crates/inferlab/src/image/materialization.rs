@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const GENERATOR_IDENTITY: &str = concat!("inferlab-image-context/", env!("CARGO_PKG_VERSION"));
+pub(super) const GENERATOR_IDENTITY: &str =
+    concat!("inferlab-image-context/", env!("CARGO_PKG_VERSION"));
 
 /// Context-generation procedure identity ([[RFC-0007:C-IMAGE-BUILD]]): bump
 /// when Dockerfile rendering, package projection, or context layout changes
@@ -19,11 +20,11 @@ pub const GENERATOR_IDENTITY: &str = concat!("inferlab-image-context/", env!("CA
 /// Epoch 3: checks execute through a generated runner that frames per-check
 /// results into the builder log, so a failed build still attributes which
 /// checks ran and how they exited.
-pub const IMAGE_CONTEXT_EPOCH: u32 = 3;
+pub(super) const IMAGE_CONTEXT_EPOCH: u32 = 3;
 
 /// The framing prefix the generated check runner emits per check; the
 /// builder log is scanned for it to reconstruct per-check evidence.
-pub const CHECK_MARKER: &str = "INFERLAB-CHECK";
+pub(super) const CHECK_MARKER: &str = "INFERLAB-CHECK";
 
 const CHECKS_CONTEXT_DIR: &str = "environment-checks";
 const POSTPROCESS_CONTEXT_DIR: &str = "environment-postprocess";
@@ -32,7 +33,7 @@ const POSTPROCESS_IMAGE_DIR: &str = "/opt/inferlab-postprocess";
 const CHECKS_RUNNER_FILE: &str = "inferlab-environment-checks.sh";
 const CHECKS_RUNNER_IMAGE_PATH: &str = "/opt/inferlab-environment-checks.sh";
 
-pub struct ContextInputs<'a> {
+pub(super) struct ContextInputs<'a> {
     pub context_dir: &'a Path,
     pub base_image: &'a str,
     pub base_image_digest: &'a str,
@@ -52,13 +53,13 @@ pub struct ContextInputs<'a> {
 /// content stays under the workspace author's secret posture, not the
 /// generated-text portability guard.
 #[derive(Clone, Debug)]
-pub struct ContextScript {
+pub(super) struct ContextScript {
     pub id: String,
     pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-pub struct BuiltWheel {
+pub(super) struct BuiltWheel {
     pub package: String,
     pub filename: String,
     pub source_path: PathBuf,
@@ -66,7 +67,7 @@ pub struct BuiltWheel {
 }
 
 #[derive(Clone, Debug)]
-pub struct PreparedContext {
+pub(super) struct PreparedContext {
     pub context_dir: PathBuf,
     pub dockerfile: String,
     /// Every rendered text destined for the image: checked by the
@@ -80,7 +81,7 @@ pub struct PreparedContext {
 /// Fails closed when a source-backed package is neither replaced by a built
 /// wheel nor resolved in the locked environment, so an image cannot silently
 /// omit a required component.
-pub fn prepare_context(
+pub(super) fn prepare_context(
     inputs: &ContextInputs<'_>,
     packages: &[PackageSpec],
     source_packages: &[String],

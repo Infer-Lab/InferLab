@@ -12,7 +12,7 @@ use std::path::Path;
 /// One declared stack's local realization state, reported by `stack status`
 /// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]).
 #[derive(Debug, Serialize)]
-pub struct EnvironmentStatusReport {
+pub(crate) struct EnvironmentStatusReport {
     pub stack: String,
     pub pixi_environment: String,
     pub status: EnvironmentStatusKind,
@@ -26,20 +26,20 @@ pub struct EnvironmentStatusReport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum EnvironmentStatusKind {
+pub(crate) enum EnvironmentStatusKind {
     Confirmed,
     NeverInstalled,
     NotUsable,
 }
 
-pub struct StackStatusRequest {
+pub(crate) struct StackStatusRequest {
     pub stack: String,
     pub pixi_environment: String,
     pub checks: Vec<PlannedEnvironmentCheck>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct StackStatusChecks {
+pub(crate) struct StackStatusChecks {
     pub state: StackStatusCheckState,
     pub evidence: Vec<StackStatusCheckEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,7 @@ pub struct StackStatusChecks {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StackStatusCheckState {
+pub(crate) enum StackStatusCheckState {
     NotDeclared,
     Skipped,
     Passed,
@@ -57,7 +57,7 @@ pub enum StackStatusCheckState {
 }
 
 #[derive(Debug, Serialize)]
-pub struct StackStatusCheckEvidence {
+pub(crate) struct StackStatusCheckEvidence {
     pub id: String,
     pub realization: CheckRealization,
     pub outcome: CheckOutcome,
@@ -79,14 +79,14 @@ impl From<CompletedLocalCheck> for StackStatusCheckEvidence {
 }
 
 #[derive(Debug, Serialize)]
-pub struct StackStatusCheckError {
+pub(crate) struct StackStatusCheckError {
     pub id: String,
     pub diagnostics: String,
 }
 
 /// Report each named stack's confirmation and declared-check readiness without
 /// installing packages or updating the manifest or lock.
-pub fn status_with_progress(
+pub(crate) fn status_with_progress(
     root: &Path,
     stacks: &[StackStatusRequest],
     progress: &Progress,

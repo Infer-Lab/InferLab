@@ -509,11 +509,16 @@ async fn send_prefill_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
+    use anyhow::{Context, Result};
+    use async_stream::stream;
     use axum::body::to_bytes;
+    use axum::http::{HeaderValue, header};
     use axum::response::IntoResponse;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
     use serde_json::json;
-    use tokio::sync::Mutex;
+    use std::time::Duration;
+    use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
 
     #[test]
@@ -705,6 +710,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_decode_reaches_both_public_routes_before_terminal_event() -> Result<()> {
+        for path in ["/v1/completions", "/v1/chat/completions"] {
+            let terminal_gate = Arc::new(Notify::new());
+            let prefill_backend = StreamingBackend::prefill(terminal_gate.clone());
+            let decode_backend = StreamingBackend::decode(terminal_gate.clone());
+            let (prefill, prefill_server) =
+                spawn_streaming_backend(prefill_backend.clone()).await?;
+            let (decode, decode_server) = spawn_streaming_backend(decode_backend).await?;
+            let state = ProxyState::new(Config {
+                host: "127.0.0.1".to_owned(),
+                port: 8000,
+                prefill: vec![PrefillTarget {
+                    url: prefill,
+                    bootstrap_url: "http://127.0.0.1:8998".to_owned(),
+                }],
+                decode: vec![decode],
+            })?;
+            *state.inner.prefill[0].engine_ids.write().await = vec!["prefill-0".to_owned()];
+            state.set_ready();
+            let request = if path == "/v1/completions" {
+                json!({"model": "m", "prompt": "hello", "stream": true})
+            } else {
+                json!({
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": true
+                })
+            };
+
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                completion_route(state, HeaderMap::new(), request, path),
+            )
+            .await
+            .context("Gateway waited for decode completion before returning response headers")?
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE),
+                Some(&HeaderValue::from_static("text/event-stream"))
+            );
+            let mut stream = response.into_body().into_data_stream();
+            let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .context("Gateway buffered the first SSE event until decode completion")?
+                .context("decode stream ended before its first SSE event")??;
+            assert_eq!(first, Bytes::from_static(b"data: first\n\n"));
+
+            terminal_gate.notify_one();
+            let terminal = stream
+                .next()
+                .await
+                .context("decode stream ended before its terminal SSE event")??;
+            assert_eq!(terminal, Bytes::from_static(b"data: [DONE]\n\n"));
+            prefill_server.abort();
+            decode_server.abort();
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn static_backend_selection_round_robins_prefill_engines_and_decode_urls() -> Result<()> {
         let state = ProxyState::new(Config {
             host: "127.0.0.1".to_owned(),
@@ -774,6 +840,63 @@ mod tests {
     async fn spawn_backend(state: MockBackend) -> Result<(String, JoinHandle<()>)> {
         let app = Router::new()
             .route("/v1/chat/completions", post(mock_chat))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let _result = serve(listener, app).await;
+        });
+        Ok((format!("http://{address}"), server))
+    }
+
+    #[derive(Clone)]
+    struct StreamingBackend {
+        prefill: bool,
+        terminal_gate: Arc<Notify>,
+    }
+
+    impl StreamingBackend {
+        fn prefill(terminal_gate: Arc<Notify>) -> Self {
+            Self {
+                prefill: true,
+                terminal_gate,
+            }
+        }
+
+        fn decode(terminal_gate: Arc<Notify>) -> Self {
+            Self {
+                prefill: false,
+                terminal_gate,
+            }
+        }
+    }
+
+    async fn streaming_response(
+        State(state): State<StreamingBackend>,
+        Json(_body): Json<Value>,
+    ) -> Response<Body> {
+        if state.prefill {
+            return Json(json!({"status": "prefill-complete"})).into_response();
+        }
+
+        let terminal_gate = state.terminal_gate;
+        let body = Body::from_stream(stream! {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: first\n\n"));
+            terminal_gate.notified().await;
+            yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+        });
+        (
+            StatusCode::ACCEPTED,
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            body,
+        )
+            .into_response()
+    }
+
+    async fn spawn_streaming_backend(state: StreamingBackend) -> Result<(String, JoinHandle<()>)> {
+        let app = Router::new()
+            .route("/v1/completions", post(streaming_response))
+            .route("/v1/chat/completions", post(streaming_response))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;

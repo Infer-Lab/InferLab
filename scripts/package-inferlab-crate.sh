@@ -41,7 +41,8 @@ grep -q '/resources/toolchain-python/inferlab_bench_runner/__init__.py$' <<< "${
 grep -q '/resources/toolchain-python/inferlab_measurement_sdk/__init__.py$' <<< "${archive_list}"
 grep -q '/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md$' <<< "${archive_list}"
 grep -q '/resources/plugin/plugins/inferlab/skills/inferlab/references/capability-map.md$' <<< "${archive_list}"
-grep -q '/resources/plugin/docs/workspace-authoring.md$' <<< "${archive_list}"
+grep -q '/resources/plugin/plugins/inferlab/skills/inferlab/references/workspace-authoring.md$' <<< "${archive_list}"
+! grep -q '/resources/plugin/docs/workspace-authoring.md$' <<< "${archive_list}"
 grep -q '/resources/plugin/docs/backend-support.md$' <<< "${archive_list}"
 grep -q '/resources/plugin/LICENSE$' <<< "${archive_list}"
 

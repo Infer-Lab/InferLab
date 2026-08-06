@@ -34,20 +34,19 @@ the smallest matching reference completely:
 
 | Task | Reference |
 | --- | --- |
-| Discover, validate, lock, or bind a workspace and its stacks | [Workspaces and stacks](references/workspaces-and-stacks.md) |
+| Author or change workspace, placement, profiling, image, Eval, or Bench definitions | [Workspace authoring](references/workspace-authoring.md) |
+| Inspect a workspace or check, lock, and diagnose stack realization | [Workspaces and stacks](references/workspaces-and-stacks.md) |
 | Start, inspect, stop, or run a recipe around a managed server | [Serving and recipes](references/serving-and-recipes.md) |
-| Define or execute Eval, Bench, datasets, sessions, metrics, SLOs, prompt authority, or prefix geometry | [Measurements](references/measurements.md) |
-| Capture an Eval or Bench with Nsight Systems | [Profiling](references/profiling.md) |
+| Execute or inspect Eval, Bench, dataset, session, metric, SLO, or prompt evidence | [Measurements](references/measurements.md) |
+| Run or diagnose an Eval/Bench capture with Nsight Systems | [Profiling](references/profiling.md) |
 | Build, select, validate, or probe a runtime image | [Images and ad-hoc execution](references/images-and-run.md) |
 | Inspect records, compare results, use the TUI or scratchpad, or diagnose a failure | [Evidence and diagnosis](references/evidence-and-diagnosis.md) |
 | Install, update, diagnose, or remove the agent plugin | [Agent plugin](references/agent-plugin.md) |
 
-The complete authoring syntax and backend-specific qualification boundaries
-remain in the bundled
-[workspace authoring guide](../../../../docs/workspace-authoring.md) and
-[backend support matrix](../../../../docs/backend-support.md). These files come
-from the same source snapshot as the installed plugin; do not substitute the
-latest website projection when reproducing an older InferLab release.
+Backend-specific qualification boundaries remain in the bundled
+[backend support matrix](../../../../docs/backend-support.md). It comes from the
+same source snapshot as the installed plugin; do not substitute the latest
+website projection when reproducing an older InferLab release.
 
 ## First Run
 

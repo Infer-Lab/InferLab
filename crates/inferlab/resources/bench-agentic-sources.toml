@@ -1,0 +1,62 @@
+schema_version = 1
+
+[qualification]
+inferencex_repository = "SemiAnalysisAI/InferenceX"
+inferencex_revision = "900b3d8199350a51d731409b690cb79b804b31bf"
+inferencex_reference = "benchmarks/benchmark_lib.sh"
+aiperf_revision = "0d2aa0572ac685943d38c580675c4a61023581d3"
+aiperf_version = "0.12.0"
+
+[datasets.semianalysis_agentx_062126]
+repository = "semianalysisai/cc-traces-weka-062126"
+revision = "23f152f6f0f9399a85901b89a6458def0ef16729"
+filename = "traces.jsonl"
+sha256 = "29b6a19e751ff5230771519aab755f80a0f43a4ba9cf96b72d3a6a437ec99276"
+trace_count = 393
+approximate_bytes = 1850000000
+license = "apache-2.0"
+source_format = "weka_kv_cache_tester_agentic_trace_v7_jsonl"
+aiperf_loader = "semianalysis_cc_traces_weka_062126"
+materialization_identity = "aiperf.dataset.loader.semianalysis_cc_traces_weka:SemiAnalysisCCTracesWekaLoader"
+
+[datasets.semianalysis_agentx_062126_256k]
+repository = "semianalysisai/cc-traces-weka-062126-256k"
+revision = "8fecd2fc56694469f758f0afbbb6335ad3043740"
+filename = "traces.jsonl"
+sha256 = "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef"
+trace_count = 393
+approximate_bytes = 569000000
+license = "apache-2.0"
+source_format = "weka_kv_cache_tester_agentic_trace_v7_jsonl"
+aiperf_loader = "semianalysis_cc_traces_weka_062126_256k"
+materialization_identity = "aiperf.dataset.loader.semianalysis_cc_traces_weka:SemiAnalysisCCTracesWekaLoader"
+
+[profiles.inferencex]
+scenario = "inferencex-agentx-mvp"
+concurrency_semantics = "root_session_tree_lanes"
+replay_semantics = "source_response_inclusive"
+cache_bust = "first_turn_prefix"
+trajectory_start_min = 0.25
+trajectory_start_max = 0.75
+global_idle_gap_cap_seconds = 10.0
+cache_warmup_seconds = 600
+warmup_grace_seconds = 1800
+dataset_configuration_timeout_seconds = 1800
+service_profile_configuration_timeout_seconds = 1800
+default_duration_seconds = 1800
+minimum_duration_seconds = 900
+failure_threshold = 0.10
+dataset_entries = 393
+streaming = true
+ignore_eos = true
+use_server_token_count = true
+gpu_telemetry = false
+server_metric_slice_seconds = 1
+required_artifacts = ["aggregate", "records", "raw_records"]
+unavailable_dimensions = [
+  "exported_per_lane_time_origin",
+  "recycle_identity",
+  "individual_global_idle_shift",
+  "warmup_handoff_state",
+  "residual_delay",
+]

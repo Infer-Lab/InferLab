@@ -1,14 +1,16 @@
 //! Bench execution coordinator. Policy and evidence owners live in focused
 //! child modules; AIPerf remains the native request-execution boundary.
 
-pub mod adaptive;
+pub(super) mod adaptive;
 mod case;
 mod matrix;
 mod native;
 mod phase_barrier;
 mod prefix_cache;
-pub mod result;
-pub mod session;
+pub(super) mod result;
+pub(super) mod session;
+#[cfg(test)]
+mod test_support;
 
 use self::adaptive::run_adaptive;
 use self::matrix::run_matrix_cases;
@@ -23,7 +25,7 @@ use crate::workload::record::{
 use crate::workload::{BenchExecutionPlan, BenchPlan, ResolvedWorkloadPlan, WorkloadServerAccess};
 use std::path::Path;
 
-pub fn run_bench(
+pub(crate) fn run_bench(
     root: &Path,
     record_id: &str,
     plan: &BenchPlan,
@@ -196,7 +198,7 @@ fn execute_bench(
     })
 }
 
-pub struct BenchRunOutcome {
+pub(super) struct BenchRunOutcome {
     measurement_succeeded: bool,
     passed: bool,
 }
@@ -210,7 +212,7 @@ fn finish_failed_bench(
     session.finish(WorkloadStatus::Failed)
 }
 
-pub fn skip<T>(
+pub(crate) fn skip<T>(
     root: &Path,
     record_id: &str,
     kind: WorkloadKind,

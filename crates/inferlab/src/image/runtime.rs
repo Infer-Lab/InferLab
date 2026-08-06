@@ -28,13 +28,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Serialize)]
-pub struct ImageBuildReport {
+pub(crate) struct ImageBuildReport {
     pub record_id: String,
     pub status: ImageStatus,
     pub manifest: ProductManifest,
 }
 
-pub fn run<T: BuilderTool>(
+pub(crate) fn run<T: BuilderTool>(
     workspace: &LoadedWorkspace,
     resolved: ResolvedImageBuild,
     tool: &T,

@@ -21,7 +21,7 @@ include!(concat!(env!("OUT_DIR"), "/toolchain_python_files.rs"));
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EvalToolchainIdentity {
+pub(crate) struct EvalToolchainIdentity {
     pub inferlab_version: String,
     pub platform: String,
     pub manifest_sha256: String,
@@ -34,7 +34,7 @@ pub struct EvalToolchainIdentity {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BundledEvalTask {
+pub(crate) struct BundledEvalTask {
     pub name: String,
     pub task_identity: String,
     pub path: PathBuf,
@@ -47,7 +47,7 @@ pub struct BundledEvalTask {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchToolchainIdentity {
+pub(crate) struct BenchToolchainIdentity {
     pub inferlab_version: String,
     pub platform: String,
     pub manifest_sha256: String,
@@ -58,7 +58,7 @@ pub struct BenchToolchainIdentity {
     pub transformers_version: String,
 }
 
-pub struct InstalledEvalToolchain {
+pub(crate) struct InstalledEvalToolchain {
     pub identity: EvalToolchainIdentity,
     pub python: PathBuf,
     pub runner: PathBuf,
@@ -66,7 +66,7 @@ pub struct InstalledEvalToolchain {
     pub bundled_tasks_path: PathBuf,
 }
 
-pub struct InstalledBenchToolchain {
+pub(crate) struct InstalledBenchToolchain {
     pub identity: BenchToolchainIdentity,
     pub python: PathBuf,
     pub runner: PathBuf,
@@ -74,7 +74,7 @@ pub struct InstalledBenchToolchain {
 }
 
 #[derive(Debug, Serialize)]
-pub struct InstallReport {
+pub(crate) struct InstallReport {
     pub state: InstallState,
     pub path: PathBuf,
     pub eval: EvalToolchainIdentity,
@@ -83,7 +83,7 @@ pub struct InstallReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InstallState {
+pub(crate) enum InstallState {
     Installed,
     AlreadyInstalled,
 }
@@ -172,7 +172,7 @@ pub(crate) fn install_with_progress(progress: &Progress) -> Result<InstallReport
     })
 }
 
-pub fn require_eval() -> Result<InstalledEvalToolchain, InferlabError> {
+pub(crate) fn require_eval() -> Result<InstalledEvalToolchain, InferlabError> {
     let platform = host_platform()?;
     let path = install_path(platform)?;
     let completion = require_completion(&path, platform)?;
@@ -186,7 +186,7 @@ pub fn require_eval() -> Result<InstalledEvalToolchain, InferlabError> {
 }
 
 impl InstalledEvalToolchain {
-    pub fn bundled_task(&self, name: &str) -> Result<BundledEvalTask, InferlabError> {
+    pub(crate) fn bundled_task(&self, name: &str) -> Result<BundledEvalTask, InferlabError> {
         if name != "estonia" {
             return Err(InferlabError::InvalidConfig {
                 message: format!("unknown bundled Eval task {name:?}"),
@@ -205,7 +205,7 @@ impl InstalledEvalToolchain {
     }
 }
 
-pub fn require_bench() -> Result<InstalledBenchToolchain, InferlabError> {
+pub(crate) fn require_bench() -> Result<InstalledBenchToolchain, InferlabError> {
     let platform = host_platform()?;
     let path = install_path(platform)?;
     let completion = require_completion(&path, platform)?;

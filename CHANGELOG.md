@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-06
+
+### Added
+
+- Serving Bench supports the release-qualified SemiAnalysis AgentX trace-replay
+  workflow through a closed `agentic_source = { dataset, profile }` boundary.
+  InferLab verifies immutable 062126 corpus revisions and digests, while the
+  pinned AIPerf 0.12 runtime owns trajectory warmup, root/subagent scheduling,
+  source-response replay, native scenario validity, and branch evidence. The
+  256k profile is qualified on direct vLLM with its 600-second cache-pressure
+  warmup and a 900-second profiling window; results remain transport evidence,
+  not agent-task quality scores.
+
+### Changed
+
+- Ordinary measurement definitions now expand concise authoring forms into
+  explicit canonical values: static Bench defaults to `serving`, synthetic
+  random sources default to exact flat completions, untagged `{ min, max }`
+  token ranges mean inclusive-uniform selection, and OpenAI smoke defaults to
+  prompt `Hello`, 16 output tokens, and a 60-second timeout.
+- The release-owned Bench runtime now pins AIPerf 0.12.0. Native request-rate,
+  linear-session, server-metric, and warmup behavior remains qualified, and
+  profile capture retains one fail-closed acknowledged barrier around both
+  request-rate and AgentX profiling phases.
+
+### Fixed
+
+- The built-in vLLM NIXL P/D Gateway now forwards streaming completion and
+  chat-completion events as they arrive instead of buffering the decode body
+  to completion, preserving client-observed TTFT and inter-token timing.
+
 ## [0.9.0] - 2026-08-05
 
 ### Added

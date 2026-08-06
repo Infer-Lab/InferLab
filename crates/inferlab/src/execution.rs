@@ -5,7 +5,7 @@ use inferlab_protocol::{
     PdRouterPlan, ProtocolVersion, ReadinessProbe, RenderInputDeclaration, ServeRoleKind,
     ServeRoleLink, ServeTopology, SettingValue,
 };
-pub use inferlab_serve_domain::{
+pub(crate) use inferlab_serve_domain::{
     ActiveRdmaInterfacePlan, AllocationPlan, ContainerPlan, EndpointPlan, ModelLocatorSource,
     NetworkMachinePlan, NetworkPlan, NetworkSelectionReason, ProcessCommandSource,
     ProcessIdentityPlan, ProcessPlan, ProfilerEscapesPlan, RemoteContainerFacts,
@@ -18,13 +18,13 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Workflow {
+pub(crate) enum Workflow {
     ServeStart,
     RecipeRun,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ResolvedExecution {
+pub(crate) struct ResolvedExecution {
     pub workflow: Workflow,
     pub workspace: WorkspaceSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,7 +35,7 @@ pub struct ResolvedExecution {
 }
 
 #[derive(Debug, Serialize)]
-pub struct DryRunPlan<'a> {
+pub(crate) struct DryRunPlan<'a> {
     pub workflow: Workflow,
     pub dry_run: bool,
     pub workspace: &'a WorkspaceSnapshot,
@@ -48,7 +48,7 @@ pub struct DryRunPlan<'a> {
 }
 
 impl ResolvedExecution {
-    pub fn dry_run_plan(&self) -> DryRunPlan<'_> {
+    pub(crate) fn dry_run_plan(&self) -> DryRunPlan<'_> {
         DryRunPlan {
             workflow: self.workflow,
             dry_run: true,
@@ -62,27 +62,27 @@ impl ResolvedExecution {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RecipePlan {
+pub(crate) struct RecipePlan {
     pub id: String,
     pub workload_suite: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CasePlan {
+pub(crate) struct CasePlan {
     pub id: String,
     pub selection: CaseSelectionSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CaseSelectionSource {
+pub(crate) enum CaseSelectionSource {
     Explicit,
     Default,
     Sole,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StackPlan {
+pub(crate) struct StackPlan {
     pub id: String,
     pub integration: String,
     pub pixi_environment: String,
@@ -93,7 +93,7 @@ pub struct StackPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ServerPlan {
+pub(crate) struct ServerPlan {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub case: Option<CasePlan>,
@@ -140,7 +140,7 @@ pub struct ServerPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct FrontendPlan {
+pub(crate) struct FrontendPlan {
     pub gateway: GatewayComponentPlan,
     /// Explicit `null` records the absence of a P/D Router for routed-single
     /// serving instead of making consumers infer it from a missing field.
@@ -152,14 +152,14 @@ pub struct FrontendPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayComponentPlan {
+pub(crate) struct GatewayComponentPlan {
     #[serde(flatten)]
     pub plan: GatewayPlan,
     pub process_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PdRouterComponentPlan {
+pub(crate) struct PdRouterComponentPlan {
     #[serde(flatten)]
     pub plan: PdRouterPlan,
     pub process_id: String,
@@ -169,7 +169,7 @@ pub struct PdRouterComponentPlan {
 /// Framework settings remain adapter-owned structured data; each role's
 /// declared and effective values remain the execution authorities.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ServerDeclarationPlan {
+pub(crate) struct ServerDeclarationPlan {
     pub source: DeclarationSource,
     pub common: CommonDeclarationPlan,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -178,14 +178,14 @@ pub struct ServerDeclarationPlan {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeclarationSource {
+pub(crate) enum DeclarationSource {
     Server { id: String },
     Case { id: String },
     Invocation { index: usize },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct CommonDeclarationPlan {
+pub(crate) struct CommonDeclarationPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,7 +211,7 @@ pub struct CommonDeclarationPlan {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct RoleDeclarationPlan {
+pub(crate) struct RoleDeclarationPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
     #[serde(default, skip_serializing_if = "parallelism_is_empty")]
@@ -225,7 +225,7 @@ fn parallelism_is_empty(parallelism: &Parallelism) -> bool {
 }
 
 impl ServerPlan {
-    pub fn processes(&self) -> impl Iterator<Item = &ProcessPlan> {
+    pub(crate) fn processes(&self) -> impl Iterator<Item = &ProcessPlan> {
         self.roles
             .iter()
             .flat_map(|role| &role.replicas)
@@ -237,7 +237,7 @@ impl ServerPlan {
             )
     }
 
-    pub fn process_count(&self) -> usize {
+    pub(crate) fn process_count(&self) -> usize {
         self.processes().count()
     }
 
@@ -255,7 +255,7 @@ impl ServerPlan {
             )
     }
 
-    pub fn process_contexts(&self) -> impl Iterator<Item = ProcessContext<'_>> {
+    pub(crate) fn process_contexts(&self) -> impl Iterator<Item = ProcessContext<'_>> {
         let model_ranks = self.roles.iter().flat_map(|role| {
             role.replicas.iter().flat_map(move |replica| {
                 replica.ranks.iter().map(move |process| ProcessContext {
@@ -279,7 +279,7 @@ impl ServerPlan {
 }
 
 #[derive(Clone, Copy)]
-pub struct ProcessContext<'a> {
+pub(crate) struct ProcessContext<'a> {
     pub role_id: &'a str,
     pub replica_id: &'a str,
     pub replica_index: u32,
@@ -287,7 +287,7 @@ pub struct ProcessContext<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RolePlan {
+pub(crate) struct RolePlan {
     pub id: String,
     pub kind: ServeRoleKind,
     pub declared_replica_count: u32,
@@ -304,7 +304,7 @@ pub struct RolePlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RoleReplicaPlan {
+pub(crate) struct RoleReplicaPlan {
     pub id: String,
     pub index: u32,
     pub device_count: u32,
@@ -319,13 +319,13 @@ pub struct RoleReplicaPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ModelPlan {
+pub(crate) struct ModelPlan {
     pub id: String,
     pub served_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct IntegrationPlan {
+pub(crate) struct IntegrationPlan {
     pub id: String,
     pub adapter_id: String,
     pub adapter_version: String,
@@ -344,12 +344,12 @@ pub struct IntegrationPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ResourcePlan {
+pub(crate) struct ResourcePlan {
     pub device_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PlacementPlan {
+pub(crate) struct PlacementPlan {
     pub id: String,
     pub selection: PlacementSelectionSource,
     pub machines: Vec<String>,
@@ -361,7 +361,7 @@ pub struct PlacementPlan {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlacementSelectionSource {
+pub(crate) enum PlacementSelectionSource {
     Explicit,
     Default,
     Sole,

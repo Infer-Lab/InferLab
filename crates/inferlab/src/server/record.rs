@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ServerStatus {
+pub(crate) enum ServerStatus {
     Starting,
     Running,
     Stopped,
@@ -36,7 +36,7 @@ impl ServerStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum FailurePhase {
+pub(crate) enum FailurePhase {
     /// A declared environment check failed before any process launched
     /// ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
     Preflight,
@@ -49,7 +49,7 @@ pub enum FailurePhase {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FailureEvidence {
+pub(crate) struct FailureEvidence {
     pub phase: FailurePhase,
     pub process_id: Option<String>,
     pub message: String,
@@ -57,7 +57,7 @@ pub struct FailureEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServerProcessEvidence {
+pub(crate) struct ServerProcessEvidence {
     pub profiler: Option<ProfilerTargetRecord>,
     pub profiler_finalization: Option<CaptureActionRecord>,
     pub profiler_cleanup: Option<ProfilerCleanupRecord>,
@@ -73,7 +73,7 @@ pub struct ServerProcessEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct LogSyncEvidence {
+pub(crate) struct LogSyncEvidence {
     pub elapsed_ms: u64,
     pub deadline_ms: Option<u64>,
     pub succeeded: bool,
@@ -82,7 +82,7 @@ pub struct LogSyncEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AdapterOperationEvidence {
+pub(crate) struct AdapterOperationEvidence {
     pub operation: String,
     pub request_sha256: String,
     pub response_sha256: String,
@@ -93,7 +93,7 @@ pub struct AdapterOperationEvidence {
 /// launch through the machine's launch path ([[RFC-0005:C-EVIDENCE]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MachineHardwareEvidence {
+pub(crate) struct MachineHardwareEvidence {
     pub driver_version: String,
     /// The devices actually assigned to serving processes on this machine.
     pub devices: Vec<DeviceHardwareEvidence>,
@@ -101,7 +101,7 @@ pub struct MachineHardwareEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceHardwareEvidence {
+pub(crate) struct DeviceHardwareEvidence {
     pub index: u32,
     pub model: String,
     pub memory_total_mib: u64,
@@ -110,7 +110,7 @@ pub struct DeviceHardwareEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServerRecord {
+pub(crate) struct ServerRecord {
     pub schema_version: u32,
     pub inferlab_version: String,
     pub id: String,
@@ -138,7 +138,7 @@ pub struct ServerRecord {
 }
 
 impl ServerRecord {
-    pub const SCHEMA_VERSION: u32 = 6;
+    pub(crate) const SCHEMA_VERSION: u32 = 6;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -191,7 +191,7 @@ pub(super) struct ServerRecordSession {
 }
 
 impl ServerRecordSession {
-    pub fn begin(
+    pub(super) fn begin(
         root: &Path,
         resolved: &ResolvedExecution,
         requested_id: Option<&str>,
@@ -276,26 +276,29 @@ impl ServerRecordSession {
         Ok(session)
     }
 
-    pub fn from_record(root: &Path, record: ServerRecord) -> Self {
+    pub(super) fn from_record(root: &Path, record: ServerRecord) -> Self {
         Self {
             root: root.to_path_buf(),
             record,
         }
     }
 
-    pub fn record(&self) -> &ServerRecord {
+    pub(super) fn record(&self) -> &ServerRecord {
         &self.record
     }
 
-    pub fn record_mut(&mut self) -> &mut ServerRecord {
+    pub(super) fn record_mut(&mut self) -> &mut ServerRecord {
         &mut self.record
     }
 
-    pub fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
+    pub(super) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.record.process(id)
     }
 
-    pub fn process_mut(&mut self, id: &str) -> Result<&mut ServerProcessEvidence, InferlabError> {
+    pub(super) fn process_mut(
+        &mut self,
+        id: &str,
+    ) -> Result<&mut ServerProcessEvidence, InferlabError> {
         let record_id = self.record.id.clone();
         self.record
             .process_evidence
@@ -307,25 +310,25 @@ impl ServerRecordSession {
             })
     }
 
-    pub fn absolute_stdout(&self, id: &str) -> Result<PathBuf, InferlabError> {
+    pub(super) fn absolute_stdout(&self, id: &str) -> Result<PathBuf, InferlabError> {
         Ok(self.root.join(&self.process(id)?.stdout))
     }
 
-    pub fn absolute_stderr(&self, id: &str) -> Result<PathBuf, InferlabError> {
+    pub(super) fn absolute_stderr(&self, id: &str) -> Result<PathBuf, InferlabError> {
         Ok(self.root.join(&self.process(id)?.stderr))
     }
 
-    pub fn rewrite(&self) -> Result<(), InferlabError> {
+    pub(super) fn rewrite(&self) -> Result<(), InferlabError> {
         write_record(&self.root, &self.record)
     }
 
-    pub fn finish(&mut self, status: ServerStatus) -> Result<(), InferlabError> {
+    pub(super) fn finish(&mut self, status: ServerStatus) -> Result<(), InferlabError> {
         self.record.status = status;
         self.record.finished_unix_ms = Some(now_unix_ms()?);
         self.rewrite()
     }
 
-    pub fn into_record(self) -> ServerRecord {
+    pub(super) fn into_record(self) -> ServerRecord {
         self.record
     }
 }

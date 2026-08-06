@@ -3,6 +3,8 @@
 import json
 
 from inferlab_measurement_sdk import (
+    BenchAgenticResultEvidence,
+    BenchAgenticSourceVerification,
     BenchClientRequest,
     BenchClientResult,
     BenchNativeInvocation,
@@ -13,6 +15,7 @@ from inferlab_measurement_sdk import (
     load_json_object,
 )
 
+from .agentic_source import acquire_and_verify_agentic_source
 from .aiperf import (
     PROFILE_EXPORT_NAME,
     SERVER_METRICS_EXPORT_NAME,
@@ -23,6 +26,7 @@ from .aiperf import (
     speed_bench_category,
 )
 from .population import load_chat_tokenizer
+from .result_agentic import agentic_result_evidence
 from .result_metrics import NORMALIZATION_SCHEMA, normalize_summary
 from .result_policy import request_slo_evidence, warmup_counts, warmup_error
 from .result_population import population_identity_error, prompt_token_reconciliation
@@ -37,8 +41,39 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
     config_path = prepared.config_path
     request_config_path = prepared.request_config_path
     command = prepared.command
+    source_verification: BenchAgenticSourceVerification | None = None
+    agentic_evidence: BenchAgenticResultEvidence | None = None
+    agentic_source = request.definition.agentic_source
+    if agentic_source is not None:
+        acquisition = acquire_and_verify_agentic_source(agentic_source)
+        source_verification = acquisition.verification
+        agentic_evidence = BenchAgenticResultEvidence(
+            source=source_verification,
+            run=None,
+        )
+        if acquisition.error is not None:
+            return BenchClientResult(
+                schema_version=1,
+                status=ClientStatus.failed,
+                completed_requests=0,
+                failed_requests=0,
+                normalization_schema=NORMALIZATION_SCHEMA,
+                metrics={},
+                agentic_evidence=agentic_evidence,
+                native_command=command,
+                native_exit_code=None,
+                raw_artifacts=raw_artifacts(
+                    artifact_dir,
+                    config_path,
+                    request_config_path,
+                    prepared.profile_artifacts,
+                ),
+                error=f"agentic source verification failed: {acquisition.error}",
+            )
     try:
-        native_exit_code, interrupted, timed_out = run_aiperf(command, deadline)
+        native_exit_code, interrupted, timed_out = run_aiperf(
+            command, deadline, prepared.environment
+        )
     except OSError as launch_error:
         return BenchClientResult(
             schema_version=1,
@@ -47,6 +82,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             failed_requests=0,
             normalization_schema=NORMALIZATION_SCHEMA,
             metrics={},
+            agentic_evidence=agentic_evidence,
             native_command=command,
             native_exit_code=None,
             raw_artifacts=raw_artifacts(
@@ -95,6 +131,24 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             )
         except (ImportError, OSError, TypeError, ValueError) as evidence_error:
             session_error = f"linear-session evidence failed: {evidence_error}"
+    agentic_error: str | None = None
+    if agentic_source is not None and source_verification is not None and summary is not None:
+        try:
+            run_evidence = agentic_result_evidence(
+                agentic_source,
+                summary,
+                summary_path,
+                raw_records_path,
+            )
+            agentic_evidence = BenchAgenticResultEvidence(
+                source=source_verification,
+                run=run_evidence,
+            )
+            if not run_evidence.submission_valid:
+                reasons = ", ".join(run_evidence.submission_invalid_reasons) or "unspecified"
+                agentic_error = f"AIPerf AgentX scenario submission is invalid: {reasons}"
+        except ValueError as evidence_error:
+            agentic_error = f"agentic evidence failed: {evidence_error}"
     artifacts = raw_artifacts(
         artifact_dir, config_path, request_config_path, prepared.profile_artifacts
     )
@@ -118,6 +172,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         or identity_error is not None
         or prompt_reconciliation_error is not None
         or session_error is not None
+        or agentic_error is not None
         or summary_error is not None
     ):
         if interrupted:
@@ -138,6 +193,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = prompt_reconciliation_error
         elif session_error is not None:
             reason = session_error
+        elif agentic_error is not None:
+            reason = agentic_error
         else:
             reason = "AIPerf produced no summary JSON"
         if count_error is not None and count_error != reason:
@@ -150,6 +207,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = f"{reason}; {prompt_reconciliation_error}"
         if session_error is not None and session_error != reason:
             reason = f"{reason}; {session_error}"
+        if agentic_error is not None and agentic_error != reason:
+            reason = f"{reason}; {agentic_error}"
         return BenchClientResult(
             schema_version=1,
             status=ClientStatus.failed,
@@ -159,6 +218,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             metrics={},
             request_slo=request_slo_result,
             session_evidence=session_evidence,
+            agentic_evidence=agentic_evidence,
             prompt_token_reconciliation=prompt_reconciliation,
             native_command=command,
             native_exit_code=native_exit_code,
@@ -179,7 +239,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
     if not errors:
         if request_slo is None and completed_requests == 0:
             errors.append("AIPerf completed no requests")
-        elif request_slo is None and failed_requests != 0:
+        elif request_slo is None and agentic_source is None and failed_requests != 0:
             errors.append(f"AIPerf reported {failed_requests} failed requests")
     report_invocations: list[BenchNativeInvocation] = []
     if not errors and request.definition.server_metrics:
@@ -212,6 +272,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         metrics=metrics,
         request_slo=request_slo_result,
         session_evidence=session_evidence,
+        agentic_evidence=agentic_evidence,
         prompt_token_reconciliation=prompt_reconciliation,
         native_command=command,
         native_exit_code=native_exit_code,

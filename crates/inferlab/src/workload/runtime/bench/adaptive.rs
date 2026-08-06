@@ -1,5 +1,8 @@
 //! Adaptive request-rate search policy and SLO probe classification.
 
+#[cfg(test)]
+mod tests;
+
 use super::BenchRunOutcome;
 use super::case::run_bench_case;
 use crate::InferlabError;
@@ -14,7 +17,7 @@ use crate::workspace::{BenchDefinition, RequestRate};
 use inferlab_runtime::interrupt;
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_adaptive(
+pub(crate) fn run_adaptive(
     plan: &BenchPlan,
     policy: &str,
     initial_rates: &[f64],
@@ -57,6 +60,7 @@ pub fn run_adaptive(
                 duration_seconds,
             )?,
             warmup_request_count: 0,
+            duration_seconds,
             session_count: None,
             warmup_session_count: None,
         };
@@ -110,7 +114,7 @@ pub fn run_adaptive(
     })
 }
 
-pub fn classify_slo_evaluation(evaluation: &CaseSloEvaluation) -> ProbeClassification {
+pub(crate) fn classify_slo_evaluation(evaluation: &CaseSloEvaluation) -> ProbeClassification {
     if evaluation.passed {
         return ProbeClassification::Feasible;
     }

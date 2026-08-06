@@ -1,5 +1,8 @@
 //! Eval execution and Eval-specific result adjudication.
 
+#[cfg(test)]
+mod tests;
+
 use super::client::{
     accept_client_result, client_terminal_cause, freeze_adjudicated_timing,
     reject_late_adjudication, remaining_duration, remaining_seconds, run_client,
@@ -66,7 +69,7 @@ fn adjudicate_eval_client(
     }
 }
 
-pub fn run_eval(
+pub(crate) fn run_eval(
     root: &Path,
     record_id: &str,
     plan: &EvalPlan,

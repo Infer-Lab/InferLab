@@ -64,9 +64,14 @@ function withoutLinkTargets(source) {
   return source.replace(/(\]\()([^\s)]+)([^)]*\))/g, '$1<route>$3');
 }
 const generatedDirectories = [
+  'src/content/docs/docs/guides/workspace-authoring',
   'src/content/docs/docs/architecture/rfc',
   'src/content/docs/docs/architecture/adr',
 ];
+
+await rm(path.join(websiteRoot, 'src/content/docs/docs/guides/workspace-authoring.md'), {
+  force: true,
+});
 
 for (const directory of generatedDirectories) {
   const absoluteDirectory = path.join(websiteRoot, directory);

@@ -61,13 +61,26 @@ fn detailed_help_states_the_operator_boundaries_it_owns() -> Result<(), Box<dyn 
         ),
         (
             &["recipe", "run"],
-            &["recorded closed loop", "Failure still finalizes"],
+            &[
+                "recorded closed loop",
+                "Failure still finalizes",
+                "kind = \"openai-smoke\"",
+            ],
         ),
         (
             &["bench"],
             &[
                 "explicit running managed-server record",
                 "sends no measurement traffic",
+                "input_tokens = 8192",
+                "input_tokens = { min = 6553, max = 8192 }",
+            ],
+        ),
+        (
+            &["workspace", "show"],
+            &[
+                "canonical default-expanded",
+                "inferlab workspace show --json",
             ],
         ),
         (
@@ -117,5 +130,18 @@ fn detailed_help_states_the_operator_boundaries_it_owns() -> Result<(), Box<dyn 
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn recipe_help_advertises_only_valid_measurement_override_paths() -> Result<(), Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_inferlab"))
+        .args(["recipe", "run", "--help"])
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("evals.gsm8k.limit=10"), "{stdout}");
+    assert!(!stdout.contains("evals.smoke.limit"), "{stdout}");
     Ok(())
 }

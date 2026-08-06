@@ -1,7 +1,7 @@
 use crate::bench_metric::BenchMetric;
 use crate::workspace::{
-    BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent, BenchTokenSelector, JsonValue,
-    RequestSlo,
+    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,
+    BenchTokenSelector, JsonValue, RequestSlo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -9,12 +9,12 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkloadEndpointProtocol {
+pub(crate) enum WorkloadEndpointProtocol {
     Http,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkloadEndpoint {
+pub(crate) struct WorkloadEndpoint {
     pub protocol: WorkloadEndpointProtocol,
     pub host: String,
     pub port: u16,
@@ -24,39 +24,39 @@ pub struct WorkloadEndpoint {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkloadServerMetricsEndpoint {
+pub(crate) struct WorkloadServerMetricsEndpoint {
     pub path: String,
     pub port_name: Option<String>,
     pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MeasurementModel {
+pub(crate) struct MeasurementModel {
     pub locator: String,
     pub served_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkloadHttpMethod {
+pub(crate) enum WorkloadHttpMethod {
     Post,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkloadHttpAction {
+pub(crate) struct WorkloadHttpAction {
     pub method: WorkloadHttpMethod,
     pub path: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DatasetCacheState {
+pub(crate) enum DatasetCacheState {
     Missing,
     Present,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BenchDatasetCatalog {
+pub(crate) struct BenchDatasetCatalog {
     pub dataset: String,
     pub profile: Option<String>,
     pub source: String,
@@ -76,7 +76,7 @@ pub struct BenchDatasetCatalog {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BenchSessionDatasetCatalog {
+pub(crate) struct BenchSessionDatasetCatalog {
     pub dataset: String,
     pub profile: Option<String>,
     pub source: String,
@@ -94,21 +94,65 @@ pub struct BenchSessionDatasetCatalog {
     pub provides_output_targets: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct BenchAgenticCatalog {
+    pub repository: String,
+    pub revision: String,
+    pub filename: String,
+    pub sha256: String,
+    pub cache_path: PathBuf,
+    pub cache_state: DatasetCacheState,
+    pub trace_count: u32,
+    pub approximate_bytes: u64,
+    pub license: String,
+    pub source_format: String,
+    pub aiperf_loader: String,
+    pub materialization_identity: String,
+    pub scenario: String,
+    pub concurrency_semantics: String,
+    pub replay_semantics: String,
+    pub cache_bust: String,
+    pub trajectory_start_min: f64,
+    pub trajectory_start_max: f64,
+    pub global_idle_gap_cap_seconds: f64,
+    pub cache_warmup_seconds: u64,
+    pub warmup_grace_seconds: u64,
+    pub dataset_configuration_timeout_seconds: u64,
+    pub service_profile_configuration_timeout_seconds: u64,
+    pub default_duration_seconds: u64,
+    pub minimum_duration_seconds: u64,
+    pub failure_threshold: f64,
+    pub dataset_entries: u32,
+    pub streaming: bool,
+    pub ignore_eos: bool,
+    pub use_server_token_count: bool,
+    pub gpu_telemetry: bool,
+    pub server_metric_slice_seconds: u64,
+    pub required_artifacts: Vec<String>,
+    pub unavailable_dimensions: Vec<String>,
+    pub inferencex_repository: String,
+    pub inferencex_revision: String,
+    pub inferencex_reference: String,
+    pub aiperf_revision: String,
+    pub aiperf_version: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BenchDatasetFilter {
+pub(crate) struct BenchDatasetFilter {
     pub field: String,
     pub value: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ResolvedBenchRandomShape {
+pub(crate) struct ResolvedBenchRandomShape {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub weight: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ResolvedBenchPrompt {
+pub(crate) struct ResolvedBenchPrompt {
+    pub declared: Option<BenchPrompt>,
     #[serde(flatten)]
     pub definition: BenchPrompt,
     pub request_representation: BenchRequestRepresentation,
@@ -117,8 +161,22 @@ pub struct ResolvedBenchPrompt {
 }
 
 impl ResolvedBenchPrompt {
-    pub fn from_definition(definition: &BenchPrompt) -> Self {
-        let (request_representation, route, rendering_authority) = match definition {
+    pub(crate) fn from_declared_and_effective(
+        declared: Option<&BenchPromptSelection>,
+        effective: &BenchPromptSelection,
+    ) -> Self {
+        Self::resolve(
+            declared.and_then(BenchPromptSelection::declared).cloned(),
+            effective.effective().clone(),
+        )
+    }
+
+    pub(crate) fn from_definition(definition: &BenchPrompt) -> Self {
+        Self::resolve(None, definition.clone())
+    }
+
+    fn resolve(declared: Option<BenchPrompt>, definition: BenchPrompt) -> Self {
+        let (request_representation, route, rendering_authority) = match &definition {
             BenchPrompt::Flat => (
                 BenchRequestRepresentation::FlatPrompt,
                 BenchPromptRoute::Completions,
@@ -136,7 +194,8 @@ impl ResolvedBenchPrompt {
             ),
         };
         Self {
-            definition: definition.clone(),
+            declared,
+            definition,
             request_representation,
             route,
             rendering_authority,
@@ -146,21 +205,21 @@ impl ResolvedBenchPrompt {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BenchRequestRepresentation {
+pub(crate) enum BenchRequestRepresentation {
     FlatPrompt,
     StructuredMessages,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BenchPromptRoute {
+pub(crate) enum BenchPromptRoute {
     Completions,
     ChatCompletions,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BenchRenderingAuthority {
+pub(crate) enum BenchRenderingAuthority {
     LocalFlat,
     LocalTemplate,
     Server,
@@ -168,7 +227,7 @@ pub enum BenchRenderingAuthority {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ResolvedBenchRequestSource {
+pub(crate) enum ResolvedBenchRequestSource {
     Random {
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
@@ -193,7 +252,7 @@ pub enum ResolvedBenchRequestSource {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ResolvedBenchSessionSource {
+pub(crate) struct ResolvedBenchSessionSource {
     pub dataset: String,
     pub profile: Option<String>,
     pub max_input_tokens: u32,
@@ -204,27 +263,37 @@ pub struct ResolvedBenchSessionSource {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct ResolvedBenchAgenticSource {
+    pub dataset: String,
+    pub profile: String,
+    pub catalog: Box<BenchAgenticCatalog>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum ResolvedBenchSource {
+pub(crate) enum ResolvedBenchSource {
     Requests {
         request_source: ResolvedBenchRequestSource,
     },
     Sessions {
         session_source: ResolvedBenchSessionSource,
     },
+    Agentic {
+        agentic_source: ResolvedBenchAgenticSource,
+    },
 }
 
 impl ResolvedBenchSource {
-    pub fn request_source(&self) -> Option<&ResolvedBenchRequestSource> {
+    pub(crate) fn request_source(&self) -> Option<&ResolvedBenchRequestSource> {
         match self {
             Self::Requests { request_source } => Some(request_source),
-            Self::Sessions { .. } => None,
+            Self::Sessions { .. } | Self::Agentic { .. } => None,
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ResolvedBenchDefinition {
+pub(crate) struct ResolvedBenchDefinition {
     #[serde(flatten)]
     pub source: ResolvedBenchSource,
     pub prompt: ResolvedBenchPrompt,
@@ -237,7 +306,7 @@ pub struct ResolvedBenchDefinition {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BenchPopulation {
+pub(crate) struct BenchPopulation {
     pub path: PathBuf,
     pub evidence_path: PathBuf,
     pub sha256: String,
@@ -247,26 +316,26 @@ pub struct BenchPopulation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BenchSessionTemplate {
+pub(crate) struct BenchSessionTemplate {
     pub template_identity: String,
     pub turn_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "direction", content = "value", rename_all = "snake_case")]
-pub enum AggregateSloBound {
+pub(crate) enum AggregateSloBound {
     AtMost(f64),
     AtLeast(f64),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ResolvedAggregateSlo {
+pub(crate) struct ResolvedAggregateSlo {
     pub metric: BenchMetric,
     pub bound: AggregateSloBound,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ResolvedBenchSloPolicy {
+pub(crate) struct ResolvedBenchSloPolicy {
     pub aggregate: Vec<ResolvedAggregateSlo>,
     pub request: Option<RequestSlo>,
 }

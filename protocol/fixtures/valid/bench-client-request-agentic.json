@@ -1,0 +1,85 @@
+{
+  "protocol_version": "7",
+  "endpoint": {
+    "protocol": "http",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "completions_path": "/v1/completions",
+    "chat_completions_path": "/v1/chat/completions",
+    "server_metrics": null
+  },
+  "model": {
+    "locator": "/models/example",
+    "served_name": "example"
+  },
+  "definition": {
+    "agentic_source": {
+      "dataset": "semianalysis_agentx_062126_256k",
+      "profile": "inferencex",
+      "catalog": {
+        "repository": "semianalysisai/cc-traces-weka-062126-256k",
+        "revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+        "filename": "traces.jsonl",
+        "sha256": "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef",
+        "cache_path": "/cache/huggingface/hub/datasets--semianalysisai--cc-traces-weka-062126-256k/snapshots/8fecd2fc56694469f758f0afbbb6335ad3043740/traces.jsonl",
+        "cache_state": "present",
+        "trace_count": 393,
+        "approximate_bytes": 569000000,
+        "license": "apache-2.0",
+        "source_format": "weka_kv_cache_tester_agentic_trace_v7_jsonl",
+        "aiperf_loader": "semianalysis_cc_traces_weka_062126_256k",
+        "materialization_identity": "aiperf.dataset.loader.semianalysis_cc_traces_weka:SemiAnalysisCCTracesWekaLoader",
+        "scenario": "inferencex-agentx-mvp",
+        "concurrency_semantics": "root_session_tree_lanes",
+        "replay_semantics": "source_response_inclusive",
+        "cache_bust": "first_turn_prefix",
+        "trajectory_start_min": 0.25,
+        "trajectory_start_max": 0.75,
+        "global_idle_gap_cap_seconds": 10.0,
+        "cache_warmup_seconds": 600,
+        "warmup_grace_seconds": 1800,
+        "dataset_configuration_timeout_seconds": 1800,
+        "service_profile_configuration_timeout_seconds": 1800,
+        "default_duration_seconds": 1800,
+        "minimum_duration_seconds": 900,
+        "failure_threshold": 0.1,
+        "dataset_entries": 393,
+        "streaming": true,
+        "ignore_eos": true,
+        "use_server_token_count": true,
+        "gpu_telemetry": false,
+        "server_metric_slice_seconds": 1,
+        "required_artifacts": ["aggregate", "records", "raw_records"],
+        "unavailable_dimensions": ["recycle_identity"],
+        "inferencex_repository": "SemiAnalysisAI/InferenceX",
+        "inferencex_revision": "900b3d8199350a51d731409b690cb79b804b31bf",
+        "inferencex_reference": "benchmarks/benchmark_lib.sh",
+        "aiperf_revision": "0d2aa0572ac685943d38c580675c4a61023581d3",
+        "aiperf_version": "0.12.0"
+      }
+    },
+    "prompt": {
+      "kind": "server_chat",
+      "request_representation": "structured_messages",
+      "route": "chat_completions",
+      "rendering_authority": "server"
+    },
+    "server_metrics": false,
+    "seed": 42,
+    "request_body": {},
+    "request_slo": null,
+    "timeout_seconds": 7200,
+    "reset_prefix_cache": false
+  },
+  "case": {
+    "load_shape": {
+      "kind": "concurrency_limited",
+      "concurrency": 1
+    },
+    "request_count": 0,
+    "warmup_request_count": 0,
+    "duration_seconds": 900
+  },
+  "case_budget_seconds": 7200.0,
+  "artifact_dir": "artifacts"
+}

@@ -109,7 +109,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         Some(64)
     );
     assert_eq!(first["bench"]["platform"], host_platform());
-    assert_eq!(first["bench"]["aiperf_version"], "0.11.0");
+    assert_eq!(first["bench"]["aiperf_version"], "0.12.0");
     assert_eq!(first["bench"]["transformers_version"], "5.12.1");
     assert!(home.install_dir().join("complete.json").is_file());
     assert!(home.install_dir().join("pixi.toml").is_file());
@@ -273,7 +273,7 @@ PYTHON
 cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"aiperf_version":"0.11.0","transformers_version":"5.12.1"}\n'
+  printf '{"aiperf_version":"0.12.0","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 printf 'unexpected python fixture arguments: %s\n' "$*" >&2

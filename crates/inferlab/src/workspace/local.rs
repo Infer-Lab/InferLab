@@ -14,7 +14,7 @@ const DEFAULT_IMAGE_ADAPTER_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LocalBindings {
+pub(crate) struct LocalBindings {
     #[serde(default)]
     pub default_placement: Option<String>,
     #[serde(default)]
@@ -35,7 +35,7 @@ pub struct LocalBindings {
 /// device-less creation.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AdapterBinding {
+pub(crate) struct AdapterBinding {
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     #[serde(default)]
@@ -63,19 +63,19 @@ impl AdapterBinding {
 /// changing shareable workspace facts ([[ADR-0005]]).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BuilderBinding {
+pub(crate) struct BuilderBinding {
     pub kind: BuilderKind,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum BuilderKind {
+pub(crate) enum BuilderKind {
     LocalDocker,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelWeightBinding {
+pub(crate) struct ModelWeightBinding {
     #[serde(default)]
     pub locator: Option<String>,
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct ModelWeightBinding {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MachineBinding {
+pub(crate) struct MachineBinding {
     pub host: String,
     pub devices: Vec<u32>,
     pub ports: Vec<u16>,
@@ -122,7 +122,7 @@ pub(crate) const KNOWN_CONTAINER_CAPABILITIES: &[&str] = &["IPC_LOCK", "SYS_NICE
 /// Container launch facts for one machine ([[RFC-0007:C-IMAGE-BUILD]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContainerBinding {
+pub(crate) struct ContainerBinding {
     /// Environment variable names passed into validation containers by name
     /// reference only (`--env NAME`), so values never enter the launch
     /// command line or the image content. This is the runtime credential
@@ -149,7 +149,7 @@ pub struct ContainerBinding {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PlacementBinding {
+pub(crate) struct PlacementBinding {
     #[serde(default)]
     pub machines: Vec<String>,
     #[serde(default)]
@@ -158,7 +158,7 @@ pub struct PlacementBinding {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
-pub enum PlacementRoleBinding {
+pub(crate) enum PlacementRoleBinding {
     MachinePool(PlacementRoleMachinePoolBinding),
     Direct(RankPlacementBinding),
     MultiRank(MultiRankReplicaPlacementBinding),
@@ -166,22 +166,22 @@ pub enum PlacementRoleBinding {
 }
 
 impl PlacementRoleBinding {
-    pub const fn uses_machine_pool(&self) -> bool {
+    pub(crate) const fn uses_machine_pool(&self) -> bool {
         matches!(self, Self::MachinePool(_))
     }
 
-    pub const fn uses_explicit_replicas(&self) -> bool {
+    pub(crate) const fn uses_explicit_replicas(&self) -> bool {
         !self.uses_machine_pool()
     }
 
-    pub fn machines(&self) -> Option<&[String]> {
+    pub(crate) fn machines(&self) -> Option<&[String]> {
         match self {
             Self::MachinePool(binding) => Some(&binding.machines),
             Self::Direct(_) | Self::MultiRank(_) | Self::Replicas(_) => None,
         }
     }
 
-    pub fn replica_count(&self) -> Option<usize> {
+    pub(crate) fn replica_count(&self) -> Option<usize> {
         match self {
             Self::MachinePool(_) => None,
             Self::Direct(_) | Self::MultiRank(_) => Some(1),
@@ -189,7 +189,10 @@ impl PlacementRoleBinding {
         }
     }
 
-    pub fn ranks_for_replica(&self, replica_index: usize) -> Option<&[RankPlacementBinding]> {
+    pub(crate) fn ranks_for_replica(
+        &self,
+        replica_index: usize,
+    ) -> Option<&[RankPlacementBinding]> {
         match self {
             Self::MachinePool(_) => None,
             Self::Direct(rank) if replica_index == 0 => Some(std::slice::from_ref(rank)),
@@ -202,11 +205,11 @@ impl PlacementRoleBinding {
         }
     }
 
-    pub const fn is_direct_single_replica(&self) -> bool {
+    pub(crate) const fn is_direct_single_replica(&self) -> bool {
         matches!(self, Self::Direct(_))
     }
 
-    pub fn is_multi_rank_replica(&self, replica_index: usize) -> bool {
+    pub(crate) fn is_multi_rank_replica(&self, replica_index: usize) -> bool {
         match self {
             Self::MultiRank(_) => replica_index == 0,
             Self::Replicas(binding) => binding
@@ -220,25 +223,25 @@ impl PlacementRoleBinding {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PlacementRoleMachinePoolBinding {
+pub(crate) struct PlacementRoleMachinePoolBinding {
     pub machines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PlacementRoleReplicasBinding {
+pub(crate) struct PlacementRoleReplicasBinding {
     pub replicas: Vec<ReplicaPlacementBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
-pub enum ReplicaPlacementBinding {
+pub(crate) enum ReplicaPlacementBinding {
     Direct(RankPlacementBinding),
     MultiRank(MultiRankReplicaPlacementBinding),
 }
 
 impl ReplicaPlacementBinding {
-    pub fn ranks(&self) -> &[RankPlacementBinding] {
+    pub(crate) fn ranks(&self) -> &[RankPlacementBinding] {
         match self {
             Self::Direct(rank) => std::slice::from_ref(rank),
             Self::MultiRank(replica) => &replica.ranks,
@@ -248,13 +251,13 @@ impl ReplicaPlacementBinding {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MultiRankReplicaPlacementBinding {
+pub(crate) struct MultiRankReplicaPlacementBinding {
     pub ranks: Vec<RankPlacementBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RankPlacementBinding {
+pub(crate) struct RankPlacementBinding {
     pub machine: String,
     pub devices: Vec<u32>,
     #[serde(default)]
@@ -263,7 +266,7 @@ pub struct RankPlacementBinding {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum LaunchBinding {
+pub(crate) enum LaunchBinding {
     #[default]
     Local,
     Ssh {

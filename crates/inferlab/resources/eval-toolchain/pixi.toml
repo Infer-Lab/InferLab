@@ -18,7 +18,7 @@ pydantic = "==2.13.4"
 c-compiler = "1.*"
 
 [feature.bench.pypi-dependencies]
-aiperf = "==0.11.0"
+aiperf = "==0.12.0"
 
 [environments]
 eval = ["eval"]

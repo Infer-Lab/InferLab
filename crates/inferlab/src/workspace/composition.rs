@@ -6,6 +6,7 @@ use super::definitions::{
     BenchDefinition, DEFAULT_LOCAL_FILE, EvalDefinition, ExternalImageDefinition, ImageDefinition,
     ModelDefinition, RecipeDefinition, ServerDefinition, StackDefinition, WORKSPACE_FILE,
     WORKSPACE_FRAGMENT_DIR, WorkloadSuiteDefinition, WorkspaceConfig,
+    deserialize_defaulted_bench_definitions,
 };
 use super::invalid;
 use super::local::{LocalBindings, validate_local_bindings};
@@ -40,7 +41,7 @@ struct WorkspaceFragment {
     servers: BTreeMap<String, ServerDefinition>,
     #[serde(default)]
     evals: BTreeMap<String, EvalDefinition>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_defaulted_bench_definitions")]
     benches: BTreeMap<String, BenchDefinition>,
     #[serde(default)]
     workload_suites: BTreeMap<String, WorkloadSuiteDefinition>,
@@ -68,7 +69,7 @@ pub(crate) fn workspace_identity(root: &Path) -> Result<WorkspaceIdentity, Infer
     })
 }
 
-pub fn discover_workspace(explicit: Option<&Path>) -> Result<PathBuf, InferlabError> {
+pub(crate) fn discover_workspace(explicit: Option<&Path>) -> Result<PathBuf, InferlabError> {
     if let Some(path) = explicit {
         let root = if path.ends_with(WORKSPACE_FILE) {
             path.parent()
@@ -95,7 +96,7 @@ pub fn discover_workspace(explicit: Option<&Path>) -> Result<PathBuf, InferlabEr
     Err(InferlabError::WorkspaceNotFound { start })
 }
 
-pub fn load_workspace(
+pub(crate) fn load_workspace(
     root: PathBuf,
     local: Option<&Path>,
 ) -> Result<LoadedWorkspace, InferlabError> {
@@ -144,7 +145,7 @@ pub fn load_workspace(
 /// callers that only need declared facts — environment identifiers, for
 /// instance — before an operator has bound this machine's local facts
 /// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]).
-pub fn load_workspace_config(root: &Path) -> Result<WorkspaceConfig, InferlabError> {
+pub(crate) fn load_workspace_config(root: &Path) -> Result<WorkspaceConfig, InferlabError> {
     // The shared parent of WORKSPACE_FILE and WORKSPACE_FRAGMENT_DIR: a
     // symlinked `.inferlab` would route every final-node guard below through
     // the link, so the intermediate component is guarded first.
@@ -158,7 +159,7 @@ pub fn load_workspace_config(root: &Path) -> Result<WorkspaceConfig, InferlabErr
     Ok(config)
 }
 
-pub fn workspace_summary(config: &WorkspaceConfig) -> String {
+pub(crate) fn workspace_summary(config: &WorkspaceConfig) -> String {
     let mut output = format!("workspace schema {}\n", config.schema_version);
     push_catalog_section(
         &mut output,

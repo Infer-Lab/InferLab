@@ -50,7 +50,15 @@ export default defineConfig({
           label: 'Guides',
           items: [
             'docs/guides',
-            'docs/guides/workspace-authoring',
+            {
+              label: 'Workspace authoring',
+              items: [
+                'docs/guides/workspace-authoring',
+                'docs/guides/workspace-authoring/workspace-definition',
+                'docs/guides/workspace-authoring/execution-authoring',
+                'docs/guides/workspace-authoring/measurement-authoring',
+              ],
+            },
             'docs/guides/tui',
           ],
         },

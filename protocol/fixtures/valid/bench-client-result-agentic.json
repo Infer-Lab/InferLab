@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "status": "succeeded",
+  "completed_requests": 1,
+  "failed_requests": 0,
+  "normalization_schema": "aiperf-summary-v1",
+  "metrics": {
+    "request_throughput": 1.0,
+    "output_throughput": 10.0,
+    "total_token_throughput": 100.0
+  },
+  "request_slo": null,
+  "session_evidence": null,
+  "agentic_evidence": {
+    "source": {
+      "repository": "semianalysisai/cc-traces-weka-062126-256k",
+      "expected_revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+      "observed_revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+      "filename": "traces.jsonl",
+      "expected_sha256": "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef",
+      "observed_sha256": "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef",
+      "cache_path": "/cache/huggingface/hub/datasets--semianalysisai--cc-traces-weka-062126-256k/snapshots/8fecd2fc56694469f758f0afbbb6335ad3043740/traces.jsonl",
+      "cache_state_before": "present",
+      "acquisition_outcome": "reused"
+    },
+    "run": {
+      "native_run_id": "agentx-run-1",
+      "scenario": "inferencex-agentx-mvp",
+      "submission_valid": true,
+      "submission_invalid_reasons": [],
+      "warmup_records": 1,
+      "warmup_error_records": 0,
+      "warmup_source_coordinate_records": 1,
+      "warmup_succeeded": true,
+      "profiling_began_after_warmup_and_drain": true,
+      "profiling_records": 1,
+      "source_coordinate_records": 1,
+      "distinct_source_traces": 1,
+      "distinct_runtime_conversations": 1,
+      "distinct_transport_requests": 1,
+      "cache_bust_records": 1,
+      "context_overflow_count": 0,
+      "ordinary_failure_count": 0,
+      "branch_stats": {
+        "children_spawned": 1,
+        "children_completed": 1,
+        "children_errored": 0,
+        "children_truncated": 0,
+        "children_delayed": 0,
+        "parents_suspended": 1,
+        "parents_resumed": 1,
+        "parents_failed_due_to_child_error": 0,
+        "joins_suppressed": 0
+      },
+      "aggregate_artifact": "artifacts/profile_export_aiperf.json",
+      "raw_records_artifact": "artifacts/profile_export_aiperf.jsonl",
+      "unavailable_dimensions": ["recycle_identity"]
+    }
+  },
+  "prompt_token_reconciliation": [],
+  "native_command": ["aiperf", "profile", "--scenario", "inferencex-agentx-mvp"],
+  "native_exit_code": 0,
+  "report_invocations": [],
+  "raw_artifacts": [
+    {
+      "name": "aiperf_summary",
+      "kind": "aiperf-summary",
+      "path": "artifacts/profile_export_aiperf.json"
+    },
+    {
+      "name": "aiperf_records",
+      "kind": "aiperf-records",
+      "path": "artifacts/profile_export_aiperf.csv"
+    },
+    {
+      "name": "aiperf_raw_records",
+      "kind": "aiperf-raw-records",
+      "path": "artifacts/profile_export_aiperf.jsonl"
+    }
+  ],
+  "error": null
+}

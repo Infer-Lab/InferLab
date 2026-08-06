@@ -18,7 +18,7 @@ const MANIFEST_FILE: &str = "product-manifest.json";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ImageStatus {
+pub(crate) enum ImageStatus {
     Running,
     Succeeded,
     Partial,
@@ -27,7 +27,7 @@ pub enum ImageStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
-pub enum AssemblyOutcome {
+pub(crate) enum AssemblyOutcome {
     Pending,
     Assembled { image_id: String, tag: String },
     Failed { message: String },
@@ -35,7 +35,7 @@ pub enum AssemblyOutcome {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
-pub enum ValidationOutcome {
+pub(crate) enum ValidationOutcome {
     Pending,
     Validated {
         recipe_record_id: String,
@@ -52,7 +52,7 @@ pub enum ValidationOutcome {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PackageEvidence {
+pub(crate) struct PackageEvidence {
     pub package: String,
     pub filename: String,
     pub sha256: String,
@@ -62,7 +62,7 @@ pub struct PackageEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AssemblyEvidence {
+pub(crate) struct AssemblyEvidence {
     pub platform: String,
     pub closure_digest: String,
     pub base_image_digest: String,
@@ -90,13 +90,13 @@ pub struct AssemblyEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExportEvidence {
+pub(crate) struct ExportEvidence {
     pub path: PathBuf,
     pub archive_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ValidationEvidence {
+pub(crate) struct ValidationEvidence {
     pub recipe: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_case: Option<String>,
@@ -107,7 +107,7 @@ pub struct ValidationEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ImageRecord {
+pub(crate) struct ImageRecord {
     pub schema_version: u32,
     pub inferlab_version: String,
     pub id: String,
@@ -131,7 +131,7 @@ impl ImageRecord {
 /// local evidence; image identities and closure digests carry no
 /// machine-private facts.
 #[derive(Clone, Debug, Serialize)]
-pub struct ProductManifest {
+pub(crate) struct ProductManifest {
     pub schema_version: u32,
     pub inferlab_version: String,
     pub record_id: String,
@@ -148,7 +148,7 @@ pub struct ProductManifest {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ManifestAssembly {
+pub(crate) struct ManifestAssembly {
     pub platform: String,
     pub closure_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,7 +161,7 @@ pub struct ManifestAssembly {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ManifestValidation {
+pub(crate) struct ManifestValidation {
     pub recipe: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_case: Option<String>,
@@ -175,14 +175,14 @@ pub struct ManifestValidation {
     pub recipe_record_id: Option<String>,
 }
 
-pub struct ImageRecordStore {
+pub(crate) struct ImageRecordStore {
     dir: PathBuf,
     record: ImageRecord,
 }
 
 impl ImageRecordStore {
     /// Create the durable record before the first external effect.
-    pub fn begin(
+    pub(crate) fn begin(
         root: &Path,
         id: String,
         resolved: ResolvedImageBuild,
@@ -241,19 +241,19 @@ impl ImageRecordStore {
         Ok(store)
     }
 
-    pub fn dir(&self) -> &Path {
+    pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
 
-    pub const fn record(&self) -> &ImageRecord {
+    pub(crate) const fn record(&self) -> &ImageRecord {
         &self.record
     }
 
-    pub const fn record_mut(&mut self) -> &mut ImageRecord {
+    pub(crate) const fn record_mut(&mut self) -> &mut ImageRecord {
         &mut self.record
     }
 
-    pub fn rewrite(&self) -> Result<(), InferlabError> {
+    pub(crate) fn rewrite(&self) -> Result<(), InferlabError> {
         let path = self.dir.join(RECORD_FILE);
         let json = serde_json::to_vec_pretty(&self.record)
             .map_err(|source| InferlabError::EncodeOutput { source })?;
@@ -261,7 +261,7 @@ impl ImageRecordStore {
     }
 
     /// Finalize the record and write the product manifest.
-    pub fn finish(&mut self, status: ImageStatus) -> Result<ProductManifest, InferlabError> {
+    pub(crate) fn finish(&mut self, status: ImageStatus) -> Result<ProductManifest, InferlabError> {
         self.record.status = status;
         self.record.finished_unix_ms = Some(now_unix_ms()?);
         self.rewrite()?;

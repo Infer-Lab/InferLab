@@ -54,6 +54,10 @@ fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn E
     );
     let artifact = PathBuf::from(String::from_utf8(package.stdout)?.trim());
     let files = crate_archive_files(&artifact)?;
+    assert!(
+        !files.contains_key(Path::new("resources/plugin/docs/workspace-authoring.md")),
+        "the staged plugin must not carry an aggregate workspace-authoring copy"
+    );
 
     assert_tree_in_archive(
         &root.join("python/inferlab-eval-runner/src/inferlab_eval_runner"),
@@ -73,10 +77,6 @@ fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn E
 
     let mut plugin_sources = vec![
         (PathBuf::from("LICENSE"), root.join("LICENSE")),
-        (
-            PathBuf::from("docs/workspace-authoring.md"),
-            root.join("docs/workspace-authoring.md"),
-        ),
         (
             PathBuf::from("docs/backend-support.md"),
             root.join("docs/backend-support.md"),

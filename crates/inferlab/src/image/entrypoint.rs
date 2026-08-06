@@ -13,7 +13,7 @@ pub(crate) const ENV_PREFIX: &str = "/opt/inferlab-env";
 /// contract is hashed over the rendered script so activation projections are
 /// behavior-affecting closure inputs, while the closure map itself carries no
 /// in-image program paths.
-pub fn entrypoint_contract_digest(rendered_entrypoint: &str) -> String {
+pub(super) fn entrypoint_contract_digest(rendered_entrypoint: &str) -> String {
     format!(
         "{:x}",
         Sha256::digest(format!("{ENTRYPOINT_PATH}\u{1e}{rendered_entrypoint}").as_bytes())
@@ -80,7 +80,7 @@ fn declares_activation_scripts(node: &toml::Value, pixi_platform: &str) -> bool 
 /// projection would all silently miss them. Feature-scoped `activation.env`
 /// is composed by the projection and is legal; scripts under features the
 /// environment does not compose are inert and stay legal too.
-pub fn guard_unmodeled_activation(
+pub(super) fn guard_unmodeled_activation(
     root: &Path,
     pixi_platform: &str,
     environment: &str,
@@ -130,7 +130,7 @@ pub fn guard_unmodeled_activation(
 /// untargeted table, and the default feature (the workspace-level tables)
 /// applies last unless the environment sets `no-default-feature`. The merge
 /// inserts in reverse precedence so later inserts overwrite.
-pub fn activation_env(
+pub(super) fn activation_env(
     root: &Path,
     pixi_platform: &str,
     environment: &str,
@@ -185,12 +185,12 @@ pub fn activation_env(
 ///   enter portable artifacts.
 /// - Self-referencing values (`CPATH=...:$CPATH`) export plainly so injected
 ///   values compose; all others use `${VAR:-...}` so `docker run --env` wins.
-pub struct RenderedEntrypoint {
+pub(super) struct RenderedEntrypoint {
     pub text: String,
     pub skipped: Vec<String>,
 }
 
-pub fn render_entrypoint(
+pub(super) fn render_entrypoint(
     activation: &BTreeMap<String, String>,
 ) -> Result<RenderedEntrypoint, InferlabError> {
     let mut lines = vec![

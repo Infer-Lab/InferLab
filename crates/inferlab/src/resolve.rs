@@ -44,12 +44,12 @@ use sha2::{Digest, Sha256};
 use topology::{validate_serve_graph, validate_workload_endpoint};
 
 #[derive(Clone, Copy, Debug)]
-pub enum ExecutionTarget<'a> {
+pub(crate) enum ExecutionTarget<'a> {
     Server(&'a str),
     Recipe(&'a str),
 }
 
-pub struct ResolveRequest<'a> {
+pub(crate) struct ResolveRequest<'a> {
     pub workflow: Workflow,
     pub target: ExecutionTarget<'a>,
     pub case: Option<&'a str>,
@@ -153,7 +153,7 @@ fn compose_measurements(
     .map(Some)
 }
 
-pub fn resolve<C: AdapterClient>(
+pub(crate) fn resolve<C: AdapterClient>(
     workspace: &LoadedWorkspace,
     request: &ResolveRequest<'_>,
     adapter: &C,

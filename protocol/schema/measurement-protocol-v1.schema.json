@@ -69,10 +69,506 @@
   "$comment": "Generated from crates/inferlab-protocol/src/wire.rs; do not edit.",
   "additionalProperties": false,
   "$defs": {
+    "BenchAgenticAcquisitionOutcome": {
+      "type": "string",
+      "enum": [
+        "reused",
+        "downloaded"
+      ]
+    },
+    "BenchAgenticBranchStats": {
+      "type": "object",
+      "properties": {
+        "children_completed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "children_delayed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "children_errored": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "children_spawned": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "children_truncated": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "joins_suppressed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "parents_failed_due_to_child_error": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "parents_resumed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "parents_suspended": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "children_spawned",
+        "children_completed",
+        "children_errored",
+        "children_truncated",
+        "children_delayed",
+        "parents_suspended",
+        "parents_resumed",
+        "parents_failed_due_to_child_error",
+        "joins_suppressed"
+      ]
+    },
+    "BenchAgenticCatalogInput": {
+      "type": "object",
+      "properties": {
+        "aiperf_loader": {
+          "type": "string"
+        },
+        "aiperf_revision": {
+          "type": "string"
+        },
+        "aiperf_version": {
+          "type": "string"
+        },
+        "approximate_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_bust": {
+          "type": "string"
+        },
+        "cache_path": {
+          "type": "string"
+        },
+        "cache_state": {
+          "$ref": "#/$defs/BenchDatasetCacheState"
+        },
+        "cache_warmup_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "concurrency_semantics": {
+          "type": "string"
+        },
+        "dataset_configuration_timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "dataset_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "default_duration_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "failure_threshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "global_idle_gap_cap_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "gpu_telemetry": {
+          "type": "boolean"
+        },
+        "ignore_eos": {
+          "type": "boolean"
+        },
+        "inferencex_reference": {
+          "type": "string"
+        },
+        "inferencex_repository": {
+          "type": "string"
+        },
+        "inferencex_revision": {
+          "type": "string"
+        },
+        "license": {
+          "type": "string"
+        },
+        "materialization_identity": {
+          "type": "string"
+        },
+        "minimum_duration_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "replay_semantics": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "required_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revision": {
+          "type": "string"
+        },
+        "scenario": {
+          "type": "string"
+        },
+        "server_metric_slice_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "service_profile_configuration_timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "source_format": {
+          "type": "string"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "trace_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "trajectory_start_max": {
+          "type": "number",
+          "format": "double"
+        },
+        "trajectory_start_min": {
+          "type": "number",
+          "format": "double"
+        },
+        "unavailable_dimensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_server_token_count": {
+          "type": "boolean"
+        },
+        "warmup_grace_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "revision",
+        "filename",
+        "sha256",
+        "cache_path",
+        "cache_state",
+        "trace_count",
+        "approximate_bytes",
+        "license",
+        "source_format",
+        "aiperf_loader",
+        "materialization_identity",
+        "scenario",
+        "concurrency_semantics",
+        "replay_semantics",
+        "cache_bust",
+        "trajectory_start_min",
+        "trajectory_start_max",
+        "global_idle_gap_cap_seconds",
+        "cache_warmup_seconds",
+        "warmup_grace_seconds",
+        "dataset_configuration_timeout_seconds",
+        "service_profile_configuration_timeout_seconds",
+        "default_duration_seconds",
+        "minimum_duration_seconds",
+        "failure_threshold",
+        "dataset_entries",
+        "streaming",
+        "ignore_eos",
+        "use_server_token_count",
+        "gpu_telemetry",
+        "server_metric_slice_seconds",
+        "required_artifacts",
+        "unavailable_dimensions",
+        "inferencex_repository",
+        "inferencex_revision",
+        "inferencex_reference",
+        "aiperf_revision",
+        "aiperf_version"
+      ]
+    },
+    "BenchAgenticResultEvidence": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchAgenticRunEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source": {
+          "$ref": "#/$defs/BenchAgenticSourceVerification"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ]
+    },
+    "BenchAgenticRunEvidence": {
+      "type": "object",
+      "properties": {
+        "aggregate_artifact": {
+          "type": "string"
+        },
+        "branch_stats": {
+          "$ref": "#/$defs/BenchAgenticBranchStats"
+        },
+        "cache_bust_records": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "context_overflow_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "distinct_runtime_conversations": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "distinct_source_traces": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "distinct_transport_requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "native_run_id": {
+          "type": "string"
+        },
+        "ordinary_failure_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "profiling_began_after_warmup_and_drain": {
+          "type": "boolean"
+        },
+        "profiling_records": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "raw_records_artifact": {
+          "type": "string"
+        },
+        "scenario": {
+          "type": "string"
+        },
+        "source_coordinate_records": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "submission_invalid_reasons": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "submission_valid": {
+          "type": "boolean"
+        },
+        "unavailable_dimensions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "warmup_error_records": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warmup_records": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warmup_source_coordinate_records": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warmup_succeeded": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "native_run_id",
+        "scenario",
+        "submission_valid",
+        "warmup_records",
+        "warmup_error_records",
+        "warmup_source_coordinate_records",
+        "warmup_succeeded",
+        "profiling_began_after_warmup_and_drain",
+        "profiling_records",
+        "source_coordinate_records",
+        "distinct_source_traces",
+        "distinct_runtime_conversations",
+        "distinct_transport_requests",
+        "cache_bust_records",
+        "context_overflow_count",
+        "ordinary_failure_count",
+        "branch_stats",
+        "aggregate_artifact",
+        "raw_records_artifact"
+      ]
+    },
+    "BenchAgenticSourceInput": {
+      "description": "One release-qualified agentic trace source and its complete effective policy.",
+      "type": "object",
+      "properties": {
+        "catalog": {
+          "$ref": "#/$defs/BenchAgenticCatalogInput"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "dataset",
+        "profile",
+        "catalog"
+      ]
+    },
+    "BenchAgenticSourceVerification": {
+      "type": "object",
+      "properties": {
+        "acquisition_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchAgenticAcquisitionOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cache_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cache_state_before": {
+          "$ref": "#/$defs/BenchDatasetCacheState"
+        },
+        "expected_revision": {
+          "type": "string"
+        },
+        "expected_sha256": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "observed_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "observed_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "repository": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "expected_revision",
+        "filename",
+        "expected_sha256",
+        "cache_state_before"
+      ]
+    },
     "BenchCaseInput": {
       "description": "A single Bench case: its load shape and the number of requests to send.",
       "type": "object",
       "properties": {
+        "duration_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "load_shape": {
           "$ref": "#/$defs/BenchLoadInput"
         },
@@ -166,6 +662,17 @@
       "description": "The result a Bench client writes for the measurement runtime to consume.",
       "type": "object",
       "properties": {
+        "agentic_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchAgenticResultEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "completed_requests": {
           "type": "integer",
           "format": "uint64",
@@ -386,6 +893,17 @@
       "description": "The workload shape a Bench client drives, shared across its load cases.",
       "type": "object",
       "properties": {
+        "agentic_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchAgenticSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "prompt": {
           "$ref": "#/$defs/BenchPromptInput"
         },

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RecipeStatus {
+pub(crate) enum RecipeStatus {
     Running,
     Succeeded,
     Failed,
@@ -19,14 +19,14 @@ pub enum RecipeStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServerRecordRef {
+pub(crate) struct ServerRecordRef {
     pub id: String,
     pub status: Option<ServerStatus>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkloadRecordRef {
+pub(crate) struct WorkloadRecordRef {
     pub definition_id: String,
     pub id: String,
     pub status: WorkloadStatus,
@@ -34,7 +34,7 @@ pub struct WorkloadRecordRef {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecipeCleanupEvidence {
+pub(crate) struct RecipeCleanupEvidence {
     pub server_record_id: String,
     pub status: Option<ServerStatus>,
     pub verified: bool,
@@ -43,7 +43,7 @@ pub struct RecipeCleanupEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecipeRecord {
+pub(crate) struct RecipeRecord {
     pub schema_version: u32,
     pub inferlab_version: String,
     pub id: String,
@@ -63,7 +63,7 @@ impl RecipeRecord {
     const SCHEMA_VERSION: u32 = 2;
 }
 
-pub fn run(
+pub(crate) fn run(
     root: &Path,
     resolved: ResolvedExecution,
     progress: &Progress,

@@ -1,10 +1,13 @@
 //! Linear-session reconciliation. AIPerf owns turn execution; Rust validates
 //! its native session and pacing evidence before accepting a case record.
 
+#[cfg(test)]
+mod tests;
+
 use inferlab_protocol::{BenchClientResult, BenchSessionResultEvidence, ClientStatus};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn duplicate_runtime_session_identity<'a>(
+pub(crate) fn duplicate_runtime_session_identity<'a>(
     existing: impl Iterator<Item = &'a BenchSessionResultEvidence>,
     candidate: &BenchSessionResultEvidence,
 ) -> Option<String> {
@@ -18,7 +21,7 @@ pub fn duplicate_runtime_session_identity<'a>(
     })
 }
 
-pub fn linear_session_result_error(
+pub(crate) fn linear_session_result_error(
     result: &BenchClientResult,
     evidence: &BenchSessionResultEvidence,
     expected_warmup_sessions: u32,

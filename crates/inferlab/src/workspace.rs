@@ -12,19 +12,21 @@ mod state;
 use crate::InferlabError;
 
 pub(crate) use catalog_validation::{validate_bench, validate_eval, validate_eval_task_source};
-pub use composition::{
+pub(crate) use composition::{
     discover_workspace, load_workspace, load_workspace_config, workspace_summary,
 };
 pub(crate) use composition::{snapshot_workspace, workspace_identity};
 #[cfg(test)]
 pub(crate) use definitions::BenchRandomShape;
-pub use definitions::{
-    AggregateSlo, BenchDefinition, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
-    BenchTpotApplicability, EvalDefinition, EvalTaskSource, JsonValue, ModelDefinition,
-    RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition,
-    StackDefinition, WorkloadSuiteDefinition, WorkspaceConfig,
+pub(crate) use definitions::{
+    AggregateSlo, BenchAgenticSource, BenchDefinition, BenchRequestSource, BenchSessionSource,
+    BenchTokenSelector, BenchTpotApplicability, EvalDefinition, EvalTaskSource, JsonValue,
+    ModelDefinition, RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition,
+    ServerDefinition, StackDefinition, WorkloadSuiteDefinition, WorkspaceConfig,
 };
-pub(crate) use definitions::{BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent};
+pub(crate) use definitions::{
+    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,
+};
 pub(crate) use definitions::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,
     DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS, DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS,
@@ -32,14 +34,14 @@ pub(crate) use definitions::{
 #[cfg(test)]
 pub(crate) use local::LocalBindings;
 pub(crate) use local::MANAGED_CONTAINER_ENV;
-pub use local::{
+pub(crate) use local::{
     AdapterBinding, BuilderKind, LaunchBinding, MachineBinding, ModelWeightBinding,
     PlacementBinding, PlacementRoleBinding,
 };
 pub(crate) use source::{
     git_status_flags, source_digest_script, source_pathspecs, workspace_mutations,
 };
-pub use state::{LoadedWorkspace, WorkspaceSnapshot};
+pub(crate) use state::{LoadedWorkspace, WorkspaceSnapshot};
 
 #[cfg(test)]
 use catalog_validation::*;
@@ -146,9 +148,10 @@ gateway_backend = "gateway"
     #[test]
     fn explicitly_declared_aggregate_slos_must_be_nonempty()
     -> Result<(), Box<dyn std::error::Error>> {
-        let result = toml::from_str::<BenchDefinition>(
+        let result = toml::from_str::<WorkspaceConfig>(
             r#"
-kind = "serving"
+schema_version = 2
+[benches.invalid]
 request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
 aggregate_slos = []
 concurrency = [1]
@@ -164,6 +167,52 @@ timeout_seconds = 60
         };
 
         assert!(error.to_string().contains("non-empty"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_serving_authoring_resolves_to_the_explicit_canonical_definition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let explicit = toml::from_str::<WorkspaceConfig>(
+            r#"
+schema_version = 2
+[benches.ordinary]
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 64, max = 128 }, output_tokens = 32 }
+concurrency = [1, 8]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+"#,
+        )?;
+        let ordinary = toml::from_str::<WorkspaceConfig>(
+            r#"
+schema_version = 2
+[benches.ordinary]
+request_source = { kind = "random", input_tokens = { min = 64, max = 128 }, output_tokens = 32 }
+concurrency = [1, 8]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+"#,
+        )?;
+
+        assert_eq!(
+            serde_json::to_value(&ordinary.benches["ordinary"])?,
+            serde_json::to_value(&explicit.benches["ordinary"])?,
+            "authoring defaults must disappear into one canonical definition"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn openai_smoke_omission_resolves_to_stable_effective_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<EvalDefinition>(r#"kind = "openai-smoke""#)?;
+        let value = serde_json::to_value(&definition)?;
+
+        assert_eq!(value["kind"], "openai-smoke");
+        assert_eq!(value["prompt"], "Hello");
+        assert_eq!(value["max_tokens"], 16);
+        assert_eq!(value["timeout_seconds"], 60);
         Ok(())
     }
 
@@ -428,14 +477,14 @@ timeout_seconds = 60
         assert!(matches!(
             request_source,
             Some(BenchRequestSource::Random {
-                prompt: BenchPrompt::Flat,
+                prompt,
                 input_tokens: BenchTokenSelector::Fixed(8000),
                 output_tokens: BenchTokenSelector::Fixed(1000),
                 prefix_sharing: Some(BenchPrefixSharing::Ratio {
                     shared_prefix_ratio: 0.75,
                 }),
                 shared_system_content: None,
-            })
+            }) if prompt.effective() == &BenchPrompt::Flat
         ));
         Ok(())
     }
@@ -503,7 +552,7 @@ chat_template = "{{ messages }}"
             "{error}"
         );
 
-        let missing_prompt = toml::from_str::<BenchDefinition>(
+        let default_prompt = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
 request_source = { kind = "random", input_tokens = 8, output_tokens = 2 }
@@ -512,10 +561,17 @@ prompts_per_concurrency = 1
 timeout_seconds = 60
 "#,
         );
-        assert!(
-            missing_prompt.is_err(),
-            "synthetic prompt kind must be explicit"
-        );
+        let default_prompt = default_prompt?;
+        let BenchDefinition::Serving { request_source, .. } = default_prompt else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::Random {
+                prompt,
+                ..
+            }) if prompt.declared().is_none() && prompt.effective() == &BenchPrompt::Flat
+        ));
         Ok(())
     }
 
@@ -563,6 +619,98 @@ timeout_seconds = 60
                         },
                     ]
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn weighted_random_mixture_prompt_omission_resolves_to_flat()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 8192, output_tokens = 1024, weight = 3 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::RandomMixture {
+                prompt,
+                ..
+            }) if prompt.declared().is_none() && prompt.effective() == &BenchPrompt::Flat
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_is_the_only_required_public_source_input()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [2]
+timeout_seconds = 3600
+"#,
+        )?;
+
+        validate_bench("agentx", &definition)?;
+        let serialized = toml::to_string(&definition)?;
+        assert!(serialized.contains("agentic_source"));
+        assert!(serialized.contains("semianalysis_agentx_062126_256k"));
+        assert!(serialized.contains("profile = \"inferencex\""));
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_rejects_independent_request_controls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 3600
+"#,
+        )?;
+
+        let error = validate_bench("agentx", &definition)
+            .err()
+            .ok_or("agentic source unexpectedly accepted prompts_per_concurrency")?;
+        assert!(
+            error.to_string().contains("prompts_per_concurrency"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_rejects_duration_below_the_release_profile_minimum()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126", profile = "inferencex" }
+concurrency = [1]
+duration_seconds = 899
+timeout_seconds = 3600
+"#,
+        )?;
+
+        let error = validate_bench("agentx", &definition)
+            .err()
+            .ok_or("agentic source unexpectedly accepted a short duration")?;
+        assert!(error.to_string().contains("at least 900"), "{error}");
         Ok(())
     }
 

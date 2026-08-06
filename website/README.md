@@ -7,7 +7,10 @@ The website is a static Astro and Starlight project published under the GitHub P
 Product landing pages and category introductions are presentation-only summaries. The build projects the following public repository sources without maintaining editable documentation copies:
 
 - `README.md`
-- `docs/workspace-authoring.md`
+- `plugins/inferlab/skills/inferlab/references/workspace-authoring.md`
+- `plugins/inferlab/skills/inferlab/references/workspace-definition.md`
+- `plugins/inferlab/skills/inferlab/references/execution-authoring.md`
+- `plugins/inferlab/skills/inferlab/references/measurement-authoring.md`
 - `docs/backend-support.md`
 - `docs/tui.md`
 - `docs/rfc/*.md`

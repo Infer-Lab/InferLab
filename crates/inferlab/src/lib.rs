@@ -2,6 +2,7 @@ mod adapter;
 mod adhoc;
 mod agent;
 mod atomic_json;
+mod bench_agentic_catalog;
 mod bench_dataset_catalog;
 mod bench_metric;
 mod cli;

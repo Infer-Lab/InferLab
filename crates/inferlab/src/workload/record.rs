@@ -7,7 +7,8 @@ pub(super) use crate::record::write_json;
 use crate::record::{RECORD_FILE, RECORDS_DIR, now_unix_ms, validate_record_id};
 use crate::workload::adaptive::AdaptiveTerminationReason;
 use crate::workload::domain::{
-    BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchRandomShape, WorkloadHttpMethod,
+    BenchAgenticCatalog, BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchRandomShape,
+    WorkloadHttpMethod,
 };
 use crate::workload::{BenchPlan, ResolvedWorkloadPlan};
 use crate::workspace::{BenchPrefixSharing, BenchSharedSystemContent, BenchTokenSelector};
@@ -25,14 +26,14 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkloadKind {
+pub(crate) enum WorkloadKind {
     Eval,
     Bench,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkloadStatus {
+pub(crate) enum WorkloadStatus {
     Running,
     Succeeded,
     Failed,
@@ -41,7 +42,7 @@ pub enum WorkloadStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClientProcessEvidence {
+pub(crate) struct ClientProcessEvidence {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub interrupted: bool,
@@ -50,7 +51,7 @@ pub struct ClientProcessEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClientTerminationEvidence {
+pub(crate) struct ClientTerminationEvidence {
     pub trigger: ClientTerminationTrigger,
     pub elapsed_ms: u64,
     pub status_deadline_ms: u64,
@@ -64,7 +65,7 @@ pub struct ClientTerminationEvidence {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientTerminationTrigger {
+pub(crate) enum ClientTerminationTrigger {
     ResultAccepted,
     LaunchFailure,
     Timeout,
@@ -74,7 +75,7 @@ pub enum ClientTerminationTrigger {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PrefixCacheResetEvidence {
+pub(crate) struct PrefixCacheResetEvidence {
     pub method: WorkloadHttpMethod,
     pub url: String,
     pub succeeded: bool,
@@ -84,7 +85,7 @@ pub struct PrefixCacheResetEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AdaptiveBenchSummary {
+pub(crate) struct AdaptiveBenchSummary {
     pub policy: String,
     pub selected_rate: Option<f64>,
     pub boundary_bracketed: bool,
@@ -94,7 +95,7 @@ pub struct AdaptiveBenchSummary {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DatasetAcquisitionOutcome {
+pub(crate) enum DatasetAcquisitionOutcome {
     Reused,
     Downloaded,
     Failed,
@@ -102,7 +103,7 @@ pub enum DatasetAcquisitionOutcome {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DatasetAcquisitionEvidence {
+pub(crate) struct DatasetAcquisitionEvidence {
     pub outcome: DatasetAcquisitionOutcome,
     pub observed_bytes: Option<u64>,
     pub observed_sha256: Option<String>,
@@ -111,7 +112,7 @@ pub struct DatasetAcquisitionEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BenchRequestSourceEvidence {
+pub(crate) enum BenchRequestSourceEvidence {
     Random {
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
@@ -135,7 +136,7 @@ pub enum BenchRequestSourceEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchDatasetRequestSourceEvidence {
+pub(crate) struct BenchDatasetRequestSourceEvidence {
     pub catalog: BenchDatasetCatalog,
     pub acquisition: DatasetAcquisitionEvidence,
     pub preparation: Option<BenchPopulationPreparationResult>,
@@ -148,7 +149,7 @@ pub struct BenchDatasetRequestSourceEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchSessionSourceEvidence {
+pub(crate) struct BenchSessionSourceEvidence {
     pub catalog: BenchSessionDatasetCatalog,
     pub acquisition: DatasetAcquisitionEvidence,
     pub preparation: Option<BenchPopulationPreparationResult>,
@@ -161,7 +162,15 @@ pub struct BenchSessionSourceEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchPopulationPreparationEvidence {
+pub(crate) struct BenchAgenticSourceEvidence {
+    pub dataset: String,
+    pub profile: String,
+    pub catalog: BenchAgenticCatalog,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchPopulationPreparationEvidence {
     pub result: Option<BenchPopulationPreparationResult>,
     pub process: Option<ClientProcessEvidence>,
     pub request: PathBuf,
@@ -173,14 +182,14 @@ pub struct BenchPopulationPreparationEvidence {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SloBoundDirection {
+pub(crate) enum SloBoundDirection {
     AtMost,
     AtLeast,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SloEvaluationOutcome {
+pub(crate) enum SloEvaluationOutcome {
     Passed,
     Failed,
     Unavailable,
@@ -188,7 +197,7 @@ pub enum SloEvaluationOutcome {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AggregateSloEvaluation {
+pub(crate) struct AggregateSloEvaluation {
     pub metric: BenchMetric,
     pub direction: SloBoundDirection,
     pub bound: f64,
@@ -198,7 +207,7 @@ pub struct AggregateSloEvaluation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RequestSloEvaluation {
+pub(crate) struct RequestSloEvaluation {
     pub good_requests: u64,
     pub good_request_ratio: f64,
     pub goodput: f64,
@@ -212,7 +221,7 @@ pub struct RequestSloEvaluation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CaseSloEvaluation {
+pub(crate) struct CaseSloEvaluation {
     pub aggregate_slos: Vec<AggregateSloEvaluation>,
     pub request_slo: Option<RequestSloEvaluation>,
     pub passed: bool,
@@ -220,7 +229,7 @@ pub struct CaseSloEvaluation {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BenchPopulationSliceEvidence {
+pub(crate) enum BenchPopulationSliceEvidence {
     Requests {
         population_sha256: String,
         warmup_start: u32,
@@ -243,7 +252,7 @@ pub enum BenchPopulationSliceEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClientCaseRecord<Evidence> {
+pub(crate) struct ClientCaseRecord<Evidence> {
     pub id: String,
     pub status: WorkloadStatus,
     pub request: PathBuf,
@@ -263,12 +272,12 @@ pub struct ClientCaseRecord<Evidence> {
     pub error: Option<String>,
 }
 
-pub type EvalCaseRecord = ClientCaseRecord<EvalCaseEvidence>;
-pub type BenchCaseRecord = ClientCaseRecord<BenchCaseEvidence>;
+pub(super) type EvalCaseRecord = ClientCaseRecord<EvalCaseEvidence>;
+pub(super) type BenchCaseRecord = ClientCaseRecord<BenchCaseEvidence>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EvalCaseEvidence {
+pub(crate) struct EvalCaseEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<BTreeMap<String, f64>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -287,7 +296,7 @@ pub struct EvalCaseEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchCaseEvidence {
+pub(crate) struct BenchCaseEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<PrefixCacheResetEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,6 +313,8 @@ pub struct BenchCaseEvidence {
     pub normalization_schema: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<BenchSessionResultEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agentic: Option<Box<inferlab_protocol::BenchAgenticResultEvidence>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -312,7 +323,7 @@ pub struct BenchCaseEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WorkloadEvidence {
+pub(crate) enum WorkloadEvidence {
     Eval {
         cases: Vec<EvalCaseRecord>,
     },
@@ -321,6 +332,8 @@ pub enum WorkloadEvidence {
         request_source: Option<Box<BenchRequestSourceEvidence>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_source: Option<Box<BenchSessionSourceEvidence>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agentic_source: Option<Box<BenchAgenticSourceEvidence>>,
         cases: Vec<BenchCaseRecord>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<AdaptiveBenchSummary>,
@@ -328,7 +341,7 @@ pub enum WorkloadEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkloadRecord {
+pub(crate) struct WorkloadRecord {
     pub schema_version: u32,
     pub inferlab_version: String,
     pub id: String,
@@ -346,7 +359,7 @@ pub struct WorkloadRecord {
 }
 
 impl WorkloadRecord {
-    const SCHEMA_VERSION: u32 = 11;
+    const SCHEMA_VERSION: u32 = 12;
 }
 
 pub(super) struct WorkloadRecordSession {
@@ -355,7 +368,7 @@ pub(super) struct WorkloadRecordSession {
 }
 
 impl WorkloadRecordSession {
-    pub fn begin(
+    pub(super) fn begin(
         root: &Path,
         id: &str,
         kind: WorkloadKind,
@@ -386,6 +399,7 @@ impl WorkloadRecordSession {
                 WorkloadKind::Bench => WorkloadEvidence::Bench {
                     request_source: None,
                     session_source: None,
+                    agentic_source: None,
                     cases: Vec::new(),
                     summary: None,
                 },
@@ -399,11 +413,11 @@ impl WorkloadRecordSession {
         Ok(session)
     }
 
-    pub fn record_mut(&mut self) -> &mut WorkloadRecord {
+    pub(super) fn record_mut(&mut self) -> &mut WorkloadRecord {
         &mut self.record
     }
 
-    pub fn set_prepared_bench_plan(&mut self, plan: BenchPlan) -> Result<(), InferlabError> {
+    pub(super) fn set_prepared_bench_plan(&mut self, plan: BenchPlan) -> Result<(), InferlabError> {
         match &mut self.record.resolved {
             ResolvedWorkloadPlan::Bench(slot) => {
                 *slot = Box::new(plan);
@@ -417,7 +431,7 @@ impl WorkloadRecordSession {
         }
     }
 
-    pub fn push_eval_case(&mut self, case: EvalCaseRecord) -> Result<(), InferlabError> {
+    pub(super) fn push_eval_case(&mut self, case: EvalCaseRecord) -> Result<(), InferlabError> {
         match &mut self.record.evidence {
             WorkloadEvidence::Eval { cases } => {
                 cases.push(case);
@@ -427,7 +441,7 @@ impl WorkloadRecordSession {
         }
     }
 
-    pub fn set_bench_request_source(
+    pub(super) fn set_bench_request_source(
         &mut self,
         request_source: BenchRequestSourceEvidence,
     ) -> Result<(), InferlabError> {
@@ -443,7 +457,7 @@ impl WorkloadRecordSession {
         }
     }
 
-    pub fn set_bench_session_source(
+    pub(super) fn set_bench_session_source(
         &mut self,
         session_source: BenchSessionSourceEvidence,
     ) -> Result<(), InferlabError> {
@@ -459,7 +473,23 @@ impl WorkloadRecordSession {
         }
     }
 
-    pub fn push_bench_case(&mut self, case: BenchCaseRecord) -> Result<(), InferlabError> {
+    pub(super) fn set_bench_agentic_source(
+        &mut self,
+        agentic_source: BenchAgenticSourceEvidence,
+    ) -> Result<(), InferlabError> {
+        match &mut self.record.evidence {
+            WorkloadEvidence::Bench {
+                agentic_source: slot,
+                ..
+            } => {
+                *slot = Some(Box::new(agentic_source));
+                Ok(())
+            }
+            WorkloadEvidence::Eval { .. } => Err(evidence_kind_error("bench", "eval")),
+        }
+    }
+
+    pub(super) fn push_bench_case(&mut self, case: BenchCaseRecord) -> Result<(), InferlabError> {
         match &mut self.record.evidence {
             WorkloadEvidence::Bench { cases, .. } => {
                 cases.push(case);
@@ -469,14 +499,14 @@ impl WorkloadRecordSession {
         }
     }
 
-    pub fn bench_cases(&self) -> Result<&[BenchCaseRecord], InferlabError> {
+    pub(super) fn bench_cases(&self) -> Result<&[BenchCaseRecord], InferlabError> {
         match &self.record.evidence {
             WorkloadEvidence::Bench { cases, .. } => Ok(cases),
             WorkloadEvidence::Eval { .. } => Err(evidence_kind_error("bench", "eval")),
         }
     }
 
-    pub fn set_adaptive_bench_summary(
+    pub(super) fn set_adaptive_bench_summary(
         &mut self,
         adaptive_summary: AdaptiveBenchSummary,
     ) -> Result<(), InferlabError> {
@@ -489,13 +519,13 @@ impl WorkloadRecordSession {
         }
     }
 
-    pub fn finish(&mut self, status: WorkloadStatus) -> Result<(), InferlabError> {
+    pub(super) fn finish(&mut self, status: WorkloadStatus) -> Result<(), InferlabError> {
         self.record.status = status;
         self.record.finished_unix_ms = Some(now_unix_ms()?);
         self.rewrite()
     }
 
-    pub fn rewrite(&self) -> Result<(), InferlabError> {
+    pub(super) fn rewrite(&self) -> Result<(), InferlabError> {
         write_json(
             &self
                 .root
@@ -506,7 +536,7 @@ impl WorkloadRecordSession {
         )
     }
 
-    pub fn case_paths(&self, case_id: &str) -> Result<ClientCasePaths, InferlabError> {
+    pub(super) fn case_paths(&self, case_id: &str) -> Result<ClientCasePaths, InferlabError> {
         validate_record_id("case", case_id)?;
         let relative_dir = Path::new(RECORDS_DIR)
             .join(&self.record.id)
@@ -526,11 +556,11 @@ impl WorkloadRecordSession {
         })
     }
 
-    pub fn absolute(&self, path: &Path) -> PathBuf {
+    pub(super) fn absolute(&self, path: &Path) -> PathBuf {
         self.root.join(path)
     }
 
-    pub fn into_record(self) -> WorkloadRecord {
+    pub(super) fn into_record(self) -> WorkloadRecord {
         self.record
     }
 }

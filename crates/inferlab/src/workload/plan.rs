@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MeasurementPlan {
+pub(crate) struct MeasurementPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<String>,
     pub evals: Vec<EvalPlan>,
@@ -23,7 +23,7 @@ pub struct MeasurementPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct EvalPlan {
+pub(crate) struct EvalPlan {
     pub id: String,
     pub capture: bool,
     pub declared_definition: EvalDefinition,
@@ -36,7 +36,7 @@ pub struct EvalPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct BenchPlan {
+pub(crate) struct BenchPlan {
     pub id: String,
     pub capture: bool,
     pub declared_definition: BenchDefinition,
@@ -47,14 +47,14 @@ pub struct BenchPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MeasurementOverridePlan {
+pub(crate) struct MeasurementOverridePlan {
     pub invocation_index: usize,
     pub value: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum ResolvedWorkloadPlan {
+pub(crate) enum ResolvedWorkloadPlan {
     Eval(Box<EvalPlan>),
     Bench(Box<BenchPlan>),
     ManualBench(Box<ManualBenchPlan>),
@@ -72,7 +72,7 @@ impl From<BenchPlan> for ResolvedWorkloadPlan {
     }
 }
 
-pub enum WorkloadServerAccess<'a> {
+pub(crate) enum WorkloadServerAccess<'a> {
     RecipeOwned { record_id: &'a str },
     ManagedServer { record_id: &'a str },
 }
@@ -86,14 +86,14 @@ impl WorkloadServerAccess<'_> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ManualBenchTarget {
+pub(crate) struct ManualBenchTarget {
     pub server_record_id: String,
     pub producing_inferlab_version: String,
     pub serving_snapshot: ResolvedExecution,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ManualBenchPlan {
+pub(crate) struct ManualBenchPlan {
     pub invoking_inferlab_version: String,
     pub target: ManualBenchTarget,
     pub measurement_workspace: WorkspaceSnapshot,
@@ -102,7 +102,7 @@ pub struct ManualBenchPlan {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ManualBenchDryRun<'a> {
+pub(crate) struct ManualBenchDryRun<'a> {
     pub dry_run: bool,
     pub invoking_inferlab_version: &'a str,
     pub target: &'a ManualBenchTarget,
@@ -112,7 +112,7 @@ pub struct ManualBenchDryRun<'a> {
 }
 
 impl ManualBenchPlan {
-    pub fn dry_run_plan(&self) -> ManualBenchDryRun<'_> {
+    pub(crate) fn dry_run_plan(&self) -> ManualBenchDryRun<'_> {
         ManualBenchDryRun {
             dry_run: true,
             invoking_inferlab_version: &self.invoking_inferlab_version,
@@ -126,7 +126,7 @@ impl ManualBenchPlan {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EvalExecutionPlan {
+pub(crate) enum EvalExecutionPlan {
     #[serde(rename = "native_openai_smoke")]
     NativeOpenAiSmoke,
     LmEval {
@@ -138,7 +138,7 @@ pub enum EvalExecutionPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct BenchClientPlan {
+pub(crate) struct BenchClientPlan {
     pub toolchain: BenchToolchainIdentity,
     pub tokenizer_backend: String,
     pub endpoint: WorkloadEndpoint,
@@ -155,7 +155,7 @@ pub struct BenchClientPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ClientCommandPlan {
+pub(crate) struct ClientCommandPlan {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
@@ -163,7 +163,7 @@ pub struct ClientCommandPlan {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-pub enum BenchExecutionPlan {
+pub(crate) enum BenchExecutionPlan {
     Matrix {
         cases: Vec<BenchCasePlan>,
     },
@@ -181,11 +181,13 @@ pub enum BenchExecutionPlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct BenchCasePlan {
+pub(crate) struct BenchCasePlan {
     pub id: String,
     pub load_shape: LoadShape,
     pub request_count: u32,
     pub warmup_request_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +214,7 @@ pub(super) fn session_population_layout(
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum LoadShape {
+pub(crate) enum LoadShape {
     ConcurrencyLimited {
         concurrency: u32,
     },
@@ -223,7 +225,7 @@ pub enum LoadShape {
     },
 }
 
-pub struct MeasurementResolveContext<'a> {
+pub(crate) struct MeasurementResolveContext<'a> {
     pub workspace_root: &'a Path,
     pub workspace_source_exclusions: &'a [PathBuf],
     pub endpoint: WorkloadEndpoint,

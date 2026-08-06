@@ -14,16 +14,16 @@ pub(crate) use domain::{
     WorkloadHttpMethod, WorkloadServerMetricsEndpoint,
 };
 pub(crate) use record::WorkloadKind;
-pub use record::WorkloadStatus;
+pub(crate) use record::WorkloadStatus;
 pub(crate) use runtime::skip;
-pub use runtime::{run_bench, run_eval};
+pub(crate) use runtime::{run_bench, run_eval};
 
-pub use plan::{
+pub(crate) use plan::{
     BenchCasePlan, BenchExecutionPlan, BenchPlan, ClientCommandPlan, EvalExecutionPlan, EvalPlan,
     LoadShape, MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan,
     WorkloadServerAccess,
 };
-pub use planning::{resolve_manual_bench, resolve_measurements, resolved_request_count};
+pub(crate) use planning::{resolve_manual_bench, resolve_measurements, resolved_request_count};
 
 #[cfg(test)]
 mod tests {
@@ -48,7 +48,7 @@ timeout_seconds = 60
         assert!(
             error
                 .to_string()
-                .contains("exactly one of request_source and session_source")
+                .contains("exactly one of request_source, session_source, and agentic_source")
         );
 
         let request_shaped = toml::from_str::<BenchDefinition>(

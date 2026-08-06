@@ -1,11 +1,11 @@
 {
   "provenance": {
-    "captured_on": "2026-07-15",
-    "source": "AIPerf profile executed by Inferlab against an OpenAI-compatible vLLM endpoint",
-    "projection": "Only the AIPerf fields consumed to qualify native warmup are retained; machine, endpoint, model, and record identities are omitted"
+    "captured_on": "2026-08-06",
+    "source": "Official AIPerf profile executed by InferLab against a local OpenAI-compatible streaming fixture endpoint",
+    "projection": "Only the AIPerf fields consumed to qualify native warmup are retained; endpoint and temporary record identities are omitted"
   },
-  "aiperf_version": "0.11.0",
-  "runner_version": "0.2.0",
+  "aiperf_version": "0.12.0",
+  "runner_version": "0.9.1",
   "effective_config": {
     "dataset": {
       "type": "synthetic",

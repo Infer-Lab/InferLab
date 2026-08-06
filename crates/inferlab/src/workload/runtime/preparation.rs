@@ -2,11 +2,11 @@
 
 use super::client::{accept_client_result, run_client, wait_for_interrupt};
 use super::{
-    BenchDatasetRequestSourceEvidence, BenchExecutionPlan, BenchPlan, BenchPopulation,
-    BenchPopulationPreparationEvidence, BenchRequestSourceEvidence, BenchSessionSourceEvidence,
-    BenchSessionTemplate, DatasetAcquisitionEvidence, DatasetAcquisitionOutcome,
-    ResolvedBenchRequestSource, ResolvedBenchSource, SYNTHETIC_MATERIALIZATION_IDENTITY,
-    WorkloadRecordSession,
+    BenchAgenticSourceEvidence, BenchDatasetRequestSourceEvidence, BenchExecutionPlan, BenchPlan,
+    BenchPopulation, BenchPopulationPreparationEvidence, BenchRequestSourceEvidence,
+    BenchSessionSourceEvidence, BenchSessionTemplate, DatasetAcquisitionEvidence,
+    DatasetAcquisitionOutcome, ResolvedBenchRequestSource, ResolvedBenchSource,
+    SYNTHETIC_MATERIALIZATION_IDENTITY, WorkloadRecordSession,
 };
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
@@ -184,6 +184,13 @@ pub(super) fn prepare_bench_request_source(
                 decode_error,
             )
         }
+        ResolvedBenchSource::Agentic { agentic_source } => {
+            session.set_bench_agentic_source(BenchAgenticSourceEvidence {
+                dataset: agentic_source.dataset,
+                profile: agentic_source.profile,
+                catalog: *agentic_source.catalog,
+            })
+        }
     }
 }
 
@@ -200,7 +207,7 @@ pub(super) fn run_population_preparation(
             .log(session.absolute(&paths.stderr)),
     )?;
     let (request_source, session_source) =
-        wire::bench_source_inputs(&plan.client.effective_definition)?;
+        wire::bench_population_source_inputs(&plan.client.effective_definition)?;
     let request = BenchPopulationPreparationRequest {
         protocol_version: ProtocolVersion::V7,
         model: wire::model_input(&plan.client.model),

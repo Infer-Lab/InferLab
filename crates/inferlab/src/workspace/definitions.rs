@@ -10,13 +10,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-pub const WORKSPACE_FILE: &str = ".inferlab/workspace.toml";
-pub const WORKSPACE_FRAGMENT_DIR: &str = ".inferlab/workspace.d";
-pub const DEFAULT_LOCAL_FILE: &str = ".inferlab/local.toml";
+pub(super) const WORKSPACE_FILE: &str = ".inferlab/workspace.toml";
+pub(super) const WORKSPACE_FRAGMENT_DIR: &str = ".inferlab/workspace.d";
+pub(super) const DEFAULT_LOCAL_FILE: &str = ".inferlab/local.toml";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceConfig {
+pub(crate) struct WorkspaceConfig {
     pub schema_version: u32,
     // Every identifier-keyed section defaults to empty so a section may be
     // supplied entirely by workspace.d fragments; the root file need not
@@ -31,7 +31,7 @@ pub struct WorkspaceConfig {
     pub servers: BTreeMap<String, ServerDefinition>,
     #[serde(default)]
     pub evals: BTreeMap<String, EvalDefinition>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_defaulted_bench_definitions")]
     pub benches: BTreeMap<String, BenchDefinition>,
     #[serde(default)]
     pub workload_suites: BTreeMap<String, WorkloadSuiteDefinition>,
@@ -49,7 +49,7 @@ pub struct WorkspaceConfig {
 /// or qualified.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExternalImageDefinition {
+pub(crate) struct ExternalImageDefinition {
     /// A registry reference carrying its immutable digest,
     /// `repository[:tag]@sha256:<64 hex>`.
     pub reference: String,
@@ -61,7 +61,7 @@ pub struct ExternalImageDefinition {
 /// recipe-referenced model validation coordinates.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageDefinition {
+pub(crate) struct ImageDefinition {
     pub stack: String,
     pub base_image: String,
     pub platforms: Vec<String>,
@@ -77,7 +77,7 @@ pub struct ImageDefinition {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageValidationCoordinate {
+pub(crate) struct ImageValidationCoordinate {
     pub recipe: String,
     #[serde(default)]
     pub server_case: Option<String>,
@@ -85,13 +85,13 @@ pub struct ImageValidationCoordinate {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelDefinition {
+pub(crate) struct ModelDefinition {
     pub served_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct StackDefinition {
+pub(crate) struct StackDefinition {
     pub integration: String,
     pub pixi_environment: String,
     #[serde(default)]
@@ -104,7 +104,7 @@ pub struct StackDefinition {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServerDefinition {
+pub(crate) struct ServerDefinition {
     pub stack: String,
     pub model: String,
     pub topology: ServeTopology,
@@ -155,7 +155,7 @@ pub(crate) const DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ServeRoleDefinition {
+pub(crate) struct ServeRoleDefinition {
     #[serde(default)]
     pub replicas: Option<u32>,
     #[serde(default)]
@@ -174,19 +174,19 @@ pub struct ServeRoleDefinition {
 /// fields replace their managed defaults.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ProfilerEscapes {
+pub(crate) struct ProfilerEscapes {
     pub nsys: NsysEscapes,
 }
 
 impl ProfilerEscapes {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.nsys.is_empty()
     }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ServeRoleOverride {
+pub(crate) struct ServeRoleOverride {
     pub replicas: Option<u32>,
     pub parallelism: Parallelism,
     pub settings: BTreeMap<String, JsonValue>,
@@ -194,7 +194,7 @@ pub struct ServeRoleOverride {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnvironmentCheckDefinition {
+pub(crate) struct EnvironmentCheckDefinition {
     pub id: String,
     /// Workspace-relative Python script; exit status zero is the sole pass
     /// signal, and output reports facts, not remedies.
@@ -207,7 +207,7 @@ pub struct EnvironmentCheckDefinition {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnvironmentScriptDefinition {
+pub(crate) struct EnvironmentScriptDefinition {
     pub id: String,
     pub script: PathBuf,
 }
@@ -220,7 +220,7 @@ pub struct EnvironmentScriptDefinition {
 /// general TOML value tree.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum JsonValue {
+pub(crate) enum JsonValue {
     Bool(bool),
     Integer(i64),
     Float(f64),
@@ -311,11 +311,14 @@ impl<'de> Deserialize<'de> for JsonValue {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum EvalDefinition {
+pub(crate) enum EvalDefinition {
     #[serde(rename = "openai-smoke")]
     OpenAiSmoke {
+        #[serde(default = "default_openai_smoke_prompt")]
         prompt: String,
+        #[serde(default = "default_openai_smoke_max_tokens")]
         max_tokens: u32,
+        #[serde(default = "default_openai_smoke_timeout_seconds")]
         timeout_seconds: u64,
     },
     LmEval {
@@ -342,13 +345,25 @@ pub enum EvalDefinition {
     },
 }
 
+fn default_openai_smoke_prompt() -> String {
+    "Hello".to_owned()
+}
+
+const fn default_openai_smoke_max_tokens() -> u32 {
+    16
+}
+
+const fn default_openai_smoke_timeout_seconds() -> u64 {
+    60
+}
+
 const fn default_eval_trials() -> u32 {
     1
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum EvalTaskSource {
+pub(crate) enum EvalTaskSource {
     BuiltIn(String),
     Bundled { bundled: String },
     WorkspaceYaml { yaml: PathBuf },
@@ -356,7 +371,7 @@ pub enum EvalTaskSource {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AggregateSlo {
+pub(crate) struct AggregateSlo {
     pub metric: BenchMetric,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_most: Option<f64>,
@@ -381,7 +396,7 @@ where
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RequestSlo {
+pub(crate) struct RequestSlo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_latency_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -393,12 +408,14 @@ pub struct RequestSlo {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum BenchDefinition {
+pub(crate) enum BenchDefinition {
     Serving {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_source: Option<BenchRequestSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_source: Option<BenchSessionSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agentic_source: Option<BenchAgenticSource>,
         #[serde(default)]
         seed: u64,
         #[serde(default)]
@@ -467,9 +484,47 @@ pub enum BenchDefinition {
     },
 }
 
+pub(super) fn deserialize_defaulted_bench_definitions<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, BenchDefinition>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut definitions = BTreeMap::<String, serde_value::Value>::deserialize(deserializer)?;
+    for definition in definitions.values_mut() {
+        let serde_value::Value::Map(fields) = definition else {
+            return Err(de::Error::custom("a Bench definition must be a table"));
+        };
+        // Default only the absent discriminator, then delegate every field and
+        // error to the ordinary tagged definition deserializer. Explicit kinds
+        // and malformed definitions therefore retain the same one authority.
+        fields
+            .entry(serde_value::Value::String("kind".to_owned()))
+            .or_insert_with(|| serde_value::Value::String("serving".to_owned()));
+    }
+    definitions
+        .into_iter()
+        .map(|(id, definition)| {
+            let definition = BenchDefinition::deserialize(definition).map_err(|error| {
+                let error = error.into_error::<de::value::Error>();
+                de::Error::custom(format!("invalid Bench {id:?}: {error}"))
+            })?;
+            Ok((id, definition))
+        })
+        .collect()
+}
+
+/// One release-qualified agentic trace corpus and replay policy.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchSessionSource {
+pub(crate) struct BenchAgenticSource {
+    pub dataset: String,
+    pub profile: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchSessionSource {
     pub dataset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -488,9 +543,10 @@ const fn default_inter_turn_delay_scale() -> f64 {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BenchRequestSource {
+pub(crate) enum BenchRequestSource {
     Random {
-        prompt: BenchPrompt,
+        #[serde(default)]
+        prompt: BenchPromptSelection,
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,7 +555,8 @@ pub enum BenchRequestSource {
         shared_system_content: Option<BenchSharedSystemContent>,
     },
     RandomMixture {
-        prompt: BenchPrompt,
+        #[serde(default)]
+        prompt: BenchPromptSelection,
         shapes: Vec<BenchRandomShape>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_sharing: Option<BenchPrefixSharing>,
@@ -516,7 +573,7 @@ pub enum BenchRequestSource {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BenchPrompt {
+pub(crate) enum BenchPrompt {
     Flat,
     RenderedChat {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,8 +584,64 @@ pub enum BenchPrompt {
     ServerChat,
 }
 
+impl Default for BenchPrompt {
+    fn default() -> Self {
+        Self::Flat
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BenchPromptSelection {
+    declared: Option<BenchPrompt>,
+    effective: BenchPrompt,
+}
+
+impl BenchPromptSelection {
+    pub(crate) fn explicit(prompt: BenchPrompt) -> Self {
+        Self {
+            declared: Some(prompt.clone()),
+            effective: prompt,
+        }
+    }
+
+    pub(crate) fn declared(&self) -> Option<&BenchPrompt> {
+        self.declared.as_ref()
+    }
+
+    pub(crate) fn effective(&self) -> &BenchPrompt {
+        &self.effective
+    }
+}
+
+impl Default for BenchPromptSelection {
+    fn default() -> Self {
+        Self {
+            declared: None,
+            effective: BenchPrompt::Flat,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BenchPromptSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        BenchPrompt::deserialize(deserializer).map(Self::explicit)
+    }
+}
+
+impl Serialize for BenchPromptSelection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.effective.serialize(serializer)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BenchTokenSelector {
+pub(crate) enum BenchTokenSelector {
     Fixed(u32),
     InclusiveUniform { min: u32, max: u32 },
 }
@@ -538,12 +651,20 @@ pub enum BenchTokenSelector {
 enum BenchTokenSelectorWire {
     Fixed(u32),
     Distribution(BenchTokenDistributionWire),
+    InclusiveUniform(BenchInclusiveUniformWire),
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum BenchTokenDistributionWire {
     InclusiveUniform { min: u32, max: u32 },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BenchInclusiveUniformWire {
+    min: u32,
+    max: u32,
 }
 
 impl<'de> Deserialize<'de> for BenchTokenSelector {
@@ -556,6 +677,9 @@ impl<'de> Deserialize<'de> for BenchTokenSelector {
             BenchTokenSelectorWire::Distribution(
                 BenchTokenDistributionWire::InclusiveUniform { min, max },
             ) => Ok(Self::InclusiveUniform { min, max }),
+            BenchTokenSelectorWire::InclusiveUniform(BenchInclusiveUniformWire { min, max }) => {
+                Ok(Self::InclusiveUniform { min, max })
+            }
         }
     }
 }
@@ -579,7 +703,7 @@ impl Serialize for BenchTokenSelector {
 }
 
 impl BenchTokenSelector {
-    pub const fn minimum(&self) -> u32 {
+    pub(crate) const fn minimum(&self) -> u32 {
         match self {
             Self::Fixed(value) => *value,
             Self::InclusiveUniform { min, .. } => *min,
@@ -597,28 +721,28 @@ impl BenchTokenSelector {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum BenchPrefixSharing {
+pub(crate) enum BenchPrefixSharing {
     Tokens { shared_prefix_tokens: u32 },
     Ratio { shared_prefix_ratio: f64 },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum BenchSharedSystemContent {
+pub(crate) enum BenchSharedSystemContent {
     Tokens { tokens: u32 },
     Ratio { ratio: f64 },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BenchRandomShape {
+pub(crate) struct BenchRandomShape {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub weight: u32,
 }
 
 impl BenchRequestSource {
-    pub fn tpot_applicability(&self) -> BenchTpotApplicability {
+    pub(crate) fn tpot_applicability(&self) -> BenchTpotApplicability {
         match self {
             Self::Random { output_tokens, .. } => output_tokens.tpot_applicability(),
             Self::RandomMixture { shapes, .. } => shapes
@@ -635,7 +759,7 @@ impl BenchRequestSource {
 }
 
 impl BenchSessionSource {
-    pub fn tpot_applicability(&self) -> BenchTpotApplicability {
+    pub(crate) fn tpot_applicability(&self) -> BenchTpotApplicability {
         self.output_tokens.map_or(
             BenchTpotApplicability::Applicable,
             BenchTpotApplicability::from_output_tokens,
@@ -645,7 +769,7 @@ impl BenchSessionSource {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BenchTpotApplicability {
+pub(crate) enum BenchTpotApplicability {
     Applicable,
     Inapplicable,
 }
@@ -659,19 +783,19 @@ impl BenchTpotApplicability {
         }
     }
 
-    pub const fn is_applicable(self) -> bool {
+    pub(crate) const fn is_applicable(self) -> bool {
         matches!(self, Self::Applicable)
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum RequestRate {
+pub(crate) enum RequestRate {
     Finite(f64),
     Unbounded,
 }
 
 impl RequestRate {
-    pub const fn finite(&self) -> Option<f64> {
+    pub(crate) const fn finite(&self) -> Option<f64> {
         match self {
             Self::Finite(value) => Some(*value),
             Self::Unbounded => None,
@@ -743,7 +867,7 @@ impl<'de> Deserialize<'de> for RequestRate {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkloadSuiteDefinition {
+pub(crate) struct WorkloadSuiteDefinition {
     #[serde(default)]
     pub evals: Vec<String>,
     #[serde(default)]
@@ -754,14 +878,14 @@ pub struct WorkloadSuiteDefinition {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecipeDefinition {
+pub(crate) struct RecipeDefinition {
     pub server: String,
     pub workload_suite: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ServerCaseDefinition {
+pub(crate) struct ServerCaseDefinition {
     pub readiness_timeout_seconds: Option<u64>,
     pub readiness_attempt_timeout_seconds: Option<u64>,
     pub capture_arm_deadline_seconds: Option<u64>,

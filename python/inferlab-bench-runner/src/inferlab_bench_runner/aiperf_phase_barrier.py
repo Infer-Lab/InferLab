@@ -1,4 +1,4 @@
-"""Coordinate AIPerf 0.11 warmup completion with Rust-owned capture."""
+"""Coordinate pinned AIPerf warmup completion with Rust-owned capture."""
 
 from __future__ import annotations
 
@@ -41,18 +41,24 @@ class PhaseProgress(Protocol):
     counter: CreditCounter
 
 
-class CreditIssuer(Protocol):
-    _progress: PhaseProgress
-
-
 class NativeTimingStrategy(Protocol):
     async def setup_phase(self) -> None: ...
 
     async def execute_phase(self) -> None: ...
 
-    async def handle_credit_return(self, credit: object) -> None: ...
+    async def handle_credit_return(self, credit: object, *, error: str | None = None) -> None: ...
 
     def set_request_rate(self, new_rate: float) -> None: ...
+
+    @property
+    def wants_returns_after_sending_complete(self) -> bool: ...
+
+    @property
+    def allows_pending_branch_handoff_after_sending_complete(self) -> bool: ...
+
+    def record_warmup_failure(self, trace_id: str) -> None: ...
+
+    def report_warmup_failures(self) -> None: ...
 
 
 class NativeTimingStrategyFactory(Protocol):
@@ -132,6 +138,11 @@ def _native_strategy_factory() -> NativeTimingStrategyFactory:
     return cast(NativeTimingStrategyFactory, module.RequestRateStrategy)
 
 
+def _native_agentic_strategy_factory() -> NativeTimingStrategyFactory:
+    module = importlib.import_module("aiperf.timing.strategies.agentic_replay")
+    return cast(NativeTimingStrategyFactory, module.AgenticReplayStrategy)
+
+
 def _counter_values(counter: CreditCounter) -> dict[str, int | None]:
     return {
         "final_requests_sent": counter.final_requests_sent,
@@ -144,7 +155,7 @@ def _counter_values(counter: CreditCounter) -> dict[str, int | None]:
     }
 
 
-class Aiperf011ProfileBarrierStrategy:
+class AiperfProfileBarrierStrategy:
     """Delegate native request-rate timing and gate its profiling setup."""
 
     def __init__(self, **kwargs: object) -> None:
@@ -155,13 +166,12 @@ class Aiperf011ProfileBarrierStrategy:
         phase = str(config.phase)
         self._release_address: str | None = None
         if phase == "warmup":
-            credit_issuer = cast(CreditIssuer, kwargs["credit_issuer"])
             _warmup_checkpoint = WarmupCheckpoint(
                 expectation=WarmupExpectation(
                     requests=config.total_expected_requests,
                     sessions=config.expected_num_sessions,
                 ),
-                progress=credit_issuer._progress,
+                progress=cast(PhaseProgress, kwargs["progress"]),
             )
         elif phase == "profiling":
             self._release_address = os.environ.get(PROFILE_BARRIER_ENV)
@@ -186,8 +196,67 @@ class Aiperf011ProfileBarrierStrategy:
     async def execute_phase(self) -> None:
         await self._delegate.execute_phase()
 
-    async def handle_credit_return(self, credit: object) -> None:
-        await self._delegate.handle_credit_return(credit)
+    async def handle_credit_return(self, credit: object, *, error: str | None = None) -> None:
+        await self._delegate.handle_credit_return(credit, error=error)
 
     def set_request_rate(self, new_rate: float) -> None:
         self._delegate.set_request_rate(new_rate)
+
+
+class AiperfAgenticProfileBarrierStrategy:
+    """Delegate native AgentX scheduling and gate its profiling setup."""
+
+    def __init__(self, **kwargs: object) -> None:
+        global _warmup_checkpoint
+
+        self._delegate = _native_agentic_strategy_factory()(**kwargs)
+        config = cast(PhaseConfig, kwargs["config"])
+        phase = str(config.phase)
+        self._release_address: str | None = None
+        if phase == "warmup":
+            _warmup_checkpoint = WarmupCheckpoint(
+                expectation=WarmupExpectation(
+                    requests=config.total_expected_requests,
+                    sessions=config.expected_num_sessions,
+                ),
+                progress=cast(PhaseProgress, kwargs["progress"]),
+            )
+        elif phase == "profiling":
+            self._release_address = os.environ.get(PROFILE_BARRIER_ENV)
+
+    @property
+    def wants_returns_after_sending_complete(self) -> bool:
+        return self._delegate.wants_returns_after_sending_complete
+
+    @property
+    def allows_pending_branch_handoff_after_sending_complete(self) -> bool:
+        return self._delegate.allows_pending_branch_handoff_after_sending_complete
+
+    async def setup_phase(self) -> None:
+        global _warmup_checkpoint
+
+        await self._delegate.setup_phase()
+        if self._release_address is None:
+            return
+        checkpoint = _warmup_checkpoint
+        _warmup_checkpoint = None
+        if checkpoint is None:
+            raise RuntimeError("AIPerf AgentX profiling reached the barrier without warmup")
+        error = warmup_completion_error(
+            checkpoint.expectation, _counter_values(checkpoint.progress.counter)
+        )
+        if error is not None:
+            raise RuntimeError(error)
+        await asyncio.to_thread(await_capture_open, self._release_address)
+
+    async def execute_phase(self) -> None:
+        await self._delegate.execute_phase()
+
+    async def handle_credit_return(self, credit: object, *, error: str | None = None) -> None:
+        await self._delegate.handle_credit_return(credit, error=error)
+
+    def record_warmup_failure(self, trace_id: str) -> None:
+        self._delegate.record_warmup_failure(trace_id)
+
+    def report_warmup_failures(self) -> None:
+        self._delegate.report_warmup_failures()

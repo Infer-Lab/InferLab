@@ -52,7 +52,7 @@ use std::time::Duration;
 
 /// Write the smallest complete current-schema image record that can be
 /// selected by a black-box launch test.
-pub fn write_assembled_image_record(
+pub(crate) fn write_assembled_image_record(
     root: &Path,
     record_id: &str,
     stack: &str,
@@ -129,19 +129,19 @@ pub fn write_assembled_image_record(
 /// black-box CLI. Tests keep using the executable boundary without rebuilding
 /// the record schema out of string-keyed `serde_json::Value` traversal.
 #[derive(Clone, Debug, Deserialize)]
-pub struct ResolvedRoleProjection {
+pub(crate) struct ResolvedRoleProjection {
     pub id: String,
     pub replicas: Vec<ResolvedReplicaProjection>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct ResolvedReplicaProjection {
+pub(crate) struct ResolvedReplicaProjection {
     pub id: String,
     pub ranks: Vec<ResolvedRankProjection>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct ResolvedRankProjection {
+pub(crate) struct ResolvedRankProjection {
     pub id: String,
     pub rank: u32,
     pub rank_count: u32,
@@ -162,19 +162,19 @@ pub struct ResolvedRankProjection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum LaunchProjection {
+pub(crate) enum LaunchProjection {
     Local,
     Ssh { target: String },
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct EndpointAssignmentProjection {
+pub(crate) struct EndpointAssignmentProjection {
     pub host: String,
     pub port: u16,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct RuntimeCacheProjection {
+pub(crate) struct RuntimeCacheProjection {
     pub storage_root: PathBuf,
     pub storage_root_source: String,
     pub namespace: RuntimeCacheNamespaceProjection,
@@ -182,7 +182,7 @@ pub struct RuntimeCacheProjection {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct RuntimeCacheNamespaceProjection {
+pub(crate) struct RuntimeCacheNamespaceProjection {
     pub workspace_source_digest: String,
     pub pixi_environment: String,
     pub image_id: Option<String>,
@@ -191,7 +191,7 @@ pub struct RuntimeCacheNamespaceProjection {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct CommandProjection {
+pub(crate) struct CommandProjection {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -202,7 +202,7 @@ pub struct CommandProjection {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct LaunchFileProjection {
+pub(crate) struct LaunchFileProjection {
     pub relative_path: String,
     pub resolved_path: PathBuf,
     pub text: String,
@@ -211,7 +211,7 @@ pub struct LaunchFileProjection {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReadinessProjection {
+pub(crate) enum ReadinessProjection {
     Http {
         path: String,
         timeout_seconds: Option<u64>,
@@ -231,14 +231,14 @@ pub enum ReadinessProjection {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct TargetRegistryExpectedProjection {
+pub(crate) struct TargetRegistryExpectedProjection {
     pub url: String,
     pub role: String,
     pub bootstrap_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct EndpointProjection {
+pub(crate) struct EndpointProjection {
     pub host: String,
     pub port: u16,
     pub protocol: String,
@@ -247,7 +247,7 @@ pub struct EndpointProjection {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct CaptureTargetProjection {
+pub(crate) struct CaptureTargetProjection {
     pub window_control_endpoint: String,
     pub control_process_id: String,
     pub start: HttpActionProjection,
@@ -257,7 +257,7 @@ pub struct CaptureTargetProjection {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct HttpActionProjection {
+pub(crate) struct HttpActionProjection {
     pub method: String,
     pub path: String,
     #[serde(default)]
@@ -267,7 +267,7 @@ pub struct HttpActionProjection {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default)]
-pub struct NsysEscapesProjection {
+pub(crate) struct NsysEscapesProjection {
     pub executable: Option<String>,
     pub launch_options: Vec<String>,
     pub start_options: Vec<String>,
@@ -278,7 +278,7 @@ pub struct NsysEscapesProjection {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedProcessProjection {
+pub(crate) struct ResolvedProcessProjection {
     pub role_id: String,
     pub replica_id: String,
     pub rank: ResolvedRankProjection,
@@ -287,7 +287,7 @@ pub struct ResolvedProcessProjection {
 /// Narrow projection of the independently allocated frontend process. It is
 /// intentionally not represented as a synthetic role replica or model rank.
 #[derive(Clone, Debug, Deserialize)]
-pub struct ResolvedFrontendProjection {
+pub(crate) struct ResolvedFrontendProjection {
     pub id: String,
     pub process_role: String,
     pub components: Vec<String>,
@@ -301,7 +301,9 @@ pub struct ResolvedFrontendProjection {
     pub endpoint: EndpointAssignmentProjection,
 }
 
-pub fn resolved_processes(value: &Value) -> Result<Vec<ResolvedProcessProjection>, Box<dyn Error>> {
+pub(crate) fn resolved_processes(
+    value: &Value,
+) -> Result<Vec<ResolvedProcessProjection>, Box<dyn Error>> {
     #[derive(Deserialize)]
     struct ServerProjection {
         roles: Vec<ResolvedRoleProjection>,
@@ -323,7 +325,10 @@ pub fn resolved_processes(value: &Value) -> Result<Vec<ResolvedProcessProjection
     Ok(processes)
 }
 
-pub fn resolved_process(value: &Value, id: &str) -> Result<ResolvedRankProjection, Box<dyn Error>> {
+pub(crate) fn resolved_process(
+    value: &Value,
+    id: &str,
+) -> Result<ResolvedRankProjection, Box<dyn Error>> {
     resolved_processes(value)?
         .into_iter()
         .find(|process| process.rank.id == id)
@@ -331,7 +336,9 @@ pub fn resolved_process(value: &Value, id: &str) -> Result<ResolvedRankProjectio
         .ok_or_else(|| format!("missing resolved process {id:?}").into())
 }
 
-pub fn resolved_frontend(value: &Value) -> Result<ResolvedFrontendProjection, Box<dyn Error>> {
+pub(crate) fn resolved_frontend(
+    value: &Value,
+) -> Result<ResolvedFrontendProjection, Box<dyn Error>> {
     #[derive(Deserialize)]
     struct ServerProjection {
         frontend: Option<FrontendProjection>,
@@ -356,9 +363,9 @@ pub fn resolved_frontend(value: &Value) -> Result<ResolvedFrontendProjection, Bo
 }
 
 /// Environment variables carrying the registration channel to fixture shims.
-pub const REAPER_REGISTRY_ENV: &str = "FIXTURE_REAPER_REGISTRY";
-pub const REAPER_OWNER_ENV: &str = "FIXTURE_REAPER_OWNER";
-pub const REAPER_WORKSPACE_ENV: &str = "FIXTURE_REAPER_WORKSPACE";
+pub(crate) const REAPER_REGISTRY_ENV: &str = "FIXTURE_REAPER_REGISTRY";
+pub(crate) const REAPER_OWNER_ENV: &str = "FIXTURE_REAPER_OWNER";
+pub(crate) const REAPER_WORKSPACE_ENV: &str = "FIXTURE_REAPER_WORKSPACE";
 
 /// Machine-shared namespaces are per-user: on a shared dev node another
 /// user's suites must neither collide with these directories nor be locked
@@ -370,7 +377,7 @@ fn shared_dir(kind: &str) -> PathBuf {
     std::env::temp_dir().join(format!("inferlab-test-{kind}-{uid}"))
 }
 
-pub fn shared_reaper_registry() -> PathBuf {
+pub(crate) fn shared_reaper_registry() -> PathBuf {
     shared_dir("serve-reaper")
 }
 
@@ -385,7 +392,7 @@ fn pid_is_alive(pid: u32) -> bool {
 /// The leader's start-time identity token (`/proc/<pgid>/stat` field 22).
 /// `comm` (field 2) may itself contain spaces or parentheses, so fields are
 /// counted after the last `)`.
-pub fn leader_starttime(pgid: u32) -> Option<u64> {
+pub(crate) fn leader_starttime(pgid: u32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pgid}/stat")).ok()?;
     let after_comm = stat.rsplit_once(')')?.1;
     after_comm.split_whitespace().nth(19)?.parse().ok()
@@ -394,7 +401,7 @@ pub fn leader_starttime(pgid: u32) -> Option<u64> {
 /// Whether any non-zombie member of the process group survives. `kill -0`
 /// would report success for a zombie leader, so this walks `ps` state flags
 /// instead.
-pub fn group_alive(pgid: u32) -> bool {
+pub(crate) fn group_alive(pgid: u32) -> bool {
     let Ok(output) = Command::new("ps").args(["-eo", "pgid=,stat="]).output() else {
         return false;
     };
@@ -458,7 +465,7 @@ fn parse_registry_entry(contents: &str) -> RegistryEntry {
 
 /// Register a process group the way the fixture shims do; the machinery tests
 /// use this to stand in for a shim-side registration.
-pub fn register_group_in(
+pub(crate) fn register_group_in(
     registry: &Path,
     pgid: u32,
     owner: u32,
@@ -481,7 +488,7 @@ pub fn register_group_in(
 /// token; the entry itself is removed either way, because a dead owner means
 /// nobody will ever reap it again. Unparseable entries are left untouched:
 /// registrations are written atomically, so a partial entry is foreign.
-pub fn sweep_orphaned_groups_in(registry: &Path) {
+pub(crate) fn sweep_orphaned_groups_in(registry: &Path) {
     let Ok(entries) = fs::read_dir(registry) else {
         return;
     };
@@ -526,7 +533,7 @@ pub fn sweep_orphaned_groups_in(registry: &Path) {
 /// same binary share the owner pid, so the workspace tag is the per-test
 /// discriminator — dropping one test's guard must not touch a sibling's
 /// still-serving fixtures.
-pub struct ServeReaper {
+pub(crate) struct ServeReaper {
     registry: PathBuf,
     workspace: String,
 }
@@ -535,7 +542,7 @@ impl ServeReaper {
     /// Guard against the shared machine registry, sweeping cross-run orphans
     /// once per suite binary — groups first, then the stale port leases their
     /// dead owners can no longer release.
-    pub fn for_workspace(workspace: &Path) -> Self {
+    pub(crate) fn for_workspace(workspace: &Path) -> Self {
         static SWEPT: Once = Once::new();
         let registry = shared_reaper_registry();
         let _ = fs::create_dir_all(&registry);
@@ -548,7 +555,7 @@ impl ServeReaper {
 
     /// Guard against a private registry; the machinery tests use this so
     /// concurrent executions cannot interfere with each other or real runs.
-    pub fn with_registry(registry: PathBuf, workspace: &Path) -> Self {
+    pub(crate) fn with_registry(registry: PathBuf, workspace: &Path) -> Self {
         Self {
             registry,
             workspace: workspace.display().to_string(),
@@ -557,7 +564,7 @@ impl ServeReaper {
 
     /// The environment variables a fixture command needs so shims register
     /// their process groups with this guard.
-    pub fn env(&self) -> [(&'static str, OsString); 3] {
+    pub(crate) fn env(&self) -> [(&'static str, OsString); 3] {
         [
             (REAPER_REGISTRY_ENV, self.registry.clone().into()),
             (REAPER_OWNER_ENV, std::process::id().to_string().into()),
@@ -611,7 +618,7 @@ impl Drop for ServeReaper {
 /// negligible cost.
 static CLAIMED_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
-pub fn claim_port(port: u16) -> bool {
+pub(crate) fn claim_port(port: u16) -> bool {
     let mut claimed = CLAIMED_PORTS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -665,7 +672,7 @@ const LEASE_GUARD_FILE: &str = "guard.flock";
 /// one critical section: without it a sweep could judge a lease stale, lose
 /// the race to a reclaiming binary, and unlink the new owner's live lease —
 /// reopening the handoff window the leases exist to close.
-pub fn lock_lease_dir(lease_dir: &Path) -> Option<fs::File> {
+pub(crate) fn lock_lease_dir(lease_dir: &Path) -> Option<fs::File> {
     let _ = fs::create_dir_all(lease_dir);
     let guard = OpenOptions::new()
         .create(true)
@@ -682,7 +689,7 @@ pub fn lock_lease_dir(lease_dir: &Path) -> Option<fs::File> {
 /// groups first: a port an unregistered orphan still binds is safe to
 /// unlease, because the OS never hands a bound port to a `bind(:0)`
 /// reservation.
-pub fn sweep_stale_leases_in(lease_dir: &Path) {
+pub(crate) fn sweep_stale_leases_in(lease_dir: &Path) {
     let Some(_guard) = lock_lease_dir(lease_dir) else {
         return;
     };
@@ -703,7 +710,7 @@ pub fn sweep_stale_leases_in(lease_dir: &Path) {
 /// Layer three: a cross-process lease file per port, created with `O_EXCL`
 /// and reclaimed under the directory lock only when its recorded owner is
 /// dead by pid and identity token (see [`lease_owner_is_dead`]).
-pub fn try_lease_port_in(lease_dir: &Path, port: u16) -> bool {
+pub(crate) fn try_lease_port_in(lease_dir: &Path, port: u16) -> bool {
     let _ = fs::create_dir_all(lease_dir);
     let lock = lease_dir.join(format!("{port}.lock"));
     match OpenOptions::new().write(true).create_new(true).open(&lock) {
@@ -722,7 +729,7 @@ pub fn try_lease_port_in(lease_dir: &Path, port: u16) -> bool {
 /// the lease — it may have changed hands since the collision (decline it) or
 /// been swept away entirely (a fresh `O_EXCL` create is then free to
 /// proceed).
-pub fn reclaim_collided_lease(lease_dir: &Path, lock: &Path) -> bool {
+pub(crate) fn reclaim_collided_lease(lease_dir: &Path, lock: &Path) -> bool {
     let Some(_guard) = lock_lease_dir(lease_dir) else {
         return false;
     };
@@ -760,26 +767,26 @@ fn claim_free_listener_in(lease_dir: &Path) -> Result<(TcpListener, u16), Box<dy
 /// out the port number and the lease taking effect never exists, and after
 /// release only the real server (which the claim set and lease protect) binds
 /// it.
-pub struct ReservedLocalPorts {
+pub(crate) struct ReservedLocalPorts {
     listeners: Vec<TcpListener>,
     ports: Vec<u16>,
 }
 
 impl ReservedLocalPorts {
-    pub fn get(&self, index: usize) -> u16 {
+    pub(crate) fn get(&self, index: usize) -> u16 {
         self.ports[index]
     }
 
     /// Drop the reservation listeners once the port numbers are committed
     /// (written to configuration), freeing them for the real server to bind.
-    pub fn release(self) {}
+    pub(crate) fn release(self) {}
 }
 
-pub fn reserve_local_ports(count: usize) -> Result<ReservedLocalPorts, Box<dyn Error>> {
+pub(crate) fn reserve_local_ports(count: usize) -> Result<ReservedLocalPorts, Box<dyn Error>> {
     reserve_local_ports_in(&shared_lease_dir(), count)
 }
 
-pub fn reserve_local_ports_in(
+pub(crate) fn reserve_local_ports_in(
     lease_dir: &Path,
     count: usize,
 ) -> Result<ReservedLocalPorts, Box<dyn Error>> {

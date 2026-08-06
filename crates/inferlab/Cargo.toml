@@ -36,6 +36,7 @@ ratatui.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
+serde-value.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true

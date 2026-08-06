@@ -11,6 +11,14 @@ pub(super) const ROOT_EXAMPLES: &str = "FIRST RUN:
 SAFE DISCOVERY:
   Add --dry-run to serve start, recipe run, bench, or image build before a stateful execution.";
 
+pub(super) const WORKSPACE_SHOW: &str = "Validate and show the merged public workspace configuration.
+
+The JSON form is the canonical default-expanded workspace representation: authoring shorthands and omitted progressive defaults appear as their explicit effective values. This command reads no machine-private bindings and performs no external action.";
+
+pub(super) const WORKSPACE_SHOW_EXAMPLES: &str = "EXAMPLES:
+  inferlab workspace show
+  inferlab workspace show --json";
+
 pub(super) const TUI: &str = "Observe operations, records, workspace definitions, metrics, referenced logs, and scratchpad entries in a persistent view-only terminal interface.
 
 The TUI does not launch workflows, mutate records, or write a UI session. Refreshes label facts by authority and retain the last successful observation as stale when a later read fails.";
@@ -51,14 +59,42 @@ pub(super) const RECIPE_RUN: &str = "Resolve and run one recipe as a recorded cl
 
 Overrides accept server.<PATH> and selected evals.<ID>.<PATH> or benches.<ID>.<PATH> fields. They cannot change definition identity or kind, recipe server, workload-suite membership, or gate. --image and --external-image are mutually exclusive. Failure still finalizes the recipe and child records and attempts cleanup. Dry-run freezes the effective server and measurement plan without launching or writing a record. Repeat --capture for selected workload ids; each capture is an observation mode on that named Eval or Bench.";
 
-pub(super) const RECIPE_RUN_EXAMPLES: &str = "EXAMPLES:
+pub(super) const RECIPE_RUN_EXAMPLES: &str = "WORKSPACE TOML — MINIMAL OPENAI SMOKE:
+  [evals.smoke]
+  kind = \"openai-smoke\"
+
+EXAMPLES:
   inferlab recipe run qualify --case tp1 --placement local --dry-run
-  inferlab recipe run qualify --set evals.smoke.limit=10
+  inferlab recipe run qualify --set evals.gsm8k.limit=10
   inferlab recipe run qualify --capture latency --capture throughput";
 
 pub(super) const BENCH: &str = "Run one named serving Bench against an explicit running managed-server record.
 
 The stored Bench definition remains the authority for request source, prompt representation, load, warmup, metrics, SLOs, timeout, and cache controls. Dry-run still requires the target server because endpoint, model, tokenizer, and integration capabilities come from its record, but it sends no measurement traffic and writes no Bench record. --capture requires profiler targets prepared when that server was started.";
+
+pub(super) const BENCH_EXAMPLES: &str = "WORKSPACE TOML — FIXED SYNTHETIC BENCH:
+  [benches.fixed-8k1k]
+  request_source = { kind = \"random\", input_tokens = 8192, output_tokens = 1024 }
+  concurrency = [1, 4]
+  prompts_per_concurrency = 4
+  timeout_seconds = 900
+
+WORKSPACE TOML — INCLUSIVE-UNIFORM SYNTHETIC BENCH:
+  [benches.range-8k1k]
+  request_source = { kind = \"random\", input_tokens = { min = 6553, max = 8192 }, output_tokens = { min = 819, max = 1024 } }
+  concurrency = [1, 4]
+  prompts_per_concurrency = 4
+  timeout_seconds = 900
+
+WORKSPACE TOML — SEMIANALYSIS AGENTX TRACE REPLAY:
+  [benches.agentx]
+  agentic_source = { dataset = \"semianalysis_agentx_062126_256k\", profile = \"inferencex\" }
+  concurrency = [1]
+  timeout_seconds = 7200
+
+AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, 600 seconds of cache-pressure warmup, a 900-second minimum and 1800-second default profiling duration, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context profile is about 1.85 GB. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
+
+Omitted static Bench and synthetic prompt kinds resolve to serving and flat. Use `inferlab workspace show --json` to inspect their canonical explicit values.";
 
 pub(super) const BENCH_OVERRIDE: &str = "Override one typed field inside the selected Bench definition with a TOML value, for example concurrency=[1,8] or request_body.temperature=1.0. Later assignments win. The Bench identity and kind cannot be changed.";
 

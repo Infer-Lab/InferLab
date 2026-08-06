@@ -380,6 +380,8 @@ pub struct BenchDefinitionInput {
     pub request_source: Option<BenchRequestSourceInput>,
     #[serde(default)]
     pub session_source: Option<BenchSessionSourceInput>,
+    #[serde(default)]
+    pub agentic_source: Option<BenchAgenticSourceInput>,
     pub prompt: BenchPromptInput,
     #[serde(default)]
     pub server_metrics: bool,
@@ -391,6 +393,59 @@ pub struct BenchDefinitionInput {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub reset_prefix_cache: bool,
+}
+
+/// One release-qualified agentic trace source and its complete effective policy.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAgenticSourceInput {
+    pub dataset: String,
+    pub profile: String,
+    pub catalog: Box<BenchAgenticCatalogInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAgenticCatalogInput {
+    pub repository: String,
+    pub revision: String,
+    pub filename: String,
+    pub sha256: String,
+    pub cache_path: PathBuf,
+    pub cache_state: BenchDatasetCacheState,
+    pub trace_count: u32,
+    pub approximate_bytes: u64,
+    pub license: String,
+    pub source_format: String,
+    pub aiperf_loader: String,
+    pub materialization_identity: String,
+    pub scenario: String,
+    pub concurrency_semantics: String,
+    pub replay_semantics: String,
+    pub cache_bust: String,
+    pub trajectory_start_min: f64,
+    pub trajectory_start_max: f64,
+    pub global_idle_gap_cap_seconds: f64,
+    pub cache_warmup_seconds: u64,
+    pub warmup_grace_seconds: u64,
+    pub dataset_configuration_timeout_seconds: u64,
+    pub service_profile_configuration_timeout_seconds: u64,
+    pub default_duration_seconds: u64,
+    pub minimum_duration_seconds: u64,
+    pub failure_threshold: f64,
+    pub dataset_entries: u32,
+    pub streaming: bool,
+    pub ignore_eos: bool,
+    pub use_server_token_count: bool,
+    pub gpu_telemetry: bool,
+    pub server_metric_slice_seconds: u64,
+    pub required_artifacts: Vec<String>,
+    pub unavailable_dimensions: Vec<String>,
+    pub inferencex_repository: String,
+    pub inferencex_revision: String,
+    pub inferencex_reference: String,
+    pub aiperf_revision: String,
+    pub aiperf_version: String,
 }
 
 /// One closed request origin lowered by Inferlab for the Bench runtime.
@@ -1362,6 +1417,8 @@ pub struct BenchCaseInput {
     #[serde(default)]
     pub warmup_request_count: u32,
     #[serde(default)]
+    pub duration_seconds: Option<u64>,
+    #[serde(default)]
     pub session_count: Option<u32>,
     #[serde(default)]
     pub warmup_session_count: Option<u32>,
@@ -1502,6 +1559,8 @@ pub struct BenchClientResult {
     #[serde(default)]
     pub session_evidence: Option<BenchSessionResultEvidence>,
     #[serde(default)]
+    pub agentic_evidence: Option<Box<BenchAgenticResultEvidence>>,
+    #[serde(default)]
     pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
     pub native_command: Vec<String>,
     pub native_exit_code: Option<i32>,
@@ -1509,6 +1568,81 @@ pub struct BenchClientResult {
     pub report_invocations: Vec<BenchNativeInvocation>,
     pub raw_artifacts: Vec<RawArtifact>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAgenticSourceVerification {
+    pub repository: String,
+    pub expected_revision: String,
+    #[serde(default)]
+    pub observed_revision: Option<String>,
+    pub filename: String,
+    pub expected_sha256: String,
+    #[serde(default)]
+    pub observed_sha256: Option<String>,
+    #[serde(default)]
+    pub cache_path: Option<PathBuf>,
+    pub cache_state_before: BenchDatasetCacheState,
+    #[serde(default)]
+    pub acquisition_outcome: Option<BenchAgenticAcquisitionOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchAgenticAcquisitionOutcome {
+    Reused,
+    Downloaded,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAgenticBranchStats {
+    pub children_spawned: u64,
+    pub children_completed: u64,
+    pub children_errored: u64,
+    pub children_truncated: u64,
+    pub children_delayed: u64,
+    pub parents_suspended: u64,
+    pub parents_resumed: u64,
+    pub parents_failed_due_to_child_error: u64,
+    pub joins_suppressed: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAgenticResultEvidence {
+    pub source: BenchAgenticSourceVerification,
+    #[serde(default)]
+    pub run: Option<Box<BenchAgenticRunEvidence>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchAgenticRunEvidence {
+    pub native_run_id: String,
+    pub scenario: String,
+    pub submission_valid: bool,
+    #[serde(default)]
+    pub submission_invalid_reasons: Vec<String>,
+    pub warmup_records: u64,
+    pub warmup_error_records: u64,
+    pub warmup_source_coordinate_records: u64,
+    pub warmup_succeeded: bool,
+    pub profiling_began_after_warmup_and_drain: bool,
+    pub profiling_records: u64,
+    pub source_coordinate_records: u64,
+    pub distinct_source_traces: u64,
+    pub distinct_runtime_conversations: u64,
+    pub distinct_transport_requests: u64,
+    pub cache_bust_records: u64,
+    pub context_overflow_count: u64,
+    pub ordinary_failure_count: u64,
+    pub branch_stats: BenchAgenticBranchStats,
+    pub aggregate_artifact: PathBuf,
+    pub raw_records_artifact: PathBuf,
+    #[serde(default)]
+    pub unavailable_dimensions: Vec<String>,
 }
 
 /// One synthetic profiling request's planned-to-observed prompt-token check.

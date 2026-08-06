@@ -640,6 +640,10 @@ fn a_gate_failure_on_one_runtime_skips_the_other() -> Result<(), Box<dyn Error>>
         ".agents/plugins/marketplace.json",
         "plugins/inferlab/.claude-plugin/plugin.json",
         "plugins/inferlab/skills/inferlab/SKILL.md",
+        "plugins/inferlab/skills/inferlab/references/workspace-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/workspace-definition.md",
+        "plugins/inferlab/skills/inferlab/references/execution-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/measurement-authoring.md",
     ] {
         let target = partial.path().join(relative);
         fs::create_dir_all(target.parent().ok_or("parent")?)?;
@@ -668,6 +672,53 @@ fn a_gate_failure_on_one_runtime_skips_the_other() -> Result<(), Box<dyn Error>>
         "",
         "a validation failure on one runtime blocks every native command"
     );
+    Ok(())
+}
+
+#[test]
+fn a_corrupt_authoring_reference_fails_before_native_cli() -> Result<(), Box<dyn Error>> {
+    let harness = AgentHarness::new(true)?;
+    let partial = tempfile::tempdir()?;
+    let root = repo_root();
+    for relative in [
+        ".claude-plugin/marketplace.json",
+        "plugins/inferlab/.claude-plugin/plugin.json",
+        "plugins/inferlab/skills/inferlab/SKILL.md",
+        "plugins/inferlab/skills/inferlab/references/workspace-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/workspace-definition.md",
+        "plugins/inferlab/skills/inferlab/references/execution-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/measurement-authoring.md",
+    ] {
+        let target = partial.path().join(relative);
+        fs::create_dir_all(target.parent().ok_or("parent")?)?;
+        fs::copy(root.join(relative), target)?;
+    }
+    fs::write(
+        partial
+            .path()
+            .join("plugins/inferlab/skills/inferlab/references/measurement-authoring.md"),
+        [0xff],
+    )?;
+
+    let output = harness.run(&[
+        "agent",
+        "install",
+        "--agent",
+        "claude",
+        "--from-checkout",
+        partial.path().to_str().ok_or("non-UTF-8 path")?,
+    ])?;
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["rows"][0]["status"], "failed");
+    assert!(
+        report["rows"][0]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("measurement-authoring.md is corrupted"),
+        "{report}"
+    );
+    assert_eq!(harness.logged()?, "");
     Ok(())
 }
 

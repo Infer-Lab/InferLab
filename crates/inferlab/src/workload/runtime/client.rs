@@ -1,6 +1,9 @@
 //! Shared measurement-client deadline, process-group, cleanup, and result
 //! acceptance boundary. It is independent of Eval and Bench domain policy.
 
+#[cfg(test)]
+mod tests;
+
 use super::{
     AcceptedClient, CLIENT_CLEANUP_STATUS_DEADLINE, CLIENT_HANDLE_FILE, CLIENT_KILL_GRACE,
     CLIENT_POLL_INTERVAL, CLIENT_TERM_GRACE, ClientCasePaths, ClientCommandPlan, ClientGroupHandle,

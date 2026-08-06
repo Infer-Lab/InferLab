@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "agent-plugin-installer",
  "clap",
@@ -1388,6 +1388,7 @@ dependencies = [
  "reqwest",
  "rustix",
  "serde",
+ "serde-value",
  "serde_json",
  "sha2 0.10.9",
  "tar",
@@ -1403,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-fake-engine"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "clap",
  "futures-util",
@@ -1417,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-profiler"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "inferlab-protocol",
  "inferlab-runtime",
@@ -1430,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-protocol"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -1439,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-proxy"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1454,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-runtime"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ctrlc",
  "reqwest",
@@ -1469,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-serve-domain"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "inferlab-profiler",
  "inferlab-protocol",
@@ -1843,6 +1844,15 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "ordered-float"
+version = "2.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "palette"
@@ -2581,6 +2591,16 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-value"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
+dependencies = [
+ "ordered-float",
+ "serde",
 ]
 
 [[package]]

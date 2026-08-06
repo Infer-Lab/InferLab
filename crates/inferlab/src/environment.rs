@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub mod status;
+pub(crate) mod status;
 
 const PIXI_MANIFEST: &str = "pixi.toml";
 const PIXI_LOCK: &str = "pixi.lock";
@@ -28,7 +28,7 @@ pub(crate) fn pixi_environment_prefix(root: &Path, environment: &str) -> PathBuf
 /// ([[RFC-0002:C-ENVIRONMENT-CHECKS]]): the script digest keys derived
 /// artifacts, so a check edit is never invisible to reuse.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PlannedEnvironmentCheck {
+pub(crate) struct PlannedEnvironmentCheck {
     pub id: String,
     pub script: PathBuf,
     pub sha256: String,
@@ -39,7 +39,7 @@ pub struct PlannedEnvironmentCheck {
 /// A declared image-realization postprocess step resolved to its content
 /// identity ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PlannedEnvironmentScript {
+pub(crate) struct PlannedEnvironmentScript {
     pub id: String,
     pub script: PathBuf,
     pub sha256: String,
@@ -49,7 +49,7 @@ pub struct PlannedEnvironmentScript {
 /// environment the operator owns, or an image environment the build owns.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum CheckRealization {
+pub(crate) enum CheckRealization {
     LocalWorkspace,
     Image,
     /// A declared external serving image: not qualified by this workspace,
@@ -60,7 +60,7 @@ pub enum CheckRealization {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum CheckOutcome {
+pub(crate) enum CheckOutcome {
     Passed,
     Failed,
 }
@@ -68,7 +68,7 @@ pub enum CheckOutcome {
 /// One executed check, recorded with the realization it examined
 /// ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct EnvironmentCheckEvidence {
+pub(crate) struct EnvironmentCheckEvidence {
     pub id: String,
     pub realization: CheckRealization,
     /// The machine whose realization was examined; absent for the
@@ -86,7 +86,7 @@ pub struct EnvironmentCheckEvidence {
 
 /// One local check for which an exit status and complete output were observed.
 #[derive(Debug)]
-pub struct CompletedLocalCheck {
+pub(crate) struct CompletedLocalCheck {
     pub id: String,
     pub outcome: CheckOutcome,
     pub output: String,
@@ -94,7 +94,7 @@ pub struct CompletedLocalCheck {
 }
 
 impl CompletedLocalCheck {
-    pub fn into_record_evidence(self) -> EnvironmentCheckEvidence {
+    pub(crate) fn into_record_evidence(self) -> EnvironmentCheckEvidence {
         EnvironmentCheckEvidence {
             id: self.id,
             realization: CheckRealization::LocalWorkspace,
@@ -109,14 +109,14 @@ impl CompletedLocalCheck {
 /// A failed local-realization check: local failure means drift, so the
 /// declared repair hint goes to the operator who owns the environment.
 #[derive(Clone, Debug)]
-pub struct LocalCheckFailure {
+pub(crate) struct LocalCheckFailure {
     pub id: String,
     pub repair_hint: Option<String>,
     pub output: String,
 }
 
 impl LocalCheckFailure {
-    pub fn message(&self, pixi_environment: &str) -> String {
+    pub(crate) fn message(&self, pixi_environment: &str) -> String {
         let mut message = format!(
             "environment check {:?} failed on the local workspace realization of Pixi \
              environment {pixi_environment:?}: {}",
@@ -132,7 +132,7 @@ impl LocalCheckFailure {
 
 /// A declared check attempt that did not produce an exit status.
 #[derive(Debug)]
-pub enum LocalCheckExecutionFailure {
+pub(crate) enum LocalCheckExecutionFailure {
     Launch {
         id: String,
         source: std::io::Error,
@@ -146,13 +146,13 @@ pub enum LocalCheckExecutionFailure {
 }
 
 impl LocalCheckExecutionFailure {
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         match self {
             Self::Launch { id, .. } | Self::NoExitCode { id, .. } => id,
         }
     }
 
-    pub fn diagnostics(&self) -> String {
+    pub(crate) fn diagnostics(&self) -> String {
         match self {
             Self::Launch { id, source } => {
                 format!("environment check {id:?} failed to launch through pixi: {source}")
@@ -169,7 +169,7 @@ impl LocalCheckExecutionFailure {
         }
     }
 
-    pub fn into_inferlab_error(self) -> InferlabError {
+    pub(crate) fn into_inferlab_error(self) -> InferlabError {
         match self {
             Self::Launch { source, .. } => InferlabError::LaunchPixi {
                 action: "environment check",
@@ -191,21 +191,21 @@ impl LocalCheckExecutionFailure {
 }
 
 #[derive(Debug)]
-pub enum LocalCheckConclusion {
+pub(crate) enum LocalCheckConclusion {
     Passed,
     Failed(LocalCheckFailure),
     ExecutionError(LocalCheckExecutionFailure),
 }
 
 #[derive(Debug)]
-pub struct LocalCheckRun {
+pub(crate) struct LocalCheckRun {
     pub completed: Vec<CompletedLocalCheck>,
     pub conclusion: LocalCheckConclusion,
 }
 
 /// Resolve declared checks and image postprocess steps to content
 /// identities, failing when a declared script is missing.
-pub fn plan_environment_checks(
+pub(crate) fn plan_environment_checks(
     root: &Path,
     definition: &StackDefinition,
 ) -> Result<(Vec<PlannedEnvironmentCheck>, Vec<PlannedEnvironmentScript>), InferlabError> {
@@ -221,7 +221,7 @@ pub fn plan_environment_checks(
     Ok((checks, postprocess))
 }
 
-pub fn plan_stack_checks(
+pub(crate) fn plan_stack_checks(
     root: &Path,
     definition: &StackDefinition,
 ) -> Result<Vec<PlannedEnvironmentCheck>, InferlabError> {
@@ -252,7 +252,7 @@ fn environment_script_digest(root: &Path, script: &Path) -> Result<String, Infer
 /// Completed evidence covers every check that produced an exit status; a
 /// launch error remains a separate conclusion. Inferlab never mutates the
 /// local environment itself.
-pub fn run_local_checks(
+pub(crate) fn run_local_checks(
     root: &Path,
     pixi_environment: &str,
     checks: &[PlannedEnvironmentCheck],
@@ -344,7 +344,7 @@ pub(crate) fn tail(text: &str, limit: usize) -> String {
 }
 
 #[derive(Debug, Serialize)]
-pub struct LockResult {
+pub(crate) struct LockResult {
     pub manifest: PathBuf,
     pub lock: PathBuf,
     pub manifest_sha256: String,
@@ -367,7 +367,7 @@ pub(crate) enum EnvironmentCheck {
 /// behind. Callers that must produce no persisted evidence — ad-hoc
 /// execution ([[RFC-0002:C-ADHOC-EXECUTION]]) — use
 /// [`ensure_usable_without_confirmation`] instead, never this function.
-pub fn ensure_usable(root: &Path, environment: &str) -> Result<(), InferlabError> {
+pub(crate) fn ensure_usable(root: &Path, environment: &str) -> Result<(), InferlabError> {
     match check_environment(root, environment)? {
         EnvironmentCheck::Confirmed => Ok(()),
         EnvironmentCheck::NeverInstalled => Err(unavailable(

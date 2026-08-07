@@ -10,6 +10,7 @@ keywords = ["llm", "inference", "benchmarking", "evaluation", "vllm"]
 categories = ["command-line-utilities", "science"]
 include = [
     "/src/**",
+    "/resources/bench-agentic-sources.toml",
     "/resources/bench-datasets.toml",
     "/resources/eval-toolchain/pixi.lock",
     "/resources/eval-toolchain/pixi.toml",

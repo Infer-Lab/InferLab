@@ -36,6 +36,7 @@ fi
 
 artifact="${artifacts[0]}"
 archive_list="$(tar -tzf "${artifact}")"
+grep -q '/resources/bench-agentic-sources.toml$' <<< "${archive_list}"
 grep -q '/resources/toolchain-python/inferlab_eval_runner/__init__.py$' <<< "${archive_list}"
 grep -q '/resources/toolchain-python/inferlab_bench_runner/__init__.py$' <<< "${archive_list}"
 grep -q '/resources/toolchain-python/inferlab_measurement_sdk/__init__.py$' <<< "${archive_list}"

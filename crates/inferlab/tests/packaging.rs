@@ -54,6 +54,13 @@ fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn E
     );
     let artifact = PathBuf::from(String::from_utf8(package.stdout)?.trim());
     let files = crate_archive_files(&artifact)?;
+    assert_eq!(
+        files.get(Path::new("resources/bench-agentic-sources.toml")),
+        Some(&fs::read(
+            crate_dir.join("resources/bench-agentic-sources.toml")
+        )?),
+        "the staged crate omitted or changed the AgentX source catalog"
+    );
     assert!(
         !files.contains_key(Path::new("resources/plugin/docs/workspace-authoring.md")),
         "the staged plugin must not carry an aggregate workspace-authoring copy"

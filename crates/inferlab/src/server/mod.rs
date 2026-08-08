@@ -1584,6 +1584,7 @@ mod tests {
                     chat_completions_path: "/v1/chat/completions".to_owned(),
                     server_metrics: None,
                     prefix_cache_reset: None,
+                    prompt_cache_read_zero_representation: None,
                 },
             },
             measurements: None,

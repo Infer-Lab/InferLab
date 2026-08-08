@@ -69,7 +69,7 @@
     "request_body": {},
     "request_slo": null,
     "timeout_seconds": 7200,
-    "reset_prefix_cache": false
+    "cache_start": "uncontrolled"
   },
   "case": {
     "load_shape": {

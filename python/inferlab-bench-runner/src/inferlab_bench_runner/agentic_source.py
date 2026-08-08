@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from huggingface_hub import HfApi, hf_hub_download, scan_cache_dir
+from huggingface_hub import hf_hub_download, try_to_load_from_cache
 from huggingface_hub.errors import (
     HfHubHTTPError,
     LocalEntryNotFoundError,
@@ -26,39 +26,20 @@ class AgenticSourceAcquisition:
     error: str | None
 
 
-def _cached_main_revision(repository: str) -> str:
-    repositories = [
-        repo
-        for repo in scan_cache_dir().repos
-        if repo.repo_type == "dataset" and repo.repo_id == repository
-    ]
-    revisions = [
-        revision.commit_hash
-        for repo in repositories
-        for revision in repo.revisions
-        if "main" in revision.refs
-    ]
-    if len(revisions) != 1:
-        raise ValueError(
-            f"Hugging Face cache has no unique main revision for dataset {repository!r}"
-        )
-    return revisions[0]
-
-
-def _main_revision(repository: str) -> tuple[str, bool]:
-    try:
-        revision = HfApi().dataset_info(repository, revision="main").sha
-    except (HfHubHTTPError, OfflineModeIsEnabled):
-        return _cached_main_revision(repository), True
-    if revision is None:
-        raise ValueError(f"Hugging Face returned no main revision for dataset {repository!r}")
-    return revision, False
+@dataclass(frozen=True)
+class AgenticSourceResolution:
+    observed_revision: str | None
+    cache_state: BenchDatasetCacheState | None
+    cache_path: Path | None
+    metadata_accessed: bool
+    error: str | None
 
 
 def verify_downloaded_snapshot(
     source: BenchAgenticSourceInput,
     observed_revision: str,
     path: Path,
+    cache_state_before: BenchDatasetCacheState | None = None,
 ) -> BenchAgenticSourceVerification:
     catalog = source.catalog
     digest = hashlib.sha256()
@@ -74,10 +55,10 @@ def verify_downloaded_snapshot(
         expected_sha256=catalog.sha256,
         observed_sha256=observed_sha256,
         cache_path=str(path),
-        cache_state_before=catalog.cache_state,
+        cache_state_before=cache_state_before or catalog.cache_state,
         acquisition_outcome=(
             BenchAgenticAcquisitionOutcome.reused
-            if catalog.cache_state is BenchDatasetCacheState.present
+            if (cache_state_before or catalog.cache_state) is BenchDatasetCacheState.present
             else BenchAgenticAcquisitionOutcome.downloaded
         ),
     )
@@ -130,13 +111,46 @@ def source_verification_error(
 def acquire_and_verify_agentic_source(
     source: BenchAgenticSourceInput,
 ) -> AgenticSourceAcquisition:
-    try:
-        observed_revision, offline = _main_revision(source.catalog.repository)
-    except (OSError, ValueError) as error:
+    resolution = resolve_agentic_source(source)
+    if resolution.error is not None or resolution.observed_revision is None:
         return AgenticSourceAcquisition(
-            verification=_partial_verification(source, None),
-            error=f"failed to resolve agentic dataset revision: {error}",
+            verification=_partial_verification(source, resolution.observed_revision),
+            error=resolution.error or "agentic dataset revision was not resolved",
         )
+    return acquire_resolved_agentic_source(
+        source,
+        resolution.observed_revision,
+        resolution.cache_state or BenchDatasetCacheState.missing,
+    )
+
+
+def resolve_agentic_source(source: BenchAgenticSourceInput) -> AgenticSourceResolution:
+    observed_revision = source.catalog.revision
+    cached = try_to_load_from_cache(
+        repo_id=source.catalog.repository,
+        filename=source.catalog.filename,
+        repo_type="dataset",
+        revision=observed_revision,
+    )
+    cache_path = Path(cached) if isinstance(cached, str) else None
+    return AgenticSourceResolution(
+        observed_revision=observed_revision,
+        cache_state=(
+            BenchDatasetCacheState.present
+            if cache_path is not None
+            else BenchDatasetCacheState.missing
+        ),
+        cache_path=cache_path,
+        metadata_accessed=False,
+        error=None,
+    )
+
+
+def acquire_resolved_agentic_source(
+    source: BenchAgenticSourceInput,
+    observed_revision: str,
+    cache_state_before: BenchDatasetCacheState,
+) -> AgenticSourceAcquisition:
     try:
         path = Path(
             hf_hub_download(
@@ -144,16 +158,23 @@ def acquire_and_verify_agentic_source(
                 filename=source.catalog.filename,
                 repo_type="dataset",
                 revision=observed_revision,
-                local_files_only=offline,
+                local_files_only=cache_state_before is BenchDatasetCacheState.present,
             )
         )
-    except (HfHubHTTPError, LocalEntryNotFoundError, OSError) as error:
+    except (
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+        OfflineModeIsEnabled,
+        OSError,
+    ) as error:
         return AgenticSourceAcquisition(
             verification=_partial_verification(source, observed_revision),
             error=f"failed to acquire agentic dataset {source.catalog.repository!r}: {error}",
         )
     try:
-        verification = verify_downloaded_snapshot(source, observed_revision, path)
+        verification = verify_downloaded_snapshot(
+            source, observed_revision, path, cache_state_before
+        )
     except OSError as error:
         return AgenticSourceAcquisition(
             verification=_partial_verification(

@@ -11,6 +11,8 @@ pub(super) enum MetricFamily {
     Ttft,
     Tpot,
     Cache,
+    Speculation,
+    Slo,
     Other,
 }
 
@@ -23,6 +25,8 @@ impl MetricFamily {
             Self::Ttft => "LATENCY · TTFT",
             Self::Tpot => "LATENCY · TPOT",
             Self::Cache => "CACHE",
+            Self::Speculation => "SPECULATION",
+            Self::Slo => "SLO",
             Self::Other => "OTHER",
         }
     }
@@ -116,6 +120,30 @@ pub(super) struct MetricPoint {
     source_index: usize,
 }
 
+pub(super) struct RecordMetrics {
+    pub(super) record_key: String,
+    pub(super) record_context: String,
+    pub(super) catalog: Vec<MetricDescriptor>,
+    pub(super) points: Vec<Vec<MetricPoint>>,
+    pub(super) case_count: usize,
+}
+
+pub(super) fn presentation(record: &super::RecordView) -> Option<RecordMetrics> {
+    let record_key = record.id.clone()?;
+    let catalog = catalog(&record.cases);
+    let points = catalog
+        .iter()
+        .map(|metric| points(&record.cases, &metric.name))
+        .collect();
+    Some(RecordMetrics {
+        record_context: compact_record_context(record),
+        record_key,
+        catalog,
+        points,
+        case_count: record.cases.len(),
+    })
+}
+
 pub(super) fn catalog(cases: &[CaseView]) -> Vec<MetricDescriptor> {
     let names = cases
         .iter()
@@ -181,6 +209,16 @@ pub(super) fn points(cases: &[CaseView], metric: &str) -> Vec<MetricPoint> {
     points
 }
 
+fn compact_record_context(record: &super::RecordView) -> String {
+    let id = record.id.as_deref().unwrap_or("unreadable-record");
+    let without_time = id.split_once("Z-").map_or(id, |(_, remainder)| remainder);
+    let label = without_time
+        .strip_prefix(&record.kind)
+        .and_then(|remainder| remainder.strip_prefix('-'))
+        .unwrap_or(without_time);
+    format!("{} · {label}", record.kind)
+}
+
 fn descriptor(name: String) -> MetricDescriptor {
     let known = match BenchMetric::parse(&name) {
         Some(BenchMetric::RequestThroughput) => Some((
@@ -221,13 +259,31 @@ fn descriptor(name: String) -> MetricDescriptor {
             };
             Some((label, family, unit, rank))
         }
-        Some(
-            BenchMetric::AcceptanceLength
-            | BenchMetric::AcceptanceRate
-            | BenchMetric::GoodRequestRatio
-            | BenchMetric::Goodput,
-        )
-        | None => None,
+        Some(BenchMetric::AcceptanceLength) => Some((
+            "Acceptance length",
+            MetricFamily::Speculation,
+            MetricUnit::Tokens,
+            0,
+        )),
+        Some(BenchMetric::AcceptanceRate) => Some((
+            "Acceptance rate",
+            MetricFamily::Speculation,
+            MetricUnit::Ratio,
+            1,
+        )),
+        Some(BenchMetric::GoodRequestRatio) => Some((
+            "Good request ratio",
+            MetricFamily::Slo,
+            MetricUnit::Ratio,
+            0,
+        )),
+        Some(BenchMetric::Goodput) => Some((
+            "Goodput",
+            MetricFamily::Slo,
+            MetricUnit::RequestsPerSecond,
+            1,
+        )),
+        None => None,
     };
     match known {
         Some((label, family, unit, rank)) => MetricDescriptor {
@@ -274,7 +330,7 @@ pub(super) fn concise_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadGroup, MetricFamily, catalog, points};
+    use super::{LoadGroup, MetricFamily, MetricUnit, catalog, points};
     use crate::tui::{CaseLoad, CaseView};
     use std::collections::BTreeMap;
 
@@ -301,6 +357,9 @@ mod tests {
                 ("p95_ttft_ms", 12.0),
                 ("mean_prompt_tokens", 136.0),
                 ("request_throughput", 1.0),
+                ("acceptance_length", 2.5),
+                ("acceptance_rate", 0.75),
+                ("good_request_ratio", 0.9),
                 ("goodput", 0.5),
                 ("vendor_metric", 2.0),
             ],
@@ -312,10 +371,22 @@ mod tests {
         assert_eq!(metrics[1].family, MetricFamily::PromptTokens);
         assert_eq!(metrics[2].name, "p95_ttft_ms");
         assert_eq!(metrics[2].family, MetricFamily::Ttft);
-        assert_eq!(metrics[3].name, "goodput");
-        assert_eq!(metrics[3].family, MetricFamily::Other);
-        assert_eq!(metrics[4].name, "vendor_metric");
-        assert_eq!(metrics[4].family, MetricFamily::Other);
+        assert_eq!(metrics[3].name, "acceptance_length");
+        assert_eq!(metrics[3].label, "Acceptance length");
+        assert_eq!(metrics[3].family, MetricFamily::Speculation);
+        assert_eq!(metrics[3].unit, MetricUnit::Tokens);
+        assert_eq!(metrics[4].name, "acceptance_rate");
+        assert_eq!(metrics[4].unit, MetricUnit::Ratio);
+        assert_eq!(metrics[5].name, "good_request_ratio");
+        assert_eq!(metrics[5].label, "Good request ratio");
+        assert_eq!(metrics[5].family, MetricFamily::Slo);
+        assert_eq!(metrics[5].unit, MetricUnit::Ratio);
+        assert_eq!(metrics[6].name, "goodput");
+        assert_eq!(metrics[6].family, MetricFamily::Slo);
+        assert_eq!(metrics[6].unit, MetricUnit::RequestsPerSecond);
+        assert_eq!(metrics[7].name, "vendor_metric");
+        assert_eq!(metrics[7].family, MetricFamily::Other);
+        assert_eq!(metrics[7].unit, MetricUnit::None);
     }
 
     #[test]

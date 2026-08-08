@@ -4,7 +4,7 @@ use super::{
     invalid, require_nonempty, require_optional_positive, require_positive, validate_request_body,
 };
 use crate::InferlabError;
-use crate::workspace::definitions::{EvalDefinition, EvalTaskSource};
+use crate::workspace::definitions::{EvalDefinition, EvalPrompt, EvalTaskSource};
 use crate::workspace::source::{is_safe_relative, reject_symlink_components};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -22,6 +22,7 @@ pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(),
         }
         EvalDefinition::LmEval {
             task,
+            prompt,
             request_body,
             limit,
             seed,
@@ -41,7 +42,13 @@ pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(),
                 }
                 EvalTaskSource::WorkspaceYaml { .. } => {}
             }
-            validate_request_body("eval", id, request_body, &["seed"])?;
+            // Server-side template controls belong to the server only when the
+            // resolved authority assigns rendering to it.
+            let reserved: &[&str] = match prompt.effective() {
+                EvalPrompt::Flat => &["seed", "chat_template", "chat_template_kwargs"],
+                EvalPrompt::ServerChat => &["seed"],
+            };
+            validate_request_body("eval", id, request_body, reserved)?;
             require_nonempty("lm-eval metric", id, metric)?;
             if let Some(metric_filter) = metric_filter {
                 require_nonempty("lm-eval metric_filter", id, metric_filter)?;

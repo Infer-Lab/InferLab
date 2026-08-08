@@ -26,6 +26,7 @@ pub(super) fn prefill_bench_result() -> BenchClientResult {
         session_evidence: None,
         agentic_evidence: None,
         prompt_token_reconciliation: Vec::new(),
+        prompt_cache_observations: Vec::new(),
         native_command: vec!["fixture-bench".to_owned()],
         native_exit_code: Some(0),
         report_invocations: Vec::new(),

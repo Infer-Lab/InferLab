@@ -17,6 +17,9 @@ from inferlab_measurement_sdk import (
     EvalMetricGateConclusion,
     EvalTaskSourceInputBundled,
     EvalTaskSourceInputWorkspaceYaml,
+    MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetPreparationResult,
+    MeasurementDataAssetReadinessOpaque,
 )
 from jsonschema import Draft202012Validator
 
@@ -152,6 +155,8 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
         FIXTURES / "valid" / "bench-client-result-agentic-source-failed.json"
     )
     eval_request = load_json(FIXTURES / "valid" / "eval-client-request-bundled.json")
+    data_asset_request = load_json(FIXTURES / "valid" / "data-asset-preparation-request-eval.json")
+    data_asset_result = load_json(FIXTURES / "valid" / "data-asset-preparation-result-opaque.json")
     validator = Draft202012Validator(load_json(SCHEMA))
 
     validator.validate({"bench_client_request": bench_request})
@@ -159,3 +164,26 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
     validator.validate({"bench_client_result": agentic_result})
     validator.validate({"bench_client_result": agentic_source_failure})
     validator.validate({"eval_client_request": eval_request})
+    validator.validate({"data_asset_preparation_request": data_asset_request})
+    validator.validate({"data_asset_preparation_result": data_asset_result})
+
+
+def test_generated_models_preserve_opaque_data_asset_readiness() -> None:
+    request = MeasurementDataAssetPreparationRequest.model_validate(
+        load_json(FIXTURES / "valid" / "data-asset-preparation-request-eval.json")
+    )
+    result = MeasurementDataAssetPreparationResult.model_validate(
+        load_json(FIXTURES / "valid" / "data-asset-preparation-result-opaque.json")
+    )
+
+    assert request.phase.root.kind == "resolve"
+    assert result.effective_selection is not None
+    selection = result.effective_selection.root
+    assert selection.kind == "eval"
+    assert selection.data_files is not None
+    assert selection.data_files.root == {
+        "test": ["fixtures/test-000.jsonl", "fixtures/test-001.jsonl"]
+    }
+    assert result.readiness is not None
+    assert isinstance(result.readiness.root, MeasurementDataAssetReadinessOpaque)
+    assert result.readiness.root.deferred_source_access

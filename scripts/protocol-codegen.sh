@@ -19,6 +19,7 @@ cargo run --quiet --locked --manifest-path "${root}/Cargo.toml" \
 generate_models() {
   local schema="$1"
   local models="$2"
+  local wire_comment="$3"
   datamodel-codegen \
     --input "${schema}" \
     --input-file-type jsonschema \
@@ -38,15 +39,17 @@ generate_models() {
     --formatters black isort \
     --disable-timestamp
 
-  sed -i '1i# Rust wire source: crates/inferlab-protocol/src/wire.rs' "${models}"
+  sed -i "1i${wire_comment}" "${models}"
 }
 
 generate_models \
   "${temporary}/schema/adapter-protocol-v7.schema.json" \
-  "${temporary}/adapter_generated.py"
+  "${temporary}/adapter_generated.py" \
+  "# Rust wire source: crates/inferlab-protocol/src/wire.rs"
 generate_models \
   "${temporary}/schema/measurement-protocol-v1.schema.json" \
-  "${temporary}/measurement_generated.py"
+  "${temporary}/measurement_generated.py" \
+  "# Rust wire sources: crates/inferlab-protocol/src/wire.rs and measurement_data_asset.rs"
 
 case "${mode}" in
   generate)

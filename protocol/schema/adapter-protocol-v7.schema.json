@@ -365,6 +365,16 @@
             }
           ]
         },
+        "prompt_cache_read_zero_representation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromptCacheReadZeroRepresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "protocol": {
           "$ref": "#/$defs/EndpointProtocol"
         },
@@ -1000,6 +1010,14 @@
       "required": [
         "argv",
         "env"
+      ]
+    },
+    "PromptCacheReadZeroRepresentation": {
+      "description": "How a backend with cache reporting enabled represents a zero-token cache read.",
+      "type": "string",
+      "enum": [
+        "explicit",
+        "omitted"
       ]
     },
     "ProtocolVersion": {

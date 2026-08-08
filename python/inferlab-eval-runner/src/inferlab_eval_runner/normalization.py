@@ -11,6 +11,7 @@ from inferlab_measurement_sdk import (
     EvalMetricGate,
     EvalMetricGateConclusion,
     EvalNormalizedMetric,
+    EvalPromptInput,
     EvalTrialSummary,
     JsonObject,
     load_json_object,
@@ -119,6 +120,15 @@ def repeated_native_sample_reference(
     return sample_paths, reference
 
 
+def resolved_prompt_authority(resolution: JsonObject) -> EvalPromptInput:
+    """The authority that produced a metric travels with the metric itself."""
+    target = resolution.get("request_target")
+    authority = target.get("prompt_authority") if isinstance(target, dict) else None
+    if authority not in {"flat", "server_chat"}:
+        raise ValueError("resolved lm-eval task has no prompt authority for its normalized metric")
+    return EvalPromptInput.model_validate({"kind": authority})
+
+
 def normalize_lm_eval_result(
     raw: JsonObject,
     resolution: JsonObject,
@@ -187,6 +197,7 @@ def normalize_lm_eval_result(
         native_metric_key=native_key,
         value=value,
         higher_is_better=direction,
+        prompt_authority=resolved_prompt_authority(resolution),
     )
     comparison = EvalMetricComparison.at_least if direction else EvalMetricComparison.at_most
     passed = value >= definition.threshold if direction else value <= definition.threshold
@@ -386,6 +397,7 @@ def normalize_repeated_lm_eval_result(
         metric=definition.metric,
         filter=definition.metric_filter,
         native_metric_key="inferlab:pass_rate",
+        prompt_authority=resolved_prompt_authority(resolution),
         value=pass_rate if pass_rate is not None else 0.0,
         higher_is_better=True,
     )
@@ -468,6 +480,7 @@ def partial_repeated_lm_eval_result(
         metric=definition.metric,
         filter=definition.metric_filter,
         native_metric_key="inferlab:pass_rate",
+        prompt_authority=resolved_prompt_authority(resolution),
         value=pass_rate,
         higher_is_better=True,
     )

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "status": "succeeded",
+  "effective_selection": {
+    "kind": "eval",
+    "task_identity": "gsm8k",
+    "dataset_path": "openai/gsm8k",
+    "dataset_name": "main",
+    "evaluation_split": "test",
+    "fewshot_split": "train",
+    "data_files": {
+      "test": ["fixtures/test-000.jsonl", "fixtures/test-001.jsonl"]
+    }
+  },
+  "readiness": {
+    "kind": "opaque",
+    "reason": "lm-eval cannot bind the complete dataset closure before materialization",
+    "unresolved_path": null,
+    "deferred_source_access": true
+  },
+  "cache_stores": [
+    {
+      "authority": "huggingface_datasets",
+      "purpose": "dataset_materialization",
+      "path": "/cache/huggingface/datasets",
+      "outcome": "unavailable"
+    }
+  ],
+  "remote_metadata": "not_accessed",
+  "source_bytes": "not_accessed",
+  "error": null
+}

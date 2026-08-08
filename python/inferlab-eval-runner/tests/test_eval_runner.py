@@ -8,6 +8,7 @@ from typing import TextIO, cast
 
 import pytest
 from inferlab_eval_runner.bundled_tasks.estonia.estonia import process_results as score_estonia
+from inferlab_eval_runner.data_asset import prepare_eval_data_asset
 from inferlab_eval_runner.eval_client import (
     execute,
     run_lm_eval,
@@ -44,7 +45,9 @@ from inferlab_eval_runner.prompt_logprobs import (
     validate_prompt_logprob_response,
 )
 from inferlab_eval_runner.task_resolution import (
+    bind_prepared_task,
     lm_eval_task_argument,
+    prepare_lm_eval_task,
     resolve_lm_eval_target,
     resolve_lm_eval_task,
     task_requires_prompt_logprobs,
@@ -60,6 +63,12 @@ from inferlab_measurement_sdk import (
     EvalFailureKind,
     EvalMetricComparison,
     EvalMetricGateConclusion,
+    EvalPreparedSourceBinding,
+    EvalTaskSourceInputWorkspaceYaml,
+    MeasurementDataAssetEffectiveSelectionEval,
+    MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetReadinessClosed,
+    MeasurementDataAssetReadinessOpaque,
     RawArtifact,
 )
 
@@ -68,7 +77,11 @@ def probe_tokenization() -> ProbeTokenization:
     return ProbeTokenization(token_ids=[10, 11, 12], offset_mapping=[(0, 8), (8, 16), (16, 41)])
 
 
-def lm_eval_request(tmp_path: Path) -> EvalClientRequest:
+def lm_eval_request(
+    tmp_path: Path,
+    prompt: str = "server_chat",
+    declared_prompt: str | None = "server_chat",
+) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
             "protocol_version": "7",
@@ -85,6 +98,8 @@ def lm_eval_request(tmp_path: Path) -> EvalClientRequest:
             "definition": {
                 "kind": "lm_eval",
                 "task": {"kind": "built_in", "name": "gsm8k"},
+                "prompt": {"kind": prompt},
+                "declared_prompt": (None if declared_prompt is None else {"kind": declared_prompt}),
                 "limit": 8,
                 "few_shot": 5,
                 "seed": 1,
@@ -132,16 +147,79 @@ def openai_smoke_request(tmp_path: Path) -> EvalClientRequest:
     )
 
 
-def task_resolution(task: tuple[str, str]) -> dict[str, object]:
+def task_resolution(
+    task: tuple[str, str],
+    prompt_authority: str = "flat",
+    emitted: list[str] | None = None,
+) -> dict[str, object]:
     identity, output_type = task
-    return {"task_identity": identity, "output_type": output_type}
+    emitted = [output_type] if emitted is None else emitted
+    return {
+        "task_identity": identity,
+        "output_type": output_type,
+        "emitted_request_types": emitted,
+        "reduces_to_one_request_type": len(set(emitted)) == 1,
+        "request_target": {"prompt_authority": prompt_authority},
+    }
 
 
-def test_lm_eval_command_targets_chat_for_generate_until(tmp_path: Path) -> None:
-    request = lm_eval_request(tmp_path)
+def test_lm_eval_command_targets_completions_for_a_flat_generative_authority(
+    tmp_path: Path,
+) -> None:
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt=None)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
 
     command = lm_eval_command(
         request,
+        definition,
+        tmp_path / "raw",
+        task_resolution(("gsm8k", "generate_until")),
+    )
+
+    run_index = command.index("run")
+    assert command[run_index + 1 : run_index + 3] == ["--model", "local-completions"]
+    assert (
+        "base_url=http://127.0.0.1:8000/v1/completions"
+        in command[command.index("--model_args") + 1]
+    )
+    assert "--apply_chat_template" not in command
+
+
+def test_flat_generative_authority_records_that_it_was_defaulted(tmp_path: Path) -> None:
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt=None)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+
+    target = resolve_lm_eval_target(
+        request, definition, task_resolution(("gsm8k", "generate_until"))
+    )
+
+    assert target.prompt_authority == "flat"
+    assert target.declared_prompt_authority is None
+
+
+def test_a_likelihood_task_rejects_a_declared_prompt_authority(tmp_path: Path) -> None:
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt="flat")
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+
+    with pytest.raises(ValueError) as error:
+        resolve_lm_eval_target(
+            request, definition, task_resolution(("arc_easy", "multiple_choice"))
+        )
+
+    assert "must not" in str(error.value) and "declare a prompt authority" in str(error.value)
+
+
+def test_lm_eval_command_targets_chat_for_a_server_chat_authority(tmp_path: Path) -> None:
+    request = lm_eval_request(tmp_path)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+
+    command = lm_eval_command(
+        request,
+        definition,
         tmp_path / "raw",
         task_resolution(("gsm8k", "generate_until")),
     )
@@ -182,6 +260,7 @@ def test_single_lm_eval_does_not_invent_an_undeclared_seed(tmp_path: Path) -> No
 
     command = lm_eval_command(
         request,
+        definition,
         tmp_path / "raw",
         task_resolution(("gsm8k", "generate_until")),
     )
@@ -191,9 +270,12 @@ def test_single_lm_eval_does_not_invent_an_undeclared_seed(tmp_path: Path) -> No
 
 
 def test_lm_eval_targets_completions_for_a_likelihood_task(tmp_path: Path) -> None:
-    request = lm_eval_request(tmp_path)
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt=None)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
     target = resolve_lm_eval_target(
         request,
+        definition,
         task_resolution(("arc_easy", "multiple_choice")),
     )
     assert target.model == "local-completions"
@@ -231,6 +313,7 @@ def test_lm_eval_command_accepts_a_workspace_task_yaml(tmp_path: Path) -> None:
     )
     command = lm_eval_command(
         request,
+        definition,
         tmp_path / "raw",
         task_resolution(("custom", "generate_until")),
     )
@@ -357,9 +440,8 @@ def test_bundled_task_resolution_preserves_release_asset_identities(
             "metric_list": [{"metric": "estonia_pass", "higher_is_better": True}],
         },
     )
-
     resolution = resolve_lm_eval_task(request, definition)
-    command = lm_eval_command(request, tmp_path / "raw", resolution)
+    command = lm_eval_command(request, definition, tmp_path / "raw", resolution)
 
     assert resolution["task_source"] == {
         "kind": "bundled",
@@ -771,8 +853,318 @@ def test_workspace_yaml_resolution_preserves_effective_dataset_fields(
         "dataset_name": "main",
         "evaluation_split": "test",
         "fewshot_split": "train",
+        "data_files": None,
     }
     assert evidence["output_type"] == "loglikelihood"
+
+
+def test_workspace_eval_source_is_prepared_as_explicitly_opaque(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    task_yaml = tmp_path / "custom.yaml"
+    task_yaml.write_text(
+        "task: custom\ndataset_path: json\ndata_files: data.jsonl\n", encoding="utf-8"
+    )
+    eval_request = lm_eval_request(tmp_path)
+    definition = eval_request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.task = definition.task.model_validate(
+        {"kind": "workspace_yaml", "path": str(task_yaml)}
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.task_resolution.load_lm_eval_yaml",
+        lambda path: {
+            "task": "custom",
+            "dataset_path": "json",
+            "dataset_name": "main",
+            "data_files": "data.jsonl",
+            "test_split": "test",
+            "output_type": "generate_until",
+            "emitted_request_types": ["generate_until"],
+            "reduces_to_one_request_type": True,
+            "request_target": {"prompt_authority": "flat"},
+        },
+    )
+    request = MeasurementDataAssetPreparationRequest.model_validate(
+        {
+            "protocol_version": "7",
+            "phase": {"kind": "resolve"},
+            "source": {
+                "kind": "eval",
+                "workspace_root": str(tmp_path),
+                "workspace_source_exclusions": [],
+                "definition": eval_request.definition.model_dump(),
+            },
+            "artifact_dir": str(tmp_path / "assets"),
+        }
+    )
+
+    result = prepare_eval_data_asset(request)
+
+    assert result.status is ClientStatus.succeeded
+    assert result.effective_selection is not None
+    effective_selection = result.effective_selection.root
+    assert isinstance(effective_selection, MeasurementDataAssetEffectiveSelectionEval)
+    assert effective_selection.dataset_path == "json"
+    assert result.readiness is not None
+    assert isinstance(result.readiness.root, MeasurementDataAssetReadinessOpaque)
+    assert result.readiness.root.deferred_source_access
+    assert result.readiness.root.unresolved_path == str(task_yaml)
+    assert result.readiness.root.reason == (
+        "the workspace task is not one supported file-backed loader with dataset_kwargs.data_files"
+    )
+
+
+def test_workspace_eval_local_files_are_snapshotted_and_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    data_file = tmp_path / "data/examples.json"
+    data_file.parent.mkdir()
+    data_file.write_text('{"question":"cold"}\n', encoding="utf-8")
+    (data_file.parent / "more.json").write_text('{"question":"warm"}\n', encoding="utf-8")
+    task_yaml = tmp_path / "custom.yaml"
+    task_yaml.write_text(
+        "task: custom\ndataset_path: json\ndataset_kwargs:\n  data_files: data/*.json\n",
+        encoding="utf-8",
+    )
+    eval_request = lm_eval_request(tmp_path)
+    definition = eval_request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.task = definition.task.model_validate(
+        {"kind": "workspace_yaml", "path": str(task_yaml)}
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.task_resolution.load_lm_eval_yaml",
+        lambda path: {
+            "task": "custom",
+            "dataset_path": "json",
+            "dataset_kwargs": {"data_files": "data/*.json"},
+            "test_split": "train",
+            "output_type": "generate_until",
+            "emitted_request_types": ["generate_until"],
+            "reduces_to_one_request_type": True,
+            "request_target": {"prompt_authority": "flat"},
+        },
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.local_eval_source._resolve_local_data_files",
+        lambda value, workspace_root: {
+            "train": [
+                workspace_root / "data/examples.json",
+                workspace_root / "data/more.json",
+            ]
+        },
+    )
+    request_value = {
+        "protocol_version": "7",
+        "source": {
+            "kind": "eval",
+            "workspace_root": str(tmp_path),
+            "workspace_source_exclusions": [],
+            "definition": eval_request.definition.model_dump(),
+        },
+        "artifact_dir": str(tmp_path / "assets"),
+    }
+    resolve = prepare_eval_data_asset(
+        MeasurementDataAssetPreparationRequest.model_validate(
+            {**request_value, "phase": {"kind": "resolve"}}
+        )
+    )
+
+    assert resolve.readiness is None
+    assert resolve.next_phase is not None
+    assert resolve.next_phase.root == "snapshot_local"
+
+    snapshot = prepare_eval_data_asset(
+        MeasurementDataAssetPreparationRequest.model_validate(
+            {**request_value, "phase": {"kind": "snapshot_local"}}
+        )
+    )
+    assert snapshot.readiness is not None
+    readiness = snapshot.readiness.root
+    assert isinstance(readiness, MeasurementDataAssetReadinessClosed)
+    acquired_source = readiness.acquired_source.model_dump()
+    assert acquired_source["kind"] == "local_file_closure"
+    assert [entry["relative_path"] for entry in acquired_source["files"]] == [
+        "custom.yaml",
+        "data/examples.json",
+        "data/more.json",
+    ]
+    assert readiness.eval_binding is not None
+    binding = readiness.eval_binding
+    prepared_data = Path(binding.workspace_root) / "data/examples.json"
+    assert prepared_data.read_text(encoding="utf-8") == '{"question":"cold"}\n'
+    assert str(prepared_data) in Path(binding.task_path).read_text(encoding="utf-8")
+    assert str(Path(binding.workspace_root) / "data/more.json") in Path(
+        binding.task_path
+    ).read_text(encoding="utf-8")
+    assert prepared_data.stat().st_mode & 0o222 == 0
+    assert Path(binding.task_path).stat().st_mode & 0o222 == 0
+
+    eval_request.prepared_source = readiness.eval_binding
+    bound = bind_prepared_task(eval_request, definition)
+    assert isinstance(bound.task.root, EvalTaskSourceInputWorkspaceYaml)
+    assert bound.task.root.path == binding.task_path
+    data_file.write_text('{"question":"mutated"}\n', encoding="utf-8")
+    assert prepared_data.read_text(encoding="utf-8") == '{"question":"cold"}\n'
+
+
+def test_prepared_eval_snapshot_is_not_rejected_as_ignored_workspace_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text(".inferlab/\n", encoding="utf-8")
+    snapshot = tmp_path / ".inferlab/records/recipe/data-assets/source/prepared-source"
+    snapshot.mkdir(parents=True)
+    task_yaml = snapshot / "_inferlab_prepared_task.yaml"
+    task_yaml.write_text("task: custom\ndataset_path: json\n", encoding="utf-8")
+    request = lm_eval_request(tmp_path)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.task = definition.task.model_validate(
+        {"kind": "workspace_yaml", "path": str(tmp_path / "original.yaml")}
+    )
+    request.prepared_source = EvalPreparedSourceBinding(
+        workspace_root=str(snapshot),
+        task_path=str(task_yaml),
+    )
+    bound = bind_prepared_task(request, definition)
+    monkeypatch.setattr(
+        "inferlab_eval_runner.task_resolution.load_lm_eval_yaml",
+        lambda path: {
+            "task": "custom",
+            "dataset_path": "json",
+            "output_type": "generate_until",
+        },
+    )
+
+    resolution = resolve_lm_eval_task(request, bound)
+
+    assert resolution["task_identity"] == "custom"
+    assert resolution["include_closure"] == [str(task_yaml)]
+    command = lm_eval_command(request, bound, tmp_path / "raw", resolution)
+    assert command[command.index("--tasks") + 1] == str(task_yaml)
+
+
+def test_builtin_eval_source_stays_opaque_without_materializing_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eval_request = lm_eval_request(tmp_path)
+    definition = eval_request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.task = definition.task.model_validate({"kind": "built_in", "name": "arc_easy"})
+
+    def unexpected_resolution(*args: object, **kwargs: object) -> object:
+        raise AssertionError("opaque built-in preparation must not instantiate lm-eval task data")
+
+    monkeypatch.setattr(
+        "inferlab_eval_runner.data_asset.resolve_lm_eval_data_source",
+        unexpected_resolution,
+    )
+    request = MeasurementDataAssetPreparationRequest.model_validate(
+        {
+            "protocol_version": "7",
+            "phase": {"kind": "resolve"},
+            "source": {
+                "kind": "eval",
+                "workspace_root": str(tmp_path),
+                "workspace_source_exclusions": [],
+                "definition": eval_request.definition.model_dump(),
+            },
+            "artifact_dir": str(tmp_path / "assets"),
+        }
+    )
+
+    result = prepare_eval_data_asset(request)
+
+    assert result.status is ClientStatus.succeeded
+    assert result.effective_selection is not None
+    selection = result.effective_selection.root
+    assert isinstance(selection, MeasurementDataAssetEffectiveSelectionEval)
+    assert selection.task_identity == "arc_easy"
+    assert selection.dataset_path is None
+    assert result.readiness is not None
+    assert isinstance(result.readiness.root, MeasurementDataAssetReadinessOpaque)
+    assert result.readiness.root.deferred_source_access
+
+
+def test_bundled_eval_source_preparation_closes_verified_release_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = Path(__file__).parents[1] / "src/inferlab_eval_runner/bundled_tasks/estonia"
+    paths = {
+        "dataset": source_root / "dataset.json",
+        "scorer": source_root / "estonia.py",
+        "task_definition": source_root / "estonia.yaml",
+        "prompt": source_root / "prompt.txt",
+    }
+    digests = {
+        label: hashlib.sha256(path.read_bytes()).hexdigest() for label, path in paths.items()
+    }
+    closure = hashlib.sha256()
+    for relative, path in [
+        ("estonia/dataset.json", paths["dataset"]),
+        ("estonia/estonia.py", paths["scorer"]),
+        ("estonia/estonia.yaml", paths["task_definition"]),
+        ("estonia/prompt.txt", paths["prompt"]),
+    ]:
+        contents = path.read_bytes()
+        closure.update(len(relative).to_bytes(8, "little"))
+        closure.update(relative.encode())
+        closure.update(len(contents).to_bytes(8, "little"))
+        closure.update(contents)
+    eval_request = lm_eval_request(tmp_path)
+    definition = eval_request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.task = definition.task.model_validate(
+        {
+            "kind": "bundled",
+            "name": "estonia",
+            "task_identity": "inferlab_estonia",
+            "path": str(paths["task_definition"]),
+            "task_closure_sha256": closure.hexdigest(),
+            "task_definition_sha256": digests["task_definition"],
+            "prompt_asset_sha256": digests["prompt"],
+            "dataset_asset_sha256": digests["dataset"],
+            "scorer_sha256": digests["scorer"],
+        }
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.task_resolution.load_lm_eval_yaml",
+        lambda path: {
+            "task": "inferlab_estonia",
+            "output_type": "generate_until",
+            "emitted_request_types": ["generate_until"],
+            "reduces_to_one_request_type": True,
+            "request_target": {"prompt_authority": "flat"},
+            "test_split": "test",
+        },
+    )
+    request = MeasurementDataAssetPreparationRequest.model_validate(
+        {
+            "protocol_version": "7",
+            "phase": {"kind": "resolve"},
+            "source": {
+                "kind": "eval",
+                "workspace_root": str(tmp_path),
+                "workspace_source_exclusions": [],
+                "definition": eval_request.definition.model_dump(),
+            },
+            "artifact_dir": str(tmp_path / "assets"),
+        }
+    )
+
+    result = prepare_eval_data_asset(request)
+
+    assert result.status is ClientStatus.succeeded
+    assert result.readiness is not None
+    assert isinstance(result.readiness.root, MeasurementDataAssetReadinessClosed)
+    acquired_source = result.readiness.root.acquired_source.model_dump()
+    assert acquired_source["kind"] == "release_qualified"
+    assert len(acquired_source["closure"]) == 4
+    assert all(item.matched for item in result.readiness.root.verification)
 
 
 def test_builtin_task_resolution_uses_the_loaded_lm_eval_task(
@@ -812,23 +1204,38 @@ def test_builtin_task_resolution_uses_the_loaded_lm_eval_task(
     }
 
 
-def test_python_task_with_dynamic_requests_uses_completions_and_the_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def python_task_manager(
+    monkeypatch: pytest.MonkeyPatch, name: str, request_types: list[str]
 ) -> None:
+    """Install a Python-defined task that emits the given request types."""
     loaded_task = SimpleNamespace(
+        # A Python task builds its own requests, so this attribute is not
+        # authoritative and the resolver must not trust it.
         OUTPUT_TYPE="generate_until",
-        dump_config=lambda: {"task": "squadv2", "output_type": "generate_until"},
+        dump_config=lambda: {"task": name, "output_type": "generate_until"},
+        doc_iterator=lambda **kwargs: iter([(index, {"id": index}) for index in range(3)]),
+        # No fewshot_context: observing request types must not build contexts.
+        construct_requests=lambda **kwargs: [
+            SimpleNamespace(request_type=request_type) for request_type in request_types
+        ],
     )
     monkeypatch.setattr(
         "inferlab_eval_runner.task_resolution.load_lm_eval_task_manager",
         lambda: SimpleNamespace(
-            all_tasks=["squadv2"],
-            all_subtasks=["squadv2"],
-            task_index={"squadv2": SimpleNamespace(kind=SimpleNamespace(name="PY_TASK"))},
-            load=lambda name: {"tasks": {name: loaded_task}},
+            all_tasks=[name],
+            all_subtasks=[name],
+            task_index={name: SimpleNamespace(kind=SimpleNamespace(name="PY_TASK"))},
+            load=lambda selected: {"tasks": {selected: loaded_task}},
         ),
     )
-    request = lm_eval_request(tmp_path)
+
+
+def test_a_python_task_emitting_mixed_requests_stays_flat_and_requires_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # squadv2 emits one generate_until and one loglikelihood request per document.
+    python_task_manager(monkeypatch, "squadv2", ["generate_until", "loglikelihood"])
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt=None)
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     definition.task = definition.task.model_validate({"kind": "built_in", "name": "squadv2"})
@@ -836,8 +1243,45 @@ def test_python_task_with_dynamic_requests_uses_completions_and_the_probe(
     evidence = resolve_lm_eval_task(request, definition)
 
     assert evidence["output_type"] == "dynamic"
+    assert evidence["emitted_request_types"] == ["generate_until", "loglikelihood"]
+    assert evidence["reduces_to_one_request_type"] is False
+    # Both decisions are fixed by the first document, so the scan stops there.
+    assert evidence["observed_request_documents"] == 1
     assert task_requires_prompt_logprobs(evidence)
-    assert resolve_lm_eval_target(request, evidence).model == "local-completions"
+    target = resolve_lm_eval_target(request, definition, evidence)
+    assert target.model == "local-completions"
+    assert target.prompt_authority == "flat"
+
+
+def test_a_generative_python_task_needs_no_probe_and_may_declare_server_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # fda, swde, squad_completion and the SCROLLS summary tasks emit only
+    # generate_until, so the request capability follows the requests, not the
+    # language the task is written in.
+    python_task_manager(monkeypatch, "fda", ["generate_until"])
+    request = lm_eval_request(tmp_path, prompt="server_chat", declared_prompt="server_chat")
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.task = definition.task.model_validate({"kind": "built_in", "name": "fda"})
+
+    evidence = resolve_lm_eval_task(request, definition)
+
+    assert evidence["output_type"] == "generate_until"
+    assert evidence["emitted_request_types"] == ["generate_until"]
+    assert evidence["reduces_to_one_request_type"] is True
+    # A single-type claim is only exact if every document backed it.
+    assert evidence["observed_request_documents"] == 3
+    assert not task_requires_prompt_logprobs(evidence)
+    target = resolve_lm_eval_target(request, definition, evidence)
+    assert target.model == "local-chat-completions"
+    assert target.prompt_authority == "server_chat"
+
+    prepared = prepare_lm_eval_task(request, definition)
+    assert prepared.requires_prompt_logprobs is False
+    request_target = prepared.resolution["request_target"]
+    assert isinstance(request_target, dict)
+    assert request_target["requires_prompt_logprobs"] is False
 
 
 def test_repeated_eval_rejects_a_dynamic_task_before_probe_or_inference(
@@ -1188,6 +1632,9 @@ def metric_resolution(identity: str = "gsm8k") -> dict[str, object]:
         "status": "resolved",
         "task_identity": identity,
         "output_type": "generate_until",
+        "emitted_request_types": ["generate_until"],
+        "reduces_to_one_request_type": True,
+        "request_target": {"prompt_authority": "flat"},
     }
 
 
@@ -1360,6 +1807,28 @@ def test_repeated_normalization_rejects_completed_response_without_task_score(
         )
 
 
+def test_a_normalized_metric_carries_the_authority_that_produced_it(
+    tmp_path: Path,
+) -> None:
+    request = lm_eval_request(tmp_path)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    definition.metric_filter = "strict-match"
+
+    _, normalized, gate = normalize_lm_eval_result(
+        {
+            "results": {"gsm8k": {"exact_match,strict-match": 0.95}},
+            "higher_is_better": {"gsm8k": {"exact_match": True}},
+        },
+        task_resolution(("gsm8k", "generate_until"), prompt_authority="server_chat"),
+        definition,
+    )
+
+    metric = normalized["gsm8k:exact_match,strict-match"]
+    assert metric.prompt_authority.root.kind == "server_chat"
+    assert gate.metric.prompt_authority.root.kind == "server_chat"
+
+
 def test_metric_normalization_applies_a_lower_is_better_gate(
     tmp_path: Path,
 ) -> None:
@@ -1474,6 +1943,9 @@ def test_run_lm_eval_reports_a_nonzero_exit(
             "status": "resolved",
             "task_identity": "gsm8k",
             "output_type": "generate_until",
+            "emitted_request_types": ["generate_until"],
+            "reduces_to_one_request_type": True,
+            "request_target": {"prompt_authority": "flat"},
         },
     )
 
@@ -1699,6 +2171,9 @@ def test_run_lm_eval_reports_absent_results_json(
             "status": "resolved",
             "task_identity": "gsm8k",
             "output_type": "generate_until",
+            "emitted_request_types": ["generate_until"],
+            "reduces_to_one_request_type": True,
+            "request_target": {"prompt_authority": "flat"},
         },
     )
 
@@ -1839,7 +2314,7 @@ def test_run_lm_eval_checkpoints_started_native_evidence_before_waiting(
 def test_run_lm_eval_stops_before_native_when_logprob_probe_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    request = lm_eval_request(tmp_path)
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt=None)
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     monkeypatch.setattr(
@@ -1848,6 +2323,9 @@ def test_run_lm_eval_stops_before_native_when_logprob_probe_fails(
             "status": "resolved",
             "task_identity": "scoring",
             "output_type": "loglikelihood",
+            "emitted_request_types": ["loglikelihood"],
+            "reduces_to_one_request_type": True,
+            "request_target": {"prompt_authority": "flat"},
         },
     )
     probe_artifact = RawArtifact(

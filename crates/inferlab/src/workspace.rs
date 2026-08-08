@@ -19,10 +19,11 @@ pub(crate) use composition::{snapshot_workspace, workspace_identity};
 #[cfg(test)]
 pub(crate) use definitions::BenchRandomShape;
 pub(crate) use definitions::{
-    AggregateSlo, BenchAgenticSource, BenchDefinition, BenchRequestSource, BenchSessionSource,
-    BenchTokenSelector, BenchTpotApplicability, EvalDefinition, EvalTaskSource, JsonValue,
-    ModelDefinition, RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition,
-    ServerDefinition, StackDefinition, WorkloadSuiteDefinition, WorkspaceConfig,
+    AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchRequestSource,
+    BenchSessionSource, BenchTokenSelector, BenchTpotApplicability, EvalDefinition, EvalPrompt,
+    EvalTaskSource, JsonValue, ModelDefinition, RecipeDefinition, RequestRate, RequestSlo,
+    ServerCaseDefinition, ServerDefinition, StackDefinition, WorkloadSuiteDefinition,
+    WorkspaceConfig,
 };
 pub(crate) use definitions::{
     BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,
@@ -404,7 +405,7 @@ chat_template = "{% for message in messages %}{{ message.content }}{% endfor %}"
     }
 
     #[test]
-    fn server_metrics_rejects_a_positive_native_warmup() -> Result<(), Box<dyn std::error::Error>> {
+    fn server_metrics_accepts_a_positive_native_warmup() -> Result<(), Box<dyn std::error::Error>> {
         let definition = toml::from_str::<BenchDefinition>(
             r#"
 kind = "serving"
@@ -416,10 +417,63 @@ warmup_prompts_per_concurrency = 1
 timeout_seconds = 60
 "#,
         )?;
-        let Err(error) = validate_bench("metrics-warmup", &definition) else {
-            return Err(std::io::Error::other("server metrics with warmup must fail").into());
-        };
-        assert!(error.to_string().contains("server_metrics"), "{error}");
+        validate_bench("metrics-warmup", &definition)?;
+        Ok(())
+    }
+
+    #[test]
+    fn serving_bench_accepts_closed_cache_starts_and_rejects_the_old_boolean()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for start in ["uncontrolled", "cold", "primed"] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", prompt = {{ kind = "flat" }}, input_tokens = 128, output_tokens = 32, prefix_sharing = {{ shared_prefix_tokens = 64 }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+cache = {{ start = "{start}" }}
+timeout_seconds = 60
+"#
+            ))?;
+            validate_bench("cache", &definition)?;
+        }
+
+        let error = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+concurrency = [1]
+prompts_per_concurrency = 1
+reset_prefix_cache = true
+timeout_seconds = 60
+"#,
+        )
+        .err()
+        .ok_or("the removed reset_prefix_cache field was accepted")?;
+        assert!(error.to_string().contains("reset_prefix_cache"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn primed_cache_requires_positive_exact_prefix_geometry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 128, output_tokens = 32, prefix_sharing = { shared_prefix_tokens = 0 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+cache = { start = "primed" }
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("primed", &definition)
+            .err()
+            .ok_or("primed cache accepted a zero shared prefix")?;
+        assert!(
+            error.to_string().contains("positive prefix_sharing"),
+            "{error}"
+        );
         Ok(())
     }
 
@@ -840,6 +894,85 @@ timeout_seconds = 3600
             task,
             EvalTaskSource::Bundled { bundled } if bundled == "estonia"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_omitted_eval_prompt_resolves_to_flat_without_claiming_a_declaration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let omitted: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+"#,
+        )?;
+        let EvalDefinition::LmEval { prompt, .. } = omitted else {
+            return Err(std::io::Error::other("fixture should be lm-eval").into());
+        };
+        assert!(prompt.declared().is_none());
+        assert_eq!(prompt.effective(), &EvalPrompt::Flat);
+
+        let declared: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+prompt = { kind = "server_chat" }
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+"#,
+        )?;
+        let EvalDefinition::LmEval { prompt, .. } = declared else {
+            return Err(std::io::Error::other("fixture should be lm-eval").into());
+        };
+        assert_eq!(prompt.declared(), Some(&EvalPrompt::ServerChat));
+        assert_eq!(prompt.effective(), &EvalPrompt::ServerChat);
+        Ok(())
+    }
+
+    #[test]
+    fn a_flat_eval_rejects_a_server_owned_chat_template_control()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+
+[request_body.chat_template_kwargs]
+enable_thinking = true
+"#,
+        )?;
+        let Err(error) = catalog_validation::validate_eval("gsm8k", &definition) else {
+            return Err(std::io::Error::other(
+                "a flat Eval must reject a server-owned template control",
+            )
+            .into());
+        };
+        assert!(
+            error.to_string().contains("chat_template_kwargs"),
+            "{error}"
+        );
+
+        let server_chat: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+prompt = { kind = "server_chat" }
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+
+[request_body.chat_template_kwargs]
+enable_thinking = true
+"#,
+        )?;
+        catalog_validation::validate_eval("gsm8k", &server_chat)?;
         Ok(())
     }
 

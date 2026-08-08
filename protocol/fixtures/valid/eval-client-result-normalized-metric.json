@@ -11,7 +11,10 @@
       "filter": "strict-match",
       "native_metric_key": "exact_match,strict-match",
       "value": 0.95,
-      "higher_is_better": true
+      "higher_is_better": true,
+      "prompt_authority": {
+        "kind": "flat"
+      }
     }
   },
   "gate": {
@@ -21,7 +24,10 @@
       "filter": "strict-match",
       "native_metric_key": "exact_match,strict-match",
       "value": 0.95,
-      "higher_is_better": true
+      "higher_is_better": true,
+      "prompt_authority": {
+        "kind": "flat"
+      }
     },
     "threshold": 0.9,
     "comparison": "at_least",
@@ -39,7 +45,12 @@
     "per_trial_filter": "strict-match",
     "higher_is_better": true
   },
-  "native_command": ["python", "-m", "lm_eval", "run"],
+  "native_command": [
+    "python",
+    "-m",
+    "lm_eval",
+    "run"
+  ],
   "native_exit_code": 0,
   "native_timed_out": false,
   "raw_artifacts": [

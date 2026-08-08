@@ -14,8 +14,9 @@ use super::record::{
     BenchAgenticSourceEvidence, BenchDatasetRequestSourceEvidence,
     BenchPopulationPreparationEvidence, BenchRequestSourceEvidence, BenchSessionSourceEvidence,
     ClientCasePaths, ClientProcessEvidence, ClientTerminationEvidence, ClientTerminationTrigger,
-    DatasetAcquisitionEvidence, DatasetAcquisitionOutcome, EvalCaseEvidence, EvalCaseRecord,
-    WorkloadKind, WorkloadRecord, WorkloadRecordSession, WorkloadStatus, write_json,
+    DataAssetMaterializationEvidence, DatasetAcquisitionEvidence, DatasetAcquisitionOutcome,
+    EvalCaseEvidence, EvalCaseRecord, WorkloadKind, WorkloadRecord, WorkloadRecordSession,
+    WorkloadStatus, write_json,
 };
 use super::{
     BenchExecutionPlan, BenchPlan, ClientCommandPlan, EvalExecutionPlan, EvalPlan,
@@ -91,4 +92,6 @@ struct ClientGroupHandle {
 
 pub(crate) use bench::run_bench;
 pub(crate) use bench::skip;
+pub(crate) use client::{ClientProcessPaths, run_unbounded_client};
 pub(crate) use eval::run_eval;
+pub(crate) use preparation::acquire_dataset_snapshot;

@@ -1,0 +1,35 @@
+{
+  "protocol_version": "7",
+  "phase": {
+    "kind": "resolve"
+  },
+  "source": {
+    "kind": "eval",
+    "workspace_root": "/workspace",
+    "workspace_source_exclusions": [
+      ".inferlab/records"
+    ],
+    "definition": {
+      "kind": "lm_eval",
+      "task": {
+        "kind": "built_in",
+        "name": "gsm8k"
+      },
+      "request_body": {},
+      "limit": 8,
+      "few_shot": 5,
+      "seed": 1,
+      "trials": 1,
+      "max_tokens": 256,
+      "concurrency": 4,
+      "metric": "exact_match",
+      "metric_filter": null,
+      "threshold": 0.9,
+      "timeout_seconds": 300,
+      "prompt": {
+        "kind": "flat"
+      }
+    }
+  },
+  "artifact_dir": "/records/recipe/data-assets/asset/resolve"
+}

@@ -16,7 +16,10 @@
           "kind": "prefill",
           "declared_replica_count": 1,
           "effective_replica_count": 1,
-          "effective_settings": {"trust_remote_code": true},
+          "effective_settings": {
+            "enable_prompt_tokens_details": false,
+            "trust_remote_code": true
+          },
           "effective_parallelism": {
             "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
             "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
@@ -29,7 +32,10 @@
           "kind": "decode",
           "declared_replica_count": 1,
           "effective_replica_count": 1,
-          "effective_settings": {"trust_remote_code": true},
+          "effective_settings": {
+            "enable_prompt_tokens_details": false,
+            "trust_remote_code": true
+          },
           "effective_parallelism": {
             "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
             "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},

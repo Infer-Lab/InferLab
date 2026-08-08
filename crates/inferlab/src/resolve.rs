@@ -130,6 +130,8 @@ fn compose_measurements(
                         url: metrics.url.clone(),
                     }
                 }),
+                prompt_cache_read_zero_representation: public_endpoint
+                    .prompt_cache_read_zero_representation,
             },
             model: crate::workload::MeasurementModel {
                 locator: model_locator,
@@ -337,6 +339,7 @@ mod tests {
             chat_completions_path: "/v1/completions".to_owned(),
             server_metrics: None,
             prefix_cache_reset: None,
+            prompt_cache_read_zero_representation: None,
         };
 
         let error = validate_workload_endpoint("fixture", &endpoint, &[])
@@ -362,6 +365,7 @@ mod tests {
                 }
             }),
             prefix_cache_reset: None,
+            prompt_cache_read_zero_representation: None,
         };
 
         validate_workload_endpoint("fixture", &endpoint(Some("/metrics")), &[])?;
@@ -398,6 +402,7 @@ mod tests {
                 port: Some("prometheus".to_owned()),
             }),
             prefix_cache_reset: None,
+            prompt_cache_read_zero_representation: None,
         };
 
         validate_workload_endpoint("fixture", &endpoint, &["prometheus".to_owned()])?;
@@ -518,6 +523,7 @@ mod tests {
                     chat_completions_path: "/v1/chat/completions".to_owned(),
                     server_metrics: None,
                     prefix_cache_reset: None,
+                    prompt_cache_read_zero_representation: None,
                 },
                 readiness: readiness.clone(),
                 ports: Vec::new(),

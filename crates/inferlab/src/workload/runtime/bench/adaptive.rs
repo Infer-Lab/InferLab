@@ -12,7 +12,9 @@ use crate::workload::record::{
     AdaptiveBenchSummary, CaseSloEvaluation, SloBoundDirection, SloEvaluationOutcome,
     WorkloadRecordSession, WorkloadStatus,
 };
-use crate::workload::{BenchCasePlan, BenchPlan, LoadShape, resolved_request_count};
+use crate::workload::{
+    BenchCasePlan, BenchPlan, BenchPreparationStep, LoadShape, resolved_request_count,
+};
 use crate::workspace::{BenchDefinition, RequestRate};
 use inferlab_runtime::interrupt;
 
@@ -20,6 +22,7 @@ use inferlab_runtime::interrupt;
 pub(crate) fn run_adaptive(
     plan: &BenchPlan,
     policy: &str,
+    preparation_order: &[BenchPreparationStep],
     initial_rates: &[f64],
     max_search_steps: u32,
     min_rate_resolution: Option<f64>,
@@ -60,6 +63,7 @@ pub(crate) fn run_adaptive(
                 duration_seconds,
             )?,
             warmup_request_count: 0,
+            preparation_order: preparation_order.to_vec(),
             duration_seconds,
             session_count: None,
             warmup_session_count: None,

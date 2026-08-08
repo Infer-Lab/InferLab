@@ -87,8 +87,8 @@ impl TestWorkspace {
             format!(
                 "default_placement = \"local\"\n\
                  \n\
-                 [model_weights.dsv4]\n\
-                 locator = \"/models/dsv4\"\n\
+                 [model_weights.deepseek-v4-flash]\n\
+                 locator = \"/models/deepseek-v4-flash\"\n\
                  \n\
                  [machines.local]\n\
                  host = \"127.0.0.1\"\n\
@@ -152,8 +152,8 @@ impl TestWorkspace {
             format!(
                 "default_placement = \"pair\"\n\
                  \n\
-                 [model_weights.dsv4]\n\
-                 locator = \"/models/dsv4\"\n\
+                 [model_weights.deepseek-v4-flash]\n\
+                 locator = \"/models/deepseek-v4-flash\"\n\
                  \n\
                  [machines.node-a]\n\
                  host = \"127.0.0.1\"\n\
@@ -238,7 +238,7 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
         "readiness",
     ] {
         assert!(
-            start_progress.contains(&format!("phase=\"{phase}\"")),
+            start_progress.contains(&format!(" INFO [serve start] {phase}")),
             "missing {phase:?}: {start_progress}"
         );
     }
@@ -246,7 +246,6 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     assert!(start_progress.contains("record_dir=\""));
     assert!(start_progress.contains("item=\"server\" position=1/1"));
     assert!(start_progress.contains("log=\""));
-    assert!(!String::from_utf8_lossy(&start_output.stdout).contains("progress:"));
 
     assert_eq!(started["status"], "running");
     assert!(started["resolved"]["recipe"].is_null());
@@ -369,8 +368,8 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     );
     let stopped: Value = serde_json::from_slice(&stop_output.stdout)?;
     let stop_progress = String::from_utf8_lossy(&stop_output.stderr);
-    assert!(stop_progress.contains("phase=\"process termination\""));
-    assert!(stop_progress.contains("phase=\"log synchronization\""));
+    assert!(stop_progress.contains(" INFO [serve stop] process termination"));
+    assert!(stop_progress.contains(" INFO [serve stop] log synchronization"));
     assert!(stop_progress.contains("item=\"server\" position=1/1"));
     assert!(stop_progress.contains("log=\""));
     assert_eq!(stopped["status"], "stopped");

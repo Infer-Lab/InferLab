@@ -23,7 +23,11 @@ impl TestWorkspace {
             .split_once("[benches.c8k1k]\n")
             .ok_or("fixture has no c8k1k Bench section")?;
         let bench_and_rest = bench_and_rest
-            .replacen("reset_prefix_cache = true", "reset_prefix_cache = false", 1)
+            .replacen(
+                "cache = { start = \"cold\" }",
+                "cache = { start = \"uncontrolled\" }",
+                1,
+            )
             .replacen(
                 "timeout_seconds = 900",
                 &format!("timeout_seconds = {timeout_seconds}"),

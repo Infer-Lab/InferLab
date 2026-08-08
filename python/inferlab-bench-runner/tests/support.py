@@ -95,7 +95,7 @@ def request(
                 },
                 "request_slo": request_slo,
                 "timeout_seconds": 120,
-                "reset_prefix_cache": False,
+                "cache_start": "uncontrolled",
             },
             "case": {
                 "load_shape": load_shape,

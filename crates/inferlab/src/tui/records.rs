@@ -1,4 +1,12 @@
+use super::bench_detail::{
+    AgenticSourceProjection, CachePreparationProjection, CaptureProjection, CaseSloProjection,
+    PopulationSliceProjection, RequestSourceProjection, SessionSourceProjection,
+};
 use super::{CaseView, LOG_TAIL_BYTES, RecordView, State};
+use inferlab_protocol::{
+    BenchAgenticResultEvidence, BenchPromptTokenReconciliation, BenchSessionResultEvidence,
+    RawArtifact,
+};
 use inferlab_protocol::{BenchClientRequest, BenchLoadInput};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -10,6 +18,8 @@ use std::time::SystemTime;
 #[derive(Default, Deserialize)]
 struct RecordProjection {
     #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     status: Option<String>,
@@ -19,6 +29,12 @@ struct RecordProjection {
     started_unix_ms: Option<u64>,
     #[serde(default)]
     finished_unix_ms: Option<u64>,
+    #[serde(default)]
+    passed: Option<bool>,
+    #[serde(default)]
+    skip_reason: Option<String>,
+    #[serde(default)]
+    capture: Option<serde_json::Value>,
     #[serde(default)]
     resolved: Option<ResolvedProjection>,
     #[serde(default)]
@@ -42,6 +58,12 @@ struct RecordProjection {
     #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
+    request_source: Option<serde_json::Value>,
+    #[serde(default)]
+    session_source: Option<serde_json::Value>,
+    #[serde(default)]
+    agentic_source: Option<serde_json::Value>,
+    #[serde(default)]
     cases: Vec<CaseProjection>,
 }
 
@@ -63,12 +85,38 @@ struct ResolvedProjection {
     execution: Option<serde_json::Value>,
     #[serde(default)]
     bench: Option<BenchPlanProjection>,
+    #[serde(default)]
+    client: Option<ClientPlanProjection>,
+}
+
+#[derive(Default, Deserialize)]
+struct ClientPlanProjection {
+    #[serde(default)]
+    effective_definition: Option<EffectiveBenchProjection>,
+}
+
+#[derive(Default, Deserialize)]
+struct EffectiveBenchProjection {
+    #[serde(default)]
+    prompt: Option<PromptProjection>,
+}
+
+#[derive(Default, Deserialize)]
+struct PromptProjection {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    rendering_authority: Option<String>,
+    #[serde(default)]
+    declared: Option<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]
 struct BenchPlanProjection {
     #[serde(default)]
     execution: Option<serde_json::Value>,
+    #[serde(default)]
+    client: Option<ClientPlanProjection>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +162,28 @@ struct CaseProjection {
     error: Option<String>,
     #[serde(default)]
     metrics: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    normalized_metrics: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    cache_preparation: Option<serde_json::Value>,
+    #[serde(default)]
+    slo: Option<serde_json::Value>,
+    #[serde(default)]
+    population_slice: Option<serde_json::Value>,
+    #[serde(default)]
+    completed_requests: Option<u64>,
+    #[serde(default)]
+    failed_requests: Option<u64>,
+    #[serde(default)]
+    normalization_schema: Option<String>,
+    #[serde(default)]
+    session: Option<serde_json::Value>,
+    #[serde(default)]
+    agentic: Option<serde_json::Value>,
+    #[serde(default)]
+    prompt_token_reconciliation: Vec<serde_json::Value>,
+    #[serde(default)]
+    raw_artifacts: Vec<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -382,10 +452,122 @@ fn read_record(root: &Path, path: PathBuf, observed_unix_ms: u64) -> RecordView 
     let mut seen_children = std::collections::BTreeSet::new();
     child_refs.retain(|id| seen_children.insert(id.clone()));
     let resolved_case_loads = resolved_case_loads(projection.resolved.as_ref());
+    let request_source = projection
+        .request_source
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<RequestSourceProjection>(value.clone()).ok());
+    let session_source = projection
+        .session_source
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<SessionSourceProjection>(value.clone()).ok());
+    let agentic_source = projection
+        .agentic_source
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<AgenticSourceProjection>(value.clone()).ok());
+    let request_source_known = request_source.is_some();
+    let session_source_known = session_source.is_some();
+    let agentic_source_known = agentic_source.is_some();
+    let source_known = request_source_known || session_source_known || agentic_source_known;
+    let mut bench_details = if kind == "bench" {
+        let mut source = super::bench_detail::record_source(
+            projection.schema_version,
+            request_source.as_ref(),
+            session_source.as_ref(),
+            agentic_source.as_ref(),
+        );
+        if request_source.is_some()
+            && let Some(prompt) = projection.resolved.as_ref().and_then(resolved_prompt)
+        {
+            source
+                .rows
+                .push(("Prompt authority".to_owned(), prompt_summary(prompt)));
+        }
+        vec![source]
+    } else {
+        Vec::new()
+    };
+    let mut artifact_refs = Vec::new();
+    let prompt_authorities = projection
+        .cases
+        .iter()
+        .flat_map(|case| case.normalized_metrics.values())
+        .filter_map(|metric| {
+            metric
+                .get("prompt_authority")
+                .and_then(|authority| authority.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
     let cases = projection
         .cases
         .into_iter()
         .map(|case| {
+            let cache_preparation = case.cache_preparation.as_ref().and_then(|value| {
+                serde_json::from_value::<CachePreparationProjection>(value.clone()).ok()
+            });
+            let slo = case
+                .slo
+                .as_ref()
+                .and_then(|value| serde_json::from_value::<CaseSloProjection>(value.clone()).ok());
+            let population_slice = case.population_slice.as_ref().and_then(|value| {
+                serde_json::from_value::<PopulationSliceProjection>(value.clone()).ok()
+            });
+            let session_present = case.session.is_some();
+            let session = case.session.as_ref().and_then(|value| {
+                serde_json::from_value::<BenchSessionResultEvidence>(value.clone()).ok()
+            });
+            let agentic_present = case.agentic.is_some();
+            let agentic = case.agentic.as_ref().and_then(|value| {
+                serde_json::from_value::<BenchAgenticResultEvidence>(value.clone()).ok()
+            });
+            let prompt_token_reconciliation = case
+                .prompt_token_reconciliation
+                .iter()
+                .filter_map(|value| {
+                    serde_json::from_value::<BenchPromptTokenReconciliation>(value.clone()).ok()
+                })
+                .collect::<Vec<_>>();
+            let raw_artifacts = case
+                .raw_artifacts
+                .iter()
+                .filter_map(|value| serde_json::from_value::<RawArtifact>(value.clone()).ok())
+                .collect::<Vec<_>>();
+            let request_evidence_unavailable = request_source_known && population_slice.is_none();
+            let has_bench_evidence = source_known
+                || case.cache_preparation.is_some()
+                || case.slo.is_some()
+                || case.population_slice.is_some()
+                || case.completed_requests.is_some()
+                || case.failed_requests.is_some()
+                || case.normalization_schema.is_some()
+                || case.session.is_some()
+                || case.agentic.is_some()
+                || !case.prompt_token_reconciliation.is_empty()
+                || !case.raw_artifacts.is_empty();
+            if kind == "bench" && has_bench_evidence {
+                let (sections, artifacts) =
+                    super::bench_detail::case_evidence(super::bench_detail::CaseEvidence {
+                        id: case.id.as_deref(),
+                        cache_preparation: cache_preparation.as_ref(),
+                        slo: slo.as_ref(),
+                        population_slice: population_slice.as_ref(),
+                        completed_requests: case.completed_requests,
+                        failed_requests: case.failed_requests,
+                        normalization_schema: case.normalization_schema.as_deref(),
+                        request_unavailable: request_evidence_unavailable,
+                        session: session.as_ref(),
+                        session_unavailable: session_source_known && !session_present
+                            || session_present && session.is_none(),
+                        agentic: agentic.as_ref(),
+                        agentic_unavailable: agentic_source_known && !agentic_present
+                            || agentic_present && agentic.is_none(),
+                        prompt_token_reconciliation: &prompt_token_reconciliation,
+                        raw_artifacts: &raw_artifacts,
+                    });
+                bench_details.extend(sections);
+                artifact_refs.extend(artifacts);
+            }
             let resolved_load = case
                 .id
                 .as_ref()
@@ -408,6 +590,40 @@ fn read_record(root: &Path, path: PathBuf, observed_unix_ms: u64) -> RecordView 
         .error
         .or_else(|| (!projection.errors.is_empty()).then(|| projection.errors.join("; ")))
         .or_else(|| projection.failure.map(|failure| failure.message));
+    let mut outcome_facts = Vec::new();
+    if kind == "eval"
+        && let Some(authority) = prompt_authorities.first()
+    {
+        // A metric scored under another authority is a different measurement,
+        // so the authority is shown wherever the values are.
+        outcome_facts.push(("Prompt authority".to_owned(), authority.clone()));
+    }
+    if kind == "bench" {
+        if let Some(passed) = projection.passed {
+            outcome_facts.push((
+                "Passed".to_owned(),
+                if passed { "yes" } else { "no" }.to_owned(),
+            ));
+        }
+        if let Some(reason) = projection.skip_reason.as_deref() {
+            outcome_facts.push(("Skip reason".to_owned(), reason.to_owned()));
+        }
+        if let Some(capture) = projection
+            .capture
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<CaptureProjection>(value.clone()).ok())
+        {
+            outcome_facts.push((
+                "Capture".to_owned(),
+                super::bench_detail::capture_summary(&capture),
+            ));
+        } else if projection.capture.is_some() {
+            outcome_facts.push((
+                "Capture".to_owned(),
+                "unavailable for this record schema".to_owned(),
+            ));
+        }
+    }
     let mut log_refs = projection
         .process_evidence
         .into_values()
@@ -439,8 +655,36 @@ fn read_record(root: &Path, path: PathBuf, observed_unix_ms: u64) -> RecordView 
         child_refs,
         topology,
         cases,
+        outcome_facts,
+        bench_details,
+        artifact_refs,
         process_observation: None,
     }
+}
+
+fn prompt_summary(prompt: &PromptProjection) -> String {
+    let kind = prompt.kind.as_deref().unwrap_or("unknown");
+    let authority = prompt.rendering_authority.as_deref().unwrap_or("unknown");
+    let provenance = if prompt.declared.is_some() {
+        "declared"
+    } else {
+        "defaulted"
+    };
+    format!("{kind} · {authority} · {provenance}")
+}
+
+fn resolved_prompt(resolved: &ResolvedProjection) -> Option<&PromptProjection> {
+    resolved
+        .client
+        .as_ref()
+        .or_else(|| {
+            resolved
+                .bench
+                .as_ref()
+                .and_then(|bench| bench.client.as_ref())
+        })
+        .and_then(|client| client.effective_definition.as_ref())
+        .and_then(|definition| definition.prompt.as_ref())
 }
 
 fn read_case_load(root: &Path, reference: Option<&Path>) -> Option<super::CaseLoad> {
@@ -524,6 +768,9 @@ fn unavailable_record(path: PathBuf, reason: String, observed_unix_ms: u64) -> R
         child_refs: Vec::new(),
         topology: None,
         cases: Vec::new(),
+        outcome_facts: Vec::new(),
+        bench_details: Vec::new(),
+        artifact_refs: Vec::new(),
         process_observation: None,
     }
 }
@@ -557,6 +804,28 @@ mod tests {
     use crate::tui::CaseLoad;
 
     #[test]
+    fn an_eval_record_surfaces_the_prompt_authority_that_produced_its_metric()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("record.json");
+        std::fs::write(
+            &path,
+            br#"{"id":"e1","kind":"eval","status":"succeeded","started_unix_ms":1,"definition_id":"gsm8k","cases":[{"id":"trial-1","status":"succeeded","metrics":{"gsm8k:exact_match,strict-match":0.91},"normalized_metrics":{"gsm8k:exact_match,strict-match":{"source_identity":"gsm8k","metric":"exact_match","filter":"strict-match","native_metric_key":"exact_match,strict-match","value":0.91,"higher_is_better":true,"prompt_authority":{"kind":"flat"}}}}]}"#,
+        )?;
+
+        let record = read_record(root.path(), path, 42);
+
+        assert!(
+            record
+                .outcome_facts
+                .contains(&("Prompt authority".to_owned(), "flat".to_owned())),
+            "{:?}",
+            record.outcome_facts
+        );
+        Ok(())
+    }
+
+    #[test]
     fn projection_extracts_typed_search_fields_and_log_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
@@ -577,6 +846,228 @@ mod tests {
         );
         assert_eq!(record.cases[0].id.as_deref(), Some("trial-1"));
         assert_eq!(record.cases[0].metrics.get("pass"), Some(&0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn bench_projection_preserves_source_outcome_and_raw_artifact_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("record.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "schema_version": 11,
+  "id": "bench-1",
+  "kind": "bench",
+  "status": "failed",
+  "definition_id": "shared-prefix",
+  "started_unix_ms": 1,
+  "finished_unix_ms": 2,
+  "passed": false,
+  "capture": {"status":"succeeded","plan":null,"arm":[],"windows":[],"finalization":[],"reports":[],"error":null},
+  "resolved": {"client":{"effective_definition":{"prompt":{"kind":"server_chat","rendering_authority":"server","declared":{"kind":"server_chat"}}}}},
+  "request_source": {
+    "kind": "random",
+    "input_tokens": {"kind":"inclusive_uniform","min":512,"max":1024},
+    "output_tokens": 128,
+    "prefix_sharing": {"shared_prefix_ratio":0.5},
+    "shared_system_content": null
+  },
+  "cases": [{
+    "id": "c1",
+    "status": "failed",
+    "request": "request.json",
+    "metrics": {},
+    "population_slice": {"kind":"requests","population_sha256":"abc","warmup_start":0,"warmup_count":1,"profiling_start":1,"profiling_count":4},
+    "completed_requests": 3,
+    "failed_requests": 1,
+    "normalization_schema": "aiperf-summary-v1",
+    "cache_preparation": {"start":"cold","transitions":[],"reset":{"method":"post","url":"http://server/flush_cache","succeeded":true,"http_status":200,"elapsed_ms":2,"error":null}},
+    "prompt_token_reconciliation": [{"population_index":1,"native_session_num":2,"planned_prompt_tokens":512,"observed_prompt_tokens":512,"reconciled":true}],
+    "raw_artifacts": [{"name":"requests","kind":"jsonl","path":"cases/c1/requests.jsonl"}]
+  }]
+}"#,
+        )?;
+
+        let record = read_record(root.path(), path, 3);
+
+        assert_eq!(
+            record.outcome_facts,
+            [
+                ("Passed".to_owned(), "no".to_owned()),
+                (
+                    "Capture".to_owned(),
+                    "succeeded · 0 window(s) · 0 report(s)".to_owned()
+                )
+            ]
+        );
+        let source = &record.bench_details[0];
+        assert_eq!(source.title, "RECORDED SOURCE · REQUESTS");
+        assert!(
+            source
+                .rows
+                .iter()
+                .any(|(label, value)| { label == "Prefix sharing" && value == "50%" })
+        );
+        assert!(source.rows.iter().any(|(label, value)| {
+            label == "Prompt authority" && value == "server_chat · server · declared"
+        }));
+        assert!(record.bench_details.iter().any(|section| {
+            section.rows.iter().any(|(label, value)| {
+                label == "Prompt-token reconciliation" && value == "1/1 reconciled"
+            })
+        }));
+        assert_eq!(
+            record.artifact_refs,
+            ["requests · jsonl · cases/c1/requests.jsonl"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_bench_without_tagged_source_stays_visible_without_inference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("record.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":7,"id":"old","kind":"bench","status":"succeeded","started_unix_ms":1,"cases":[]}"#,
+        )?;
+
+        let record = read_record(root.path(), path, 2);
+
+        assert_eq!(record.state, State::Live);
+        assert_eq!(record.bench_details[0].title, "RECORDED SOURCE");
+        assert_eq!(
+            record.bench_details[0].rows[0].1,
+            "unavailable for this record schema"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dataset_source_summary_reads_new_preparation_reference_and_historical_acquisition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let current = root.path().join("current.json");
+        let historical = root.path().join("historical.json");
+        let future = root.path().join("future.json");
+        let catalog = r#"{"dataset":"speed_bench","profile":"default","upstream_identity":"release","sha256":"abc"}"#;
+        std::fs::write(
+            &current,
+            format!(
+                r#"{{"schema_version":14,"id":"current","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"data-asset-1"}},"cases":[]}}"#,
+            ),
+        )?;
+        std::fs::write(
+            &historical,
+            format!(
+                r#"{{"schema_version":12,"id":"historical","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"must-not-be-read","acquisition":{{"outcome":"reused"}}}},"cases":[]}}"#,
+            ),
+        )?;
+        std::fs::write(
+            &future,
+            format!(
+                r#"{{"schema_version":15,"id":"future","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"must-not-be-read"}},"cases":[]}}"#,
+            ),
+        )?;
+
+        let current = read_record(root.path(), current, 2);
+        let historical = read_record(root.path(), historical, 2);
+        let future = read_record(root.path(), future, 2);
+        assert!(
+            current.bench_details[0]
+                .rows
+                .iter()
+                .any(|(label, value)| { label == "Source preparation" && value == "data-asset-1" })
+        );
+        assert!(
+            historical.bench_details[0]
+                .rows
+                .iter()
+                .any(|(label, value)| { label == "Source preparation" && value == "reused" })
+        );
+        assert!(future.bench_details[0].rows.iter().any(|(label, value)| {
+            label == "Source preparation" && value == "unavailable for unsupported record schema"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_tagged_source_evidence_does_not_hide_the_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("record.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":8,"id":"old-session","kind":"bench","status":"succeeded","started_unix_ms":1,"session_source":{"catalog":{"dataset":"legacy"}},"cases":[]}"#,
+        )?;
+
+        let record = read_record(root.path(), path, 2);
+
+        assert_eq!(record.state, State::Live);
+        assert_eq!(record.bench_details[0].title, "RECORDED SOURCE");
+        assert_eq!(
+            record.bench_details[0].rows[0].1,
+            "unavailable for this record schema"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_case_evidence_degrades_only_its_source_specific_detail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("record.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":9,"id":"future","kind":"bench","status":"succeeded","started_unix_ms":1,"cases":[{"id":"session","status":"failed","session":{"future_field":true}},{"id":"agentic","status":"failed","agentic":{"future_field":true}}]}"#,
+        )?;
+
+        let record = read_record(root.path(), path, 2);
+
+        assert_eq!(record.state, State::Live);
+        for title in ["LINEAR SESSION RESULT", "AGENTIC REPLAY RESULT"] {
+            let section = record
+                .bench_details
+                .iter()
+                .find(|section| section.title == title)
+                .ok_or("missing degraded source-specific detail")?;
+            assert!(section.rows.iter().any(|(label, value)| {
+                label == "Evidence" && value == "unavailable for this record schema"
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generic_request_case_facts_do_not_stand_in_for_recorded_population()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("record.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":8,"id":"old-request","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{"kind":"random","input_tokens":128,"output_tokens":32},"cases":[{"id":"c1","status":"succeeded","completed_requests":1,"normalization_schema":"legacy","raw_artifacts":[{"name":"summary","kind":"json","path":"summary.json"}]}]}"#,
+        )?;
+
+        let record = read_record(root.path(), path, 2);
+
+        assert_eq!(record.state, State::Live);
+        let section = record
+            .bench_details
+            .iter()
+            .find(|section| section.title == "REQUEST RESULT")
+            .ok_or("missing unavailable request population detail")?;
+        assert!(section.rows.iter().any(|(label, value)| {
+            label == "Evidence" && value == "unavailable for this record schema"
+        }));
+        assert!(record.bench_details.iter().any(|section| {
+            section
+                .rows
+                .iter()
+                .any(|(label, value)| label == "Completed requests" && value == "1")
+        }));
         Ok(())
     }
 
@@ -654,7 +1145,7 @@ mod tests {
         std::fs::create_dir_all(&rate_dir)?;
         let request = |load_shape: &str, artifact_dir: &std::path::Path| {
             format!(
-                r#"{{"protocol_version":"7","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null,"shared_system_content":null}},"prompt":{{"kind":"server_chat","request_representation":"structured_messages","route":"chat_completions","rendering_authority":"server"}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"reset_prefix_cache":false}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{}}}"#,
+                r#"{{"protocol_version":"7","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null,"shared_system_content":null}},"prompt":{{"kind":"server_chat","request_representation":"structured_messages","route":"chat_completions","rendering_authority":"server"}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"cache_start":"uncontrolled"}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{}}}"#,
                 serde_json::to_string(artifact_dir).unwrap_or_else(|_| "\"artifacts\"".to_owned())
             )
         };

@@ -14,7 +14,7 @@ fn unresolved_typed_reference_is_rejected() -> Result<(), Box<dyn Error>> {
     let path = workspace.root.path().join(".inferlab/workspace.toml");
     fs::write(
         &path,
-        WORKSPACE.replace("model = \"dsv4\"", "model = \"missing\""),
+        WORKSPACE.replace("model = \"deepseek-v4-flash\"", "model = \"missing\""),
     )?;
     let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
 
@@ -175,7 +175,7 @@ fn insufficient_devices_are_reported_after_lowering() -> Result<(), Box<dyn Erro
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -491,13 +491,15 @@ fn strip_source_derived(mut server: Value) -> Value {
 // files.
 #[test]
 fn identifier_declared_by_two_files_is_rejected_naming_both() -> Result<(), Box<dyn Error>> {
-    // Root + fragment collision: the root file declares model "dsv4" (it lives
-    // in SPLIT_SERVING, so a root variant that inlines the models section
-    // collides against a fragment still supplying it). The root file is always
+    // Root + fragment collision: the root file declares model
+    // "deepseek-v4-flash" (it lives in SPLIT_SERVING, so a root variant that
+    // inlines the models section collides against a fragment still supplying
+    // it). The root file is always
     // named first: its declarations occupy the composed map before any
     // fragment is visited, and an occupant without fragment provenance is
     // attributed to the root file.
-    let root_with_model = format!("{SPLIT_ROOT}\n[models.dsv4]\nserved_name = \"dsv4\"\n");
+    let root_with_model =
+        format!("{SPLIT_ROOT}\n[models.deepseek-v4-flash]\nserved_name = \"deepseek-v4-flash\"\n");
     let root_fragment = TestWorkspace::new()?;
     root_fragment.split_workspace(
         &root_with_model,
@@ -511,7 +513,7 @@ fn identifier_declared_by_two_files_is_rejected_naming_both() -> Result<(), Box<
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
         stderr.contains(
-            "model \"dsv4\" is declared by both .inferlab/workspace.toml \
+            "model \"deepseek-v4-flash\" is declared by both .inferlab/workspace.toml \
              and .inferlab/workspace.d/serving.toml"
         ),
         "root+fragment collision message was: {stderr}"

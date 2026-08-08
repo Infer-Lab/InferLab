@@ -22,6 +22,7 @@ from inferlab_adapter_sdk import (
     PlanServeInput,
     PlanServeResult,
     ProcessSpec,
+    PromptCacheReadZeroRepresentation,
     ReadinessProbe,
     ReadinessProbeHttp,
     ReadinessProbeProcessAlive,
@@ -71,6 +72,7 @@ _INFERLAB_OPTION_ARITY: dict[str, int | None] = {
     "--enable-auto-tool-choice": 0,
     "--enable-expert-parallel": 0,
     "--enable-flashinfer-autotune": 0,
+    "--enable-prompt-tokens-details": 0,
     "--gpu-memory-utilization": 1,
     "--headless": 0,
     "--host": 1,
@@ -123,6 +125,7 @@ class VllmServeSettings(BaseModel):
     enable_auto_tool_choice: bool | None = None
     reasoning_config: dict[str, JsonValue] | None = None
     enable_flashinfer_autotune: bool | None = None
+    enable_prompt_tokens_details: bool = False
     kv_transfer_protocol: str | None = None
     mooncake_num_workers: int | None = Field(default=None, ge=1)
     extra_args: list[str] | None = None
@@ -303,6 +306,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         )
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas = _plan_role(input, role, [])
+    settings = _settings(role_result.effective_settings)
     role_result.public_endpoint = EndpointRequirement(
         protocol=EndpointProtocol(),
         completions_path="/v1/completions",
@@ -311,6 +315,11 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         prefix_cache_reset=HttpActionSpec(
             method=HttpMethod(),
             path="/reset_prefix_cache",
+        ),
+        prompt_cache_read_zero_representation=(
+            PromptCacheReadZeroRepresentation.explicit
+            if settings.enable_prompt_tokens_details
+            else None
         ),
     )
     return PlanServeResult(
@@ -513,6 +522,8 @@ def _render_process(
             if settings.enable_flashinfer_autotune
             else "--no-enable-flashinfer-autotune"
         )
+    if settings.enable_prompt_tokens_details:
+        inferlab_args.append("--enable-prompt-tokens-details")
     if settings.trust_remote_code:
         inferlab_args.append("--trust-remote-code")
     if (experts.expert_parallel_size or 1) > 1:

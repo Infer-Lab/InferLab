@@ -60,6 +60,35 @@ fn agentic_source_dry_run_preserves_declared_boundary_and_effective_profile()
         bench["client"]["effective_definition"]["prompt"]["kind"],
         "server_chat"
     );
+    let asset = &plan["measurements"]["data_assets"][0];
+    assert_eq!(asset["consumers"][0]["definition_id"], "agentx");
+    assert_eq!(asset["source"]["kind"], "agentic");
+    assert_eq!(
+        asset["source"]["catalog"]["revision"],
+        "8fecd2fc56694469f758f0afbbb6335ad3043740"
+    );
+    assert_eq!(asset["dry_run"]["state"], "local_observation");
+    assert_eq!(
+        asset["dry_run"]["effective_selection"]["observed_revision"],
+        "8fecd2fc56694469f758f0afbbb6335ad3043740"
+    );
+    assert_eq!(
+        asset["dry_run"]["cache_stores"][0]["authority"],
+        "huggingface_hub"
+    );
+    assert_eq!(
+        asset["dry_run"]["cache_stores"][0]["outcome"],
+        "partial_reuse"
+    );
+    assert_eq!(
+        asset["dry_run"]["observations"],
+        serde_json::json!(["owning_runtime_source_observed"])
+    );
+    assert!(
+        asset["dry_run"]["unavailable"]
+            .as_array()
+            .is_some_and(|facts| facts.iter().any(|fact| fact == "acquired_source"))
+    );
     Ok(())
 }
 
@@ -140,6 +169,8 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
         "--set",
         "evals.gsm8k.trials=5",
         "--set",
+        "evals.gsm8k.prompt.kind='server_chat'",
+        "--set",
         "evals.gsm8k.request_body.chat_template_kwargs.enable_thinking=true",
         "--set",
         "benches.c8k1k.concurrency=[1, 8]",
@@ -159,6 +190,13 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
     assert_eq!(gsm8k["definition"]["limit"], 100);
     assert_eq!(gsm8k["definition"]["concurrency"], 8);
     assert_eq!(gsm8k["definition"]["trials"], 5);
+    // The declared authority is flat, so the chat-only request member is legal
+    // only because the override moved the effective authority to server_chat.
+    assert_eq!(gsm8k["declared_definition"]["prompt"]["kind"], "flat");
+    assert_eq!(gsm8k["definition"]["prompt"]["kind"], "server_chat");
+    // The definitions above serialize their effective authority, so only this
+    // field shows that the workspace actually declared one.
+    assert_eq!(gsm8k["declared_prompt"]["kind"], "flat");
     assert_eq!(
         gsm8k["definition"]["request_body"],
         serde_json::json!({"chat_template_kwargs": {"enable_thinking": true}})
@@ -169,8 +207,9 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
             {"invocation_index": 0, "value": "evals.gsm8k.limit=100"},
             {"invocation_index": 1, "value": "evals.gsm8k.concurrency=8"},
             {"invocation_index": 2, "value": "evals.gsm8k.trials=5"},
+            {"invocation_index": 3, "value": "evals.gsm8k.prompt.kind='server_chat'"},
             {
-                "invocation_index": 3,
+                "invocation_index": 4,
                 "value": "evals.gsm8k.request_body.chat_template_kwargs.enable_thinking=true"
             },
         ])
@@ -189,6 +228,14 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
     assert_eq!(bench["execution"]["cases"][1]["warmup_request_count"], 16);
     assert_eq!(bench["execution"]["cases"][2]["warmup_request_count"], 0);
     assert_eq!(
+        bench["execution"]["cases"][0]["preparation_order"],
+        serde_json::json!(["warmup_drain", "cache_reset", "profiling_release"])
+    );
+    assert_eq!(
+        bench["execution"]["cases"][2]["preparation_order"],
+        serde_json::json!(["cache_reset", "profiling_release"])
+    );
+    assert_eq!(
         bench["client"]["effective_definition"]["request_body"],
         serde_json::json!({"temperature": 1.0})
     );
@@ -206,13 +253,13 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
     assert_eq!(
         bench["overrides"],
         serde_json::json!([{
-            "invocation_index": 4,
+            "invocation_index": 5,
             "value": "benches.c8k1k.concurrency=[1, 8]"
         }, {
-            "invocation_index": 5,
+            "invocation_index": 6,
             "value": "benches.c8k1k.warmup_prompts_per_concurrency=2"
         }, {
-            "invocation_index": 6,
+            "invocation_index": 7,
             "value": "benches.c8k1k.request_body.temperature=1.0"
         }])
     );
@@ -323,6 +370,10 @@ fn workspace_lm_eval_yaml_resolves_as_the_effective_task_source() -> Result<(), 
     let task_dir = workspace.root.path().join("evals");
     fs::create_dir_all(&task_dir)?;
     fs::write(
+        task_dir.join("data.jsonl"),
+        "{\"prompt\":\"hello\",\"answer\":\"world\"}\n",
+    )?;
+    fs::write(
         task_dir.join("custom.yaml"),
         "task: custom_eval\n\
          dataset_path: json\n\
@@ -343,7 +394,17 @@ fn workspace_lm_eval_yaml_resolves_as_the_effective_task_source() -> Result<(), 
     );
     fs::write(path, config)?;
 
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_LOCAL_SNAPSHOT", "1")
+        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let eval = &plan["measurements"]["evals"][1];
     assert_eq!(
         eval["declared_definition"]["task"],
@@ -358,6 +419,24 @@ fn workspace_lm_eval_yaml_resolves_as_the_effective_task_source() -> Result<(), 
             .display()
             .to_string()
     );
+    let asset = plan["measurements"]["data_assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|asset| asset["consumers"][0]["definition_id"] == "gsm8k")
+        })
+        .ok_or("dry-run has no workspace Eval source asset")?;
+    assert_eq!(asset["dry_run"]["state"], "local_observation");
+    assert_eq!(
+        asset["dry_run"]["observations"],
+        serde_json::json!(["complete_local_closure_enumerated"])
+    );
+    assert_eq!(
+        asset["dry_run"]["planned_external_work"],
+        serde_json::json!(["immutable_local_snapshot"])
+    );
+    assert!(!workspace.root.path().join(".inferlab/records").exists());
     Ok(())
 }
 

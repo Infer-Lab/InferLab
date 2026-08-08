@@ -20,6 +20,7 @@ from inferlab_adapter_sdk import (
     PlanServeInput,
     PlanServeResult,
     ProcessSpec,
+    PromptCacheReadZeroRepresentation,
     ReadinessProbe,
     ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
@@ -68,6 +69,7 @@ _INFERLAB_OPTION_ARITY: dict[str, int | None] = {
     "--disaggregation-mode": 1,
     "--disaggregation-transfer-backend": 1,
     "--dp-size": 1,
+    "--enable-cache-report": 0,
     "--enable-dp-attention": 0,
     "--enable-metrics": 0,
     "--ep-size": 1,
@@ -109,6 +111,7 @@ class SglangServeSettings(BaseModel):
     cuda_graph_max_bs_decode: int | None = Field(default=None, ge=1)
     moe_runner_backend: str | None = None
     trust_remote_code: bool = False
+    enable_cache_report: bool = False
     enable_metrics: bool = False
     extra_args: list[str] | None = None
     extra_env: dict[str, str] | None = None
@@ -291,7 +294,9 @@ def _plan_role(
     )
 
 
-def _endpoint_requirement(*, include_server_metrics: bool) -> EndpointRequirement:
+def _endpoint_requirement(
+    *, include_server_metrics: bool, include_cache_reporting: bool
+) -> EndpointRequirement:
     return EndpointRequirement(
         protocol=EndpointProtocol(),
         completions_path="/v1/completions",
@@ -300,6 +305,9 @@ def _endpoint_requirement(*, include_server_metrics: bool) -> EndpointRequiremen
             ServerMetricsEndpointRequirement(path="/metrics") if include_server_metrics else None
         ),
         prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
+        prompt_cache_read_zero_representation=(
+            PromptCacheReadZeroRepresentation.omitted if include_cache_reporting else None
+        ),
     )
 
 
@@ -318,7 +326,8 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     role_result, replicas = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
     role_result.public_endpoint = _endpoint_requirement(
-        include_server_metrics=settings.enable_metrics
+        include_server_metrics=settings.enable_metrics,
+        include_cache_reporting=settings.enable_cache_report,
     )
     return PlanServeResult(
         integration=_identity(),
@@ -417,7 +426,10 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         implementation=implementation,
         implementation_version=implementation_version,
         render_source=render_source,
-        endpoint=_endpoint_requirement(include_server_metrics=False),
+        endpoint=_endpoint_requirement(
+            include_server_metrics=False,
+            include_cache_reporting=False,
+        ),
         gateway_readiness=gateway_readiness,
         pd_router_readiness=pd_router_readiness,
         policies=PdRoutingPolicies(prefill="round_robin", decode="round_robin"),
@@ -499,6 +511,8 @@ def _render_process(
     append_option(inferlab_args, "--moe-runner-backend", settings.moe_runner_backend)
     if settings.trust_remote_code:
         inferlab_args.append("--trust-remote-code")
+    if settings.enable_cache_report:
+        inferlab_args.append("--enable-cache-report")
     if settings.enable_metrics:
         inferlab_args.append("--enable-metrics")
     if input.topology == ServeTopology.prefill_decode:

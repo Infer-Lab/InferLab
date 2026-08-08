@@ -361,6 +361,14 @@ impl RecordView {
                 ],
             ),
         ];
+        if !self.outcome_facts.is_empty() {
+            details.insert(1, fact_detail("RECORDED OUTCOME", &self.outcome_facts));
+        }
+        details.extend(
+            self.bench_details
+                .iter()
+                .map(|section| fact_detail(section.title, &section.rows)),
+        );
         let metric_catalog = metrics::catalog(&self.cases);
         if !metric_catalog.is_empty() {
             details.push(detail(
@@ -482,6 +490,7 @@ impl RecordView {
                 ("Record file", self.path.display().to_string()),
                 ("Child records", optional_list(&self.child_refs)),
                 ("Log refs", optional_list(&self.log_refs)),
+                ("Raw artifacts", optional_list(&self.artifact_refs)),
             ],
         ));
         let mut search_fields = vec![id.to_owned(), self.kind.clone(), status.to_owned()];
@@ -526,6 +535,37 @@ impl DefinitionView {
     }
 
     pub(super) fn display(&self) -> DisplayEntry {
+        let mut details = vec![detail(
+            "IDENTITY",
+            [
+                ("Kind", self.kind.clone()),
+                ("Identifier", self.id.clone()),
+                ("Relationships", self.relationship.clone()),
+            ],
+        )];
+        details.extend(
+            self.fact_sections
+                .iter()
+                .map(|section| fact_detail(section.title, &section.rows)),
+        );
+        details.push(observation_detail(
+            Authority::Declared,
+            self.state,
+            self.reason.as_deref(),
+            self.observed_unix_ms,
+            Some(self.last_success_unix_ms),
+        ));
+        let mut search_fields = vec![
+            self.kind.clone(),
+            self.id.clone(),
+            self.relationship.clone(),
+        ];
+        search_fields.extend(
+            self.fact_sections
+                .iter()
+                .flat_map(|section| section.rows.iter())
+                .flat_map(|(label, value)| [label.clone(), value.clone()]),
+        );
         DisplayEntry {
             kind: EntryKind::Definition,
             key: format!("{}:{}", self.kind, self.id),
@@ -536,30 +576,21 @@ impl DefinitionView {
             state: self.state,
             lifecycle: None,
             tone: state_tone(self.state),
-            details: vec![
-                detail(
-                    "IDENTITY",
-                    [
-                        ("Kind", self.kind.clone()),
-                        ("Identifier", self.id.clone()),
-                        ("Relationships", self.relationship.clone()),
-                    ],
-                ),
-                observation_detail(
-                    Authority::Declared,
-                    self.state,
-                    self.reason.as_deref(),
-                    self.observed_unix_ms,
-                    Some(self.last_success_unix_ms),
-                ),
-            ],
-            search_fields: vec![
-                self.kind.clone(),
-                self.id.clone(),
-                self.relationship.clone(),
-            ],
+            details,
+            search_fields,
             log_refs: Vec::new(),
         }
+    }
+}
+
+fn fact_detail(title: &'static str, rows: &[(String, String)]) -> DetailSection {
+    DetailSection {
+        title,
+        rows: rows
+            .iter()
+            .map(|(label, value)| (label.clone(), DetailValue::Text(value.clone())))
+            .collect(),
+        body: Vec::new(),
     }
 }
 

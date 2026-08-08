@@ -3,8 +3,14 @@ use crate::execution::ResolvedExecution;
 use crate::progress::{Phase, Progress};
 use crate::record::{RECORD_FILE, RECORDS_DIR, RecordIdentity, now_unix_ms, record_id};
 use crate::server::{self, ServerRecord, ServerStatus};
-use crate::workload::{self, WorkloadStatus};
+use crate::workload::{
+    self, DataAssetConsumerKind, DataAssetPreparationAttempt, WorkloadDataAssetEvidence,
+    WorkloadStatus, attempt_id_for, attempts_from_plans, prepare_data_assets,
+};
 use inferlab_runtime::interrupt;
+use inferlab_runtime::operation_bound::{
+    OperationBound, OperationTerminalCause, OperationTimingEvidence,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,10 +63,14 @@ pub(crate) struct RecipeRecord {
     pub interrupted: bool,
     pub errors: Vec<String>,
     pub cleanup: Option<RecipeCleanupEvidence>,
+    pub data_assets: Vec<DataAssetPreparationAttempt>,
+    pub source_preparation_completed: bool,
+    pub serving_launch_attempted: bool,
+    pub source_preparation_timing: Option<OperationTimingEvidence>,
 }
 
 impl RecipeRecord {
-    const SCHEMA_VERSION: u32 = 2;
+    const SCHEMA_VERSION: u32 = 3;
 }
 
 pub(crate) fn run(
@@ -84,20 +94,71 @@ pub(crate) fn run(
     let server_id = session.record().server.id.clone();
     let mut server_started = false;
 
-    progress.phase(Phase::named("server startup"))?;
-    match server::start_for_recipe(root, resolved.clone(), &server_id, progress) {
-        Ok(_) => {
+    let mut data_assets = session.record().data_assets.clone();
+    let owner_record_id = session.record().id.clone();
+    let source_preparation_bound = (!data_assets.is_empty()).then(OperationBound::unbounded);
+    let source_preparation = prepare_data_assets(
+        root,
+        &owner_record_id,
+        &measurements.data_assets,
+        &mut data_assets,
+        progress,
+        |updates| {
+            for update in updates {
+                session.update_data_asset_attempt(update)?;
+            }
+            Ok(())
+        },
+    );
+    let source_preparation_succeeded = match source_preparation {
+        Ok(()) => {
+            session.record_mut().source_preparation_completed = true;
+            session.rewrite()?;
+            true
+        }
+        Err(error) => {
+            session.record_mut().errors.push(format!(
+                "measurement source preparation failed before serving launch: {error}"
+            ));
+            session.rewrite()?;
+            false
+        }
+    };
+    if let Some(bound) = source_preparation_bound {
+        session.record_mut().source_preparation_timing = Some(bound.timing(
+            "before_first_source_preparation_effect",
+            if source_preparation_succeeded {
+                OperationTerminalCause::Succeeded
+            } else if interrupt::received() {
+                OperationTerminalCause::Interrupted
+            } else {
+                OperationTerminalCause::Failed
+            },
+        ));
+        session.rewrite()?;
+    }
+
+    if source_preparation_succeeded {
+        session.record_mut().serving_launch_attempted = true;
+        session.rewrite()?;
+        progress.phase(Phase::named("server startup"))?;
+    }
+    match source_preparation_succeeded
+        .then(|| server::start_for_recipe(root, resolved.clone(), &server_id, progress))
+    {
+        Some(Ok(_)) => {
             server_started = true;
             session.record_mut().server.status = Some(ServerStatus::Running);
             session.rewrite()?;
         }
-        Err(error) => {
+        Some(Err(error)) => {
             session.record_mut().server.status = Some(ServerStatus::Failed);
             session
                 .record_mut()
                 .errors
                 .push(format!("server start failed: {error}"));
         }
+        None => {}
     }
 
     let mut gate_succeeded = measurements.gate.is_none();
@@ -105,28 +166,32 @@ pub(crate) fn run(
     for (index, plan) in measurements.evals.iter().enumerate() {
         progress.phase(Phase::named("Eval").item(&plan.id, index + 1, eval_total))?;
         let id = format!("{}-eval-{index:03}-{}", session.record().id, plan.id);
+        let data_assets = recipe_workload_data_assets(
+            session.record(),
+            measurements,
+            DataAssetConsumerKind::Eval,
+            &plan.id,
+        )?;
         let outcome = if !server_started {
             workload::skip(
                 root,
                 &id,
-                workload::WorkloadKind::Eval,
-                &plan.id,
-                plan,
+                workload::ResolvedWorkloadPlan::Eval(Box::new(plan.clone())),
                 "server did not start",
                 progress,
+                data_assets.clone(),
             )
         } else if interrupt::received() {
             workload::skip(
                 root,
                 &id,
-                workload::WorkloadKind::Eval,
-                &plan.id,
-                plan,
+                workload::ResolvedWorkloadPlan::Eval(Box::new(plan.clone())),
                 "recipe interrupted",
                 progress,
+                data_assets.clone(),
             )
         } else {
-            workload::run_eval(root, &id, plan, &server_id, progress)
+            workload::run_eval(root, &id, plan, &server_id, progress, data_assets)
         };
         match outcome {
             Ok(record) => {
@@ -162,35 +227,38 @@ pub(crate) fn run(
     for (index, plan) in measurements.benches.iter().enumerate() {
         progress.phase(Phase::named("Bench").item(&plan.id, index + 1, bench_total))?;
         let id = format!("{}-bench-{index:03}-{}", session.record().id, plan.id);
+        let data_assets = recipe_workload_data_assets(
+            session.record(),
+            measurements,
+            DataAssetConsumerKind::Bench,
+            &plan.id,
+        )?;
         let outcome = if !server_started {
             workload::skip(
                 root,
                 &id,
-                workload::WorkloadKind::Bench,
-                &plan.id,
-                plan,
+                workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
                 "server did not start",
                 progress,
+                data_assets.clone(),
             )
         } else if interrupt::received() {
             workload::skip(
                 root,
                 &id,
-                workload::WorkloadKind::Bench,
-                &plan.id,
-                plan,
+                workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
                 "recipe interrupted",
                 progress,
+                data_assets.clone(),
             )
         } else if !gate_succeeded {
             workload::skip(
                 root,
                 &id,
-                workload::WorkloadKind::Bench,
-                &plan.id,
-                plan,
+                workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
                 "eval gate did not succeed",
                 progress,
+                data_assets.clone(),
             )
         } else {
             workload::run_bench(
@@ -202,6 +270,7 @@ pub(crate) fn run(
                 },
                 workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
                 progress,
+                data_assets,
             )
         };
         match outcome {
@@ -251,7 +320,7 @@ pub(crate) fn run(
                     .push(format!("server cleanup failed: {error}"));
             }
         }
-    } else {
+    } else if session.record().serving_launch_attempted {
         match server::status(root, &server_id) {
             Ok(report) => {
                 let (verified, cleanup_error) = server_cleanup_summary(&report.record);
@@ -299,6 +368,27 @@ pub(crate) fn run(
         RecipeStatus::Failed
     })?;
     Ok(session.into_record())
+}
+
+fn recipe_workload_data_assets(
+    record: &RecipeRecord,
+    measurements: &crate::workload::MeasurementPlan,
+    kind: DataAssetConsumerKind,
+    definition_id: &str,
+) -> Result<WorkloadDataAssetEvidence, InferlabError> {
+    let Some(attempt_id) = attempt_id_for(&measurements.data_assets, kind, definition_id)? else {
+        return Ok(WorkloadDataAssetEvidence::None);
+    };
+    let prepared_source = record
+        .data_assets
+        .iter()
+        .find(|attempt| attempt.attempt_id == attempt_id)
+        .and_then(DataAssetPreparationAttempt::eval_binding);
+    Ok(WorkloadDataAssetEvidence::Recipe {
+        recipe_record_id: record.id.clone(),
+        attempt_ids: vec![attempt_id],
+        prepared_source,
+    })
 }
 
 fn server_cleanup_summary(record: &ServerRecord) -> (bool, Option<String>) {
@@ -355,6 +445,10 @@ impl RecipeRecordSession {
             },
             started_unix_ms,
         )?;
+        let data_assets = resolved
+            .measurements
+            .as_ref()
+            .map_or_else(Vec::new, |plan| attempts_from_plans(&plan.data_assets));
         let record = RecipeRecord {
             schema_version: RecipeRecord::SCHEMA_VERSION,
             inferlab_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -372,6 +466,10 @@ impl RecipeRecordSession {
             interrupted: false,
             errors: Vec::new(),
             cleanup: None,
+            data_assets,
+            source_preparation_completed: false,
+            serving_launch_attempted: false,
+            source_preparation_timing: None,
         };
         let session = Self {
             root: root.to_path_buf(),
@@ -387,6 +485,22 @@ impl RecipeRecordSession {
 
     fn record_mut(&mut self) -> &mut RecipeRecord {
         &mut self.record
+    }
+
+    fn update_data_asset_attempt(
+        &mut self,
+        update: &DataAssetPreparationAttempt,
+    ) -> Result<(), InferlabError> {
+        let slot = self
+            .record
+            .data_assets
+            .iter_mut()
+            .find(|attempt| attempt.attempt_id == update.attempt_id)
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!("unknown recipe data-asset attempt {:?}", update.attempt_id),
+            })?;
+        *slot = update.clone();
+        self.rewrite()
     }
 
     fn rewrite(&self) -> Result<(), InferlabError> {

@@ -45,10 +45,12 @@ traffic, preserving the same seeded population basis across cases.
 
 ## Runtime Phases
 
-When configured, prefix-cache reset occurs once before native warmup. Warmup
-drains before the measured phase and is excluded from normalized profiling
-counts and metrics. A captured Bench opens the framework window only after
-warmup succeeds.
+Cache start defaults to uncontrolled. For a cold or primed start, native
+warmup drains first, then InferLab resets the cache; primed additionally sends
+the frozen maximum canonical prefix before profiling release. Population
+preparation, warmup, reset, and conditioning remain outside normalized
+profiling counts and metrics. A default captured Bench opens the framework
+window only after these preparation actions succeed.
 
 Independent request populations and dependent linear sessions use separate
 native phase identities. A session keeps each conversation live across its

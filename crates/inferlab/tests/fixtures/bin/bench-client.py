@@ -21,9 +21,77 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--input", required=True)
 parser.add_argument("--output", required=True)
 parser.add_argument("--prepare", action="store_true")
+parser.add_argument("--prepare-source", action="store_true")
 args = parser.parse_args()
 with open(args.input) as handle:
     request = json.load(handle)
+if args.prepare_source:
+    if os.environ.get("FIXTURE_SOURCE_PREPARATION_FAIL") == "1":
+        result = {
+            "schema_version": 1,
+            "status": "failed",
+            "effective_selection": None,
+            "readiness": None,
+            "cache_stores": [],
+            "remote_metadata": "unavailable",
+            "source_bytes": "unavailable",
+            "error": "fixture source preparation failed",
+        }
+        with open(args.output, "w") as handle:
+            json.dump(result, handle)
+        raise SystemExit(1)
+    source = request["source"]["source"]
+    catalog = source["catalog"]
+    phase = request["phase"]
+    selection = {
+        "kind": "agentic",
+        "repository": catalog["repository"],
+        "requested_revision": catalog["revision"],
+        "observed_revision": catalog["revision"],
+        "filename": catalog["filename"],
+    }
+    readiness = None
+    source_bytes = "not_accessed"
+    cache_outcome = "partial_reuse"
+    if phase["kind"] == "acquire":
+        source_bytes = "reused"
+        cache_outcome = "full_hit"
+        readiness = {
+            "kind": "closed",
+            "acquired_source": {
+                "kind": "release_qualified",
+                "identity": f"sha256:{catalog['sha256']}",
+                "closure": [{"relative_path": catalog["filename"], "sha256": catalog["sha256"]}],
+            },
+            "verification": [
+                {
+                    "subject": catalog["filename"],
+                    "expected": catalog["sha256"],
+                    "observed": catalog["sha256"],
+                    "matched": True,
+                }
+            ],
+        }
+    result = {
+        "schema_version": 1,
+        "status": "succeeded",
+        "effective_selection": selection,
+        "readiness": readiness,
+        "cache_stores": [
+            {
+                "authority": "huggingface_hub",
+                "purpose": "dataset_repository_files",
+                "path": "/fixture/huggingface/hub",
+                "outcome": cache_outcome,
+            }
+        ],
+        "remote_metadata": "not_accessed",
+        "source_bytes": source_bytes,
+        "error": None,
+    }
+    with open(args.output, "w") as handle:
+        json.dump(result, handle)
+    raise SystemExit(0)
 if args.prepare:
     artifact_dir = Path(request["artifact_dir"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -73,19 +141,43 @@ if args.prepare:
     elif session_source is not None and session_source.get("output_tokens") is not None:
         tpot_applicable = session_source["output_tokens"] >= 2
     prompt_token_targeting = None
+    prefix_geometry = None
+    prefix_conditioning = None
     if request_source is not None and request_source["kind"] in ("random", "random_mixture"):
-        prompt_token_targeting = {
-            "selected_prompt_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
-            "pre_template_content_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
-            "projection_template": {
+        projection_template = (
+            None
+            if request["prompt"]["kind"] == "flat"
+            else {
                 "source": "tokenizer_default",
                 "content": "{{ messages }}",
                 "sha256": hashlib.sha256(b"{{ messages }}").hexdigest(),
-            },
+            }
+        )
+        prompt_token_targeting = {
+            "selected_prompt_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
+            "pre_template_content_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
+            "projection_template": projection_template,
             "exact_entries": required_entries,
             "fallback_entries": 0,
             "fallback_reasons": {},
         }
+        if request["cache_start"] == "primed":
+            canonical_prefix = "canonical prefix"
+            canonical_prefix_path = artifact_dir / "canonical-prefix.txt"
+            canonical_prefix_path.write_text(canonical_prefix, encoding="utf-8")
+            canonical_prefix_sha256 = hashlib.sha256(canonical_prefix.encode()).hexdigest()
+            prefix_geometry = {
+                "shared_prefix_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
+                "unique_suffix_tokens": {"minimum": 0, "maximum": 0, "mean": 0.0},
+                "maximum_shared_prefix_tokens": 8,
+                "canonical_prefix_sha256": canonical_prefix_sha256,
+                "full_prompt_entries": required_entries,
+            }
+            prefix_conditioning = {
+                "path": str(canonical_prefix_path),
+                "sha256": canonical_prefix_sha256,
+                "prompt_tokens": 8,
+            }
     if os.environ.get("FIXTURE_OMIT_PROMPT_TARGETING") == "1":
         prompt_token_targeting = None
     result = {
@@ -108,12 +200,16 @@ if args.prepare:
         "input_tokens": {"minimum": 8, "maximum": 8, "mean": 8.0},
         "output_tokens": {"minimum": 2, "maximum": 2, "mean": 2.0},
         "prompt_token_targeting": prompt_token_targeting,
+        "prefix_geometry": prefix_geometry,
+        "prefix_conditioning": prefix_conditioning,
         "evidence_path": str(evidence_path),
         "error": None,
     }
     with open(args.output, "w") as handle:
         json.dump(result, handle)
     raise SystemExit(0)
+if os.environ.get("FIXTURE_RECORD_CLIENT_START") == "1":
+    record_capture_event("client_started")
 barrier = os.environ.get("INFERLAB_AIPERF_PROFILE_BARRIER")
 if barrier:
     record_capture_event("warmup_complete")
@@ -121,6 +217,9 @@ if barrier:
         raise SystemExit(7)
     host, port = barrier.rsplit(":", 1)
     with socket.create_connection((host, int(port))) as connection:
+        if os.environ.get("FIXTURE_BENCH_INVALID_BARRIER") == "1":
+            connection.sendall(b"invalid-readiness\n")
+            raise SystemExit(8)
         connection.sendall(b"profiling-ready\n")
         if connection.makefile("rb").readline() != b"capture-open\n":
             raise RuntimeError("fixture profiling release was not acknowledged")
@@ -203,6 +302,38 @@ result = {
         else ("fixture bench failure" if failed else None)
     ),
 }
+if request["definition"]["cache_start"] == "primed":
+    result["prompt_cache_observations"] = [
+        {
+            "request_id": index,
+            "prompt_tokens": 8000,
+            "cache_read_tokens": 8000,
+            "uncached_prompt_tokens": 0,
+            "cache_read_ratio": 1.0,
+        }
+        for index in range(request_count)
+    ]
+    result["metrics"].update(
+        {
+            "mean_prompt_cache_read_tokens": 8000.0,
+            "min_prompt_cache_read_tokens": 8000.0,
+            "max_prompt_cache_read_tokens": 8000.0,
+            "stddev_prompt_cache_read_tokens": 0.0,
+            "p50_prompt_cache_read_tokens": 8000.0,
+            "p90_prompt_cache_read_tokens": 8000.0,
+            "p95_prompt_cache_read_tokens": 8000.0,
+            "p99_prompt_cache_read_tokens": 8000.0,
+            "mean_uncached_prompt_tokens": 0.0,
+            "min_uncached_prompt_tokens": 0.0,
+            "max_uncached_prompt_tokens": 0.0,
+            "stddev_uncached_prompt_tokens": 0.0,
+            "p50_uncached_prompt_tokens": 0.0,
+            "p90_uncached_prompt_tokens": 0.0,
+            "p95_uncached_prompt_tokens": 0.0,
+            "p99_uncached_prompt_tokens": 0.0,
+            "prompt_cache_read_ratio": 1.0,
+        }
+    )
 if os.environ.get("FIXTURE_BENCH_INTERRUPT_WAIT") == "1":
     with open(args.output, "w") as handle:
         json.dump(result, handle)

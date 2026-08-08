@@ -45,6 +45,26 @@
         }
       ]
     },
+    "data_asset_preparation_request": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MeasurementDataAssetPreparationRequest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "data_asset_preparation_result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MeasurementDataAssetPreparationResult"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "eval_client_request": {
       "anyOf": [
         {
@@ -66,7 +86,7 @@
       ]
     }
   },
-  "$comment": "Generated from crates/inferlab-protocol/src/wire.rs; do not edit.",
+  "$comment": "Generated from crates/inferlab-protocol/src/wire.rs and measurement_data_asset.rs; do not edit.",
   "additionalProperties": false,
   "$defs": {
     "BenchAgenticAcquisitionOutcome": {
@@ -159,10 +179,22 @@
           "type": "string"
         },
         "cache_path": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "cache_state": {
-          "$ref": "#/$defs/BenchDatasetCacheState"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchDatasetCacheState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "cache_warmup_seconds": {
           "type": "integer",
@@ -295,8 +327,6 @@
         "revision",
         "filename",
         "sha256",
-        "cache_path",
-        "cache_state",
         "trace_count",
         "approximate_bytes",
         "license",
@@ -518,7 +548,15 @@
           "default": null
         },
         "cache_state_before": {
-          "$ref": "#/$defs/BenchDatasetCacheState"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchDatasetCacheState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "expected_revision": {
           "type": "string"
@@ -552,8 +590,15 @@
         "repository",
         "expected_revision",
         "filename",
-        "expected_sha256",
-        "cache_state_before"
+        "expected_sha256"
+      ]
+    },
+    "BenchCacheStartInput": {
+      "type": "string",
+      "enum": [
+        "uncontrolled",
+        "cold",
+        "primed"
       ]
     },
     "BenchCaseInput": {
@@ -711,6 +756,13 @@
         },
         "normalization_schema": {
           "type": "string"
+        },
+        "prompt_cache_observations": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BenchPromptCacheObservation"
+          }
         },
         "prompt_token_reconciliation": {
           "type": "array",
@@ -904,6 +956,9 @@
           ],
           "default": null
         },
+        "cache_start": {
+          "$ref": "#/$defs/BenchCacheStartInput"
+        },
         "prompt": {
           "$ref": "#/$defs/BenchPromptInput"
         },
@@ -936,10 +991,6 @@
           ],
           "default": null
         },
-        "reset_prefix_cache": {
-          "type": "boolean",
-          "default": false
-        },
         "seed": {
           "type": "integer",
           "format": "uint64",
@@ -970,7 +1021,8 @@
       "required": [
         "prompt",
         "seed",
-        "timeout_seconds"
+        "timeout_seconds",
+        "cache_start"
       ]
     },
     "BenchInclusiveUniformInput": {
@@ -1143,6 +1195,9 @@
         "artifact_dir": {
           "type": "string"
         },
+        "cache_start": {
+          "$ref": "#/$defs/BenchCacheStartInput"
+        },
         "model": {
           "$ref": "#/$defs/MeasurementModelInput"
         },
@@ -1212,6 +1267,7 @@
         "tokenizer_backend",
         "transformers_version",
         "prompt",
+        "cache_start",
         "required_entries",
         "seed",
         "artifact_dir"
@@ -1290,6 +1346,17 @@
             }
           ]
         },
+        "prefix_conditioning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchPrefixConditioningInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "prefix_geometry": {
           "anyOf": [
             {
@@ -1346,6 +1413,29 @@
         "candidate_entries",
         "admitted_entries",
         "ineligible_entries"
+      ]
+    },
+    "BenchPrefixConditioningInput": {
+      "description": "File-bound exact canonical prefix used to condition a primed cache start.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "prompt_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "prompt_tokens"
       ]
     },
     "BenchPrefixGeometrySummary": {
@@ -1409,6 +1499,44 @@
             "shared_prefix_ratio"
           ]
         }
+      ]
+    },
+    "BenchPromptCacheObservation": {
+      "description": "Backend-reported prompt/cache token accounting for one completed profiling request.",
+      "type": "object",
+      "properties": {
+        "cache_read_ratio": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "prompt_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "request_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "uncached_prompt_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "prompt_tokens",
+        "cache_read_tokens",
+        "uncached_prompt_tokens",
+        "cache_read_ratio"
       ]
     },
     "BenchPromptInput": {
@@ -2440,6 +2568,17 @@
           "maximum": 65535,
           "minimum": 0
         },
+        "prompt_cache_read_zero_representation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PromptCacheReadZeroRepresentation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "protocol": {
           "$ref": "#/$defs/EndpointProtocol"
         },
@@ -2509,6 +2648,17 @@
         },
         "model": {
           "$ref": "#/$defs/MeasurementModelInput"
+        },
+        "prepared_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalPreparedSourceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "protocol_version": {
           "$ref": "#/$defs/ProtocolVersion"
@@ -2679,6 +2829,18 @@
               "format": "uint32",
               "minimum": 0
             },
+            "declared_prompt": {
+              "description": "The authority the definition declared, absent when it was defaulted.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EvalPromptInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "few_shot": {
               "type": [
                 "integer",
@@ -2717,6 +2879,10 @@
               ],
               "default": null
             },
+            "prompt": {
+              "description": "The prompt rendering authority resolution selected.",
+              "$ref": "#/$defs/EvalPromptInput"
+            },
             "request_body": {
               "type": "object",
               "additionalProperties": {
@@ -2754,6 +2920,7 @@
           "required": [
             "kind",
             "task",
+            "prompt",
             "trials",
             "metric",
             "threshold",
@@ -2837,6 +3004,10 @@
         "native_metric_key": {
           "type": "string"
         },
+        "prompt_authority": {
+          "description": "The prompt rendering authority that produced this value. The same task\nscored under another authority is a different measurement, so the value\nnever travels without it.",
+          "$ref": "#/$defs/EvalPromptInput"
+        },
         "source_identity": {
           "type": "string"
         },
@@ -2851,7 +3022,58 @@
         "metric",
         "native_metric_key",
         "value",
-        "higher_is_better"
+        "higher_is_better",
+        "prompt_authority"
+      ]
+    },
+    "EvalPreparedSourceBinding": {
+      "description": "The immutable workspace-task snapshot consumed by one Eval client.",
+      "type": "object",
+      "properties": {
+        "task_path": {
+          "type": "string"
+        },
+        "workspace_root": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "workspace_root",
+        "task_path"
+      ]
+    },
+    "EvalPromptInput": {
+      "description": "The prompt rendering authority for a generative lm-eval definition.\n\nThe authority determines the protocol route and the release-pinned lm-eval\nclient; the runner rejects an authority the resolved task output type does\nnot permit.",
+      "oneOf": [
+        {
+          "description": "Ordinary text on the completions path with no chat construction.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "flat"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Structured messages on the chat-completions path, rendered by the server.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "server_chat"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "EvalTaskSourceInput": {
@@ -3007,6 +3229,539 @@
         "higher_is_better"
       ]
     },
+    "MeasurementDataAssetAcquiredSource": {
+      "description": "The complete immutable source identity established by preparation.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "closure": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MeasurementDataAssetContentEntry"
+              }
+            },
+            "identity": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "release_qualified"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "identity",
+            "closure"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MeasurementDataAssetContentEntry"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "local_file_closure"
+            },
+            "source_root": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_root",
+            "files"
+          ]
+        }
+      ]
+    },
+    "MeasurementDataAssetCacheOutcome": {
+      "description": "Read-only or preparation-time outcome for one independently owned cache.",
+      "type": "string",
+      "enum": [
+        "full_hit",
+        "miss",
+        "partial_reuse",
+        "unavailable"
+      ]
+    },
+    "MeasurementDataAssetCacheStore": {
+      "description": "One effective physical cache store as reported by its owning runtime.",
+      "type": "object",
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/MeasurementDataAssetCacheOutcome"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "purpose": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "purpose",
+        "outcome"
+      ]
+    },
+    "MeasurementDataAssetContentEntry": {
+      "description": "One member of a complete, ordered content closure.",
+      "type": "object",
+      "properties": {
+        "relative_path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "sha256"
+      ]
+    },
+    "MeasurementDataAssetEffectiveSelection": {
+      "description": "The effective selection reported by the owning measurement runtime.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "data_files": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MeasurementDataFiles"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "dataset_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "dataset_path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "evaluation_split": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "fewshot_split": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "eval"
+            },
+            "task_identity": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "task_identity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "agentic"
+            },
+            "observed_revision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "repository": {
+              "type": "string"
+            },
+            "requested_revision": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "repository",
+            "requested_revision",
+            "filename"
+          ]
+        }
+      ]
+    },
+    "MeasurementDataAssetPreparationNextPhase": {
+      "description": "The next separately durable preparation phase selected by the owning\nruntime after source resolution.",
+      "type": "string",
+      "enum": [
+        "snapshot_local"
+      ]
+    },
+    "MeasurementDataAssetPreparationPhase": {
+      "description": "One externally observable source-preparation phase. Separating resolution\nfrom acquisition lets the control plane durably commit each result.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resolve"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "snapshot_local"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cache_state_before": {
+              "$ref": "#/$defs/MeasurementDataAssetCacheOutcome"
+            },
+            "kind": {
+              "type": "string",
+              "const": "acquire"
+            },
+            "resolved_revision": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "resolved_revision",
+            "cache_state_before"
+          ]
+        }
+      ]
+    },
+    "MeasurementDataAssetPreparationRequest": {
+      "description": "One narrowly scoped source-preparation request issued before measurement\nmaterialization. The selected measurement definition remains authoritative\nfor dataset semantics.",
+      "type": "object",
+      "properties": {
+        "artifact_dir": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/MeasurementDataAssetPreparationPhase"
+        },
+        "protocol_version": {
+          "$ref": "#/$defs/ProtocolVersion"
+        },
+        "source": {
+          "$ref": "#/$defs/MeasurementDataAssetSourceInput"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "phase",
+        "source",
+        "artifact_dir"
+      ]
+    },
+    "MeasurementDataAssetPreparationResult": {
+      "description": "Terminal result returned by the owning measurement runtime.",
+      "type": "object",
+      "properties": {
+        "cache_stores": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MeasurementDataAssetCacheStore"
+          }
+        },
+        "effective_selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeasurementDataAssetEffectiveSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "next_phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeasurementDataAssetPreparationNextPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeasurementDataAssetReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "remote_metadata": {
+          "$ref": "#/$defs/MeasurementDataAssetRemoteMetadataOutcome"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_bytes": {
+          "$ref": "#/$defs/MeasurementDataAssetSourceBytesOutcome"
+        },
+        "status": {
+          "$ref": "#/$defs/ClientStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "remote_metadata",
+        "source_bytes"
+      ]
+    },
+    "MeasurementDataAssetReadiness": {
+      "description": "Whether preparation established a closed source or an explicitly opaque\nnon-reproducible source.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "acquired_source": {
+              "$ref": "#/$defs/MeasurementDataAssetAcquiredSource"
+            },
+            "eval_binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EvalPreparedSourceBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "closed"
+            },
+            "verification": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/MeasurementDataAssetVerification"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "acquired_source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "deferred_source_access": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "opaque"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "unresolved_path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason",
+            "deferred_source_access"
+          ]
+        }
+      ]
+    },
+    "MeasurementDataAssetRemoteMetadataOutcome": {
+      "description": "Whether preparation contacted a remote metadata authority.",
+      "type": "string",
+      "enum": [
+        "not_accessed",
+        "accessed",
+        "unavailable"
+      ]
+    },
+    "MeasurementDataAssetSourceBytesOutcome": {
+      "description": "Whether immutable source bytes were reused or downloaded.",
+      "type": "string",
+      "enum": [
+        "not_accessed",
+        "reused",
+        "downloaded",
+        "unavailable"
+      ]
+    },
+    "MeasurementDataAssetSourceInput": {
+      "description": "The measurement-owned source whose bytes or task selection are prepared.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "definition": {
+              "$ref": "#/$defs/EvalDefinitionInput"
+            },
+            "kind": {
+              "type": "string",
+              "const": "eval"
+            },
+            "workspace_root": {
+              "type": "string"
+            },
+            "workspace_source_exclusions": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "workspace_root",
+            "definition"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "agentic"
+            },
+            "source": {
+              "$ref": "#/$defs/BenchAgenticSourceInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source"
+          ]
+        }
+      ]
+    },
+    "MeasurementDataAssetVerification": {
+      "description": "Expected-versus-observed integrity evidence for qualified source content.",
+      "type": "object",
+      "properties": {
+        "expected": {
+          "type": "string"
+        },
+        "matched": {
+          "type": "boolean"
+        },
+        "observed": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subject",
+        "expected",
+        "matched"
+      ]
+    },
+    "MeasurementDataFiles": {
+      "description": "A normalized mapping from dataset split names to selected file patterns.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
     "MeasurementModelInput": {
       "description": "The model identity used by measurement clients. Unlike integration\nplanning, a benchmark client may need a controller-visible tokenizer\nlocator.",
       "type": "object",
@@ -3022,6 +3777,14 @@
       "required": [
         "locator",
         "served_name"
+      ]
+    },
+    "PromptCacheReadZeroRepresentation": {
+      "description": "How a backend with cache reporting enabled represents a zero-token cache read.",
+      "type": "string",
+      "enum": [
+        "explicit",
+        "omitted"
       ]
     },
     "ProtocolVersion": {

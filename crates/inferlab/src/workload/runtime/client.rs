@@ -152,10 +152,38 @@ pub(super) fn run_client_with_environment(
     bound: &OperationBound,
     runtime_environment: &[(&str, &str)],
 ) -> Result<ClientRun, InferlabError> {
-    let request_path = session.absolute(&paths.request);
-    let result_path = session.absolute(&paths.result);
-    let stdout_path = session.absolute(&paths.stdout);
-    let stderr_path = session.absolute(&paths.stderr);
+    run_client_at_paths(
+        command,
+        request,
+        &ClientProcessPaths {
+            request: session.absolute(&paths.request),
+            result: session.absolute(&paths.result),
+            stdout: session.absolute(&paths.stdout),
+            stderr: session.absolute(&paths.stderr),
+        },
+        bound,
+        runtime_environment,
+    )
+}
+
+pub(crate) struct ClientProcessPaths {
+    pub(crate) request: PathBuf,
+    pub(crate) result: PathBuf,
+    pub(crate) stdout: PathBuf,
+    pub(crate) stderr: PathBuf,
+}
+
+fn run_client_at_paths(
+    command: &ClientCommandPlan,
+    request: &impl Serialize,
+    paths: &ClientProcessPaths,
+    bound: &OperationBound,
+    runtime_environment: &[(&str, &str)],
+) -> Result<ClientRun, InferlabError> {
+    let request_path = paths.request.clone();
+    let result_path = paths.result.clone();
+    let stdout_path = paths.stdout.clone();
+    let stderr_path = paths.stderr.clone();
     write_json(&request_path, request)?;
     if bound.is_expired() {
         return Ok(ClientRun {
@@ -358,6 +386,35 @@ pub(super) fn run_client_with_environment(
         let _ = fs::remove_file(&handle_path);
     }
     Ok(run)
+}
+
+pub(crate) struct UnboundedClientOutcome<T> {
+    pub(crate) result: Option<T>,
+    pub(crate) process: Option<ClientProcessEvidence>,
+    pub(crate) error: Option<String>,
+}
+
+pub(crate) fn run_unbounded_client<T: DeserializeOwned>(
+    command: &ClientCommandPlan,
+    request: &impl Serialize,
+    paths: &ClientProcessPaths,
+    extra_argv: &[&str],
+) -> Result<UnboundedClientOutcome<T>, InferlabError> {
+    let mut command = command.clone();
+    command
+        .argv
+        .extend(extra_argv.iter().map(|value| (*value).to_owned()));
+    let bound = OperationBound::unbounded();
+    let run = run_client_at_paths(&command, request, paths, &bound, &[])?;
+    let mut accepted =
+        accept_client_result::<T>(&paths.result, "source preparation client", run, &bound);
+    let error = accepted.decode_error.take();
+    accepted.run.finish_cleanup();
+    Ok(UnboundedClientOutcome {
+        result: accepted.result,
+        process: accepted.run.process,
+        error,
+    })
 }
 
 pub(super) fn cleanup_remaining_client_group(

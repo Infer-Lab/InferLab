@@ -11,23 +11,8 @@ from inferlab_measurement_sdk import (
     JsonObject,
 )
 
-from inferlab_bench_runner.result_metrics import metric_value
+from inferlab_bench_runner.result_metrics import metric_value, record_metric_value
 from inferlab_bench_runner.result_records import profiling_records, raw_phase_records
-
-
-def record_metric_value(metrics: JsonObject, tag: str) -> tuple[float | None, str | None]:
-    raw_metric = metrics.get(tag)
-    if raw_metric is None:
-        return None, None
-    if not isinstance(raw_metric, dict):
-        return None, f"AIPerf profiling metric {tag!r} is not an object"
-    raw_value = raw_metric.get("value")
-    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-        return None, f"AIPerf profiling metric {tag!r} has no numeric value"
-    value = float(raw_value)
-    if not math.isfinite(value):
-        return None, f"AIPerf profiling metric {tag!r} is not finite"
-    return value, None
 
 
 def required_request_metric_tags(slo: BenchRequestSloInput) -> list[str]:

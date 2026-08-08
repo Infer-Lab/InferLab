@@ -1,17 +1,121 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input", required=True)
 parser.add_argument("--output", required=True)
+parser.add_argument("--prepare-source", action="store_true")
 args = parser.parse_args()
 with open(args.input) as request_file:
     request = json.load(request_file)
+if args.prepare_source:
+    if os.environ.get("FIXTURE_SOURCE_PREPARATION_FAIL") == "1":
+        with open(args.output, "w") as output_file:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "status": "failed",
+                    "effective_selection": None,
+                    "readiness": None,
+                    "cache_stores": [],
+                    "remote_metadata": "unavailable",
+                    "source_bytes": "unavailable",
+                    "error": "fixture source preparation failed",
+                },
+                output_file,
+            )
+        raise SystemExit(0)
+    definition = request["source"]["definition"]
+    task = definition["task"]
+    if os.environ.get("FIXTURE_LOCAL_SNAPSHOT") == "1":
+        phase = request["phase"]["kind"]
+        task_path = Path(task["path"])
+        digest = hashlib.sha256(task_path.read_bytes()).hexdigest()
+        readiness = None
+        next_phase = "snapshot_local"
+        source_bytes = "reused"
+        if phase == "snapshot_local":
+            snapshot_root = Path(request["artifact_dir"]) / "prepared-source"
+            snapshot_root.mkdir(parents=True, exist_ok=True)
+            prepared_task = snapshot_root / "_inferlab_prepared_task.yaml"
+            prepared_task.write_bytes(task_path.read_bytes())
+            readiness = {
+                "kind": "closed",
+                "acquired_source": {
+                    "kind": "local_file_closure",
+                    "source_root": str(task_path.parent),
+                    "files": [
+                        {"relative_path": task_path.name, "sha256": digest},
+                    ],
+                },
+                "verification": [],
+                "eval_binding": {
+                    "workspace_root": str(snapshot_root),
+                    "task_path": str(prepared_task),
+                },
+            }
+            next_phase = None
+        result = {
+            "schema_version": 1,
+            "status": "succeeded",
+            "effective_selection": {
+                "kind": "eval",
+                "task_identity": "custom_eval",
+                "dataset_path": "json",
+                "dataset_name": None,
+                "evaluation_split": "test",
+                "fewshot_split": None,
+                "data_files": {"train": ["evals/data.jsonl"]},
+            },
+            "readiness": readiness,
+            "next_phase": next_phase,
+            "cache_stores": [],
+            "remote_metadata": "not_accessed",
+            "source_bytes": source_bytes,
+            "error": None,
+        }
+        with open(args.output, "w") as output_file:
+            json.dump(result, output_file)
+        raise SystemExit(0)
+    result = {
+        "schema_version": 1,
+        "status": "succeeded",
+        "effective_selection": {
+            "kind": "eval",
+            "task_identity": task.get("name", task.get("task_identity", "custom")),
+            "dataset_path": "fixture/dataset",
+            "dataset_name": None,
+            "evaluation_split": "test",
+            "fewshot_split": None,
+            "data_files": None,
+        },
+        "readiness": {
+            "kind": "opaque",
+            "reason": "fixture lm-eval source has no closed dataset interface",
+            "unresolved_path": task.get("path"),
+            "deferred_source_access": True,
+        },
+        "cache_stores": [],
+        "remote_metadata": "not_accessed",
+        "source_bytes": "not_accessed",
+        "error": None,
+    }
+    with open(args.output, "w") as output_file:
+        json.dump(result, output_file)
+    raise SystemExit(0)
+if os.environ.get("FIXTURE_EVAL_NO_RESULT") == "1":
+    raise SystemExit(7)
+if os.environ.get("FIXTURE_LOCAL_SNAPSHOT") == "1":
+    prepared_source = request.get("prepared_source")
+    if prepared_source is None or not Path(prepared_source["task_path"]).is_file():
+        raise SystemExit("prepared Eval source binding was not received")
 if os.environ.get("FIXTURE_EVAL_WAIT") == "1":
     if os.environ.get("FIXTURE_EVAL_NATIVE_CHECKPOINT") == "1":
         artifact_dir = os.path.join(os.path.dirname(args.output), "artifacts")
@@ -69,6 +173,7 @@ if kind == "lm_eval":
         "native_metric_key": native_key,
         "value": score,
         "higher_is_better": True,
+        "prompt_authority": definition["prompt"],
     }
     metrics = {f"{source}:{native_key}": score}
     normalized_metrics = {f"{source}:{native_key}": normalized}

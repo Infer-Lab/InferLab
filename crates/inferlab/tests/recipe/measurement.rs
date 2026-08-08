@@ -2,6 +2,7 @@ use crate::harness::{TestWorkspace, WORKSPACE};
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
+use std::path::Path;
 
 impl TestWorkspace {
     fn configure_static_slo_failure(&self) -> Result<(), Box<dyn Error>> {
@@ -49,6 +50,279 @@ impl TestWorkspace {
         fs::write(manifest, text)?;
         Ok(())
     }
+
+    fn configure_release_dataset_bench(&self) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?.replacen(
+            "request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }",
+            "request_source = { kind = \"dataset\", dataset = \"sharegpt\", max_input_tokens = 8192 }",
+            1,
+        );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    fn configure_primed_prefix_bench(&self) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?
+            .replacen(
+                "request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }",
+                "request_source = { kind = \"random\", prompt = { kind = \"flat\" }, input_tokens = 8, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 1.0 } }",
+                1,
+            )
+            .replacen(
+                "cache = { start = \"cold\" }",
+                "cache = { start = \"primed\" }\nrequest_body = { temperature = 0.0 }",
+                1,
+            )
+            .replace(
+                "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "benches = [\"c8k1k\"]",
+            );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    fn configure_uncontrolled_warmup_bench(&self) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?
+            .replacen(
+                "prompts_per_concurrency = 4",
+                "prompts_per_concurrency = 4\nwarmup_prompts_per_concurrency = 2",
+                1,
+            )
+            .replacen(
+                "cache = { start = \"cold\" }",
+                "cache = { start = \"uncontrolled\" }",
+                1,
+            )
+            .replace(
+                "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "benches = [\"c8k1k\"]",
+            );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    fn configure_workspace_eval(&self) -> Result<(), Box<dyn Error>> {
+        let evals = self.root().join("evals");
+        fs::create_dir_all(&evals)?;
+        fs::write(evals.join("data.jsonl"), "{\"question\":\"cold\"}\n")?;
+        fs::write(
+            evals.join("custom.yaml"),
+            "task: custom_eval\n\
+             dataset_path: json\n\
+             dataset_kwargs:\n\
+               data_files: evals/data.jsonl\n\
+             test_split: test\n\
+             output_type: generate_until\n",
+        )?;
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?.replace(
+            "task = \"gsm8k\"",
+            "task = { yaml = \"evals/custom.yaml\" }",
+        );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn source_preparation_failure_is_durable_before_server_launch() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let config = fs::read_to_string(&manifest)?.replace(
+        "evals = [\"smoke\", \"gsm8k\"]",
+        "evals = [\"smoke\", \"gsm8k\", \"second\"]",
+    ) + "\n[evals.second]\nkind = \"lm-eval\"\ntask = \"arc_easy\"\nlimit = 8\nmetric = \"acc_norm\"\nthreshold = 0.5\ntimeout_seconds = 900\n";
+    fs::write(manifest, config)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_SOURCE_PREPARATION_FAIL", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["schema_version"], 3);
+    assert_eq!(recipe["source_preparation_completed"], false);
+    assert_eq!(recipe["serving_launch_attempted"], false);
+    assert_eq!(recipe["server"]["status"], Value::Null);
+    assert_eq!(recipe["data_assets"][0]["state"], "failed");
+    assert_eq!(
+        recipe["data_assets"][0]["reproducibility"]["conclusion"],
+        "not_established"
+    );
+    let attempts = recipe["data_assets"]
+        .as_array()
+        .ok_or("recipe data assets are not an array")?;
+    assert!(attempts.len() > 1);
+    assert!(attempts[1..].iter().all(|attempt| {
+        attempt["state"] == "interrupted"
+            && attempt["reproducibility"]["conclusion"] == "not_established"
+            && attempt["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("stopped after attempt"))
+    }));
+    let server_record_id = recipe["server"]["id"]
+        .as_str()
+        .ok_or("recipe omitted its planned server record id")?;
+    assert!(
+        !workspace
+            .root()
+            .join(".inferlab/records")
+            .join(server_record_id)
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_eval_uses_the_prepared_local_source_binding() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_workspace_eval()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_LOCAL_SNAPSHOT", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let attempt = recipe["data_assets"]
+        .as_array()
+        .and_then(|attempts| {
+            attempts
+                .iter()
+                .find(|attempt| attempt["consumers"][0]["definition_id"] == "gsm8k")
+        })
+        .ok_or("recipe has no workspace Eval source attempt")?;
+    assert_eq!(attempt["state"], "ready");
+    assert_eq!(attempt["phases"][0]["phase"], "resolve");
+    assert_eq!(attempt["phases"][1]["phase"], "snapshot_local");
+    assert_eq!(attempt["readiness"]["kind"], "closed");
+    let binding = &attempt["readiness"]["eval_binding"];
+
+    let eval_id = recipe["evals"][1]["id"]
+        .as_str()
+        .ok_or("workspace Eval has no child record")?;
+    let eval = workspace.load_record(eval_id)?;
+    let request_path = eval["cases"][0]["request"]
+        .as_str()
+        .ok_or("workspace Eval case has no request evidence")?;
+    let request: Value = serde_json::from_slice(&fs::read(workspace.root().join(request_path))?)?;
+    assert_eq!(request["prepared_source"], *binding);
+    assert!(
+        Path::new(
+            binding["task_path"]
+                .as_str()
+                .ok_or("prepared binding has no task path")?
+        )
+        .is_file()
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "manual E2E requires Hugging Face network access"]
+fn release_dataset_preparation_is_cold_then_a_verified_cache_hit() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_release_dataset_bench()?;
+    let cache = tempfile::tempdir()?;
+    let run = || {
+        Ok::<_, Box<dyn Error>>(
+            workspace
+                .command()
+                .env("XDG_CACHE_HOME", cache.path())
+                .args(["recipe", "run", "dsv4-qualify"])
+                .output()?,
+        )
+    };
+
+    let cold = run()?;
+    assert!(
+        cold.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let cold: Value = serde_json::from_slice(&cold.stdout)?;
+    let warm = run()?;
+    assert!(
+        warm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let warm: Value = serde_json::from_slice(&warm.stdout)?;
+    let release_attempt = |record: &Value| {
+        record["data_assets"]
+            .as_array()
+            .and_then(|attempts| {
+                attempts
+                    .iter()
+                    .find(|attempt| attempt["source"]["kind"] == "release_catalog")
+            })
+            .cloned()
+    };
+    let cold_attempt = release_attempt(&cold).ok_or("cold record has no release attempt")?;
+    let warm_attempt = release_attempt(&warm).ok_or("warm record has no release attempt")?;
+
+    assert_eq!(cold["source_preparation_completed"], true);
+    assert_eq!(cold["serving_launch_attempted"], true);
+    assert_eq!(warm["source_preparation_completed"], true);
+    assert_eq!(warm["serving_launch_attempted"], true);
+    assert_eq!(cold_attempt["source"], warm_attempt["source"]);
+    assert_eq!(
+        cold_attempt["source_key_sha256"],
+        warm_attempt["source_key_sha256"]
+    );
+    assert_eq!(cold_attempt["state"], "ready");
+    assert_eq!(warm_attempt["state"], "ready");
+    assert_eq!(
+        cold_attempt["phases"][0]["cache_stores"][0]["outcome"],
+        "miss"
+    );
+    assert_eq!(
+        warm_attempt["phases"][0]["cache_stores"][0]["outcome"],
+        "partial_reuse"
+    );
+    assert_eq!(cold_attempt["phases"][1]["source_bytes"], "downloaded");
+    assert_eq!(
+        cold_attempt["phases"][1]["cache_stores"][0]["outcome"],
+        "miss"
+    );
+    assert_eq!(warm_attempt["phases"][1]["source_bytes"], "reused");
+    assert_eq!(
+        warm_attempt["phases"][1]["cache_stores"][0]["outcome"],
+        "full_hit"
+    );
+    assert_eq!(warm_attempt["readiness"]["kind"], "closed");
+    assert_eq!(
+        warm_attempt["readiness"]["verification"][0]["matched"],
+        true
+    );
+    let bench_id = warm["benches"][0]
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("warm recipe omitted its dataset Bench child")?;
+    let bench = workspace.load_record(bench_id)?;
+    let materialization = &bench["data_asset_materialization"];
+    assert_eq!(materialization["authority"], "inferlab_bench_child");
+    assert_eq!(
+        materialization["preparation_attempt_id"],
+        warm_attempt["attempt_id"]
+    );
+    assert!(bench["cases"].as_array().is_some_and(|cases| {
+        cases.iter().all(|case| {
+            case["data_asset_materialization_identity"]
+                == materialization["materialization_identity"]
+                && case.get("data_asset_materialization").is_none()
+        })
+    }));
+    Ok(())
 }
 
 #[test]
@@ -142,7 +416,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("smoke Eval has no record id")?;
     let eval = workspace.load_record(eval_id)?;
-    assert_eq!(eval["schema_version"], 12);
+    assert_eq!(eval["schema_version"], 14);
     assert_eq!(eval["kind"], "eval");
     assert_eq!(eval["resolved"]["execution"]["kind"], "native_openai_smoke");
     assert_eq!(eval["cases"][0]["process"], Value::Null);
@@ -170,7 +444,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
         .ok_or("smoke case has no request path")?;
     let request: Value = serde_json::from_slice(&fs::read(workspace.root().join(request_path))?)?;
     assert_eq!(request["method"], "POST");
-    assert_eq!(request["body"]["model"], "dsv4");
+    assert_eq!(request["body"]["model"], "deepseek-v4-flash");
     assert_eq!(request["body"]["prompt"], "San Francisco is a city in");
     assert_eq!(request["body"]["max_tokens"], 16);
     assert_eq!(request["body"]["temperature"], 0.0);
@@ -299,6 +573,28 @@ fn successful_eval_envelope_cannot_override_client_process_failure() -> Result<(
 }
 
 #[test]
+fn eval_failure_before_native_start_does_not_claim_materialization() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_EVAL_NO_RESULT", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let eval_id = recipe["evals"][1]["id"]
+        .as_str()
+        .ok_or("failed Eval has no record id")?;
+    let eval = workspace.load_record(eval_id)?;
+    assert_eq!(eval["cases"][0]["status"], "failed");
+    assert!(eval["cases"][0].get("data_asset_materialization").is_none());
+    assert!(eval["cases"][0].get("native_command").is_none());
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
 fn eval_client_deadline_rejects_a_late_result_and_cleans_up_after_timeout()
 -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
@@ -412,8 +708,14 @@ fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(),
         .ok_or("matrix bench has no record id")?;
     let bench = workspace.load_record(bench_id)?;
     assert_eq!(bench["cases"][0]["status"], "failed");
-    assert_eq!(bench["cases"][0]["prefix_cache_reset"]["succeeded"], false);
-    assert_eq!(bench["cases"][0]["prefix_cache_reset"]["http_status"], 206);
+    assert_eq!(
+        bench["cases"][0]["cache_preparation"]["reset"]["succeeded"],
+        false
+    );
+    assert_eq!(
+        bench["cases"][0]["cache_preparation"]["reset"]["http_status"],
+        206
+    );
     assert_eq!(bench["cases"][0]["error"], "prefix-cache reset failed");
     assert!(bench["cases"][0].get("metrics").is_none());
     assert!(bench["cases"][0].get("completed_requests").is_none());
@@ -422,6 +724,182 @@ fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(),
     assert!(bench["cases"][0].get("native_command").is_none());
     assert!(bench["cases"][0].get("native_exit_code").is_none());
     assert!(bench["cases"][0].get("raw_artifacts").is_none());
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
+fn uncontrolled_warmup_failure_never_releases_profiling() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_uncontrolled_warmup_bench()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_BENCH_FAIL_BEFORE_PROFILE", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("matrix bench has no record id")?,
+    )?;
+    assert_eq!(bench["cases"][0]["status"], "failed");
+    assert!(
+        bench["cases"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("before AIPerf reported profiling readiness"))
+    );
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
+fn invalid_profile_barrier_handshake_is_retained_as_a_failed_case() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_uncontrolled_warmup_bench()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_BENCH_INVALID_BARRIER", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("matrix bench has no record id")?,
+    )?;
+    let cases = bench["cases"].as_array().ok_or("matrix has no cases")?;
+    assert_eq!(cases.len(), 4);
+    let warmup_cases = cases
+        .iter()
+        .filter(|case| case["population_slice"]["warmup_count"] != 0)
+        .collect::<Vec<_>>();
+    assert_eq!(warmup_cases.len(), 2);
+    assert!(warmup_cases.iter().all(|case| case["status"] == "failed"));
+    assert!(warmup_cases.iter().all(|case| {
+        case["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid readiness message"))
+    }));
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
+fn primed_dry_run_projects_order_and_conditioning_values() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = &recipe["measurements"]["benches"][0];
+    assert_eq!(
+        bench["execution"]["cases"][0]["preparation_order"],
+        serde_json::json!(["cache_reset", "cache_conditioning", "profiling_release"])
+    );
+    assert_eq!(
+        bench["client"]["prefix_cache_conditioning"],
+        serde_json::json!({
+            "route": "/v1/completions",
+            "model": "deepseek-v4-flash",
+            "prompt": {
+                "declared": {"kind": "flat"},
+                "kind": "flat",
+                "request_representation": "flat_prompt",
+                "route": "completions",
+                "rendering_authority": "local_flat"
+            },
+            "request_body": {"temperature": 0.0},
+            "maximum_shared_prefix_tokens": 8,
+            "output_tokens": 1,
+            "consumes_population_entry": false
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn primed_prefix_preparation_precedes_profiling_and_records_exact_request()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
+        .env("FIXTURE_RECORD_CLIENT_START", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; case errors: {}; stderr: {}",
+        bench["error"],
+        bench["cases"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let case = &bench["cases"][0];
+    assert_eq!(case["cache_preparation"]["start"], "primed");
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["prompt_tokens"],
+        8
+    );
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["backend_prompt_tokens"],
+        8
+    );
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["backend_cache_read_tokens"],
+        0
+    );
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["maximum_shared_prefix_tokens"],
+        8
+    );
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["prompt"]["kind"],
+        "flat"
+    );
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["request_body"],
+        serde_json::json!({"temperature": 0.0})
+    );
+    assert_eq!(
+        case["cache_preparation"]["conditioning"]["consumes_population_entry"],
+        false
+    );
+    assert_eq!(case["metrics"]["prompt_cache_read_ratio"], 1.0);
+    assert_eq!(
+        case["prompt_cache_observations"][0]["cache_read_ratio"],
+        1.0
+    );
+
+    let request: Value = serde_json::from_slice(&fs::read(workspace.conditioning_request())?)?;
+    assert_eq!(request["model"], "deepseek-v4-flash");
+    assert_eq!(request["prompt"], "canonical prefix");
+    assert_eq!(request["max_tokens"], 1);
+    assert_eq!(request["n"], 1);
+    assert_eq!(request["stream"], false);
+    assert_eq!(request["temperature"], 0.0);
+
+    let events = fs::read_to_string(workspace.capture_events())?;
+    let events = events.lines().collect::<Vec<_>>();
+    assert_eq!(
+        &events[..3],
+        ["cache_reset", "cache_conditioning", "client_started",]
+    );
     assert_eq!(recipe["cleanup"]["verified"], true);
     Ok(())
 }

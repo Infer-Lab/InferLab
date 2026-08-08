@@ -85,12 +85,40 @@ threshold, and timeout while the task retains dataset and scoring authority.
 InferLab uses the resolved model-weight locator as the Hugging Face tokenizer
 locator. This follows the normal model-directory convention and avoids a
 second tokenizer setting; the locator must contain a usable tokenizer.
-`generate_until` tasks use chat completions. Tasks whose
-resolved output type is `loglikelihood`, `loglikelihood_rolling`, or
-`multiple_choice` use completions and first run a prompt-logprob/tokenizer
-alignment probe. Dynamic Python tasks are probed conservatively as well. A
-probe failure makes support inconclusive rather than silently removing the
-task.
+A `generate_until` task may declare a prompt rendering authority, and omitting
+it resolves to `flat`:
+
+```toml
+[evals.gsm8k]
+kind = "lm-eval"
+task = "gsm8k"
+prompt = { kind = "flat" }      # omit for the same result
+metric = "exact_match"
+metric_filter = "strict-match"
+threshold = 0.90
+timeout_seconds = 900
+```
+
+`flat` sends the task's own few-shot context as ordinary text on the completions
+path, so the task keeps the continuation format its scoring filters expect. Use
+it unless the model chat template is itself part of what you are measuring.
+`server_chat` sends structured messages on the chat-completions path and lets
+the model server apply its own template; choose it when the evaluated behavior
+depends on that template or on server-side controls such as
+`chat_template_kwargs`. The two are different measurements of the same task, so
+records carry the resolved authority and whether it was declared or defaulted;
+do not compare scores across them.
+
+Server-side template controls such as `chat_template` and `chat_template_kwargs`
+are accepted in `request_body` only under `server_chat`; a `flat` definition that
+declares one fails resolution and names the conflicting member.
+
+Tasks whose resolved output type is `loglikelihood`, `loglikelihood_rolling`, or
+`multiple_choice` must not declare `prompt`. They use completions and first run a
+prompt-logprob/tokenizer alignment probe, because the pinned lm-eval chat client
+does not implement loglikelihood scoring. Dynamic Python tasks are treated the
+same way. A probe failure makes support inconclusive rather than silently
+removing the task.
 
 Use `request_body` for task-specific inference parameters such as sampling,
 reasoning effort, logprobs, or chat-template arguments:
@@ -153,26 +181,49 @@ For concurrency `c`, the resolved warmup count is
 `c * warmup_prompts_per_concurrency`. Warmup uses the same route, request
 source, request body, and concurrency as profiling, but consumes a disjoint
 prefix of the frozen request population. It is excluded from normalized
-metrics and profiling request counts. A requested prefix-cache reset happens
-once before warmup, and the case timeout covers reset, warmup, profiling, and
-result handling; process cleanup retains its separate grace. When the Bench is
-captured, InferLab opens the framework capture window only after native warmup
-has drained and closes it at the existing client-completion boundary. A warmup
-failure leaves the capture window unopened.
+metrics and profiling request counts. Cache start defaults to uncontrolled;
+declare a cold or primed start only when the experiment requires it:
+
+```toml
+cache = { start = "cold" }   # warmup drains, then reset, then profiling
+```
+
+`cold` requires the selected integration/topology to expose a prefix-cache
+reset. `primed` additionally requires an exact flat or rendered-chat
+`prefix_sharing` source; after reset, InferLab sends the maximum canonical
+shared prefix once with one output token, then releases profiling. A rendered
+prefix that cannot tokenize exactly as an independent conditioning prompt
+fails preparation. Reset and conditioning occur after warmup, are excluded
+from profiling metrics, and do not consume population entries. The one case
+timeout covers warmup, reset, conditioning, profiling, and result handling;
+cleanup retains its separate grace. A default capture window opens after cache
+preparation and before profiling release. Any warmup or cache-preparation
+failure leaves the window unopened.
 
 Every successful Bench reports `request_throughput`, `output_throughput`, and
 `total_token_throughput`. For each of `request_latency_ms`, `ttft_ms`, and
 `tpot_ms`, InferLab reports `mean`, `min`, `max`, `stddev`, `p50`, `p90`,
 `p95`, and `p99` using names such as `p95_tpot_ms`. TPOT is not applicable to
 an `output_tokens = 1` prefill-dominant workload and its TPOT metrics are then
-omitted. `prompt_cache_read_ratio` is present only when AIPerf reports valid
-cache-usage evidence. `good_request_ratio` and `goodput` are derived only when
-a request SLO is configured.
+omitted. A Bench with `prefix_sharing`, `shared_system_content`, or a primed
+start requires backend prompt-token and cache-read-token usage on every
+completed profiling request. It reports `prompt_cache_read_tokens` and
+`uncached_prompt_tokens` with the same distribution statistics, plus
+`prompt_cache_read_ratio = sum(cache_read_tokens) / sum(prompt_tokens)`.
+For direct vLLM, enable `enable_prompt_tokens_details = true` in the server
+settings. For direct SGLang, enable `enable_cache_report = true`; SGLang's
+OpenAI protocol omits the cache detail when the reported read is exactly zero,
+so its integration records that endpoint representation and InferLab preserves
+the request observation as zero. An undeclared missing value still fails
+normalization. Other cases preserve AIPerf's optional aggregate cache ratio
+when available. `good_request_ratio` and `goodput` are derived only when a
+request SLO is configured.
 
 Set `server_metrics = true` to ask AIPerf to collect the server's declared JSON
 metrics export. This is accepted only when the selected integration/topology
-declares a metrics endpoint and the Bench has zero warmup. The integration may
-bind that endpoint to the public serving port or to one named port it already
+declares a metrics endpoint. Native warmup and cache preparation remain outside
+the exported profiling window. The integration may bind that endpoint to the
+public serving port or to one named port it already
 requires; InferLab allocates the port and freezes the exact URL before launching
 the measurement client. InferLab preserves framework routes such as `/metrics`
 or `/v1/metrics` rather than substituting a framework-neutral default. Direct
@@ -361,6 +412,50 @@ InferLab verifies the selected parquet snapshot, filters and samples without
 replacement, and freezes only each row's first user turn as an independent
 request. Later turns are recorded as omitted rather than silently becoming
 sessions.
+
+## Source preparation and cold-to-warm verification
+
+Non-synthetic measurement sources are prepared before a recipe launches its
+server. Release-catalog and AgentX sources must close and verify their immutable
+content; a task-owned lm-eval source that cannot expose its complete closure is
+recorded explicitly as opaque and non-reproducible. Source preparation is
+separate from lm-eval, AIPerf, or InferLab population materialization, so its
+time and cache outcome are not charged to an arbitrary measurement case.
+
+For a workspace lm-eval YAML using a file-backed `json`, `csv`, `parquet`,
+`text`, or `arrow` loader, InferLab snapshots the YAML include closure and
+workspace-local `data_files` before serving starts. Exact paths, lists, split
+mappings, and file globs are expanded into the recorded ordered closure, and
+the Eval client receives a generated task YAML bound only to the read-only
+snapshot. Remote selectors, paths outside the workspace, and task function
+references remain explicit opaque sources because preparation cannot bind
+their complete file closure.
+
+Use an isolated cache to exercise a real cold preparation followed by verified
+reuse without changing the recipe or measurement definitions:
+
+```sh
+INFERLAB_ASSET_E2E_CACHE=$(mktemp -d)
+XDG_CACHE_HOME="$INFERLAB_ASSET_E2E_CACHE" inferlab recipe run <RECIPE> > cold-recipe.json
+XDG_CACHE_HOME="$INFERLAB_ASSET_E2E_CACHE" inferlab recipe run <RECIPE> > warm-recipe.json
+```
+
+Choose a recipe whose suite contains a release-qualified dataset or AgentX
+source. Both records must report `source_preparation_completed = true` and
+`serving_launch_attempted = true`. In `data_assets`, the same selection must
+have the same `selection_key_sha256`; the cold attempt's terminal preparation
+phase reports downloaded source bytes and a cache miss, while the warm attempt
+reports reused source bytes and a verified full hit. The terminal `ready`
+attempt must retain a closed content list and its expected-versus-observed
+verification. Compare the two records' data-asset `selection`, `consumers`, and
+the selected workload definitions under `resolved.measurements` to confirm
+that only the cache outcome changed. A dry-run may inspect an existing local
+path, but never downloads, verifies, or claims source readiness.
+
+For a manual Bench, the same preparation occurs before its first inference
+request. A preparation failure leaves the selected managed server running and
+records `target_server_unchanged = true` in the Bench record's standalone
+`data_assets` evidence.
 
 ## Linear serving sessions
 

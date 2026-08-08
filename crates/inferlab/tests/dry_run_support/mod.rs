@@ -79,12 +79,20 @@ impl TestWorkspace {
 
         let private_weight = root
             .path()
-            .join("private/weights/dsv4")
+            .join("private/weights/deepseek-v4-flash")
             .display()
             .to_string();
         Self::write_local_bindings(&inferlab_dir.join("local.toml"), &private_weight)?;
         Self::write_adapter(&adapter_bin.join("inferlab-adapter-vllm"))?;
         Self::write_pixi(&adapter_bin.join("pixi"))?;
+        write_executable(
+            &adapter_bin.join("fixture-eval-client"),
+            include_str!("../fixtures/bin/recipe-eval-client.py"),
+        )?;
+        write_executable(
+            &adapter_bin.join("fixture-bench-client"),
+            include_str!("../fixtures/bin/bench-client.py"),
+        )?;
         write_executable(&adapter_bin.join("ip"), NETWORK_IP)?;
         write_executable(&adapter_bin.join("ibdev2netdev"), IBDEV2NETDEV)?;
         write_executable(&adapter_bin.join("ssh"), SSH)?;
@@ -128,7 +136,7 @@ impl TestWorkspace {
             format!(
                 "default_placement = \"local\"\n\
                  \n\
-                 [model_weights.dsv4]\n\
+                 [model_weights.deepseek-v4-flash]\n\
                  locator = {private_weight:?}\n\
                  \n\
                  [machines.local]\n\
@@ -395,8 +403,8 @@ print(json.dumps({
              if [ \"$1\" = install ] && [ \"$2\" = --manifest-path ] && [ \"$4\" = --all ] && [ \"$5\" = --locked ]; then\n\
                prefix=\"$(dirname \"$3\")\"\n\
                mkdir -p \"$prefix/.pixi/envs/eval/bin\" \"$prefix/.pixi/envs/bench/bin\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf '\"'\"'{\"lm_eval_version\":\"0.4.12\"}\\n'\"'\"'' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf '\"'\"'{\"aiperf_version\":\"0.12.0\",\"transformers_version\":\"5.12.1\"}\\n'\"'\"'' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
+               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"lm_eval_version\":\"0.4.12\"}\\n'\"'\"'; exit 0; fi' 'shift' 'exec fixture-eval-client \"$@\"' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
+               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"aiperf_version\":\"0.12.0\",\"transformers_version\":\"5.12.1\"}\\n'\"'\"'; exit 0; fi' 'if [ \"$1\" = -m ] && [ \"$2\" = inferlab_bench_runner.bench_client ]; then shift 2; else shift; fi' 'exec fixture-bench-client \"$@\"' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
                chmod +x \"$prefix/.pixi/envs/eval/bin/python\" \"$prefix/.pixi/envs/bench/bin/python\"\n\
                exit 0\n\
              fi\n\
@@ -496,8 +504,8 @@ workload_suite = \"qualify\"
 ";
 
 pub(crate) const SPLIT_SERVING: &str = "\
-[models.dsv4]
-served_name = \"dsv4\"
+[models.deepseek-v4-flash]
+served_name = \"deepseek-v4-flash\"
 
 [stacks.vllm]
 integration = \"vllm\"
@@ -506,7 +514,7 @@ source_paths = [\"vendor/vllm\", \"vendor/flashinfer\"]
 
 [servers.dsv4-qualify]
 stack = \"vllm\"
-model = \"dsv4\"
+model = \"deepseek-v4-flash\"
 topology = \"single\"
 readiness_timeout_seconds = 900
 default_case = \"tp2\"
@@ -544,6 +552,7 @@ timeout_seconds = 60
 [evals.gsm8k]
 kind = \"lm-eval\"
 task = \"gsm8k\"
+prompt = { kind = \"flat\" }
 limit = 64
 metric = \"exact_match\"
 metric_filter = \"strict-match\"
@@ -558,7 +567,7 @@ prompts_per_concurrency = 4
 request_rates = [1.0, \"inf\"]
 request_count = 32
 burstiness = 1.0
-reset_prefix_cache = true
+cache = { start = \"cold\" }
 timeout_seconds = 900
 
 [benches.adaptive-c8k1k]
@@ -574,7 +583,7 @@ max_search_steps = 3
 min_rate_resolution = 0.25
 request_count = 32
 burstiness = 1.0
-reset_prefix_cache = true
+cache = { start = \"cold\" }
 timeout_seconds = 900
 
 [workload_suites.qualify]
@@ -776,7 +785,10 @@ pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> St
              block_size = 16",
             1,
         )
-        .replace("reset_prefix_cache = true", "reset_prefix_cache = false")
+        .replace(
+            "cache = { start = \"cold\" }",
+            "cache = { start = \"uncontrolled\" }",
+        )
 }
 
 const NETWORK_IP: &str = r#"#!/bin/sh

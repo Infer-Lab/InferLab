@@ -401,8 +401,6 @@ def aiperf_config(
     if definition.agentic_source is not None:
         benchmark["scenario"] = definition.agentic_source.catalog.scenario
     if definition.server_metrics:
-        if request.case.warmup_request_count != 0:
-            raise ValueError("server metrics require a zero-warmup Bench case")
         server_metrics = endpoint.server_metrics
         if server_metrics is None:
             raise ValueError("server metrics requested without an endpoint capability")

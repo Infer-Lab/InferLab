@@ -3,23 +3,36 @@
 
 use super::super::{AcceptedClient, AdjudicatedClient};
 use super::native::{adjudicate_bench_client, run_bench_client};
-use super::phase_barrier::{PROFILE_BARRIER_ENV, ProfileBarrier};
-use super::prefix_cache::reset_prefix_cache;
+use super::phase_barrier::{
+    PROFILE_BARRIER_ENV, PROFILE_BARRIER_REQUIRES_WARMUP_ENV, ProfileBarrier,
+};
+use super::prefix_cache::{CachePreparationInput, prepare_prefix_cache};
 use super::result::evaluate_case_slos;
 use crate::InferlabError;
 use crate::workload::domain::ResolvedBenchSource;
 use crate::workload::plan::session_population_layout;
 use crate::workload::record::{
+    BenchCachePreparationEvidence, BenchCachePreparationPhase, BenchCachePreparationTransition,
     BenchCaseEvidence, BenchCaseRecord, BenchPopulationSliceEvidence, ClientCasePaths,
-    PrefixCacheResetEvidence, WorkloadRecordSession, WorkloadStatus,
+    DataAssetMaterializationEvidence, WorkloadRecordSession, WorkloadStatus,
 };
-use crate::workload::{BenchCasePlan, BenchPlan};
+use crate::workload::{BenchCasePlan, BenchPlan, BenchPreparationStep};
 use inferlab_protocol::BenchClientResult;
 use inferlab_runtime::operation_bound::{
     OperationBound, OperationTerminalCause, OperationTimingEvidence,
 };
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Duration;
+
+struct CaseRun {
+    adjudicated: AdjudicatedClient<BenchClientResult>,
+    cache_preparation: Option<BenchCachePreparationEvidence>,
+}
+
+struct CaseRunFailure {
+    message: String,
+    cache_preparation: Option<BenchCachePreparationEvidence>,
+}
 
 pub(super) fn run_bench_case(
     plan: &BenchPlan,
@@ -29,104 +42,132 @@ pub(super) fn run_bench_case(
 ) -> Result<BenchCaseRecord, InferlabError> {
     let paths = session.case_paths(&case.id)?;
     let budget = Duration::from_secs(plan.client.effective_definition.timeout_seconds);
-    let reset_bound = plan
-        .client
-        .prefix_cache_reset
-        .as_ref()
-        .map(|_| OperationBound::finite(budget));
-    let reset = plan
-        .client
-        .prefix_cache_reset
-        .as_ref()
-        .zip(reset_bound.as_ref())
-        .map(|(action, bound)| reset_prefix_cache(&plan.client.endpoint, action, bound));
-    if reset_bound.as_ref().is_some_and(OperationBound::is_expired) {
-        let timing = reset_bound.as_ref().map_or_else(
-            || {
-                OperationBound::finite(Duration::ZERO).timing(
-                    "before_prefix_cache_reset",
-                    OperationTerminalCause::TimedOut,
-                )
-            },
-            |bound| {
-                bound.timing(
-                    "before_prefix_cache_reset",
-                    OperationTerminalCause::TimedOut,
-                )
-            },
-        );
-        return Ok(failed_case(
-            plan,
-            case,
-            paths,
-            reset,
-            timing,
-            "measurement-case budget expired during prefix-cache reset",
-        ));
-    }
-    if reset.as_ref().is_some_and(|evidence| !evidence.succeeded) {
-        let timing = reset_bound.as_ref().map_or_else(
-            || {
-                OperationBound::finite(Duration::ZERO)
-                    .timing("before_prefix_cache_reset", OperationTerminalCause::Failed)
-            },
-            |bound| bound.timing("before_prefix_cache_reset", OperationTerminalCause::Failed),
-        );
-        return Ok(failed_case(
-            plan,
-            case,
-            paths,
-            reset,
-            timing,
-            "prefix-cache reset failed",
-        ));
-    }
-    let run_and_adjudicate = || -> Result<_, InferlabError> {
-        let adjudicated = match reset_bound.as_ref() {
-            Some(bound) => {
-                let accepted = run_bench_client(plan, case, session, &paths, bound, &[])?;
-                adjudicate_bench_client(accepted, bound, plan, case)
-            }
-            None => {
-                let bound = OperationBound::finite(budget);
-                let accepted = run_bench_client(plan, case, session, &paths, &bound, &[])?;
-                adjudicate_bench_client(accepted, &bound, plan, case)
-            }
-        };
-        Ok(adjudicated)
+    let bound = OperationBound::finite(budget);
+    let requires_warmup_barrier = case
+        .preparation_order
+        .contains(&BenchPreparationStep::WarmupDrain);
+    let controlled_cache = case
+        .preparation_order
+        .contains(&BenchPreparationStep::CacheReset);
+    let pre_client_preparation = if controlled_cache && !requires_warmup_barrier {
+        plan.client.prefix_cache_reset.as_ref().map(|action| {
+            prepare_prefix_cache(
+                CachePreparationInput {
+                    endpoint: &plan.client.endpoint,
+                    action,
+                    start: plan.client.effective_definition.cache_start,
+                    conditioning: plan.client.prefix_cache_conditioning.as_ref(),
+                    population: plan.client.population.as_ref(),
+                    warmup_drained: false,
+                },
+                &bound,
+            )
+        })
+    } else {
+        None
     };
-    let adjudicated = match capture {
-        Some(capture)
-            if case.warmup_request_count > 0
-                || case.warmup_session_count.is_some_and(|count| count > 0)
-                || matches!(
-                    &plan.client.effective_definition.source,
-                    ResolvedBenchSource::Agentic { .. }
-                ) =>
-        {
-            run_captured_after_warmup(
+    if let Some(preparation) = pre_client_preparation.as_ref()
+        && let Some(message) = cache_preparation_error(preparation)
+    {
+        return Ok(failed_preparation_case(
+            plan,
+            case,
+            session,
+            paths,
+            pre_client_preparation,
+            &bound,
+            message,
+        ));
+    }
+    let run_and_adjudicate = |bound: &OperationBound| -> Result<_, InferlabError> {
+        let accepted = run_bench_client(plan, case, session, &paths, bound, &[])?;
+        Ok(adjudicate_bench_client(accepted, bound, plan, case))
+    };
+    let case_run = if let Some(mut preparation) = pre_client_preparation {
+        let mut release_and_run = || {
+            preparation
+                .transitions
+                .push(BenchCachePreparationTransition {
+                    phase: BenchCachePreparationPhase::ProfilingReleased,
+                    elapsed_ms: bound.elapsed_ms(),
+                });
+            run_and_adjudicate(&bound)
+        };
+        let adjudicated = match capture {
+            Some(capture) => capture.run_window(&case.id, release_and_run),
+            None => release_and_run(),
+        }?;
+        CaseRun {
+            adjudicated,
+            cache_preparation: Some(preparation),
+        }
+    } else {
+        match capture {
+            Some(capture) if requires_warmup_barrier => match run_after_setup_barrier(
                 plan,
                 case,
                 session,
                 &paths,
-                capture,
-                reset_bound.as_ref(),
-                budget,
-            )
-        }
-        Some(capture) => capture.run_window(&case.id, run_and_adjudicate),
-        None => run_and_adjudicate(),
-    }?;
+                Some(capture),
+                &bound,
+                requires_warmup_barrier,
+            ) {
+                Ok(case_run) => Ok(case_run),
+                Err(failure) => {
+                    return Ok(failed_barrier_case(
+                        plan, case, session, paths, failure, &bound,
+                    ));
+                }
+            },
+            Some(capture) => capture
+                .run_window(&case.id, || {
+                    let bound = OperationBound::finite(budget);
+                    run_and_adjudicate(&bound)
+                })
+                .map(|adjudicated| CaseRun {
+                    adjudicated,
+                    cache_preparation: None,
+                }),
+            None if requires_warmup_barrier => match run_after_setup_barrier(
+                plan,
+                case,
+                session,
+                &paths,
+                None,
+                &bound,
+                requires_warmup_barrier,
+            ) {
+                Ok(case_run) => Ok(case_run),
+                Err(failure) => {
+                    return Ok(failed_barrier_case(
+                        plan, case, session, paths, failure, &bound,
+                    ));
+                }
+            },
+            None => {
+                let bound = OperationBound::finite(budget);
+                run_and_adjudicate(&bound).map(|adjudicated| CaseRun {
+                    adjudicated,
+                    cache_preparation: None,
+                })
+            }
+        }?
+    };
+    let CaseRun {
+        adjudicated,
+        cache_preparation,
+    } = case_run;
     let AdjudicatedClient {
         mut accepted,
         mut succeeded,
         mut error,
     } = adjudicated;
-    if reset.is_some() {
-        accepted.timing.start_boundary = "before_prefix_cache_reset".to_owned();
+    accepted.timing.start_boundary = if controlled_cache && !requires_warmup_barrier {
+        "before_prefix_cache_reset"
     } else {
-        accepted.timing.start_boundary = "before_external_client_release".to_owned();
+        "before_external_client_release"
     }
+    .to_owned();
     let result = accepted.result;
     let slo = if succeeded {
         match result
@@ -158,7 +199,14 @@ pub(super) fn run_bench_case(
         process: accepted.run.process,
         timing: accepted.timing,
         evidence: BenchCaseEvidence {
-            prefix_cache_reset: reset,
+            preparation_attempt_id: session.data_asset_attempt_id().map(str::to_owned),
+            data_asset_materialization: agentic_data_asset_materialization(
+                plan,
+                session,
+                result.as_ref(),
+            ),
+            data_asset_materialization_identity: population_materialization_identity(plan),
+            cache_preparation,
             metrics: result.as_ref().map(|result| result.metrics.clone()),
             slo,
             population_slice: bench_population_slice(plan, case),
@@ -176,6 +224,9 @@ pub(super) fn run_bench_case(
             prompt_token_reconciliation: result.as_ref().map_or_else(Vec::new, |result| {
                 result.prompt_token_reconciliation.clone()
             }),
+            prompt_cache_observations: result
+                .as_ref()
+                .map_or_else(Vec::new, |result| result.prompt_cache_observations.clone()),
             report_invocations: result
                 .as_ref()
                 .map_or_else(Vec::new, |result| result.report_invocations.clone()),
@@ -187,20 +238,27 @@ pub(super) fn run_bench_case(
     })
 }
 
-fn run_captured_after_warmup(
+fn run_after_setup_barrier(
     plan: &BenchPlan,
     case: &BenchCasePlan,
     session: &WorkloadRecordSession,
     paths: &ClientCasePaths,
-    capture: &mut inferlab_profiler::session::CaptureSession,
-    reset_bound: Option<&OperationBound>,
-    budget: Duration,
-) -> Result<AdjudicatedClient<BenchClientResult>, InferlabError> {
-    let case_bound = OperationBound::finite(budget);
-    let bound = reset_bound.unwrap_or(&case_bound);
-    let barrier = ProfileBarrier::bind()?;
+    mut capture: Option<&mut inferlab_profiler::session::CaptureSession>,
+    bound: &OperationBound,
+    requires_warmup: bool,
+) -> Result<CaseRun, Box<CaseRunFailure>> {
+    let barrier = ProfileBarrier::bind().map_err(|error| {
+        Box::new(CaseRunFailure {
+            message: error.to_string(),
+            cache_preparation: None,
+        })
+    })?;
     let barrier_address = barrier.address().to_owned();
-    let runtime_environment = [(PROFILE_BARRIER_ENV, barrier_address.as_str())];
+    let requires_warmup_value = if requires_warmup { "1" } else { "0" };
+    let runtime_environment = [
+        (PROFILE_BARRIER_ENV, barrier_address.as_str()),
+        (PROFILE_BARRIER_REQUIRES_WARMUP_ENV, requires_warmup_value),
+    ];
 
     thread::scope(|scope| {
         let client = scope
@@ -208,59 +266,183 @@ fn run_captured_after_warmup(
         let release = match barrier.wait_for_ready(&client) {
             Ok(Some(release)) => release,
             Ok(None) => {
-                return finish_before_profile_release(client, plan, case, bound, capture);
+                return finish_before_profile_release(
+                    client,
+                    plan,
+                    case,
+                    bound,
+                    capture.as_deref_mut(),
+                )
+                .map_err(|error| {
+                    Box::new(CaseRunFailure {
+                        message: error.to_string(),
+                        cache_preparation: None,
+                    })
+                });
             }
             Err(error) => {
-                finish_client_cleanup(client, plan, case, bound);
-                return Err(error);
+                let message = error.to_string();
+                if let Some(capture) = capture.as_deref_mut()
+                    && let Err(error) =
+                        capture.record_unopened_window(&case.id, true, message.clone())
+                {
+                    return Err(Box::new(CaseRunFailure {
+                        message: format!("{message}; {error}"),
+                        cache_preparation: None,
+                    }));
+                }
+                return finish_after_barrier_failure(client, plan, case, bound, None, message);
             }
         };
         let mut client = Some(client);
         let mut release = Some(release);
-        let result = capture.run_window(&case.id, || {
+        let mut cache_preparation = plan.client.prefix_cache_reset.as_ref().map(|action| {
+            prepare_prefix_cache(
+                CachePreparationInput {
+                    endpoint: &plan.client.endpoint,
+                    action,
+                    start: plan.client.effective_definition.cache_start,
+                    conditioning: plan.client.prefix_cache_conditioning.as_ref(),
+                    population: plan.client.population.as_ref(),
+                    warmup_drained: requires_warmup,
+                },
+                bound,
+            )
+        });
+        let preparation_error = cache_preparation.as_ref().and_then(cache_preparation_error);
+        if let Some(message) = preparation_error {
+            drop(release.take());
+            let Some(client) = client.take() else {
+                return Err(Box::new(CaseRunFailure {
+                    message: "cache preparation lost Bench client ownership".to_owned(),
+                    cache_preparation,
+                }));
+            };
+            let accepted = match join_bench_client(client) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    return Err(Box::new(CaseRunFailure {
+                        message: error.to_string(),
+                        cache_preparation,
+                    }));
+                }
+            };
+            let mut adjudicated = adjudicate_bench_client(accepted, bound, plan, case);
+            adjudicated.succeeded = false;
+            adjudicated.error = Some(message.to_owned());
+            if let Some(capture) = capture.as_deref_mut()
+                && let Err(error) =
+                    capture.record_unopened_window(&case.id, true, message.to_owned())
+            {
+                return Err(Box::new(CaseRunFailure {
+                    message: error.to_string(),
+                    cache_preparation,
+                }));
+            }
+            return Ok(CaseRun {
+                adjudicated,
+                cache_preparation,
+            });
+        }
+        let mut release_and_join = || {
             let release = release
                 .take()
                 .ok_or_else(|| InferlabError::ProfileBarrierProtocol {
-                    message: "capture window attempted to release profiling twice".to_owned(),
+                    message: "Bench case attempted to release profiling twice".to_owned(),
                 })?;
             release.acknowledge()?;
+            if let Some(preparation) = cache_preparation.as_mut() {
+                preparation
+                    .transitions
+                    .push(BenchCachePreparationTransition {
+                        phase: BenchCachePreparationPhase::ProfilingReleased,
+                        elapsed_ms: bound.elapsed_ms(),
+                    });
+            }
             let client = client
                 .take()
                 .ok_or_else(|| InferlabError::ProfileBarrierProtocol {
-                    message: "capture window attempted to join the Bench client twice".to_owned(),
+                    message: "Bench case attempted to join its client twice".to_owned(),
                 })?;
             let accepted = join_bench_client(client)?;
-            Ok(adjudicate_bench_client(accepted, bound, plan, case))
-        });
-        if result.is_err() {
-            drop(release.take());
-            if let Some(client) = client.take() {
-                finish_client_cleanup(client, plan, case, bound);
+            Ok(CaseRun {
+                adjudicated: adjudicate_bench_client(accepted, bound, plan, case),
+                cache_preparation: cache_preparation.take(),
+            })
+        };
+        let result: Result<CaseRun, InferlabError> = match capture {
+            Some(capture) => capture.run_window(&case.id, release_and_join),
+            None => release_and_join(),
+        };
+        match result {
+            Ok(case_run) => Ok(case_run),
+            Err(error) => {
+                drop(release.take());
+                let Some(client) = client.take() else {
+                    return Err(Box::new(CaseRunFailure {
+                        message: error.to_string(),
+                        cache_preparation,
+                    }));
+                };
+                finish_after_barrier_failure(
+                    client,
+                    plan,
+                    case,
+                    bound,
+                    cache_preparation,
+                    error.to_string(),
+                )
             }
         }
-        result
     })
 }
 
-fn finish_before_profile_release(
+fn failed_barrier_case(
+    plan: &BenchPlan,
+    case: &BenchCasePlan,
+    session: &WorkloadRecordSession,
+    paths: ClientCasePaths,
+    failure: Box<CaseRunFailure>,
+    bound: &OperationBound,
+) -> BenchCaseRecord {
+    let terminal_cause = if bound.is_expired() {
+        OperationTerminalCause::TimedOut
+    } else {
+        OperationTerminalCause::Failed
+    };
+    let CaseRunFailure {
+        message,
+        cache_preparation,
+    } = *failure;
+    failed_case_record(
+        plan,
+        case,
+        session,
+        paths,
+        cache_preparation,
+        bound.timing("before_external_client_release", terminal_cause),
+        &message,
+    )
+}
+
+fn finish_after_barrier_failure(
     client: ScopedJoinHandle<'_, Result<AcceptedClient<BenchClientResult>, InferlabError>>,
     plan: &BenchPlan,
     case: &BenchCasePlan,
     bound: &OperationBound,
-    capture: &mut inferlab_profiler::session::CaptureSession,
-) -> Result<AdjudicatedClient<BenchClientResult>, InferlabError> {
+    cache_preparation: Option<BenchCachePreparationEvidence>,
+    message: String,
+) -> Result<CaseRun, Box<CaseRunFailure>> {
     let accepted = match join_bench_client(client) {
         Ok(accepted) => accepted,
         Err(error) => {
-            capture.record_unopened_window(&case.id, false, error.to_string())?;
-            return Err(error);
+            return Err(Box::new(CaseRunFailure {
+                message: format!("{message}; {error}"),
+                cache_preparation,
+            }));
         }
     };
     let mut adjudicated = adjudicate_bench_client(accepted, bound, plan, case);
-    let message =
-        "Bench client exited before AIPerf reported profiling readiness; capture remained unopened"
-            .to_owned();
-    capture.record_unopened_window(&case.id, true, message.clone())?;
     adjudicated.succeeded = false;
     adjudicated.error = Some(
         adjudicated
@@ -268,35 +450,58 @@ fn finish_before_profile_release(
             .take()
             .map_or(message.clone(), |error| format!("{error}; {message}")),
     );
-    Ok(adjudicated)
+    Ok(CaseRun {
+        adjudicated,
+        cache_preparation,
+    })
 }
 
-fn finish_client_cleanup(
-    client: ScopedJoinHandle<'_, Result<AcceptedClient<BenchClientResult>, InferlabError>>,
-    plan: &BenchPlan,
-    case: &BenchCasePlan,
-    bound: &OperationBound,
-) {
-    if let Ok(accepted) = join_bench_client(client) {
-        adjudicate_bench_client(accepted, bound, plan, case);
+fn cache_preparation_error(preparation: &BenchCachePreparationEvidence) -> Option<&'static str> {
+    if !preparation.reset.succeeded {
+        Some("prefix-cache reset failed")
+    } else if preparation.start == crate::workspace::BenchCacheStart::Primed
+        && preparation
+            .conditioning
+            .as_ref()
+            .is_none_or(|conditioning| !conditioning.succeeded)
+    {
+        Some("prefix-cache conditioning failed")
+    } else {
+        None
     }
 }
 
-fn join_bench_client(
-    client: ScopedJoinHandle<'_, Result<AcceptedClient<BenchClientResult>, InferlabError>>,
-) -> Result<AcceptedClient<BenchClientResult>, InferlabError> {
-    client
-        .join()
-        .map_err(|_| InferlabError::ProfileBarrierProtocol {
-            message: "Bench client supervision thread panicked".to_owned(),
-        })?
-}
-
-fn failed_case(
+fn failed_preparation_case(
     plan: &BenchPlan,
     case: &BenchCasePlan,
+    session: &WorkloadRecordSession,
     paths: ClientCasePaths,
-    reset: Option<PrefixCacheResetEvidence>,
+    cache_preparation: Option<BenchCachePreparationEvidence>,
+    bound: &OperationBound,
+    error: &str,
+) -> BenchCaseRecord {
+    let terminal_cause = if bound.is_expired() {
+        OperationTerminalCause::TimedOut
+    } else {
+        OperationTerminalCause::Failed
+    };
+    failed_case_record(
+        plan,
+        case,
+        session,
+        paths,
+        cache_preparation,
+        bound.timing("before_prefix_cache_reset", terminal_cause),
+        error,
+    )
+}
+
+fn failed_case_record(
+    plan: &BenchPlan,
+    case: &BenchCasePlan,
+    session: &WorkloadRecordSession,
+    paths: ClientCasePaths,
+    cache_preparation: Option<BenchCachePreparationEvidence>,
     timing: OperationTimingEvidence,
     error: &str,
 ) -> BenchCaseRecord {
@@ -310,7 +515,10 @@ fn failed_case(
         process: None,
         timing,
         evidence: BenchCaseEvidence {
-            prefix_cache_reset: reset,
+            preparation_attempt_id: session.data_asset_attempt_id().map(str::to_owned),
+            data_asset_materialization: None,
+            data_asset_materialization_identity: population_materialization_identity(plan),
+            cache_preparation,
             metrics: None,
             slo: None,
             population_slice: bench_population_slice(plan, case),
@@ -320,6 +528,7 @@ fn failed_case(
             session: None,
             agentic: None,
             prompt_token_reconciliation: Vec::new(),
+            prompt_cache_observations: Vec::new(),
             report_invocations: Vec::new(),
         },
         native_command: None,
@@ -327,6 +536,94 @@ fn failed_case(
         raw_artifacts: None,
         error: Some(error.to_owned()),
     }
+}
+
+fn finish_before_profile_release(
+    client: ScopedJoinHandle<'_, Result<AcceptedClient<BenchClientResult>, InferlabError>>,
+    plan: &BenchPlan,
+    case: &BenchCasePlan,
+    bound: &OperationBound,
+    mut capture: Option<&mut inferlab_profiler::session::CaptureSession>,
+) -> Result<CaseRun, InferlabError> {
+    let accepted = match join_bench_client(client) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            if let Some(capture) = capture.as_deref_mut() {
+                capture.record_unopened_window(&case.id, false, error.to_string())?;
+            }
+            return Err(error);
+        }
+    };
+    let mut adjudicated = adjudicate_bench_client(accepted, bound, plan, case);
+    let message =
+        "Bench client exited before AIPerf reported profiling readiness; capture remained unopened"
+            .to_owned();
+    if let Some(capture) = capture {
+        capture.record_unopened_window(&case.id, true, message.clone())?;
+    }
+    adjudicated.succeeded = false;
+    adjudicated.error = Some(
+        adjudicated
+            .error
+            .take()
+            .map_or(message.clone(), |error| format!("{error}; {message}")),
+    );
+    Ok(CaseRun {
+        adjudicated,
+        cache_preparation: None,
+    })
+}
+
+fn join_bench_client(
+    client: ScopedJoinHandle<'_, Result<AcceptedClient<BenchClientResult>, InferlabError>>,
+) -> Result<AcceptedClient<BenchClientResult>, InferlabError> {
+    client
+        .join()
+        .map_err(|_| InferlabError::ProfileBarrierProtocol {
+            message: "Bench client supervision thread panicked".to_owned(),
+        })?
+}
+
+fn agentic_data_asset_materialization(
+    plan: &BenchPlan,
+    session: &WorkloadRecordSession,
+    result: Option<&BenchClientResult>,
+) -> Option<DataAssetMaterializationEvidence> {
+    let ResolvedBenchSource::Agentic { agentic_source } = &plan.client.effective_definition.source
+    else {
+        return None;
+    };
+    result
+        .and_then(|result| result.agentic_evidence.as_deref())
+        .and_then(|evidence| evidence.run.as_ref())?;
+    Some(DataAssetMaterializationEvidence {
+        preparation_attempt_id: session.data_asset_attempt_id()?.to_owned(),
+        authority: "aiperf_case_startup".to_owned(),
+        materialization_identity: format!(
+            "{}:{}:{}",
+            agentic_source.catalog.aiperf_loader,
+            agentic_source.catalog.source_format,
+            agentic_source.catalog.materialization_identity
+        ),
+        dataset_fingerprint: None,
+        unavailable_reason: Some(
+            "AIPerf did not report a distinct derived-cache fingerprint".to_owned(),
+        ),
+    })
+}
+
+fn population_materialization_identity(plan: &BenchPlan) -> Option<String> {
+    match &plan.client.effective_definition.source {
+        ResolvedBenchSource::Requests {
+            request_source: crate::workload::domain::ResolvedBenchRequestSource::Dataset { .. },
+        } => {}
+        ResolvedBenchSource::Sessions { .. } => {}
+        ResolvedBenchSource::Agentic { .. } | ResolvedBenchSource::Requests { .. } => return None,
+    }
+    plan.client
+        .population
+        .as_ref()
+        .map(|population| format!("sha256:{}", population.sha256))
 }
 
 fn bench_population_slice(

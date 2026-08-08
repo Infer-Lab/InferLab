@@ -1,15 +1,26 @@
 use super::super::test_support::{complete_session_evidence, prefill_bench_result};
-use super::bench_result_error;
-use crate::workload::domain::{BenchAgenticCatalog, DatasetCacheState, ResolvedBenchAgenticSource};
+use super::{BenchResultExpectations, bench_result_error};
+use crate::workload::domain::{BenchAgenticCatalog, ResolvedBenchAgenticSource};
 use crate::workspace::RequestSlo;
 use inferlab_protocol::{
     BenchAgenticAcquisitionOutcome, BenchAgenticBranchStats, BenchAgenticResultEvidence,
     BenchAgenticRunEvidence, BenchAgenticSourceVerification, BenchDatasetCacheState,
-    BenchNativeInvocation, RawArtifact,
+    BenchNativeInvocation, BenchPromptCacheObservation, RawArtifact,
 };
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
+
+fn expectations(request_count: u32) -> BenchResultExpectations<'static> {
+    BenchResultExpectations {
+        tpot_applicable: false,
+        speed_bench_server_metrics: false,
+        sessions: None,
+        agentic_source: None,
+        request_count,
+        request_slo: None,
+        prompt_cache_evidence: false,
+    }
+}
 
 fn agentic_source() -> ResolvedBenchAgenticSource {
     ResolvedBenchAgenticSource {
@@ -20,8 +31,8 @@ fn agentic_source() -> ResolvedBenchAgenticSource {
             revision: "revision".to_owned(),
             filename: "traces.jsonl".to_owned(),
             sha256: "digest".to_owned(),
-            cache_path: PathBuf::from("/cache/traces.jsonl"),
-            cache_state: DatasetCacheState::Present,
+            cache_path: None,
+            cache_state: None,
             trace_count: 393,
             approximate_bytes: 569_000_000,
             license: "apache-2.0".to_owned(),
@@ -72,8 +83,8 @@ fn complete_agentic_evidence(source: &ResolvedBenchAgenticSource) -> BenchAgenti
             filename: source.catalog.filename.clone(),
             expected_sha256: source.catalog.sha256.clone(),
             observed_sha256: Some(source.catalog.sha256.clone()),
-            cache_path: Some(source.catalog.cache_path.clone()),
-            cache_state_before: BenchDatasetCacheState::Present,
+            cache_path: Some(PathBuf::from("/cache/traces.jsonl")),
+            cache_state_before: Some(BenchDatasetCacheState::Present),
             acquisition_outcome: Some(BenchAgenticAcquisitionOutcome::Reused),
         },
         run: Some(Box::new(BenchAgenticRunEvidence {
@@ -115,7 +126,7 @@ fn complete_agentic_evidence(source: &ResolvedBenchAgenticSource) -> BenchAgenti
 #[test]
 fn prefill_only_bench_does_not_require_tpot() {
     assert_eq!(
-        bench_result_error(&prefill_bench_result(), false, false, None, None, 1, None),
+        bench_result_error(&prefill_bench_result(), expectations(1)),
         None
     );
 }
@@ -152,14 +163,26 @@ fn agentic_bench_defers_failed_request_threshold_to_native_scenario()
     result.agentic_evidence = Some(Box::new(evidence));
 
     assert_eq!(
-        bench_result_error(&result, false, false, None, Some(&source), 0, None),
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                agentic_source: Some(&source),
+                ..expectations(0)
+            },
+        ),
         None
     );
 
     if let Some(evidence) = result.agentic_evidence.as_mut() {
         evidence.source.observed_sha256 = Some("wrong".to_owned());
     }
-    let error = bench_result_error(&result, false, false, None, Some(&source), 0, None);
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            agentic_source: Some(&source),
+            ..expectations(0)
+        },
+    );
     assert!(error.is_some_and(|error| error.contains("source verification")));
 
     if let Some(evidence) = result.agentic_evidence.as_mut() {
@@ -169,7 +192,13 @@ fn agentic_bench_defers_failed_request_threshold_to_native_scenario()
             run.submission_invalid_reasons = vec!["context_overflow_rate_exceeded".to_owned()];
         }
     }
-    let error = bench_result_error(&result, false, false, None, Some(&source), 0, None);
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            agentic_source: Some(&source),
+            ..expectations(0)
+        },
+    );
     assert!(error.is_some_and(|error| error.contains("scenario submission is invalid")));
 
     if let Some(evidence) = result.agentic_evidence.as_mut()
@@ -181,59 +210,26 @@ fn agentic_bench_defers_failed_request_threshold_to_native_scenario()
     result
         .raw_artifacts
         .retain(|artifact| artifact.name != "aiperf_raw_records");
-    let error = bench_result_error(&result, false, false, None, Some(&source), 0, None);
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            agentic_source: Some(&source),
+            ..expectations(0)
+        },
+    );
     assert!(error.is_some_and(|error| error.contains("required native artifact")));
     Ok(())
 }
 
 #[test]
-fn agentic_source_accepts_equivalent_cache_paths() -> Result<(), Box<dyn std::error::Error>> {
-    let temporary = tempfile::tempdir()?;
-    let cache_directory = temporary.path().join("cache");
-    fs::create_dir(&cache_directory)?;
-    let cache_path = cache_directory.join("traces.jsonl");
-    fs::write(&cache_path, b"trace")?;
-
-    let mut source = agentic_source();
-    source.catalog.cache_path = cache_path;
-    let mut evidence = complete_agentic_evidence(&source);
-    evidence.source.cache_path = Some(cache_directory.join("..").join("cache/traces.jsonl"));
-    let run = evidence
-        .run
-        .as_deref()
-        .ok_or("missing agentic run evidence")?;
-    let mut result = prefill_bench_result();
-    result.completed_requests = 1;
-    result.failed_requests = 1;
-    result.raw_artifacts = vec![
-        RawArtifact {
-            name: "aiperf_summary".to_owned(),
-            kind: "aiperf-summary".to_owned(),
-            path: run.aggregate_artifact.clone(),
-        },
-        RawArtifact {
-            name: "aiperf_records".to_owned(),
-            kind: "aiperf-records".to_owned(),
-            path: PathBuf::from("records.json"),
-        },
-        RawArtifact {
-            name: "aiperf_raw_records".to_owned(),
-            kind: "aiperf-raw-records".to_owned(),
-            path: run.raw_records_artifact.clone(),
-        },
-    ];
-    result.agentic_evidence = Some(Box::new(evidence));
-
-    assert_eq!(
-        bench_result_error(&result, false, false, None, Some(&source), 0, None),
-        None
-    );
-    Ok(())
-}
-
-#[test]
 fn decode_bench_requires_tpot() {
-    let error = bench_result_error(&prefill_bench_result(), true, false, None, None, 1, None);
+    let error = bench_result_error(
+        &prefill_bench_result(),
+        BenchResultExpectations {
+            tpot_applicable: true,
+            ..expectations(1)
+        },
+    );
 
     assert!(error.is_some_and(|error| error.contains("mean_tpot_ms")));
 }
@@ -245,7 +241,13 @@ fn linear_session_bench_requires_semantically_reconciled_evidence() {
     result.session_evidence = Some(complete_session_evidence());
 
     assert_eq!(
-        bench_result_error(&result, false, false, Some((0, 1)), None, 2, None),
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                sessions: Some((0, 1)),
+                ..expectations(2)
+            },
+        ),
         None
     );
 
@@ -253,7 +255,13 @@ fn linear_session_bench_requires_semantically_reconciled_evidence() {
     if let Some(evidence) = result.session_evidence.as_mut() {
         evidence.turns[1].preceding_native_session_num = None;
     }
-    let error = bench_result_error(&result, false, false, Some((0, 1)), None, 2, None);
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            sessions: Some((0, 1)),
+            ..expectations(2)
+        },
+    );
     assert!(error.is_some_and(|error| error.contains("linear-session")));
 }
 
@@ -264,9 +272,50 @@ fn bench_rejects_out_of_range_cache_ratio() {
         .metrics
         .insert("prompt_cache_read_ratio".to_owned(), 1.01);
 
-    let error = bench_result_error(&result, false, false, None, None, 1, None);
+    let error = bench_result_error(&result, expectations(1));
 
     assert!(error.is_some_and(|error| error.contains("prompt_cache_read_ratio")));
+}
+
+#[test]
+fn required_prompt_cache_evidence_reconciles_backend_token_observations() {
+    let mut result = prefill_bench_result();
+    result.prompt_cache_observations = vec![BenchPromptCacheObservation {
+        request_id: 7,
+        prompt_tokens: 10,
+        cache_read_tokens: 6,
+        uncached_prompt_tokens: 4,
+        cache_read_ratio: 0.6,
+    }];
+    for family in ["prompt_cache_read_tokens", "uncached_prompt_tokens"] {
+        for statistic in ["mean", "min", "max", "stddev", "p50", "p90", "p95", "p99"] {
+            result.metrics.insert(format!("{statistic}_{family}"), 1.0);
+        }
+    }
+    result
+        .metrics
+        .insert("prompt_cache_read_ratio".to_owned(), 0.6);
+
+    assert_eq!(
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                prompt_cache_evidence: true,
+                ..expectations(1)
+            },
+        ),
+        None
+    );
+
+    result.prompt_cache_observations[0].uncached_prompt_tokens = 3;
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            prompt_cache_evidence: true,
+            ..expectations(1)
+        },
+    );
+    assert!(error.is_some_and(|error| error.contains("per-request prompt-cache evidence")));
 }
 
 #[test]
@@ -294,12 +343,24 @@ fn speed_bench_server_metrics_require_both_acceptance_scalars() {
     .collect();
 
     assert_eq!(
-        bench_result_error(&result, false, true, None, None, 1, None),
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                speed_bench_server_metrics: true,
+                ..expectations(1)
+            },
+        ),
         None
     );
 
     result.metrics.remove("acceptance_rate");
-    let error = bench_result_error(&result, false, true, None, None, 1, None);
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            speed_bench_server_metrics: true,
+            ..expectations(1)
+        },
+    );
     assert!(error.is_some_and(|error| error.contains("acceptance_rate")));
 }
 
@@ -331,7 +392,14 @@ fn complete_all_error_request_slo_result_is_measurement_evidence() {
     };
 
     assert_eq!(
-        bench_result_error(&result, true, false, None, None, 4, Some(&slo)),
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                tpot_applicable: true,
+                request_slo: Some(&slo),
+                ..expectations(4)
+            },
+        ),
         None
     );
 }

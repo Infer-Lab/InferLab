@@ -8,6 +8,7 @@ from inferlab_adapter_sdk import (
     GatewayTargetEngine,
     Parallelism,
     PlanServeInput,
+    PromptCacheReadZeroRepresentation,
     RenderServeInput,
     ServeModelInput,
     ServeProcessAllocation,
@@ -67,6 +68,13 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
         "path": "/metrics",
         "port": "prometheus",
     }
+    # A primed or prefix-sharing Bench needs cache-read usage, so the endpoint
+    # states the reporting capability rather than leaving it unsaid.
+    assert result.gateway.endpoint.prefix_cache_reset is not None
+    assert (
+        result.gateway.endpoint.prompt_cache_read_zero_representation
+        is PromptCacheReadZeroRepresentation.explicit
+    )
     assert result.gateway.effective_settings["policy"].root == "least_load"
     target = result.gateway.targets[0].root
     assert isinstance(target, GatewayTargetEngine)
@@ -168,10 +176,15 @@ def test_plan_rejects_non_contract_topologies_and_engine_specific_settings() -> 
         plan_serve(request)
 
 
-def _render_input(tensor_parallel_size: int = 1) -> RenderServeInput:
+def _render_input(
+    tensor_parallel_size: int = 1,
+    engine_settings: dict[str, object] | None = None,
+) -> RenderServeInput:
     plan_input = _plan_input(
         Parallelism.model_validate({"outer": {"tensor_parallel_size": tensor_parallel_size}})
     )
+    for name, value in (engine_settings or {}).items():
+        plan_input.roles[0].settings[name] = SettingValue.model_validate(value)
     plan = plan_serve(plan_input)
     role = plan.roles[0]
     assert plan.gateway is not None
@@ -260,6 +273,87 @@ def test_render_uses_only_the_canonical_tp2_worker_contract_and_smg() -> None:
     assert gateway[gateway.index("--policy") + 1] == "least_load"
     assert "--pd-disaggregation" not in gateway
     assert all("grout" not in argument and "sm120" not in argument for argument in engine)
+
+
+def test_plan_records_declared_engine_settings_without_inventing_omitted_ones() -> None:
+    plan_input = _plan_input(Parallelism.model_validate({"outer": {"tensor_parallel_size": 2}}))
+    plan_input.roles[0].settings["gpu_memory_utilization_percent"] = SettingValue.model_validate(90)
+    plan_input.roles[0].settings["prefix_cache_ranks"] = SettingValue.model_validate(
+        [{"cpu_bytes": 100, "numa_node": 3}, {"cpu_bytes": 200, "numa_node": 4}]
+    )
+
+    effective = plan_serve(plan_input).roles[0].effective_settings
+
+    assert effective["gpu_memory_utilization_percent"].root == 90
+    ranks = effective["prefix_cache_ranks"].root
+    assert isinstance(ranks, list)
+    declared: list[tuple[object, object]] = []
+    for entry in ranks:
+        fields = entry.root
+        assert isinstance(fields, dict)
+        declared.append((fields["cpu_bytes"].root, fields["numa_node"].root))
+    assert declared == [(100, 3), (200, 4)]
+    # An omitted setting renders no argument, so the record must not claim one.
+    assert "workspace_reserve_mib" not in effective
+    assert "prefix_cache_host_memory_percent" not in effective
+
+
+def test_render_passes_every_declared_memory_and_prefix_cache_option() -> None:
+    render_input = _render_input(
+        tensor_parallel_size=2,
+        engine_settings={
+            "gpu_memory_utilization_percent": 90,
+            "workspace_reserve_mib": 2048,
+            "prefix_cache_gpu_entries": 16,
+            "prefix_cache_ranks": [
+                {"cpu_bytes": 100, "numa_node": 3},
+                {"cpu_bytes": 200, "numa_node": 4},
+            ],
+        },
+    )
+
+    engine = render_serve(render_input).processes[0].root.command.argv
+
+    # The worker pairs the per-rank lists by occurrence, so rank 0 is (100, 3).
+    assert engine[engine.index("--max-num-batched-tokens") + 2 :] == [
+        "--gpu-memory-utilization-percent",
+        "90",
+        "--workspace-reserve-mib",
+        "2048",
+        "--prefix-cache-gpu-entries",
+        "16",
+        "--prefix-cache-cpu-bytes-per-rank",
+        "100",
+        "--prefix-cache-cpu-bytes-per-rank",
+        "200",
+        "--prefix-cache-numa-node-per-rank",
+        "3",
+        "--prefix-cache-numa-node-per-rank",
+        "4",
+    ]
+
+
+def test_render_rejects_per_rank_prefix_cache_that_does_not_cover_every_rank() -> None:
+    render_input = _render_input(
+        tensor_parallel_size=2,
+        engine_settings={"prefix_cache_ranks": [{"cpu_bytes": 100, "numa_node": 3}]},
+    )
+
+    with pytest.raises(AdapterOperationError, match="declares 1 ranks"):
+        render_serve(render_input)
+
+
+def test_plan_rejects_two_host_prefix_cache_sizing_authorities() -> None:
+    # Settings validation runs while planning, so the contradiction never
+    # reaches a rendered command.
+    with pytest.raises(AdapterOperationError, match="exactly one host sizing authority"):
+        _render_input(
+            tensor_parallel_size=1,
+            engine_settings={
+                "prefix_cache_host_memory_percent": 50,
+                "prefix_cache_ranks": [{"cpu_bytes": 100, "numa_node": 3}],
+            },
+        )
 
 
 def test_render_rejects_multi_process_rank_decomposition() -> None:

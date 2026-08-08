@@ -183,11 +183,11 @@ impl TestWorkspace {
             format!(
                 "default_placement = \"local\"\n\
                  \n\
-                 [model_weights.dsv4]\n\
-                 locator = \"/models/dsv4\"\n\
+                 [model_weights.deepseek-v4-flash]\n\
+                 locator = \"/models/deepseek-v4-flash\"\n\
                  \n\
-                 [model_weights.dsv4b]\n\
-                 locator = \"/models/dsv4b\"\n\
+                 [model_weights.deepseek-v4-pro]\n\
+                 locator = \"/models/deepseek-v4-pro\"\n\
                  \n\
                  [machines.local]\n\
                  host = \"127.0.0.1\"\n\
@@ -392,7 +392,7 @@ fn dry_run_reports_dedup_and_eligibility() -> Result<(), Box<dyn Error>> {
 
     let rendered = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !rendered.contains("/models/dsv4"),
+        !rendered.contains("/models/deepseek-v4-flash"),
         "dry-run output must not carry model weight locators"
     );
     Ok(())
@@ -414,30 +414,32 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
 
     let progress = String::from_utf8_lossy(&output.stderr);
     assert!(
-        progress.contains("phase=\"record created\"")
+        progress.contains(" INFO [image build] record created ")
             && progress.contains(&format!("record=\"{record_id}\""))
             && progress.contains("record_dir=\""),
         "the record identity is reported as soon as the record exists"
     );
     assert!(
-        progress.contains("phase=\"assembly skipped\"")
+        progress.contains(" INFO [image build] assembly skipped ")
             && progress.contains("item=\"linux/arm64:")
             && progress.contains("position=1/1"),
         "the skipped platform is reported to the operator: {progress}"
     );
     assert!(
-        progress.contains("phase=\"package-build preflight\""),
+        progress.contains(" INFO [image build] package-build preflight "),
         "entry checks report as a phase before package builds: {progress}"
     );
     assert!(
-        progress.contains("phase=\"package-build\" item=\"vendor/vllm\"")
+        progress.contains(" INFO [image build] package-build item=\"vendor/vllm\"")
             && progress.contains("log=\""),
         "wheel build phases report their log paths: {progress}"
     );
-    assert!(progress.contains("phase=\"assembly\" item=\"linux/amd64\" position=1/1"));
-    assert!(progress.contains("phase=\"inspection\"") && progress.contains("position=1/1"));
-    assert!(progress.contains("phase=\"export\"") && progress.contains("position=1/1"));
-    assert!(progress.contains("phase=\"validation\" item=\"dsv4-qualify/"));
+    assert!(progress.contains(" INFO [image build] assembly item=\"linux/amd64\" position=1/1"));
+    assert!(
+        progress.contains(" INFO [image build] inspection ") && progress.contains("position=1/1")
+    );
+    assert!(progress.contains(" INFO [image build] export ") && progress.contains("position=1/1"));
+    assert!(progress.contains(" INFO [image build] validation item=\"dsv4-qualify/"));
 
     let manifest = &report["manifest"];
     let assemblies = manifest["assemblies"].as_array().ok_or("assemblies")?;
@@ -589,7 +591,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
         ".inferlab/records/{record_id}/context-linux-amd64/Dockerfile"
     )))?;
     assert!(dockerfile.contains("example.com/micromamba:1.0@sha256:"));
-    assert!(!dockerfile.contains("/models/dsv4"));
+    assert!(!dockerfile.contains("/models/deepseek-v4-flash"));
     assert!(!dockerfile.contains(workspace.root.path().to_str().ok_or("root")?));
     let postprocess_layer =
         "RUN /usr/local/bin/inferlab-entrypoint python /opt/inferlab-postprocess/fixture-finish.py";

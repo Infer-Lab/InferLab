@@ -40,7 +40,13 @@
     "metric": "exact_match",
     "metric_filter": "strict-match",
     "threshold": 0.9,
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "prompt": {
+      "kind": "server_chat"
+    },
+    "declared_prompt": {
+      "kind": "server_chat"
+    }
   },
   "case_budget_seconds": 29.5,
   "artifact_dir": "/records/eval/artifacts"

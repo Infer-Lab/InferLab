@@ -8,6 +8,8 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::{self, ScopedJoinHandle};
 
 pub(super) const PROFILE_BARRIER_ENV: &str = "INFERLAB_AIPERF_PROFILE_BARRIER";
+pub(super) const PROFILE_BARRIER_REQUIRES_WARMUP_ENV: &str =
+    "INFERLAB_AIPERF_PROFILE_BARRIER_REQUIRES_WARMUP";
 const PROFILE_READY: &[u8] = b"profiling-ready\n";
 const CAPTURE_OPEN: &[u8] = b"capture-open\n";
 

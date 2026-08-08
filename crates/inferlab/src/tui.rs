@@ -1,6 +1,7 @@
 //! Responsive, strictly view-only workspace terminal interface.
 
 mod app;
+mod bench_detail;
 mod collector;
 mod metrics;
 mod presentation;
@@ -407,6 +408,9 @@ struct RecordView {
     child_refs: Vec<String>,
     topology: Option<String>,
     cases: Vec<CaseView>,
+    outcome_facts: Vec<(String, String)>,
+    bench_details: Vec<FactSection>,
+    artifact_refs: Vec<String>,
     process_observation: Option<ObjectState<bool>>,
 }
 
@@ -434,10 +438,17 @@ struct DefinitionView {
     kind: String,
     id: String,
     relationship: String,
+    fact_sections: Vec<FactSection>,
     state: State,
     observed_unix_ms: u64,
     last_success_unix_ms: u64,
     reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FactSection {
+    title: &'static str,
+    rows: Vec<(String, String)>,
 }
 
 #[derive(Clone)]

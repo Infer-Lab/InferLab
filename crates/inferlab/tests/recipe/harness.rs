@@ -38,6 +38,7 @@ pub(crate) struct TestWorkspace {
     bench_marker: PathBuf,
     eval_marker: PathBuf,
     capture_events: PathBuf,
+    conditioning_request: PathBuf,
 }
 
 impl TestWorkspace {
@@ -83,8 +84,8 @@ impl TestWorkspace {
             format!(
                 "default_placement = \"local\"\n\
                  \n\
-                 [model_weights.dsv4]\n\
-                 locator = \"/models/dsv4\"\n\
+                 [model_weights.deepseek-v4-flash]\n\
+                 locator = \"/models/deepseek-v4-flash\"\n\
                  \n\
                  [machines.local]\n\
                  host = \"127.0.0.1\"\n\
@@ -128,6 +129,7 @@ impl TestWorkspace {
         let bench_marker = root.path().join("bench-ran");
         let eval_marker = root.path().join("eval-ran");
         let capture_events = root.path().join("capture-events");
+        let conditioning_request = root.path().join("conditioning-request.json");
         Ok(Self {
             reaper,
             root,
@@ -136,6 +138,7 @@ impl TestWorkspace {
             bench_marker,
             eval_marker,
             capture_events,
+            conditioning_request,
         })
     }
 
@@ -151,6 +154,7 @@ impl TestWorkspace {
             .env("FIXTURE_BENCH_MARKER", &self.bench_marker)
             .env("FIXTURE_EVAL_MARKER", &self.eval_marker)
             .env("FIXTURE_CAPTURE_EVENTS", &self.capture_events)
+            .env("FIXTURE_CONDITIONING_REQUEST", &self.conditioning_request)
             .env(
                 "FIXTURE_NSYS_STATE",
                 self.root.path().join(".inferlab/nsys-state"),
@@ -201,13 +205,13 @@ impl TestWorkspace {
                 "[servers.dsv4-qualify.cases.tp2.parallelism.outer]",
                 "[servers.dsv4-qualify.roles.decode]\nreplicas = 2\n\n[servers.dsv4-qualify.cases.tp2.parallelism.outer]",
             )
-            .replace("reset_prefix_cache = true", "reset_prefix_cache = false");
+            .replace("cache = { start = \"cold\" }", "cache = { start = \"uncontrolled\" }");
         fs::write(self.root.path().join(".inferlab/workspace.toml"), config)?;
         let ports = support::reserve_local_ports(9)?;
         fs::write(
             self.root.path().join(".inferlab/local.toml"),
             format!(
-                "default_placement = \"local\"\n\n[model_weights.dsv4]\nlocator = \"/models/dsv4\"\n\n[machines.local]\nhost = \"127.0.0.1\"\nports = [{}, {}, {}, {}, {}, {}, {}, {}, {}]\ndevices = [0, 1, 2, 3, 4, 5, 6, 7]\n\n[placements.local]\nmachines = [\"local\"]\n",
+                "default_placement = \"local\"\n\n[model_weights.deepseek-v4-flash]\nlocator = \"/models/deepseek-v4-flash\"\n\n[machines.local]\nhost = \"127.0.0.1\"\nports = [{}, {}, {}, {}, {}, {}, {}, {}, {}]\ndevices = [0, 1, 2, 3, 4, 5, 6, 7]\n\n[placements.local]\nmachines = [\"local\"]\n",
                 ports.get(0),
                 ports.get(1),
                 ports.get(2),
@@ -249,6 +253,10 @@ impl TestWorkspace {
 
     pub(crate) fn capture_events(&self) -> &Path {
         &self.capture_events
+    }
+
+    pub(crate) fn conditioning_request(&self) -> &Path {
+        &self.conditioning_request
     }
 }
 

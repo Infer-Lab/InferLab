@@ -214,6 +214,11 @@ class ProcessSpec(BaseModel):
     env: dict[str, str]
 
 
+class PromptCacheReadZeroRepresentation(StrEnum):
+    explicit = 'explicit'
+    omitted = 'omitted'
+
+
 class ProtocolVersion(RootModel[Literal['7']]):
     root: Annotated[
         Literal['7'],
@@ -560,6 +565,9 @@ class EndpointRequirement(BaseModel):
     chat_completions_path: str
     completions_path: str
     prefix_cache_reset: HttpActionSpec | None = None
+    prompt_cache_read_zero_representation: PromptCacheReadZeroRepresentation | None = (
+        None
+    )
     protocol: EndpointProtocol
     server_metrics: ServerMetricsEndpointRequirement | None = None
 

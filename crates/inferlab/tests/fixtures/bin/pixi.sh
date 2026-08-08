@@ -32,7 +32,11 @@ if [ "$2" = --handshake ]; then
   printf '{"aiperf_version":"0.12.0","transformers_version":"5.12.1"}\n'
   exit 0
 fi
-shift
+if [ "$1" = -m ] && [ "$2" = inferlab_bench_runner.bench_client ]; then
+  shift 2
+else
+  shift
+fi
 exec fixture-bench-client "$@"
 PYTHON
   chmod +x "$prefix/.pixi/envs/eval/bin/python" "$prefix/.pixi/envs/bench/bin/python"

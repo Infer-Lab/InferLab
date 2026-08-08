@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     process::ExitCode,
 };
 
@@ -50,6 +50,32 @@ struct SmgWorkerCli {
     /// Maximum aggregate tokens admitted to one scheduled model iteration.
     #[arg(long, default_value = "12288")]
     max_num_batched_tokens: NonZeroUsize,
+
+    /// Share of device memory the Engine may occupy.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+    gpu_memory_utilization_percent: u32,
+
+    /// Device memory withheld from the Engine for execution workspaces.
+    #[arg(long, default_value_t = 0)]
+    workspace_reserve_mib: u32,
+
+    /// Prefix-cache entries retained on device by each tensor-parallel rank.
+    #[arg(long, default_value = "8")]
+    prefix_cache_gpu_entries: NonZeroU32,
+
+    /// Share of host memory backing the prefix cache when no explicit per-rank
+    /// sizing is supplied.
+    #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u32).range(1..=100))]
+    prefix_cache_host_memory_percent: u32,
+
+    /// Host prefix-cache bytes for each rank, paired with the NUMA nodes below
+    /// by occurrence order.
+    #[arg(long)]
+    prefix_cache_cpu_bytes_per_rank: Vec<NonZeroU64>,
+
+    /// NUMA node backing each rank's host prefix cache.
+    #[arg(long)]
+    prefix_cache_numa_node_per_rank: Vec<u32>,
 }
 
 #[derive(Debug, Error)]
@@ -149,6 +175,78 @@ mod tests {
         assert_eq!(worker.tensor_parallel_size.get(), 1);
         assert_eq!(worker.default_max_output_tokens, 3);
         assert_eq!(worker.max_num_batched_tokens.get(), 4_096);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_the_memory_and_prefix_cache_contract_options() -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from([
+            "inferlab-token-engine",
+            "smg-worker",
+            "--listen",
+            "127.0.0.1:50051",
+            "--model",
+            "/models/fake-model",
+            "--served-model-name",
+            "fake-model",
+            "--tensor-parallel-size",
+            "2",
+            "--gpu-memory-utilization-percent",
+            "90",
+            "--workspace-reserve-mib",
+            "2048",
+            "--prefix-cache-gpu-entries",
+            "16",
+            "--prefix-cache-cpu-bytes-per-rank",
+            "100",
+            "--prefix-cache-cpu-bytes-per-rank",
+            "200",
+            "--prefix-cache-numa-node-per-rank",
+            "3",
+            "--prefix-cache-numa-node-per-rank",
+            "4",
+        ])?;
+
+        let CliCommand::SmgWorker(worker) = cli.command;
+        assert_eq!(worker.gpu_memory_utilization_percent, 90);
+        assert_eq!(worker.workspace_reserve_mib, 2_048);
+        assert_eq!(worker.prefix_cache_gpu_entries.get(), 16);
+        // The two lists pair by occurrence order, so rank 0 is (100, 3).
+        assert_eq!(
+            worker
+                .prefix_cache_cpu_bytes_per_rank
+                .iter()
+                .map(|bytes| bytes.get())
+                .collect::<Vec<_>>(),
+            [100, 200]
+        );
+        assert_eq!(worker.prefix_cache_numa_node_per_rank, [3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn applies_the_worker_defaults_when_the_optional_contract_options_are_absent()
+    -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from([
+            "inferlab-token-engine",
+            "smg-worker",
+            "--listen",
+            "127.0.0.1:50051",
+            "--model",
+            "/models/fake-model",
+            "--served-model-name",
+            "fake-model",
+            "--tensor-parallel-size",
+            "1",
+        ])?;
+
+        let CliCommand::SmgWorker(worker) = cli.command;
+        assert_eq!(worker.gpu_memory_utilization_percent, 100);
+        assert_eq!(worker.workspace_reserve_mib, 0);
+        assert_eq!(worker.prefix_cache_gpu_entries.get(), 8);
+        assert_eq!(worker.prefix_cache_host_memory_percent, 75);
+        assert!(worker.prefix_cache_cpu_bytes_per_rank.is_empty());
+        assert!(worker.prefix_cache_numa_node_per_rank.is_empty());
         Ok(())
     }
 

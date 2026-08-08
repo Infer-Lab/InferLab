@@ -83,7 +83,7 @@ def session_request(tmp_path: Path) -> BenchClientRequest:
                 "request_body": {},
                 "request_slo": None,
                 "timeout_seconds": 120,
-                "reset_prefix_cache": False,
+                "cache_start": "uncontrolled",
             },
             "population": {
                 "path": str(population_path),
@@ -144,6 +144,7 @@ def session_preparation_request(
                 },
             },
             "prompt": resolved_prompt_input({"kind": "server_chat"}),
+            "cache_start": "uncontrolled",
             "source_path": str(source_path),
             "required_entries": required_entries,
             "seed": 7,

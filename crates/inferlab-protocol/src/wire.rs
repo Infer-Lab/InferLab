@@ -1,9 +1,13 @@
 //! The versioned wire types used by framework integrations
 //! ([[RFC-0006:C-INTEGRATIONS]]) and by the release-owned Eval and Bench
 //! measurement clients ([[RFC-0004:C-MEASUREMENTS]]). [`AdapterProtocol`] and
-//! [`MeasurementProtocol`] are separate schema roots over this one Rust source
-//! authority.
+//! [`MeasurementProtocol`] are separate schema roots. Measurement data-asset
+//! declarations live in their owning sibling module.
 
+use crate::measurement_data_asset::{
+    EvalPreparedSourceBinding, MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetPreparationResult,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -309,6 +313,16 @@ pub struct ClientEndpointInput {
     pub chat_completions_path: String,
     #[serde(default)]
     pub server_metrics: Option<ServerMetricsEndpointInput>,
+    #[serde(default)]
+    pub prompt_cache_read_zero_representation: Option<PromptCacheReadZeroRepresentation>,
+}
+
+/// How a backend with cache reporting enabled represents a zero-token cache read.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheReadZeroRepresentation {
+    Explicit,
+    Omitted,
 }
 
 /// The resolved server-metrics endpoint supplied to a measurement client.
@@ -335,6 +349,11 @@ pub enum EvalDefinitionInput {
     /// An lm-eval task run with a pass threshold on the chosen metric.
     LmEval {
         task: Box<EvalTaskSourceInput>,
+        /// The prompt rendering authority resolution selected.
+        prompt: EvalPromptInput,
+        /// The authority the definition declared, absent when it was defaulted.
+        #[serde(default)]
+        declared_prompt: Option<EvalPromptInput>,
         #[serde(default)]
         request_body: BTreeMap<String, SettingValue>,
         limit: Option<u32>,
@@ -349,6 +368,20 @@ pub enum EvalDefinitionInput {
         threshold: f64,
         timeout_seconds: u64,
     },
+}
+
+/// The prompt rendering authority for a generative lm-eval definition.
+///
+/// The authority determines the protocol route and the release-pinned lm-eval
+/// client; the runner rejects an authority the resolved task output type does
+/// not permit.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvalPromptInput {
+    /// Ordinary text on the completions path with no chat construction.
+    Flat,
+    /// Structured messages on the chat-completions path, rendered by the server.
+    ServerChat,
 }
 
 /// The resolved lm-eval task source consumed by the release-owned Eval runner.
@@ -391,8 +424,15 @@ pub struct BenchDefinitionInput {
     #[serde(default)]
     pub request_slo: Option<BenchRequestSloInput>,
     pub timeout_seconds: u64,
-    #[serde(default)]
-    pub reset_prefix_cache: bool,
+    pub cache_start: BenchCacheStartInput,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchCacheStartInput {
+    Uncontrolled,
+    Cold,
+    Primed,
 }
 
 /// One release-qualified agentic trace source and its complete effective policy.
@@ -411,8 +451,10 @@ pub struct BenchAgenticCatalogInput {
     pub revision: String,
     pub filename: String,
     pub sha256: String,
-    pub cache_path: PathBuf,
-    pub cache_state: BenchDatasetCacheState,
+    #[serde(default)]
+    pub cache_path: Option<PathBuf>,
+    #[serde(default)]
+    pub cache_state: Option<BenchDatasetCacheState>,
     pub trace_count: u32,
     pub approximate_bytes: u64,
     pub license: String,
@@ -699,6 +741,7 @@ pub struct BenchPopulationPreparationRequest {
     #[serde(default)]
     pub session_source: Option<BenchSessionSourceInput>,
     pub prompt: BenchPromptInput,
+    pub cache_start: BenchCacheStartInput,
     #[serde(default)]
     pub source_path: Option<PathBuf>,
     pub required_entries: u32,
@@ -762,6 +805,15 @@ pub struct BenchPrefixGeometrySummary {
     pub full_prompt_entries: u32,
 }
 
+/// File-bound exact canonical prefix used to condition a primed cache start.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPrefixConditioningInput {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub prompt_tokens: u32,
+}
+
 /// Resolved pre-template shared system-content shape across one frozen
 /// server-chat population.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -792,6 +844,8 @@ pub struct BenchPopulationPreparationResult {
     pub prompt_token_targeting: Option<BenchPromptTokenTargetingSummary>,
     #[serde(default)]
     pub prefix_geometry: Option<BenchPrefixGeometrySummary>,
+    #[serde(default)]
+    pub prefix_conditioning: Option<BenchPrefixConditioningInput>,
     #[serde(default)]
     pub shared_system_content: Option<BenchSharedSystemContentSummary>,
     pub evidence_path: Option<PathBuf>,
@@ -1331,6 +1385,8 @@ pub struct EndpointRequirement {
     pub server_metrics: Option<ServerMetricsEndpointRequirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<HttpActionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_read_zero_representation: Option<PromptCacheReadZeroRepresentation>,
 }
 
 /// An integration-owned logical server-metrics endpoint.
@@ -1385,6 +1441,8 @@ pub struct EvalClientRequest {
     pub endpoint: ClientEndpointInput,
     pub model: MeasurementModelInput,
     pub definition: EvalDefinitionInput,
+    #[serde(default)]
+    pub prepared_source: Option<EvalPreparedSourceBinding>,
     /// Remaining control-plane case budget when the client is released.
     pub case_budget_seconds: f64,
     pub artifact_dir: PathBuf,
@@ -1489,6 +1547,10 @@ pub struct EvalNormalizedMetric {
     pub native_metric_key: String,
     pub value: f64,
     pub higher_is_better: bool,
+    /// The prompt rendering authority that produced this value. The same task
+    /// scored under another authority is a different measurement, so the value
+    /// never travels without it.
+    pub prompt_authority: EvalPromptInput,
 }
 
 /// The effective threshold comparison for the configured primary metric.
@@ -1562,12 +1624,25 @@ pub struct BenchClientResult {
     pub agentic_evidence: Option<Box<BenchAgenticResultEvidence>>,
     #[serde(default)]
     pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
+    #[serde(default)]
+    pub prompt_cache_observations: Vec<BenchPromptCacheObservation>,
     pub native_command: Vec<String>,
     pub native_exit_code: Option<i32>,
     #[serde(default)]
     pub report_invocations: Vec<BenchNativeInvocation>,
     pub raw_artifacts: Vec<RawArtifact>,
     pub error: Option<String>,
+}
+
+/// Backend-reported prompt/cache token accounting for one completed profiling request.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchPromptCacheObservation {
+    pub request_id: u64,
+    pub prompt_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub uncached_prompt_tokens: u64,
+    pub cache_read_ratio: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1583,7 +1658,8 @@ pub struct BenchAgenticSourceVerification {
     pub observed_sha256: Option<String>,
     #[serde(default)]
     pub cache_path: Option<PathBuf>,
-    pub cache_state_before: BenchDatasetCacheState,
+    #[serde(default)]
+    pub cache_state_before: Option<BenchDatasetCacheState>,
     #[serde(default)]
     pub acquisition_outcome: Option<BenchAgenticAcquisitionOutcome>,
 }
@@ -1794,4 +1870,8 @@ pub struct MeasurementProtocol {
     pub bench_population_preparation_request: Option<BenchPopulationPreparationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bench_population_preparation_result: Option<BenchPopulationPreparationResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_asset_preparation_request: Option<MeasurementDataAssetPreparationRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_asset_preparation_result: Option<MeasurementDataAssetPreparationResult>,
 }

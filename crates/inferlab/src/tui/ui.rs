@@ -464,6 +464,9 @@ mod tests {
                         metrics: BTreeMap::from([("request_throughput".to_owned(), 1.25)]),
                     },
                 ],
+                outcome_facts: Vec::new(),
+                bench_details: Vec::new(),
+                artifact_refs: Vec::new(),
                 process_observation: None,
             }],
             child_servers: Vec::new(),
@@ -745,6 +748,7 @@ mod tests {
             kind: "bench".to_owned(),
             id: "random-8k1k".to_owned(),
             relationship: "standalone".to_owned(),
+            fact_sections: Vec::new(),
             state: State::Live,
             observed_unix_ms: 2_000,
             last_success_unix_ms: 2_000,
@@ -769,6 +773,7 @@ mod tests {
             kind: "bench".to_owned(),
             id: "qualification".to_owned(),
             relationship: "standalone".to_owned(),
+            fact_sections: Vec::new(),
             state: State::Live,
             observed_unix_ms: 2_000,
             last_success_unix_ms: 2_000,
@@ -792,6 +797,7 @@ mod tests {
             kind: "bench".to_owned(),
             id: "qualification".to_owned(),
             relationship: "standalone".to_owned(),
+            fact_sections: Vec::new(),
             state: State::Live,
             observed_unix_ms: 2_000,
             last_success_unix_ms: 2_000,
@@ -1167,6 +1173,7 @@ mod tests {
 
         assert!(!screen.contains("METRIC SELECTOR"));
         assert!(screen.contains("Request throughput"));
+        assert!(screen.contains("THROUGHPUT"));
         assert!(screen.contains("c1"));
         assert!(screen.contains("c8"));
         assert!(screen.contains("↑↓ Metric"));
@@ -1224,6 +1231,7 @@ mod tests {
                 .lines()
                 .any(|line| line.contains("metric-that") && line.contains('…'))
         );
+        assert!(screen.contains("OTHER"));
         assert!(
             screen
                 .lines()
@@ -1328,6 +1336,7 @@ mod tests {
                 kind: "model".to_owned(),
                 id: "qwen".to_owned(),
                 relationship: "weights".to_owned(),
+                fact_sections: Vec::new(),
                 state: State::Live,
                 observed_unix_ms: 2_000,
                 last_success_unix_ms: 2_000,
@@ -1337,6 +1346,7 @@ mod tests {
                 kind: "bench".to_owned(),
                 id: "random-8k1k".to_owned(),
                 relationship: "standalone".to_owned(),
+                fact_sections: Vec::new(),
                 state: State::Live,
                 observed_unix_ms: 2_000,
                 last_success_unix_ms: 2_000,

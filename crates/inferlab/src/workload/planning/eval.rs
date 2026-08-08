@@ -94,11 +94,16 @@ pub(super) fn resolve_eval(
             }
         }
     };
+    let declared_prompt = match &declared_definition {
+        EvalDefinition::LmEval { prompt, .. } => prompt.declared().cloned(),
+        EvalDefinition::OpenAiSmoke { .. } => None,
+    };
     Ok(EvalPlan {
         id: id.to_owned(),
         capture: context.capture_ids.iter().any(|capture| capture == id),
         declared_definition,
         definition,
+        declared_prompt,
         overrides: override_plan,
         endpoint: context.endpoint.clone(),
         model: context.model.clone(),

@@ -1,6 +1,6 @@
 use super::text::{display_width, ellipsize_end, pad_left, pad_right};
 use super::theme::{ACCENT, ACCENT_SOFT, CRITICAL, MUTED, SECONDARY, WARNING};
-use crate::tui::metrics::{self, MetricDescriptor, MetricPoint, MetricUnit};
+use crate::tui::metrics::{MetricDescriptor, MetricPoint, MetricUnit};
 use crate::tui::{App, WIDE_WIDTH};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -28,7 +28,7 @@ pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 Constraint::Min(20),
             ])
             .split(area);
-        render_selector(frame, columns[0], &page.catalog, page.selected);
+        render_selector(frame, columns[0], page.catalog, page.selected);
         render_chart(frame, columns[2], &page, metric);
     } else {
         render_chart(frame, area, &page, metric);
@@ -99,7 +99,7 @@ fn render_chart(
     page: &crate::tui::app::MetricPage<'_>,
     metric: &MetricDescriptor,
 ) {
-    let record_context = compact_record_context(page.record);
+    let record_context = &page.record.record_context;
     let context_width = usize::from(area.width)
         .saturating_sub(display_width(" METRICS · ") + display_width(" · REC "));
     let block = Block::default()
@@ -109,7 +109,7 @@ fn render_chart(
             Span::styled(" METRICS ", Style::default().fg(ACCENT_SOFT)),
             Span::styled("· ", Style::default().fg(MUTED)),
             Span::styled(
-                ellipsize_end(&record_context, context_width),
+                ellipsize_end(record_context, context_width),
                 Style::default().fg(SECONDARY),
             ),
             Span::styled(" · REC ", Style::default().fg(ACCENT_SOFT)),
@@ -120,9 +120,9 @@ fn render_chart(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(inner);
-    let points = metrics::points(&page.record.cases, &metric.name);
+    let points = page.points;
     let case_start = app_scroll(page, points.len());
-    let case_end = visible_case_end(&points, case_start, usize::from(rows[1].height));
+    let case_end = visible_case_end(points, case_start, usize::from(rows[1].height));
     render_metric_header(
         frame,
         rows[0],
@@ -132,9 +132,9 @@ fn render_chart(
         case_end,
         points.len(),
     );
-    let scroll = chart_line_offset(&points, case_start);
+    let scroll = chart_line_offset(points, case_start);
     frame.render_widget(
-        Paragraph::new(chart_lines(&points, metric, rows[1].width))
+        Paragraph::new(chart_lines(points, metric, rows[1].width))
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .wrap(Wrap { trim: false }),
         rows[1],
@@ -165,6 +165,7 @@ fn render_metric_header(
         case_end,
         case_count
     );
+    let family_and_name = format!("{} · {}", metric.family.label(), metric.name);
     let name_width = usize::from(area.width).saturating_sub(display_width(&case_suffix));
     frame.render_widget(
         Paragraph::new(vec![
@@ -178,7 +179,7 @@ fn render_metric_header(
             ]),
             Line::from(vec![
                 Span::styled(
-                    ellipsize_end(&metric.name, name_width),
+                    ellipsize_end(&family_and_name, name_width),
                     Style::default().fg(MUTED),
                 ),
                 Span::styled(case_suffix, Style::default().fg(MUTED)),
@@ -194,10 +195,7 @@ fn scale_line(
     metric: &MetricDescriptor,
     width: u16,
 ) -> Vec<Span<'static>> {
-    let maximum = scale_maximum(
-        &metrics::points(&page.record.cases, &metric.name),
-        metric.unit,
-    );
+    let maximum = scale_maximum(page.points, metric.unit);
     let label = value_text(maximum, metric.unit);
     let rule_width = usize::from(width).saturating_sub(display_width(&label) + 12);
     vec![
@@ -344,16 +342,6 @@ fn visible_case_end(points: &[MetricPoint], case_start: usize, visible_lines: us
         previous_group = Some(point.group);
     }
     end
-}
-
-fn compact_record_context(record: &crate::tui::RecordView) -> String {
-    let id = record.id.as_deref().unwrap_or("unreadable-record");
-    let without_time = id.split_once("Z-").map_or(id, |(_, remainder)| remainder);
-    let label = without_time
-        .strip_prefix(&record.kind)
-        .and_then(|remainder| remainder.strip_prefix('-'))
-        .unwrap_or(without_time);
-    format!("{} · {label}", record.kind)
 }
 
 fn scale_maximum(points: &[MetricPoint], unit: MetricUnit) -> f64 {

@@ -39,14 +39,25 @@ session or launch an InferLab workflow.
   followed by metrics and case state. Exact record identifiers, paths, child
   references, scratchpad references, and explicitly referenced logs remain
   available farther down the detail surface; case stdout and stderr artifacts
-  remain mapped to their owning case under **Case Artifacts**. For a workload
-  record with case metrics, `m` opens a
+  remain mapped to their owning case under **Case Artifacts**. Bench records
+  additionally show the recorded terminal and capture outcomes and identify the
+  request, linear-session, or agentic-replay source. Request details include
+  population, prompt authority, prefix-cache reset, and token reconciliation.
+  Linear-session details keep warmup and profiling session/request counts,
+  reconciliation, and failed-session diagnostics distinct. Agentic details keep
+  source verification, acquisition, run/scenario validity, warmup handoff,
+  profiling populations, branch/join counters, unavailable dimensions, and raw
+  artifact references distinct. Older records without tagged source evidence
+  remain navigable and say that the source is unavailable instead of inferring
+  one. For a workload record with case metrics, `m` opens a
   record-local comparison surface. It selects one available metric at a time
   and draws horizontal bars for every case in that record; it does not combine
   records or add an SLO interpretation.
 - **Workspace** groups declared models, stacks, servers, Evals, Benches,
   workload suites, recipes, images, and external images by kind, followed by
-  scratchpad entries.
+  scratchpad entries. A Bench definition identifies its request,
+  linear-session, or agentic-replay source and shows only the applicable source
+  identity, prompt, population, load, and prefix-sharing declarations.
 
 Every fact is labeled by its authority: **declared** workspace configuration,
 **recorded** evidence or journal text, **ephemeral** command progress, or an
@@ -73,9 +84,12 @@ lifecycle is already authoritative and no running process is claimed.
 Recipe-owned server records remain children in Records, but a running or
 abnormal child server is still observed and surfaced in Overview.
 
-The Metrics selector groups recorded names into throughput, request latency,
-TTFT, TPOT, cache, and `OTHER` families. It defaults to request throughput when
-that metric exists and retains unknown recorded metric names under `OTHER`.
+The Metrics selector groups recorded names into throughput, observed input,
+request latency, TTFT, TPOT, cache, speculation, SLO, and `OTHER` families.
+Acceptance length uses tokens; acceptance rate and good-request ratio use
+percentages; goodput uses requests per second. It defaults to request throughput
+when that metric exists and retains unknown recorded metric names unchanged
+under `OTHER` without inventing a unit.
 Concurrency and request-rate cases form separate chart regions and are ordered
 by their typed effective load values, including the explicit request evidence
 for adaptive probes; case identifiers are not parsed to recover load. A case

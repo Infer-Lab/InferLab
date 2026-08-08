@@ -1,4 +1,4 @@
-use super::super::result::bench_result_error;
+use super::super::result::{BenchResultExpectations, bench_result_error};
 use super::super::test_support::{complete_session_evidence, prefill_bench_result};
 use super::duplicate_runtime_session_identity;
 
@@ -23,7 +23,18 @@ fn linear_session_native_request_identity_is_phase_qualified() {
     result.session_evidence = Some(evidence);
 
     assert_eq!(
-        bench_result_error(&result, false, false, Some((1, 1)), None, 2, None),
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                tpot_applicable: false,
+                speed_bench_server_metrics: false,
+                sessions: Some((1, 1)),
+                agentic_source: None,
+                request_count: 2,
+                request_slo: None,
+                prompt_cache_evidence: false,
+            },
+        ),
         None
     );
 }

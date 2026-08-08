@@ -16,12 +16,13 @@ use crate::workload::domain::{
     ResolvedBenchSloPolicy, ResolvedBenchSource,
 };
 use crate::workload::plan::{
-    BenchClientPlan, BenchPlan, ClientCommandPlan, MeasurementOverridePlan,
-    MeasurementResolveContext,
+    BenchClientPlan, BenchPlan, BenchPrefixCacheConditioningPlan, ClientCommandPlan,
+    MeasurementOverridePlan, MeasurementResolveContext,
 };
 use crate::workspace::{
-    AggregateSlo, BenchAgenticSource, BenchDefinition, BenchPrompt, BenchRequestSource,
-    BenchSessionSource, BenchTpotApplicability, validate_bench,
+    AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchPrefixSharing,
+    BenchPrompt, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
+    BenchTpotApplicability, validate_bench,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -94,20 +95,29 @@ pub(super) fn build_bench_plan(
         });
     }
     let slo = resolve_bench_slo_policy(&definition)?;
-    let prefix_cache_reset = if resolved_definition.reset_prefix_cache {
+    let prefix_cache_reset = if matches!(
+        resolved_definition.cache_start,
+        BenchCacheStart::Cold | BenchCacheStart::Primed
+    ) {
         Some(
             context
                 .prefix_cache_reset
                 .clone()
                 .ok_or_else(|| InferlabError::InvalidConfig {
                     message: format!(
-                        "bench {id:?} requests prefix-cache reset, but the server exposes no reset capability"
+                        "bench {id:?} selects cache.start = {:?}, but the server exposes no prefix-cache reset capability",
+                        resolved_definition.cache_start
                     ),
                 })?,
         )
     } else {
         None
     };
+    let prefix_cache_conditioning = prefix_cache_conditioning_plan(
+        &resolved_definition,
+        &context.endpoint.completions_path,
+        &context.model.served_name,
+    );
     let mut env = context.command_env.clone();
     env.remove("HF_HUB_OFFLINE");
     env.insert(
@@ -137,14 +147,69 @@ pub(super) fn build_bench_plan(
             command: ClientCommandPlan {
                 argv: vec![
                     toolchain.python.to_string_lossy().into_owned(),
-                    toolchain.runner.to_string_lossy().into_owned(),
+                    "-m".to_owned(),
+                    "inferlab_bench_runner.bench_client".to_owned(),
                 ],
                 env,
                 cwd: context.command_cwd.to_path_buf(),
             },
             prefix_cache_reset,
+            prefix_cache_conditioning,
         },
     })
+}
+
+fn prefix_cache_conditioning_plan(
+    definition: &ResolvedBenchDefinition,
+    completions_path: &str,
+    model: &str,
+) -> Option<BenchPrefixCacheConditioningPlan> {
+    if definition.cache_start != BenchCacheStart::Primed {
+        return None;
+    }
+    let request_source = definition.source.request_source()?;
+    let (maximum_input_tokens, sharing) = match request_source {
+        ResolvedBenchRequestSource::Random {
+            input_tokens,
+            prefix_sharing: Some(sharing),
+            ..
+        } => (token_selector_maximum(input_tokens), sharing),
+        ResolvedBenchRequestSource::RandomMixture {
+            shapes,
+            prefix_sharing: Some(sharing),
+            ..
+        } => (
+            shapes.iter().map(|shape| shape.input_tokens).max()?,
+            sharing,
+        ),
+        ResolvedBenchRequestSource::Random { .. }
+        | ResolvedBenchRequestSource::RandomMixture { .. }
+        | ResolvedBenchRequestSource::Dataset { .. } => return None,
+    };
+    let maximum_shared_prefix_tokens = match sharing {
+        BenchPrefixSharing::Tokens {
+            shared_prefix_tokens,
+        } => *shared_prefix_tokens,
+        BenchPrefixSharing::Ratio {
+            shared_prefix_ratio,
+        } => (f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32,
+    };
+    Some(BenchPrefixCacheConditioningPlan {
+        route: completions_path.to_owned(),
+        model: model.to_owned(),
+        prompt: definition.prompt.clone(),
+        request_body: definition.request_body.clone(),
+        maximum_shared_prefix_tokens,
+        output_tokens: 1,
+        consumes_population_entry: false,
+    })
+}
+
+fn token_selector_maximum(selector: &BenchTokenSelector) -> u32 {
+    match selector {
+        BenchTokenSelector::Fixed(value) => *value,
+        BenchTokenSelector::InclusiveUniform { max, .. } => *max,
+    }
 }
 
 pub(super) fn apply_bench_overrides(
@@ -251,7 +316,7 @@ fn resolve_bench_definition(
             server_metrics,
             request_body,
             request_slo,
-            reset_prefix_cache,
+            cache,
             timeout_seconds,
             ..
         } => {
@@ -293,7 +358,7 @@ fn resolve_bench_definition(
                 request_body: request_body.clone(),
                 request_slo: request_slo.clone(),
                 timeout_seconds: *timeout_seconds,
-                reset_prefix_cache: *reset_prefix_cache,
+                cache_start: cache.map_or(BenchCacheStart::Uncontrolled, |cache| cache.start),
             })
         }
         BenchDefinition::AdaptiveServing {
@@ -302,7 +367,7 @@ fn resolve_bench_definition(
             server_metrics,
             request_body,
             request_slo,
-            reset_prefix_cache,
+            cache,
             timeout_seconds,
             ..
         } => Ok(ResolvedBenchDefinition {
@@ -318,7 +383,7 @@ fn resolve_bench_definition(
             request_body: request_body.clone(),
             request_slo: request_slo.clone(),
             timeout_seconds: *timeout_seconds,
-            reset_prefix_cache: *reset_prefix_cache,
+            cache_start: cache.map_or(BenchCacheStart::Uncontrolled, |cache| cache.start),
         }),
     }
 }
@@ -327,19 +392,6 @@ fn resolve_bench_agentic_source(
     source: &BenchAgenticSource,
 ) -> Result<ResolvedBenchAgenticSource, InferlabError> {
     let resolved = bench_agentic_catalog::resolve(&source.dataset, &source.profile)?;
-    let cache_path = huggingface_hub_cache_home()?
-        .join(format!(
-            "datasets--{}",
-            resolved.source.repository.replace('/', "--")
-        ))
-        .join("snapshots")
-        .join(&resolved.source.revision)
-        .join(&resolved.source.filename);
-    let cache_state = if cache_path.is_file() {
-        DatasetCacheState::Present
-    } else {
-        DatasetCacheState::Missing
-    };
     Ok(ResolvedBenchAgenticSource {
         dataset: resolved.dataset,
         profile: resolved.profile,
@@ -348,8 +400,8 @@ fn resolve_bench_agentic_source(
             revision: resolved.source.revision,
             filename: resolved.source.filename,
             sha256: resolved.source.sha256,
-            cache_path,
-            cache_state,
+            cache_path: None,
+            cache_state: None,
             trace_count: resolved.source.trace_count,
             approximate_bytes: resolved.source.approximate_bytes,
             license: resolved.source.license,
@@ -389,24 +441,6 @@ fn resolve_bench_agentic_source(
             aiperf_version: resolved.qualification.aiperf_version,
         }),
     })
-}
-
-fn huggingface_hub_cache_home() -> Result<PathBuf, InferlabError> {
-    if let Some(path) = std::env::var_os("HF_HUB_CACHE") {
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(path) = std::env::var_os("HF_HOME") {
-        return Ok(PathBuf::from(path).join("hub"));
-    }
-    if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
-        return Ok(PathBuf::from(path).join("huggingface/hub"));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".cache/huggingface/hub"))
-        .ok_or_else(|| InferlabError::InvalidConfig {
-            message: "HF_HUB_CACHE, HF_HOME, XDG_CACHE_HOME, and HOME are all unset".to_owned(),
-        })
 }
 
 fn declared_request_source(definition: &BenchDefinition) -> Option<&BenchRequestSource> {

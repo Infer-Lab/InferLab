@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 
 PROFILE_BARRIER_ENV = "INFERLAB_AIPERF_PROFILE_BARRIER"
+PROFILE_BARRIER_REQUIRES_WARMUP_ENV = "INFERLAB_AIPERF_PROFILE_BARRIER_REQUIRES_WARMUP"
 PROFILE_READY = b"profiling-ready\n"
 CAPTURE_OPEN = b"capture-open\n"
 
@@ -185,7 +186,12 @@ class AiperfProfileBarrierStrategy:
         checkpoint = _warmup_checkpoint
         _warmup_checkpoint = None
         if checkpoint is None:
-            raise RuntimeError("AIPerf profiling reached the barrier without a warmup checkpoint")
+            if os.environ.get(PROFILE_BARRIER_REQUIRES_WARMUP_ENV) == "1":
+                raise RuntimeError(
+                    "AIPerf profiling reached the barrier without a warmup checkpoint"
+                )
+            await asyncio.to_thread(await_capture_open, self._release_address)
+            return
         error = warmup_completion_error(
             checkpoint.expectation, _counter_values(checkpoint.progress.counter)
         )

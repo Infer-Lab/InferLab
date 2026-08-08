@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-08
+
+### Added
+
+- Recipe-owned and standalone measurements now prepare non-synthetic data
+  assets before serving or inference begins. Release-catalog and AgentX inputs
+  retain verified immutable closures, enumerable local lm-eval sources are
+  rebound to read-only snapshots, and sources whose complete closure is owned
+  elsewhere remain explicit opaque evidence. Dry-run reports only locally
+  observable state and planned effects, while records preserve preparation,
+  reuse, and reproducibility outcomes.
+- Serving Bench accepts `cache = { start = "uncontrolled" | "cold" | "primed" }`.
+  Native warmup drains before controlled reset, a primed case conditions the
+  exact canonical shared prefix once, and profiling starts only after cache
+  preparation succeeds. Prefix-sensitive cases retain per-request prompt and
+  cache-read token evidence and report weighted observed reuse; direct vLLM
+  and SGLang cache-start paths are qualified with their integration-owned
+  reporting controls.
+- Generative lm-eval definitions can select `prompt = { kind = "flat" }` or
+  `prompt = { kind = "server_chat" }`, with omission resolving to `flat`.
+  InferLab derives the native client and route from that authority, records it
+  with every metric, and determines prompt-logprob probes from the request
+  types a resolved task actually emits rather than from its definition
+  language.
+- The TUI now presents source-aware request, linear-session, and AgentX Bench
+  definitions and records, together with domain labels, families, and units
+  for every known Bench metric.
+- The Specialized Engine integration exposes typed GPU-memory, workspace,
+  prefix-cache GPU, and per-rank host-cache settings. Its public endpoint also
+  declares explicit prompt-cache-read reporting, while vLLM and SGLang expose
+  opt-in settings that enable and describe their backend reporting behavior.
+
+### Changed
+
+- Human progress on stderr now uses conventional timestamped, scoped log lines
+  with concise item positions and elapsed durations while preserving the
+  existing machine-readable stdout and operation-observation facts.
+- The 0.10.0 workspace package set uses `inferlab-adapter-sdk==0.7.0`, version
+  `0.6.0` of the vLLM, SGLang, TensorRT-LLM, and TokenSpeed integrations, and
+  `inferlab-integration-specialized-engine==0.3.0`. Existing workspaces must
+  update the exact SDK and selected integration pins together and relock.
+
+### Fixed
+
+- Local lm-eval sources are classified as closed only when the release-pinned
+  loader can enumerate and rebind every consumed file; unsupported selectors,
+  external paths, and function references remain runnable as explicit opaque
+  sources instead of overstating reproducibility.
+- Documentation light and dark modes now apply one coherent semantic palette
+  across navigation, sidebars, controls, and primary content while retaining
+  the InferLab accent and font choices.
+
 ## [0.9.1] - 2026-08-06
 
 ### Added

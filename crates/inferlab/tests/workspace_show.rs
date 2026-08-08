@@ -42,7 +42,10 @@ fn workspace_show_json_returns_the_merged_public_definition_without_local_bindin
     let value: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(value["schema_version"], 2);
     assert_eq!(value["stacks"]["vllm"]["integration"], "vllm");
-    assert_eq!(value["servers"]["dsv4-qualify"]["model"], "dsv4");
+    assert_eq!(
+        value["servers"]["dsv4-qualify"]["model"],
+        "deepseek-v4-flash"
+    );
     assert_eq!(value["recipes"]["dsv4-qualify"]["server"], "dsv4-qualify");
     assert!(!root.path().join(".inferlab/local.toml").exists());
     Ok(())

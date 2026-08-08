@@ -324,6 +324,8 @@ pub(crate) enum EvalDefinition {
     LmEval {
         task: EvalTaskSource,
         #[serde(default)]
+        prompt: EvalPromptSelection,
+        #[serde(default)]
         request_body: BTreeMap<String, JsonValue>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
@@ -359,6 +361,70 @@ const fn default_openai_smoke_timeout_seconds() -> u64 {
 
 const fn default_eval_trials() -> u32 {
     1
+}
+
+/// The prompt rendering authority a generative lm-eval definition may declare.
+///
+/// The resolved task output type bounds the legal domain, and that bound is
+/// enforced where the task is loaded rather than here.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum EvalPrompt {
+    #[default]
+    Flat,
+    ServerChat,
+}
+
+/// An lm-eval prompt authority separated into what the definition declared and
+/// what resolution selected, so records can tell a declaration from a default.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EvalPromptSelection {
+    declared: Option<EvalPrompt>,
+    effective: EvalPrompt,
+}
+
+impl EvalPromptSelection {
+    pub(crate) fn explicit(prompt: EvalPrompt) -> Self {
+        Self {
+            declared: Some(prompt.clone()),
+            effective: prompt,
+        }
+    }
+
+    pub(crate) fn declared(&self) -> Option<&EvalPrompt> {
+        self.declared.as_ref()
+    }
+
+    pub(crate) fn effective(&self) -> &EvalPrompt {
+        &self.effective
+    }
+}
+
+impl Default for EvalPromptSelection {
+    fn default() -> Self {
+        Self {
+            declared: None,
+            effective: EvalPrompt::Flat,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EvalPromptSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        EvalPrompt::deserialize(deserializer).map(Self::explicit)
+    }
+}
+
+impl Serialize for EvalPromptSelection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.effective.serialize(serializer)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -448,8 +514,8 @@ pub(crate) enum BenchDefinition {
         duration_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         burstiness: Option<f64>,
-        #[serde(default)]
-        reset_prefix_cache: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache: Option<BenchCachePolicy>,
         timeout_seconds: u64,
     },
     AdaptiveServing {
@@ -478,10 +544,25 @@ pub(crate) enum BenchDefinition {
         duration_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         burstiness: Option<f64>,
-        #[serde(default)]
-        reset_prefix_cache: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache: Option<BenchCachePolicy>,
         timeout_seconds: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchCachePolicy {
+    pub start: BenchCacheStart,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BenchCacheStart {
+    #[default]
+    Uncontrolled,
+    Cold,
+    Primed,
 }
 
 pub(super) fn deserialize_defaulted_bench_definitions<'de, D>(

@@ -92,10 +92,6 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         String::from_utf8_lossy(&first.stderr)
     );
     let first_progress = String::from_utf8_lossy(&first.stderr).into_owned();
-    assert!(
-        !String::from_utf8_lossy(&first.stdout).contains("progress:"),
-        "progress must not corrupt the JSON result stream"
-    );
     let first: Value = serde_json::from_slice(&first.stdout)?;
     assert_eq!(first["state"], "installed");
     assert_eq!(first["eval"]["platform"], host_platform());
@@ -173,7 +169,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         "Bench verification",
     ] {
         assert!(
-            first_progress.contains(&format!("phase=\"{phase}\"")),
+            first_progress.contains(&format!(" INFO [toolchain install] {phase}")),
             "missing {phase:?} in progress output: {first_progress}"
         );
     }

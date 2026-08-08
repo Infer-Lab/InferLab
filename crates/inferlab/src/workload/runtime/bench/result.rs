@@ -6,27 +6,65 @@ mod tests;
 use super::session::linear_session_result_error;
 use crate::bench_metric::BenchMetric;
 use crate::workload::domain::{
-    AggregateSloBound, DatasetCacheState, ResolvedBenchAgenticSource, ResolvedBenchSloPolicy,
+    AggregateSloBound, ResolvedBenchAgenticSource, ResolvedBenchRequestSource,
+    ResolvedBenchSloPolicy, ResolvedBenchSource,
 };
 use crate::workload::record::{
     AggregateSloEvaluation, CaseSloEvaluation, RequestSloEvaluation, SloBoundDirection,
     SloEvaluationOutcome,
 };
-use crate::workspace::RequestSlo;
-use inferlab_protocol::{
-    BenchAgenticAcquisitionOutcome, BenchClientResult, BenchDatasetCacheState, ClientStatus,
-};
-use std::path::Path;
+use crate::workload::{BenchCasePlan, BenchPlan};
+use crate::workspace::{BenchCacheStart, RequestSlo};
+use inferlab_protocol::{BenchClientResult, ClientStatus};
 
-pub(crate) fn bench_result_error(
+pub(super) struct BenchResultExpectations<'a> {
+    pub(super) tpot_applicable: bool,
+    pub(super) speed_bench_server_metrics: bool,
+    pub(super) sessions: Option<(u32, u32)>,
+    pub(super) agentic_source: Option<&'a ResolvedBenchAgenticSource>,
+    pub(super) request_count: u32,
+    pub(super) request_slo: Option<&'a RequestSlo>,
+    pub(super) prompt_cache_evidence: bool,
+}
+
+impl<'a> BenchResultExpectations<'a> {
+    pub(super) fn for_case(plan: &'a BenchPlan, case: &BenchCasePlan) -> Self {
+        let source = &plan.client.effective_definition.source;
+        Self {
+            tpot_applicable: plan.client.tpot_applicability.is_applicable(),
+            speed_bench_server_metrics: plan.client.effective_definition.server_metrics
+                && matches!(
+                    source.request_source(),
+                    Some(ResolvedBenchRequestSource::Dataset { dataset, .. })
+                        if dataset == "speed_bench"
+                ),
+            sessions: case
+                .session_count
+                .map(|profiling| (case.warmup_session_count.unwrap_or_default(), profiling)),
+            agentic_source: match source {
+                ResolvedBenchSource::Agentic { agentic_source } => Some(agentic_source),
+                ResolvedBenchSource::Requests { .. } | ResolvedBenchSource::Sessions { .. } => None,
+            },
+            request_count: case.request_count,
+            request_slo: plan.client.slo.request.as_ref(),
+            prompt_cache_evidence: requires_prompt_cache_evidence(plan),
+        }
+    }
+}
+
+pub(super) fn bench_result_error(
     result: &BenchClientResult,
-    tpot_applicable: bool,
-    speed_bench_server_metrics: bool,
-    expected_sessions: Option<(u32, u32)>,
-    expected_agentic_source: Option<&ResolvedBenchAgenticSource>,
-    request_count: u32,
-    request_slo: Option<&RequestSlo>,
+    expectations: BenchResultExpectations<'_>,
 ) -> Option<String> {
+    let BenchResultExpectations {
+        tpot_applicable,
+        speed_bench_server_metrics,
+        sessions: expected_sessions,
+        agentic_source: expected_agentic_source,
+        request_count,
+        request_slo,
+        prompt_cache_evidence: requires_prompt_cache_evidence,
+    } = expectations;
     if result.status == ClientStatus::Failed {
         return Some(
             result
@@ -231,6 +269,9 @@ pub(crate) fn bench_result_error(
             "Bench client result metric \"prompt_cache_read_ratio\" is outside [0, 1]: {value}"
         ));
     }
+    if let Some(error) = prompt_cache_result_error(result, requires_prompt_cache_evidence) {
+        return Some(error);
+    }
     if let Some(value) = result.metrics.get("acceptance_length")
         && (!value.is_finite() || *value < 1.0)
     {
@@ -248,6 +289,95 @@ pub(crate) fn bench_result_error(
     None
 }
 
+fn requires_prompt_cache_evidence(plan: &BenchPlan) -> bool {
+    if plan.client.effective_definition.cache_start == BenchCacheStart::Primed {
+        return true;
+    }
+    matches!(
+        plan.client.effective_definition.source.request_source(),
+        Some(
+            ResolvedBenchRequestSource::Random {
+                prefix_sharing: Some(_),
+                ..
+            } | ResolvedBenchRequestSource::Random {
+                shared_system_content: Some(_),
+                ..
+            } | ResolvedBenchRequestSource::RandomMixture {
+                prefix_sharing: Some(_),
+                ..
+            }
+        )
+    )
+}
+
+fn prompt_cache_result_error(result: &BenchClientResult, required: bool) -> Option<String> {
+    if !required {
+        return (!result.prompt_cache_observations.is_empty()).then(|| {
+            "Bench client returned per-request prompt-cache evidence for an inapplicable case"
+                .to_owned()
+        });
+    }
+    if result.prompt_cache_observations.len() != result.completed_requests as usize {
+        return Some(format!(
+            "Bench client returned {} prompt-cache observations for {} completed requests",
+            result.prompt_cache_observations.len(),
+            result.completed_requests
+        ));
+    }
+    let mut request_ids = std::collections::BTreeSet::new();
+    let mut total_prompt = 0_u64;
+    let mut total_cache = 0_u64;
+    for observation in &result.prompt_cache_observations {
+        if !request_ids.insert(observation.request_id)
+            || observation.prompt_tokens == 0
+            || observation.cache_read_tokens > observation.prompt_tokens
+            || observation.uncached_prompt_tokens
+                != observation.prompt_tokens - observation.cache_read_tokens
+            || !same_finite_value(
+                observation.cache_read_ratio,
+                observation.cache_read_tokens as f64 / observation.prompt_tokens as f64,
+            )
+        {
+            return Some(
+                "Bench client returned invalid per-request prompt-cache evidence".to_owned(),
+            );
+        }
+        total_prompt = match total_prompt.checked_add(observation.prompt_tokens) {
+            Some(value) => value,
+            None => return Some("Bench client prompt-token observations overflow".to_owned()),
+        };
+        total_cache = match total_cache.checked_add(observation.cache_read_tokens) {
+            Some(value) => value,
+            None => return Some("Bench client cache-read observations overflow".to_owned()),
+        };
+    }
+    for family in ["prompt_cache_read_tokens", "uncached_prompt_tokens"] {
+        for statistic in ["mean", "min", "max", "stddev", "p50", "p90", "p95", "p99"] {
+            let name = format!("{statistic}_{family}");
+            if !result
+                .metrics
+                .get(&name)
+                .is_some_and(|value| value.is_finite())
+            {
+                return Some(format!(
+                    "Bench client result is missing finite required metric {name:?}"
+                ));
+            }
+        }
+    }
+    let expected_ratio = total_cache as f64 / total_prompt as f64;
+    if !result
+        .metrics
+        .get("prompt_cache_read_ratio")
+        .is_some_and(|value| same_finite_value(*value, expected_ratio))
+    {
+        return Some(
+            "Bench client prompt_cache_read_ratio disagrees with per-request usage".to_owned(),
+        );
+    }
+    None
+}
+
 fn agentic_result_error(
     result: &BenchClientResult,
     evidence: &inferlab_protocol::BenchAgenticResultEvidence,
@@ -260,21 +390,6 @@ fn agentic_result_error(
         || evidence.source.filename != catalog.filename
         || evidence.source.expected_sha256 != catalog.sha256
         || evidence.source.observed_sha256.as_deref() != Some(catalog.sha256.as_str())
-        || !evidence
-            .source
-            .cache_path
-            .as_deref()
-            .is_some_and(|path| same_cache_file(&catalog.cache_path, path))
-        || evidence.source.cache_state_before
-            != match catalog.cache_state {
-                DatasetCacheState::Missing => BenchDatasetCacheState::Missing,
-                DatasetCacheState::Present => BenchDatasetCacheState::Present,
-            }
-        || evidence.source.acquisition_outcome
-            != Some(match catalog.cache_state {
-                DatasetCacheState::Missing => BenchAgenticAcquisitionOutcome::Downloaded,
-                DatasetCacheState::Present => BenchAgenticAcquisitionOutcome::Reused,
-            })
     {
         return Some("source verification does not match the resolved release catalog".to_owned());
     }
@@ -346,19 +461,6 @@ fn agentic_result_error(
         }
     }
     None
-}
-
-fn same_cache_file(expected: &Path, observed: &Path) -> bool {
-    if expected == observed {
-        return true;
-    }
-    let (Ok(expected), Ok(observed)) = (
-        std::fs::canonicalize(expected),
-        std::fs::canonicalize(observed),
-    ) else {
-        return false;
-    };
-    expected == observed
 }
 
 fn same_finite_value(left: f64, right: f64) -> bool {

@@ -159,6 +159,43 @@ def test_profile_barrier_forwards_the_pinned_timing_strategy_error_context(
     assert observed == [(credit, "context overflow")]
 
 
+def test_profile_barrier_allows_controlled_cache_setup_without_a_warmup_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+
+    class Delegate:
+        async def setup_phase(self) -> None:
+            observed.append("native-setup")
+
+    monkeypatch.setattr(aiperf_phase_barrier, "_warmup_checkpoint", None)
+    monkeypatch.setenv("INFERLAB_AIPERF_PROFILE_BARRIER", "127.0.0.1:1")
+    monkeypatch.setenv("INFERLAB_AIPERF_PROFILE_BARRIER_REQUIRES_WARMUP", "0")
+    monkeypatch.setattr(
+        aiperf_phase_barrier,
+        "_native_strategy_factory",
+        lambda: lambda **_kwargs: Delegate(),
+    )
+    monkeypatch.setattr(
+        aiperf_phase_barrier,
+        "await_capture_open",
+        lambda _address: observed.append("inferlab-release"),
+    )
+    config = type(
+        "Config",
+        (),
+        {
+            "phase": "profiling",
+            "total_expected_requests": 1,
+            "expected_num_sessions": None,
+        },
+    )()
+
+    asyncio.run(AiperfProfileBarrierStrategy(config=config).setup_phase())
+
+    assert observed == ["native-setup", "inferlab-release"]
+
+
 def test_agentic_profile_barrier_preserves_native_warmup_and_branch_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

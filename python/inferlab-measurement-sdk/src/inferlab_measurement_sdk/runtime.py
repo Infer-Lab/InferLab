@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--handshake", action="store_true")
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--prepare-source", action="store_true")
     parser.add_argument("--input")
     parser.add_argument("--output")
     return parser.parse_args()

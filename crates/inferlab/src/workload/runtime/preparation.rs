@@ -4,9 +4,9 @@ use super::client::{accept_client_result, run_client, wait_for_interrupt};
 use super::{
     BenchAgenticSourceEvidence, BenchDatasetRequestSourceEvidence, BenchExecutionPlan, BenchPlan,
     BenchPopulation, BenchPopulationPreparationEvidence, BenchRequestSourceEvidence,
-    BenchSessionSourceEvidence, BenchSessionTemplate, DatasetAcquisitionEvidence,
-    DatasetAcquisitionOutcome, ResolvedBenchRequestSource, ResolvedBenchSource,
-    SYNTHETIC_MATERIALIZATION_IDENTITY, WorkloadRecordSession,
+    BenchSessionSourceEvidence, BenchSessionTemplate, DataAssetMaterializationEvidence,
+    DatasetAcquisitionEvidence, DatasetAcquisitionOutcome, ResolvedBenchRequestSource,
+    ResolvedBenchSource, SYNTHETIC_MATERIALIZATION_IDENTITY, WorkloadRecordSession,
 };
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
@@ -76,35 +76,7 @@ pub(super) fn prepare_bench_request_source(
                 Ok(())
             }
             ResolvedBenchRequestSource::Dataset { catalog, .. } => {
-                let phase = if catalog.cache_path.is_file() {
-                    "dataset snapshot verification"
-                } else {
-                    "dataset snapshot download"
-                };
-                progress.phase(Phase::named(phase).current_item(&catalog.upstream_identity))?;
-                let acquisition = match acquire_dataset_snapshot(
-                    &catalog.cache_path,
-                    &catalog.url,
-                    &catalog.sha256,
-                ) {
-                    Ok(evidence) => evidence,
-                    Err(failure) => {
-                        let (evidence, error) = *failure;
-                        session.set_bench_request_source(BenchRequestSourceEvidence::Dataset(
-                            Box::new(BenchDatasetRequestSourceEvidence {
-                                catalog: *catalog,
-                                acquisition: evidence,
-                                preparation: None,
-                                preparation_process: None,
-                                preparation_request: None,
-                                preparation_result: None,
-                                preparation_stdout: None,
-                                preparation_stderr: None,
-                            }),
-                        ))?;
-                        return Err(error);
-                    }
-                };
+                let preparation_attempt_id = required_preparation_attempt_id(session)?;
                 let (preparation, decode_error) = run_population_preparation(
                     plan,
                     session,
@@ -113,8 +85,9 @@ pub(super) fn prepare_bench_request_source(
                 )?;
                 session.set_bench_request_source(BenchRequestSourceEvidence::Dataset(Box::new(
                     BenchDatasetRequestSourceEvidence {
+                        preparation_attempt_id: preparation_attempt_id.clone(),
                         catalog: (*catalog).clone(),
-                        acquisition,
+                        acquisition: None,
                         preparation: preparation.result.clone(),
                         preparation_process: preparation.process.clone(),
                         preparation_request: Some(preparation.request.clone()),
@@ -129,38 +102,12 @@ pub(super) fn prepare_bench_request_source(
                     &preparation,
                     decode_error,
                 )?;
-                Ok(())
+                record_population_materialization(plan, session, preparation_attempt_id)
             }
         },
         ResolvedBenchSource::Sessions { session_source } => {
             let catalog = session_source.catalog;
-            let phase = if catalog.cache_path.is_file() {
-                "dataset snapshot verification"
-            } else {
-                "dataset snapshot download"
-            };
-            progress.phase(Phase::named(phase).current_item(&catalog.upstream_identity))?;
-            let acquisition = match acquire_dataset_snapshot(
-                &catalog.cache_path,
-                &catalog.url,
-                &catalog.sha256,
-            ) {
-                Ok(evidence) => evidence,
-                Err(failure) => {
-                    let (evidence, error) = *failure;
-                    session.set_bench_session_source(BenchSessionSourceEvidence {
-                        catalog: *catalog,
-                        acquisition: evidence,
-                        preparation: None,
-                        preparation_process: None,
-                        preparation_request: None,
-                        preparation_result: None,
-                        preparation_stdout: None,
-                        preparation_stderr: None,
-                    })?;
-                    return Err(error);
-                }
-            };
+            let preparation_attempt_id = required_preparation_attempt_id(session)?;
             let (preparation, decode_error) = run_population_preparation(
                 plan,
                 session,
@@ -168,8 +115,9 @@ pub(super) fn prepare_bench_request_source(
                 Some(catalog.cache_path.clone()),
             )?;
             session.set_bench_session_source(BenchSessionSourceEvidence {
+                preparation_attempt_id: preparation_attempt_id.clone(),
                 catalog: (*catalog).clone(),
-                acquisition,
+                acquisition: None,
                 preparation: preparation.result.clone(),
                 preparation_process: preparation.process.clone(),
                 preparation_request: Some(preparation.request.clone()),
@@ -182,16 +130,52 @@ pub(super) fn prepare_bench_request_source(
                 &catalog.materialization_identity,
                 &preparation,
                 decode_error,
-            )
+            )?;
+            record_population_materialization(plan, session, preparation_attempt_id)
         }
         ResolvedBenchSource::Agentic { agentic_source } => {
             session.set_bench_agentic_source(BenchAgenticSourceEvidence {
+                preparation_attempt_id: required_preparation_attempt_id(session)?,
                 dataset: agentic_source.dataset,
                 profile: agentic_source.profile,
                 catalog: *agentic_source.catalog,
             })
         }
     }
+}
+
+fn record_population_materialization(
+    plan: &BenchPlan,
+    session: &mut WorkloadRecordSession,
+    preparation_attempt_id: String,
+) -> Result<(), InferlabError> {
+    let population =
+        plan.client
+            .population
+            .as_ref()
+            .ok_or_else(|| InferlabError::DatasetPreparation {
+                message: "successful dataset materialization omitted its frozen population"
+                    .to_owned(),
+            })?;
+    session.set_bench_data_asset_materialization(DataAssetMaterializationEvidence {
+        preparation_attempt_id,
+        authority: "inferlab_bench_child".to_owned(),
+        materialization_identity: format!("sha256:{}", population.sha256),
+        dataset_fingerprint: None,
+        unavailable_reason: None,
+    })
+}
+
+fn required_preparation_attempt_id(
+    session: &WorkloadRecordSession,
+) -> Result<String, InferlabError> {
+    session
+        .data_asset_attempt_id()
+        .map(str::to_owned)
+        .ok_or_else(|| InferlabError::DatasetPreparation {
+            message: "non-synthetic Bench source has no authoritative preparation attempt"
+                .to_owned(),
+        })
 }
 
 pub(super) fn run_population_preparation(
@@ -216,6 +200,17 @@ pub(super) fn run_population_preparation(
         request_source,
         session_source,
         prompt: wire::prompt_input(&plan.client.effective_definition.prompt)?,
+        cache_start: match plan.client.effective_definition.cache_start {
+            crate::workspace::BenchCacheStart::Uncontrolled => {
+                inferlab_protocol::BenchCacheStartInput::Uncontrolled
+            }
+            crate::workspace::BenchCacheStart::Cold => {
+                inferlab_protocol::BenchCacheStartInput::Cold
+            }
+            crate::workspace::BenchCacheStart::Primed => {
+                inferlab_protocol::BenchCacheStartInput::Primed
+            }
+        },
         source_path,
         required_entries: plan.client.required_population_count,
         seed: plan.client.effective_definition.seed,
@@ -278,6 +273,7 @@ pub(super) fn finish_population_preparation(
             sha256: population.sha256.clone(),
             entries: population.entries,
             tpot_applicable: population.tpot_applicable,
+            prefix_conditioning: result.prefix_conditioning.clone(),
             session_templates: population
                 .session_templates
                 .iter()
@@ -375,7 +371,7 @@ fn sum_session_turns(
     })
 }
 
-pub(super) fn acquire_dataset_snapshot(
+pub(crate) fn acquire_dataset_snapshot(
     cache_path: &Path,
     url: &str,
     expected_sha256: &str,
@@ -713,6 +709,40 @@ pub(super) fn validate_population_preparation(
         _ => {
             return Err(InferlabError::DatasetPreparation {
                 message: "synthetic prefix-geometry summary is not reconciled".to_owned(),
+            });
+        }
+    }
+    let conditioning_required =
+        plan.client.effective_definition.cache_start == crate::workspace::BenchCacheStart::Primed;
+    match (conditioning_required, result.prefix_conditioning.as_ref()) {
+        (true, Some(conditioning))
+            if conditioning.prompt_tokens > 0
+                && conditioning.sha256.len() == 64
+                && conditioning.path.is_file() =>
+        {
+            let (_, observed_sha256) = hash_dataset_file(&conditioning.path)?;
+            if observed_sha256 != conditioning.sha256 {
+                return Err(InferlabError::DatasetDigest {
+                    path: conditioning.path.clone(),
+                    expected: conditioning.sha256.clone(),
+                    observed: observed_sha256,
+                });
+            }
+            let maximum = result
+                .prefix_geometry
+                .as_ref()
+                .map(|summary| summary.maximum_shared_prefix_tokens);
+            if maximum != Some(conditioning.prompt_tokens) {
+                return Err(InferlabError::DatasetPreparation {
+                    message: "canonical prefix conditioning tokens disagree with prefix geometry"
+                        .to_owned(),
+                });
+            }
+        }
+        (false, None) => {}
+        _ => {
+            return Err(InferlabError::DatasetPreparation {
+                message: "canonical prefix conditioning artifact is not reconciled".to_owned(),
             });
         }
     }

@@ -785,6 +785,9 @@ mod tests {
                     ("request_throughput".to_owned(), 1.0),
                 ]),
             }],
+            outcome_facts: Vec::new(),
+            bench_details: Vec::new(),
+            artifact_refs: Vec::new(),
             process_observation: None,
         }
     }
@@ -922,7 +925,7 @@ mod tests {
 
         let page = app.metric_page();
         assert!(page.is_some_and(|page| {
-            page.record.id.as_deref() == Some("record-1")
+            page.record.record_key == "record-1"
                 && page.catalog[page.selected].name == "request_throughput"
         }));
     }
@@ -952,7 +955,7 @@ mod tests {
         let page = app.metric_page();
         assert!(page.is_some_and(|page| {
             Some(page.catalog[page.selected].name.clone()) == selected_name
-                && page.record.cases.len() == 2
+                && page.record.case_count == 2
         }));
     }
 

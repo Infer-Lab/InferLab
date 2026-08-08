@@ -195,6 +195,9 @@ pub struct EndpointPlan {
     pub server_metrics: Option<ServerMetricsEndpointPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<inferlab_protocol::HttpActionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_read_zero_representation:
+        Option<inferlab_protocol::PromptCacheReadZeroRepresentation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

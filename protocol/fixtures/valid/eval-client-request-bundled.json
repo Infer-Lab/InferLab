@@ -41,7 +41,13 @@
     "metric": "estonia_pass",
     "metric_filter": "strict-terminal-answer",
     "threshold": 0.5,
-    "timeout_seconds": 3600
+    "timeout_seconds": 3600,
+    "prompt": {
+      "kind": "server_chat"
+    },
+    "declared_prompt": {
+      "kind": "server_chat"
+    }
   },
   "case_budget_seconds": 3599.0,
   "artifact_dir": "/records/eval/artifacts"

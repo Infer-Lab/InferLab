@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.1"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -48,6 +48,8 @@ tokio-stream = { version = "0.1", features = ["net"] }
 toml = "1"
 tonic = "0.14"
 tonic-health = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "time"] }
 humantime = "2"
 unicode-segmentation = "1"
 unicode-width = "0.2"

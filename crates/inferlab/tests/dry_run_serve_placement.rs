@@ -192,12 +192,13 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
         recipe["measurements"]["benches"][1]["definition"]["request_slo"]["minimum_good_request_ratio"],
         0.99
     );
-    assert!(
-        recipe["measurements"]["benches"][0]["client"]["command"]["argv"][1]
-            .as_str()
-            .is_some_and(|value| {
-                value.ends_with("/runner/inferlab_bench_runner/bench_client.py")
-            })
+    assert_eq!(
+        recipe["measurements"]["benches"][0]["client"]["command"]["argv"][1],
+        "-m"
+    );
+    assert_eq!(
+        recipe["measurements"]["benches"][0]["client"]["command"]["argv"][2],
+        "inferlab_bench_runner.bench_client"
     );
     assert_eq!(
         recipe["measurements"]["benches"][0]["client"]["prefix_cache_reset"]["path"],
@@ -570,10 +571,10 @@ fn ordered_two_node_placement_is_allocated_before_process_rendering() -> Result<
         format!(
             "default_placement = \"pair\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
-             [model_weights.dsv4.machine_locators]\n\
+             [model_weights.deepseek-v4-flash.machine_locators]\n\
              node-b = {:?}\n\
              \n\
              [machines.node-a]\n\
@@ -649,7 +650,7 @@ fn device_groups_can_place_multiple_ranks_on_one_machine() -> Result<(), Box<dyn
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -722,7 +723,7 @@ fn static_npmd_on_one_machine_allocates_disjoint_replicas_and_a_public_proxy()
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -899,7 +900,7 @@ fn heterogeneous_pd_parallelism_places_one_prefill_replica_across_nodes()
         format!(
             "default_placement = \"heterogeneous\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.prefill-a]\n\
@@ -1001,7 +1002,7 @@ fn single_replica_list_placement_is_rejected() -> Result<(), Box<dyn Error>> {
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -1056,7 +1057,7 @@ fn sglang_builtin_proxy_dry_run_preserves_prefill_bootstrap_triples() -> Result<
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -1152,7 +1153,7 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -1300,7 +1301,7 @@ fn built_in_proxy_prefers_the_local_machine_in_a_remote_first_placement()
         format!(
             "default_placement = \"pair\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.remote]\n\
@@ -1342,7 +1343,7 @@ fn machine_binding_selects_runtime_cache_storage_root() -> Result<(), Box<dyn Er
         format!(
             "default_placement = \"local\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.local]\n\
@@ -1375,7 +1376,7 @@ fn two_node_resolution_rejects_placements_without_a_common_routable_interface()
         format!(
             "default_placement = \"pair\"\n\
              \n\
-             [model_weights.dsv4]\n\
+             [model_weights.deepseek-v4-flash]\n\
              locator = {:?}\n\
              \n\
              [machines.node-a]\n\

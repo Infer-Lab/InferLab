@@ -5,9 +5,8 @@ use super::super::client::{
     reject_late_adjudication, remaining_seconds, run_client_with_environment,
 };
 use super::super::{AcceptedClient, AdjudicatedClient};
-use super::result::bench_result_error;
+use super::result::{BenchResultExpectations, bench_result_error};
 use crate::InferlabError;
-use crate::workload::domain::{ResolvedBenchRequestSource, ResolvedBenchSource};
 use crate::workload::record::{ClientCasePaths, WorkloadRecordSession};
 use crate::workload::wire;
 use crate::workload::{BenchCasePlan, BenchPlan, LoadShape};
@@ -66,24 +65,7 @@ pub(super) fn adjudicate_bench_client(
 ) -> AdjudicatedClient<BenchClientResult> {
     reject_late_adjudication(&mut accepted, bound);
     let domain_error = accepted.result.as_ref().and_then(|result| {
-        bench_result_error(
-            result,
-            plan.client.tpot_applicability.is_applicable(),
-            plan.client.effective_definition.server_metrics
-                && matches!(
-                    plan.client.effective_definition.source.request_source(),
-                    Some(ResolvedBenchRequestSource::Dataset { dataset, .. })
-                        if dataset == "speed_bench"
-                ),
-            case.session_count
-                .map(|profiling| (case.warmup_session_count.unwrap_or_default(), profiling)),
-            match &plan.client.effective_definition.source {
-                ResolvedBenchSource::Agentic { agentic_source } => Some(agentic_source),
-                ResolvedBenchSource::Requests { .. } | ResolvedBenchSource::Sessions { .. } => None,
-            },
-            case.request_count,
-            plan.client.slo.request.as_ref(),
-        )
+        bench_result_error(result, BenchResultExpectations::for_case(plan, case))
     });
     reject_late_adjudication(&mut accepted, bound);
     let error = accepted.decode_error.take().or(domain_error);

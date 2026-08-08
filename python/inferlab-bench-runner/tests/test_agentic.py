@@ -7,6 +7,7 @@ import pytest
 from inferlab_bench_runner import execution
 from inferlab_bench_runner.agentic_source import (
     AgenticSourceAcquisition,
+    acquire_resolved_agentic_source,
     source_verification_error,
     verify_downloaded_snapshot,
 )
@@ -14,12 +15,20 @@ from inferlab_bench_runner.aiperf import (
     aiperf_config,
     prepare_aiperf_execution,
 )
+from inferlab_bench_runner.data_asset import prepare_agentic_data_asset
 from inferlab_bench_runner.execution import execute
 from inferlab_bench_runner.result_agentic import agentic_result_evidence
 from inferlab_measurement_sdk import (
+    BenchAgenticAcquisitionOutcome,
+    BenchAgenticSourceVerification,
     BenchClientRequest,
+    BenchDatasetCacheState,
     CaseDeadline,
     ClientStatus,
+    MeasurementDataAssetEffectiveSelectionAgentic,
+    MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetReadinessClosed,
+    MeasurementDataAssetRemoteMetadataOutcome,
 )
 
 from .support import resolved_prompt_input
@@ -103,7 +112,7 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
                 "request_body": {},
                 "request_slo": None,
                 "timeout_seconds": 3600,
-                "reset_prefix_cache": False,
+                "cache_start": "uncontrolled",
             },
             "case": {
                 "load_shape": {"kind": "concurrency_limited", "concurrency": 2},
@@ -115,6 +124,115 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
             "artifact_dir": str(tmp_path),
         }
     )
+
+
+def test_agentic_source_preparation_closes_the_release_qualified_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench_request = agentic_request(tmp_path)
+    source = bench_request.definition.agentic_source
+    assert source is not None
+    verification = BenchAgenticSourceVerification(
+        repository=source.catalog.repository,
+        expected_revision=source.catalog.revision,
+        observed_revision=source.catalog.revision,
+        filename=source.catalog.filename,
+        expected_sha256=source.catalog.sha256,
+        observed_sha256=source.catalog.sha256,
+        cache_path=str(tmp_path / source.catalog.filename),
+        cache_state_before=BenchDatasetCacheState.present,
+        acquisition_outcome=BenchAgenticAcquisitionOutcome.reused,
+    )
+    monkeypatch.setattr(
+        "inferlab_bench_runner.data_asset.acquire_resolved_agentic_source",
+        lambda source, revision, cache_state: AgenticSourceAcquisition(
+            verification=verification, error=None
+        ),
+    )
+    request = MeasurementDataAssetPreparationRequest.model_validate(
+        {
+            "protocol_version": "7",
+            "phase": {
+                "kind": "acquire",
+                "resolved_revision": source.catalog.revision,
+                "cache_state_before": "full_hit",
+            },
+            "source": {"kind": "agentic", "source": source.model_dump()},
+            "artifact_dir": str(tmp_path / "assets"),
+        }
+    )
+
+    result = prepare_agentic_data_asset(request)
+
+    assert result.status is ClientStatus.succeeded
+    assert result.readiness is not None
+    assert isinstance(result.readiness.root, MeasurementDataAssetReadinessClosed)
+    acquired_source = result.readiness.root.acquired_source.model_dump()
+    assert acquired_source["kind"] == "release_qualified"
+    assert acquired_source["closure"][0]["sha256"] == source.catalog.sha256
+    assert result.cache_stores[0].outcome.value == "full_hit"
+
+
+def test_agentic_source_resolution_uses_the_release_revision_not_mutable_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench_request = agentic_request(tmp_path)
+    source = bench_request.definition.agentic_source
+    assert source is not None
+    monkeypatch.setattr(
+        "inferlab_bench_runner.agentic_source.try_to_load_from_cache",
+        lambda **_: None,
+    )
+    request = MeasurementDataAssetPreparationRequest.model_validate(
+        {
+            "protocol_version": "7",
+            "phase": {"kind": "resolve"},
+            "source": {"kind": "agentic", "source": source.model_dump()},
+            "artifact_dir": str(tmp_path / "assets"),
+        }
+    )
+
+    result = prepare_agentic_data_asset(request)
+
+    assert result.status is ClientStatus.succeeded
+    assert result.effective_selection is not None
+    selection = result.effective_selection.root
+    assert isinstance(selection, MeasurementDataAssetEffectiveSelectionAgentic)
+    assert selection.observed_revision == source.catalog.revision
+    assert result.remote_metadata is MeasurementDataAssetRemoteMetadataOutcome.not_accessed
+
+
+def test_verified_agentic_cache_hit_uses_local_only_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench_request = agentic_request(tmp_path)
+    source = bench_request.definition.agentic_source
+    assert source is not None
+    snapshot = tmp_path / source.catalog.filename
+    snapshot.write_bytes(b"qualified fixture")
+    catalog = source.catalog.model_copy(
+        update={"sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest()}
+    )
+    source = source.model_copy(update={"catalog": catalog})
+    observed_local_only: list[bool] = []
+
+    def download(**kwargs: object) -> str:
+        observed_local_only.append(kwargs.get("local_files_only") is True)
+        return str(snapshot)
+
+    monkeypatch.setattr(
+        "inferlab_bench_runner.agentic_source.hf_hub_download",
+        download,
+    )
+
+    acquisition = acquire_resolved_agentic_source(
+        source,
+        catalog.revision,
+        BenchDatasetCacheState.present,
+    )
+
+    assert acquisition.error is None
+    assert observed_local_only == [True]
 
 
 def test_agentic_config_lowers_the_release_profile_without_an_inferlab_dag(

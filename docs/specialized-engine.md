@@ -31,6 +31,36 @@ inferlab-token-engine smg-worker \
   --max-num-batched-tokens <count>
 ```
 
+It also accepts these memory and prefix-cache options. InferLab passes each one
+only when the serve role declares it, so an omitted setting leaves the Engine's
+own default in force rather than restating it:
+
+```text
+  --gpu-memory-utilization-percent <1-100>      # default 100
+  --workspace-reserve-mib <count>               # default 0
+  --prefix-cache-gpu-entries <count>            # per rank, default 8
+  --prefix-cache-host-memory-percent <1-100>    # default 75
+  --prefix-cache-cpu-bytes-per-rank <bytes>     # repeated once per rank
+  --prefix-cache-numa-node-per-rank <node>      # repeated once per rank
+```
+
+The two per-rank options pair by occurrence order, so the first occurrence of
+each describes rank 0. They are supplied together or not at all, each appears
+exactly `tensor-parallel-size` times, and their presence replaces
+`--prefix-cache-host-memory-percent` as the host-cache sizing authority. A
+workspace declares them as one list of rank entries so the two argument lists
+cannot drift apart:
+
+```toml
+[servers.engine.roles.serve.settings]
+gpu_memory_utilization_percent = 90
+prefix_cache_gpu_entries = 16
+prefix_cache_ranks = [
+  { cpu_bytes = 100, numa_node = 3 },
+  { cpu_bytes = 200, numa_node = 4 },
+]
+```
+
 The listener serves the published TokenSpeed scheduler gRPC protocol and the
 standard gRPC health service used by TokenSpeed SMG during worker registration.
 Request execution requires tokenized input. Prompt text is transport metadata

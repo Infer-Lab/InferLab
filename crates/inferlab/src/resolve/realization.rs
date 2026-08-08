@@ -305,6 +305,8 @@ pub(super) fn realize_runtime(
                 chat_completions_path: endpoint_requirement.chat_completions_path.clone(),
                 server_metrics,
                 prefix_cache_reset: endpoint_requirement.prefix_cache_reset.clone(),
+                prompt_cache_read_zero_representation: endpoint_requirement
+                    .prompt_cache_read_zero_representation,
             });
         }
         device_count += requirement.device_count();

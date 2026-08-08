@@ -5,10 +5,13 @@ import json
 from inferlab_measurement_sdk import (
     BenchAgenticResultEvidence,
     BenchAgenticSourceVerification,
+    BenchCacheStartInput,
     BenchClientRequest,
     BenchClientResult,
     BenchNativeInvocation,
     BenchRequestSloResult,
+    BenchRequestSourceInputRandom,
+    BenchRequestSourceInputRandomMixture,
     CaseDeadline,
     ClientStatus,
     JsonObject,
@@ -27,11 +30,25 @@ from .aiperf import (
 )
 from .population import load_chat_tokenizer
 from .result_agentic import agentic_result_evidence
-from .result_metrics import NORMALIZATION_SCHEMA, normalize_summary
+from .result_metrics import NORMALIZATION_SCHEMA, normalize_summary, prompt_cache_evidence
 from .result_policy import request_slo_evidence, warmup_counts, warmup_error
 from .result_population import population_identity_error, prompt_token_reconciliation
 from .result_records import request_counts
 from .result_sessions import session_result_evidence
+
+
+def requires_prompt_cache_evidence(request: BenchClientRequest) -> bool:
+    if request.definition.cache_start is BenchCacheStartInput.primed:
+        return True
+    source_input = request.definition.request_source
+    if source_input is None:
+        return False
+    source = source_input.root
+    if isinstance(source, BenchRequestSourceInputRandom):
+        return source.prefix_sharing is not None or source.shared_system_content is not None
+    if isinstance(source, BenchRequestSourceInputRandomMixture):
+        return source.prefix_sharing is not None
+    return False
 
 
 def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -> BenchClientResult:
@@ -121,6 +138,11 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
     prompt_reconciliation, prompt_reconciliation_error = prompt_token_reconciliation(
         request, records_path
     )
+    prompt_cache_observations, prompt_cache_metrics, prompt_cache_error = prompt_cache_evidence(
+        records_path,
+        requires_prompt_cache_evidence(request),
+        request.endpoint.prompt_cache_read_zero_representation,
+    )
     session_evidence = None
     session_error: str | None = None
     if request.definition.session_source is not None:
@@ -171,6 +193,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         or phase_error is not None
         or identity_error is not None
         or prompt_reconciliation_error is not None
+        or prompt_cache_error is not None
         or session_error is not None
         or agentic_error is not None
         or summary_error is not None
@@ -191,6 +214,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = identity_error
         elif prompt_reconciliation_error is not None:
             reason = prompt_reconciliation_error
+        elif prompt_cache_error is not None:
+            reason = prompt_cache_error
         elif session_error is not None:
             reason = session_error
         elif agentic_error is not None:
@@ -205,6 +230,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = f"{reason}; {identity_error}"
         if prompt_reconciliation_error is not None and prompt_reconciliation_error != reason:
             reason = f"{reason}; {prompt_reconciliation_error}"
+        if prompt_cache_error is not None and prompt_cache_error != reason:
+            reason = f"{reason}; {prompt_cache_error}"
         if session_error is not None and session_error != reason:
             reason = f"{reason}; {session_error}"
         if agentic_error is not None and agentic_error != reason:
@@ -220,6 +247,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             session_evidence=session_evidence,
             agentic_evidence=agentic_evidence,
             prompt_token_reconciliation=prompt_reconciliation,
+            prompt_cache_observations=prompt_cache_observations,
             native_command=command,
             native_exit_code=native_exit_code,
             raw_artifacts=artifacts,
@@ -231,6 +259,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
     if summary is not None and not complete_all_failed:
         try:
             metrics = normalize_summary(summary, prepared.population.tpot_applicable)
+            metrics.update(prompt_cache_metrics)
         except ValueError as normalization_error:
             errors.append(str(normalization_error))
     if request_slo_result is not None:
@@ -274,6 +303,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         session_evidence=session_evidence,
         agentic_evidence=agentic_evidence,
         prompt_token_reconciliation=prompt_reconciliation,
+        prompt_cache_observations=prompt_cache_observations,
         native_command=command,
         native_exit_code=native_exit_code,
         report_invocations=report_invocations,

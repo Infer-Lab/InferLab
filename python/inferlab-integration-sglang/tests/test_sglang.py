@@ -10,6 +10,7 @@ from inferlab_adapter_sdk import (
     ParallelismOuter,
     PlanServeInput,
     PlanServeResult,
+    PromptCacheReadZeroRepresentation,
     ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
     RenderServeInput,
@@ -673,6 +674,19 @@ def test_render_lowers_published_sglang_settings() -> None:
 
     assert argv[argv.index("--cuda-graph-max-bs-decode") + 1] == "32"
     assert argv[argv.index("--moe-runner-backend") + 1] == "flashinfer_mxfp4"
+
+
+def test_render_enables_cache_report_when_declared() -> None:
+    plan = plan_serve(_plan_input(settings={"enable_cache_report": SettingValue(root=True)}))
+
+    result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
+
+    assert "--enable-cache-report" in result.processes[0].root.command.argv
+    endpoint = plan.roles[0].public_endpoint
+    assert endpoint is not None
+    assert (
+        endpoint.prompt_cache_read_zero_representation is PromptCacheReadZeroRepresentation.omitted
+    )
 
 
 @pytest.mark.parametrize("transport", [KvTransferMechanism.mooncake, KvTransferMechanism.nixl])

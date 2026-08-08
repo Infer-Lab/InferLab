@@ -1,10 +1,12 @@
 use crate::InferlabError;
 use crate::operation::{OperationPosition, OperationProgress, OperationPublisher};
+use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tracing_subscriber::fmt::time::UtcTime;
 
 const FIRST_REPORT_AFTER: Duration = Duration::from_secs(10);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
@@ -77,6 +79,33 @@ struct ActivePhase {
     next_report: Instant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReportKind {
+    Phase,
+    Heartbeat,
+}
+
+#[derive(Clone, Copy)]
+struct ItemPosition {
+    index: usize,
+    total: usize,
+}
+
+impl fmt::Display for ItemPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.index, self.total)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ElapsedSeconds(u64);
+
+impl fmt::Display for ElapsedSeconds {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}s", self.0)
+    }
+}
+
 #[derive(Debug)]
 struct ProgressState {
     command: String,
@@ -101,7 +130,7 @@ impl ProgressState {
         }
     }
 
-    fn begin(&mut self, now: Instant, phase: Phase) -> Option<String> {
+    fn begin(&mut self, now: Instant, phase: Phase) -> Option<ReportKind> {
         if self.observed_record.is_none()
             && let Some(record) = &phase.record
         {
@@ -123,10 +152,10 @@ impl ProgressState {
                 deadline
             },
         });
-        immediate.then(|| self.render(false, now))
+        immediate.then_some(ReportKind::Phase)
     }
 
-    fn due(&mut self, now: Instant) -> Option<String> {
+    fn due(&mut self, now: Instant) -> Option<ReportKind> {
         let active = self.active.as_mut()?;
         if now < active.next_report {
             return None;
@@ -140,7 +169,11 @@ impl ProgressState {
             } else {
                 FIRST_REPORT_AFTER
             };
-        Some(self.render(heartbeat, now))
+        Some(if heartbeat {
+            ReportKind::Heartbeat
+        } else {
+            ReportKind::Phase
+        })
     }
 
     fn set_readiness_failure(&mut self, failure: impl Into<String>) {
@@ -170,71 +203,74 @@ impl ProgressState {
             active.next_report.saturating_duration_since(now)
         })
     }
-
-    fn render(&self, heartbeat: bool, now: Instant) -> String {
-        let Some(active) = self.active.as_ref() else {
-            return String::new();
-        };
-        let mut line = format!(
-            "progress: command=\"{}\" phase=\"{}\"",
-            escape(&self.command),
-            escape(&active.phase.name)
-        );
-        push_field(&mut line, "item", active.phase.item.as_deref());
-        if let Some((index, total)) = active.phase.position {
-            line.push_str(&format!(" position={index}/{total}"));
-        }
-        push_field(&mut line, "lock", active.phase.lock.as_deref());
-        push_field(
-            &mut line,
-            "readiness_failure",
-            active.phase.readiness_failure.as_deref(),
-        );
-        push_field(&mut line, "record", active.phase.record.as_deref());
-        push_field(&mut line, "record_dir", active.phase.record_dir.as_deref());
-        push_field(&mut line, "log", active.phase.log.as_deref());
-        if heartbeat {
-            line.push_str(&format!(
-                " elapsed={}s",
-                now.saturating_duration_since(active.started).as_secs()
-            ));
-        }
-        line
-    }
 }
 
-fn push_field(line: &mut String, name: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        line.push_str(&format!(" {name}=\"{}\"", escape(value)));
-    }
+fn emit_report(
+    dispatcher: &tracing::Dispatch,
+    progress: &ProgressState,
+    report: ReportKind,
+    now: Instant,
+) {
+    let Some(active) = progress.active.as_ref() else {
+        return;
+    };
+    let message = match report {
+        ReportKind::Phase => format!("[{}] {}", progress.command, active.phase.name),
+        ReportKind::Heartbeat => {
+            format!(
+                "[{}] {}: still running",
+                progress.command, active.phase.name
+            )
+        }
+    };
+    let position = active
+        .phase
+        .position
+        .map(|(index, total)| tracing::field::display(ItemPosition { index, total }));
+    let elapsed = (report == ReportKind::Heartbeat).then(|| {
+        tracing::field::display(ElapsedSeconds(
+            now.saturating_duration_since(active.started).as_secs(),
+        ))
+    });
+
+    tracing::dispatcher::with_default(dispatcher, || {
+        tracing::info!(
+            item = active.phase.item.as_deref(),
+            position,
+            elapsed,
+            lock = active.phase.lock.as_deref(),
+            readiness_failure = active.phase.readiness_failure.as_deref(),
+            record = active.phase.record.as_deref(),
+            record_dir = active.phase.record_dir.as_deref(),
+            log = active.phase.log.as_deref(),
+            "{message}"
+        );
+    });
 }
 
-fn escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
+fn progress_dispatch(writer: Box<dyn Write + Send>) -> tracing::Dispatch {
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(Mutex::new(writer))
+        .with_timer(UtcTime::rfc_3339())
+        .with_ansi(false)
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .log_internal_errors(false)
+        .finish();
+    tracing::Dispatch::new(subscriber)
 }
 
 struct SharedState {
     progress: ProgressState,
-    writer: Box<dyn Write + Send>,
     stopped: bool,
-    write_error: Option<io::Error>,
     observer: Option<OperationPublisher>,
 }
 
 struct Shared {
     state: Mutex<SharedState>,
     changed: Condvar,
+    dispatcher: tracing::Dispatch,
 }
 
 /// One command-scoped diagnostic progress stream. Phase changes are written
@@ -275,12 +311,11 @@ impl Progress {
         let shared = Arc::new(Shared {
             state: Mutex::new(SharedState {
                 progress: ProgressState::new(command, mode),
-                writer,
                 stopped: false,
-                write_error: None,
                 observer,
             }),
             changed: Condvar::new(),
+            dispatcher: progress_dispatch(writer),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -298,8 +333,9 @@ impl Progress {
             return Ok(());
         };
         let mut state = lock_state(shared);
-        if let Some(line) = state.progress.begin(Instant::now(), phase) {
-            write_line(&mut state, &line);
+        let now = Instant::now();
+        if let Some(report) = state.progress.begin(now, phase) {
+            emit_report(&shared.dispatcher, &state.progress, report, now);
         }
         publish_observation(&state)?;
         drop(state);
@@ -354,8 +390,8 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
             return;
         }
         let now = Instant::now();
-        if let Some(line) = state.progress.due(now) {
-            write_line(&mut state, &line);
+        if let Some(report) = state.progress.due(now) {
+            emit_report(&shared.dispatcher, &state.progress, report, now);
             let _ = publish_observation(&state);
         }
         let wait = state.progress.wait_duration(Instant::now());
@@ -373,15 +409,6 @@ fn lock_state(shared: &Shared) -> MutexGuard<'_, SharedState> {
     }
 }
 
-fn write_line(state: &mut SharedState, line: &str) {
-    if state.write_error.is_some() {
-        return;
-    }
-    if let Err(source) = writeln!(state.writer, "{line}").and_then(|()| state.writer.flush()) {
-        state.write_error = Some(source);
-    }
-}
-
 fn publish_observation(state: &SharedState) -> Result<(), InferlabError> {
     if let (Some(observer), Some(progress)) = (&state.observer, state.progress.observation()) {
         observer.publish(progress)?;
@@ -391,8 +418,10 @@ fn publish_observation(state: &SharedState) -> Result<(), InferlabError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, Phase, Progress, ProgressState};
+    use super::{Mode, Phase, Progress, ProgressState, ReportKind, emit_report, progress_dispatch};
     use std::io::{self, Write};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     struct FailingWriter;
@@ -407,31 +436,98 @@ mod tests {
         }
     }
 
+    struct RecordingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            let mut bytes = self
+                .bytes
+                .lock()
+                .map_err(|_| io::Error::other("recording writer lock poisoned"))?;
+            bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn report_line(state: &ProgressState, report: ReportKind, now: Instant) -> String {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = progress_dispatch(Box::new(RecordingWriter {
+            bytes: Arc::clone(&bytes),
+        }));
+        emit_report(&dispatcher, state, report, now);
+        recorded_text(&bytes)
+    }
+
+    fn recorded_text(bytes: &Mutex<Vec<u8>>) -> String {
+        let bytes = match bytes.lock() {
+            Ok(bytes) => bytes,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn begin_line(state: &mut ProgressState, now: Instant, phase: Phase) -> Option<String> {
+        let report = state.begin(now, phase)?;
+        Some(report_line(state, report, now))
+    }
+
+    fn due_line(state: &mut ProgressState, now: Instant) -> Option<String> {
+        let report = state.due(now)?;
+        Some(report_line(state, report, now))
+    }
+
     #[test]
     fn immediate_phase_reports_then_heartbeats_at_bounded_intervals() {
         let start = Instant::now();
         let mut state = ProgressState::new("toolchain install", Mode::Immediate);
 
-        assert_eq!(
-            state.begin(start, Phase::named("Pixi installation")),
-            Some("progress: command=\"toolchain install\" phase=\"Pixi installation\"".to_owned())
-        );
+        let phase = begin_line(&mut state, start, Phase::named("Pixi installation"));
+        assert!(phase.is_some_and(|line| {
+            line.contains(" INFO [toolchain install] Pixi installation")
+                && line.ends_with('\n')
+                && !line.contains("command=")
+                && !line.contains("progress:")
+        }));
+
         assert_eq!(state.due(start + Duration::from_secs(9)), None);
-        assert_eq!(
-            state.due(start + Duration::from_secs(10)),
-            Some(
-                "progress: command=\"toolchain install\" phase=\"Pixi installation\" elapsed=10s"
-                    .to_owned()
-            )
-        );
+        let heartbeat = due_line(&mut state, start + Duration::from_secs(10));
+        assert!(heartbeat.is_some_and(|line| {
+            line.contains(" INFO [toolchain install] Pixi installation: still running")
+                && line.contains("elapsed=10s")
+        }));
         assert_eq!(state.due(start + Duration::from_secs(39)), None);
-        assert_eq!(
-            state.due(start + Duration::from_secs(40)),
-            Some(
-                "progress: command=\"toolchain install\" phase=\"Pixi installation\" elapsed=40s"
-                    .to_owned()
-            )
-        );
+        let heartbeat = due_line(&mut state, start + Duration::from_secs(40));
+        assert!(heartbeat.is_some_and(|line| line.contains("elapsed=40s")));
+    }
+
+    #[test]
+    fn emitted_progress_is_one_complete_stderr_line() -> Result<(), crate::InferlabError> {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let progress = Progress::with_writer(
+            "toolchain install",
+            Mode::Immediate,
+            Box::new(RecordingWriter {
+                bytes: Arc::clone(&bytes),
+            }),
+            None,
+        )?;
+
+        progress.phase(Phase::named("Pixi installation"))?;
+        progress.finish()?;
+
+        let output = recorded_text(&bytes);
+        assert!(output.ends_with('\n'));
+        assert_eq!(output.lines().count(), 1);
+        assert!(output.contains(" INFO [toolchain install] Pixi installation"));
+        assert!(!output.contains("command="));
+        assert!(!output.contains("progress:"));
+        Ok(())
     }
 
     #[test]
@@ -459,18 +555,17 @@ mod tests {
             None
         );
         assert_eq!(state.due(start + Duration::from_secs(9)), None);
-        assert_eq!(
-            state.due(start + Duration::from_secs(10)),
-            Some("progress: command=\"stack status\" phase=\"realization inspection\"".to_owned())
-        );
+        let phase = due_line(&mut state, start + Duration::from_secs(10));
+        assert!(phase.is_some_and(|line| {
+            line.contains(" INFO [stack status] realization inspection")
+                && !line.contains("still running")
+        }));
         assert_eq!(state.due(start + Duration::from_secs(19)), None);
-        assert_eq!(
-            state.due(start + Duration::from_secs(20)),
-            Some(
-                "progress: command=\"stack status\" phase=\"realization inspection\" elapsed=20s"
-                    .to_owned()
-            )
-        );
+        let heartbeat = due_line(&mut state, start + Duration::from_secs(20));
+        assert!(heartbeat.is_some_and(|line| {
+            line.contains("[stack status] realization inspection: still running")
+                && line.contains("elapsed=20s")
+        }));
     }
 
     #[test]
@@ -486,14 +581,14 @@ mod tests {
             ),
             None
         );
-        assert_eq!(
-            state.due(start + Duration::from_secs(10)),
-            Some("progress: command=\"image build\" phase=\"package-build\"".to_owned())
+        let phase = due_line(&mut state, start + Duration::from_secs(10));
+        assert!(phase.is_some_and(|line| line.contains(" INFO [image build] package-build")));
+        let next_phase = begin_line(
+            &mut state,
+            start + Duration::from_secs(11),
+            Phase::named("assembly"),
         );
-        assert_eq!(
-            state.begin(start + Duration::from_secs(11), Phase::named("assembly")),
-            Some("progress: command=\"image build\" phase=\"assembly\"".to_owned())
-        );
+        assert!(next_phase.is_some_and(|line| line.contains(" INFO [image build] assembly")));
     }
 
     #[test]
@@ -502,16 +597,21 @@ mod tests {
         let mut state = ProgressState::new("serve start", Mode::Immediate);
         let phase = Phase::named("readiness")
             .item("worker-0", 1, 2)
+            .lock(Path::new("/tmp/serve.lock"))
+            .record("serve-1", "/records/serve-1")
             .log("/records/server.stderr.log");
-        let initial = state.begin(start, phase);
+        let initial = begin_line(&mut state, start, phase);
         assert!(initial.is_some_and(|line| {
             line.contains("item=\"worker-0\"")
                 && line.contains("position=1/2")
+                && line.contains("lock=\"/tmp/serve.lock\"")
+                && line.contains("record=\"serve-1\"")
+                && line.contains("record_dir=\"/records/serve-1\"")
                 && line.contains("log=\"/records/server.stderr.log\"")
         }));
 
         state.set_readiness_failure("connection refused\nretrying");
-        let heartbeat = state.due(start + Duration::from_secs(10));
+        let heartbeat = due_line(&mut state, start + Duration::from_secs(10));
         assert!(heartbeat.is_some_and(|line| {
             line.contains("readiness_failure=\"connection refused\\nretrying\"")
                 && line.contains("elapsed=10s")
@@ -523,7 +623,8 @@ mod tests {
         let start = Instant::now();
         let mut state = ProgressState::new("recipe run", Mode::Immediate);
         let _ = state.begin(start, Phase::named("server startup"));
-        let line = state.begin(
+        let line = begin_line(
+            &mut state,
             start + Duration::from_secs(8),
             Phase::named("Eval").item("quote \" and slash \\", 2, 3),
         );
@@ -534,8 +635,7 @@ mod tests {
         }));
         assert_eq!(state.due(start + Duration::from_secs(17)), None);
         assert!(
-            state
-                .due(start + Duration::from_secs(18))
+            due_line(&mut state, start + Duration::from_secs(18))
                 .is_some_and(|line| line.contains("elapsed=10s"))
         );
     }

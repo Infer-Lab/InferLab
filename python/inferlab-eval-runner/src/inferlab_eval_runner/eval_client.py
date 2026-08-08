@@ -12,12 +12,22 @@ from inferlab_measurement_sdk import (
     EvalClientResult,
     EvalDefinitionInputLmEval,
     EvalFailureKind,
+    MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetPreparationResult,
+    MeasurementDataAssetRemoteMetadataOutcome,
+    MeasurementDataAssetSourceBytesOutcome,
     RawArtifact,
     load_json_object,
     parse_args,
 )
 
-from inferlab_eval_runner import native_execution, normalization, prompt_logprobs, task_resolution
+from inferlab_eval_runner import (
+    data_asset,
+    native_execution,
+    normalization,
+    prompt_logprobs,
+    task_resolution,
+)
 from inferlab_eval_runner.task_resolution import (
     lm_eval_task_argument,
 )
@@ -30,6 +40,7 @@ def run_lm_eval(
     deadline: CaseDeadline | None = None,
 ) -> EvalClientResult:
     deadline = deadline or CaseDeadline(request.case_budget_seconds)
+    definition = task_resolution.bind_prepared_task(request, definition)
     publisher = native_execution.EvalCheckpointPublisher(checkpoint)
     artifact_dir = Path(request.artifact_dir)
     raw_dir = artifact_dir / "lm-eval-raw"
@@ -106,7 +117,9 @@ def run_lm_eval(
             publisher,
             deadline,
         )
-    command = native_execution.lm_eval_command(request, raw_dir, resolution, deadline.remaining())
+    command = native_execution.lm_eval_command(
+        request, definition, raw_dir, resolution, deadline.remaining()
+    )
     process_path = artifact_dir / "lm-eval-process.json"
     raw_artifacts.append(
         native_execution.write_lm_eval_process_evidence(
@@ -238,7 +251,9 @@ def execute(
     raise TypeError(f"unsupported Eval definition {type(definition).__name__}")
 
 
-def write_eval_client_result(path: Path, result: EvalClientResult) -> None:
+def write_client_result(
+    path: Path, result: EvalClientResult | MeasurementDataAssetPreparationResult
+) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(result.model_dump_json(indent=2), encoding="utf-8")
     temporary.replace(path)
@@ -249,12 +264,17 @@ def handle_eval_execution(input_text: str, output: Path) -> EvalClientResult:
     deadline = CaseDeadline(request.case_budget_seconds)
     result = execute(
         request,
-        lambda checkpoint: write_eval_client_result(output, checkpoint),
+        lambda checkpoint: write_client_result(output, checkpoint),
         deadline,
     )
     if result.status == ClientStatus.succeeded:
         deadline.remaining()
     return result
+
+
+def handle_data_asset_preparation(input_text: str) -> MeasurementDataAssetPreparationResult:
+    request = MeasurementDataAssetPreparationRequest.model_validate_json(input_text)
+    return data_asset.prepare_eval_data_asset(request)
 
 
 def main() -> int:
@@ -274,24 +294,41 @@ def main() -> int:
         raise ValueError("--input and --output are required")
     output = Path(args.output)
     try:
-        result = handle_eval_execution(Path(args.input).read_text(encoding="utf-8"), output)
+        input_text = Path(args.input).read_text(encoding="utf-8")
+        result: EvalClientResult | MeasurementDataAssetPreparationResult
+        if args.prepare_source:
+            result = handle_data_asset_preparation(input_text)
+        else:
+            result = handle_eval_execution(input_text, output)
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
-        try:
-            result = EvalClientResult.model_validate_json(output.read_text(encoding="utf-8"))
-            result.status = ClientStatus.failed
-            result.error = f"{result.error}; Eval runner failed: {error}"
-        except (OSError, ValueError):
-            result = EvalClientResult(
+        if args.prepare_source:
+            result = MeasurementDataAssetPreparationResult(
                 schema_version=1,
                 status=ClientStatus.failed,
-                metrics={},
-                native_command=[],
-                raw_artifacts=[],
-                failure_kind=None,
+                effective_selection=None,
+                readiness=None,
+                cache_stores=[],
+                remote_metadata=MeasurementDataAssetRemoteMetadataOutcome.unavailable,
+                source_bytes=MeasurementDataAssetSourceBytesOutcome.unavailable,
                 error=str(error),
             )
-    write_eval_client_result(output, result)
+        else:
+            try:
+                result = EvalClientResult.model_validate_json(output.read_text(encoding="utf-8"))
+                result.status = ClientStatus.failed
+                result.error = f"{result.error}; Eval runner failed: {error}"
+            except (OSError, ValueError):
+                result = EvalClientResult(
+                    schema_version=1,
+                    status=ClientStatus.failed,
+                    metrics={},
+                    native_command=[],
+                    raw_artifacts=[],
+                    failure_kind=None,
+                    error=str(error),
+                )
+    write_client_result(output, result)
     return 0
 
 

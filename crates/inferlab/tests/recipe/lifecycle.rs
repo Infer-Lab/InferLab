@@ -51,7 +51,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
         String::from_utf8_lossy(&output.stderr)
     );
     let record: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(record["schema_version"], 2);
+    assert_eq!(record["schema_version"], 3);
     let id = record["id"].as_str().ok_or("missing recipe record id")?;
     assert_datetime_record_id(id, "recipe-dsv4-qualify-tp2")?;
     let server_id = record["server"]["id"]
@@ -92,7 +92,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("missing matrix bench record id")?;
     let matrix = workspace.load_record(matrix_id)?;
-    assert_eq!(matrix["schema_version"], 12);
+    assert_eq!(matrix["schema_version"], 14);
     assert_eq!(matrix["kind"], "bench");
     assert_eq!(matrix["passed"], true);
     assert!(
@@ -100,11 +100,14 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
             .as_array()
             .is_some_and(|cases| { cases.iter().all(|case| case.get("slo").is_none()) })
     );
-    assert_eq!(matrix["cases"][0]["prefix_cache_reset"]["succeeded"], true);
+    assert_eq!(
+        matrix["cases"][0]["cache_preparation"]["reset"]["succeeded"],
+        true
+    );
     assert!(matrix["cases"][0].get("eval_gate").is_none());
     assert!(matrix["cases"][0].get("eval_trial_summary").is_none());
     assert!(
-        matrix["cases"][0]["prefix_cache_reset"]
+        matrix["cases"][0]["cache_preparation"]["reset"]
             .get("status")
             .is_none()
     );
@@ -256,7 +259,7 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
         other => return Err(format!("unhandled transport {other}").into()),
     }
 
-    // configure_pd flips reset_prefix_cache off, so the matrix Bench records
+    // configure_pd selects an uncontrolled cache start, so the matrix Bench records
     // the reset as skipped: no per-case prefix-cache reset action ran, unlike
     // the enabled path where each case carries a succeeded reset.
     let matrix_id = recipe["benches"][0]["id"]
@@ -264,8 +267,8 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
         .ok_or("recipe has no matrix Bench record id")?;
     let matrix = workspace.load_record(matrix_id)?;
     assert_eq!(
-        matrix["resolved"]["definition"]["reset_prefix_cache"],
-        false
+        matrix["resolved"]["client"]["effective_definition"]["cache_start"],
+        "uncontrolled"
     );
     assert_eq!(
         matrix["resolved"]["client"]["prefix_cache_reset"],
@@ -277,7 +280,7 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
             .is_some_and(|cases| !cases.is_empty()
                 && cases
                     .iter()
-                    .all(|case| case["prefix_cache_reset"] == Value::Null)),
+                    .all(|case| case["cache_preparation"] == Value::Null)),
         "with reset disabled every matrix case skips the prefix-cache reset: {}",
         matrix["cases"]
     );
@@ -388,6 +391,70 @@ fn manual_bench_attaches_to_an_explicit_running_server() -> Result<(), Box<dyn E
         bench["resolved"]["measurement_workspace"]["source_digest"],
         server["resolved"]["workspace"]["source_digest"]
     );
+
+    let stop = workspace
+        .command()
+        .args(["serve", "stop", server_id])
+        .output()?;
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn manual_bench_source_preparation_failure_leaves_target_server_running()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let mut config = fs::read_to_string(&manifest)?;
+    config.push_str(
+        r#"
+
+[benches.agentx]
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [1]
+timeout_seconds = 60
+"#,
+    );
+    fs::write(manifest, config)?;
+    let start = workspace
+        .command()
+        .args(["serve", "start", "dsv4-qualify"])
+        .output()?;
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let server: Value = serde_json::from_slice(&start.stdout)?;
+    let server_id = server["id"].as_str().ok_or("server record has no id")?;
+
+    let failed = workspace
+        .command()
+        .env("FIXTURE_SOURCE_PREPARATION_FAIL", "1")
+        .args(["bench", "agentx", "--serve", server_id])
+        .output()?;
+    assert!(!failed.status.success());
+    let bench: Value = serde_json::from_slice(&failed.stdout)?;
+    assert_eq!(bench["status"], "failed");
+    assert_eq!(bench["data_assets"]["target_server_unchanged"], true);
+    assert_eq!(bench["data_assets"]["attempts"][0]["state"], "failed");
+
+    let status = workspace
+        .command()
+        .args(["serve", "status", server_id])
+        .output()?;
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let server_status: Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(server_status["record"]["status"], "running");
+    assert_eq!(server_status["observed_alive"], true);
 
     let stop = workspace
         .command()

@@ -3,9 +3,9 @@
 use super::{invalid, require_nonempty, require_positive, validate_request_body};
 use crate::InferlabError;
 use crate::workspace::definitions::{
-    AggregateSlo, BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchRequestSource,
-    BenchSessionSource, BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability,
-    JsonValue, RequestRate, RequestSlo,
+    AggregateSlo, BenchCacheStart, BenchDefinition, BenchPrefixSharing, BenchPrompt,
+    BenchRequestSource, BenchSessionSource, BenchSharedSystemContent, BenchTokenSelector,
+    BenchTpotApplicability, JsonValue, RequestRate, RequestSlo,
 };
 use crate::{bench_agentic_catalog, bench_dataset_catalog};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +29,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
             request_count,
             duration_seconds,
             burstiness,
-            reset_prefix_cache,
+            cache,
             timeout_seconds,
             ..
         } => {
@@ -69,10 +69,10 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                     || !request_body.is_empty()
                     || !aggregate_slos.is_empty()
                     || request_slo.is_some()
-                    || *reset_prefix_cache
+                    || cache.is_some()
                 {
                     return invalid(format!(
-                        "bench {id:?} agentic_source rejects prompts_per_concurrency, warmup_prompts_per_concurrency, sessions_per_concurrency, warmup_sessions_per_concurrency, request_rates, request_count, burstiness, request_body, aggregate_slos, request_slo, and reset_prefix_cache"
+                        "bench {id:?} agentic_source rejects prompts_per_concurrency, warmup_prompts_per_concurrency, sessions_per_concurrency, warmup_sessions_per_concurrency, request_rates, request_count, burstiness, request_body, aggregate_slos, request_slo, and cache"
                     ));
                 }
                 if duration_seconds
@@ -138,11 +138,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                         "bench {id:?} session_source rejects prompts_per_concurrency, warmup_prompts_per_concurrency, request_rates, request_count, duration_seconds, and burstiness"
                     ));
                 }
-                if *server_metrics && *warmup_sessions_per_concurrency != 0 {
-                    return invalid(format!(
-                        "bench {id:?} server_metrics requires zero warmup_sessions_per_concurrency"
-                    ));
-                }
+                validate_cache_policy(id, cache.as_ref(), request_source.as_ref())?;
                 return Ok(());
             }
             if sessions_per_concurrency.is_some() || *warmup_sessions_per_concurrency != 0 {
@@ -181,11 +177,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                     "bench {id:?} sets warmup_prompts_per_concurrency without concurrency cases"
                 ));
             }
-            if *server_metrics && *warmup_prompts_per_concurrency != 0 {
-                return invalid(format!(
-                    "bench {id:?} server_metrics requires zero warmup_prompts_per_concurrency"
-                ));
-            }
+            validate_cache_policy(id, cache.as_ref(), request_source.as_ref())?;
             validate_request_rates(id, request_rates)?;
             validate_rate_count_policy(
                 id,
@@ -207,6 +199,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
             duration_seconds,
             burstiness,
             timeout_seconds,
+            cache,
             ..
         } => {
             validate_bench_common(
@@ -242,8 +235,74 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                     "bench {id:?} min_rate_resolution must be positive and finite"
                 ));
             }
+            validate_cache_policy(id, cache.as_ref(), Some(request_source))?;
             validate_rate_count_policy(id, true, false, *request_count, *duration_seconds)
         }
+    }
+}
+
+fn validate_cache_policy(
+    id: &str,
+    policy: Option<&crate::workspace::definitions::BenchCachePolicy>,
+    request_source: Option<&BenchRequestSource>,
+) -> Result<(), InferlabError> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    if policy.start != BenchCacheStart::Primed {
+        return Ok(());
+    }
+    let has_positive_prefix = match request_source {
+        Some(BenchRequestSource::Random {
+            prompt,
+            input_tokens,
+            prefix_sharing: Some(sharing),
+            ..
+        }) if matches!(
+            prompt.effective(),
+            BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
+        ) =>
+        {
+            match sharing {
+                BenchPrefixSharing::Tokens {
+                    shared_prefix_tokens,
+                } => *shared_prefix_tokens > 0,
+                BenchPrefixSharing::Ratio {
+                    shared_prefix_ratio,
+                } => (f64::from(input_tokens.minimum()) * shared_prefix_ratio).floor() >= 1.0,
+            }
+        }
+        Some(BenchRequestSource::RandomMixture {
+            prompt,
+            shapes,
+            prefix_sharing: Some(sharing),
+        }) if matches!(
+            prompt.effective(),
+            BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
+        ) =>
+        {
+            let minimum_input = shapes
+                .iter()
+                .map(|shape| shape.input_tokens)
+                .min()
+                .unwrap_or_default();
+            match sharing {
+                BenchPrefixSharing::Tokens {
+                    shared_prefix_tokens,
+                } => *shared_prefix_tokens > 0,
+                BenchPrefixSharing::Ratio {
+                    shared_prefix_ratio,
+                } => (f64::from(minimum_input) * shared_prefix_ratio).floor() >= 1.0,
+            }
+        }
+        _ => false,
+    };
+    if has_positive_prefix {
+        Ok(())
+    } else {
+        invalid(format!(
+            "bench {id:?} cache.start = \"primed\" requires flat or rendered_chat synthetic prompt authority with positive prefix_sharing"
+        ))
     }
 }
 

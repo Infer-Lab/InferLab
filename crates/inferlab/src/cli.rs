@@ -854,7 +854,7 @@ fn run_bench_command(
     let snapshot = crate::workspace::snapshot_workspace(root, &config)?;
     let status = server::status(root, &args.serve)?;
     server::require_running(&status)?;
-    let plan = workload::resolve_manual_bench(
+    let mut plan = workload::resolve_manual_bench(
         root,
         &config,
         &snapshot,
@@ -864,6 +864,7 @@ fn run_bench_command(
         args.capture,
     )?;
     if args.dry_run {
+        workload::observe_data_asset_dry_run(&mut plan.data_assets)?;
         return write_json(&plan.dry_run_plan());
     }
 
@@ -880,6 +881,11 @@ fn run_bench_command(
         },
         workload::ResolvedWorkloadPlan::ManualBench(Box::new(plan.clone())),
         progress,
+        workload::WorkloadDataAssetEvidence::Standalone {
+            attempts: workload::attempts_from_plans(&plan.data_assets),
+            target_server_unchanged: true,
+            timing: None,
+        },
     )?;
     let failed = record.status == WorkloadStatus::Failed;
     let record_id = record.id.clone();
@@ -952,7 +958,7 @@ fn run_selection(
         };
     let process_adapter = ProcessAdapterClient::new(workspace.local.adapter.process_timeout());
     progress.phase(Phase::named("local and remote preflight"))?;
-    let resolved = if let Some(image) = &image {
+    let mut resolved = if let Some(image) = &image {
         resolve(
             &workspace,
             &request,
@@ -968,6 +974,9 @@ fn run_selection(
         resolve(&workspace, &request, &process_adapter)?
     };
     if selection.dry_run {
+        if let Some(measurements) = resolved.measurements.as_mut() {
+            workload::observe_data_asset_dry_run(&mut measurements.data_assets)?;
+        }
         write_json(&resolved.dry_run_plan())
     } else {
         match workflow {

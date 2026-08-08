@@ -69,7 +69,6 @@ pub(crate) struct InstalledEvalToolchain {
 pub(crate) struct InstalledBenchToolchain {
     pub identity: BenchToolchainIdentity,
     pub python: PathBuf,
-    pub runner: PathBuf,
     pub python_path: PathBuf,
 }
 
@@ -212,7 +211,6 @@ pub(crate) fn require_bench() -> Result<InstalledBenchToolchain, InferlabError> 
     Ok(InstalledBenchToolchain {
         identity: completion.bench,
         python: bench_python_path(&path),
-        runner: bench_runner_path(&path),
         python_path: path.join("runner"),
     })
 }

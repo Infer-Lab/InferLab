@@ -37,6 +37,7 @@
     },
     "server_metrics": false,
     "seed": 7,
+    "cache_start": "uncontrolled",
     "timeout_seconds": 120
   },
   "case": {

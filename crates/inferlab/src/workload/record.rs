@@ -6,12 +6,15 @@ use crate::bench_metric::BenchMetric;
 pub(super) use crate::record::write_json;
 use crate::record::{RECORD_FILE, RECORDS_DIR, now_unix_ms, validate_record_id};
 use crate::workload::adaptive::AdaptiveTerminationReason;
+use crate::workload::data_asset::WorkloadDataAssetEvidence;
 use crate::workload::domain::{
-    BenchAgenticCatalog, BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchRandomShape,
-    WorkloadHttpMethod,
+    BenchAgenticCatalog, BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchPrompt,
+    ResolvedBenchRandomShape, WorkloadHttpMethod,
 };
 use crate::workload::{BenchPlan, ResolvedWorkloadPlan};
-use crate::workspace::{BenchPrefixSharing, BenchSharedSystemContent, BenchTokenSelector};
+use crate::workspace::{
+    BenchCacheStart, BenchPrefixSharing, BenchSharedSystemContent, BenchTokenSelector, JsonValue,
+};
 use inferlab_profiler::record::CaptureRecord;
 use inferlab_protocol::{
     BenchNativeInvocation, BenchPopulationPreparationResult, BenchPromptTokenReconciliation,
@@ -81,6 +84,56 @@ pub(crate) struct PrefixCacheResetEvidence {
     pub succeeded: bool,
     pub http_status: Option<u16>,
     pub error: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrefixCacheConditioningEvidence {
+    pub url: String,
+    pub model: String,
+    pub prompt_path: PathBuf,
+    pub prompt_sha256: String,
+    pub prompt_tokens: u32,
+    pub prompt: ResolvedBenchPrompt,
+    pub request_body: BTreeMap<String, JsonValue>,
+    pub maximum_shared_prefix_tokens: u32,
+    pub output_tokens: u32,
+    pub consumes_population_entry: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_cache_read_tokens: Option<u64>,
+    pub succeeded: bool,
+    pub http_status: Option<u16>,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BenchCachePreparationPhase {
+    WarmupDrained,
+    CacheReset,
+    CacheConditioned,
+    ProfilingReleased,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchCachePreparationTransition {
+    pub phase: BenchCachePreparationPhase,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchCachePreparationEvidence {
+    pub start: BenchCacheStart,
+    pub transitions: Vec<BenchCachePreparationTransition>,
+    pub reset: PrefixCacheResetEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditioning: Option<PrefixCacheConditioningEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -137,8 +190,9 @@ pub(crate) enum BenchRequestSourceEvidence {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchDatasetRequestSourceEvidence {
+    pub preparation_attempt_id: String,
     pub catalog: BenchDatasetCatalog,
-    pub acquisition: DatasetAcquisitionEvidence,
+    pub acquisition: Option<DatasetAcquisitionEvidence>,
     pub preparation: Option<BenchPopulationPreparationResult>,
     pub preparation_process: Option<ClientProcessEvidence>,
     pub preparation_request: Option<PathBuf>,
@@ -150,8 +204,9 @@ pub(crate) struct BenchDatasetRequestSourceEvidence {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchSessionSourceEvidence {
+    pub preparation_attempt_id: String,
     pub catalog: BenchSessionDatasetCatalog,
-    pub acquisition: DatasetAcquisitionEvidence,
+    pub acquisition: Option<DatasetAcquisitionEvidence>,
     pub preparation: Option<BenchPopulationPreparationResult>,
     pub preparation_process: Option<ClientProcessEvidence>,
     pub preparation_request: Option<PathBuf>,
@@ -163,6 +218,7 @@ pub(crate) struct BenchSessionSourceEvidence {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchAgenticSourceEvidence {
+    pub preparation_attempt_id: String,
     pub dataset: String,
     pub profile: String,
     pub catalog: BenchAgenticCatalog,
@@ -277,7 +333,23 @@ pub(super) type BenchCaseRecord = ClientCaseRecord<BenchCaseEvidence>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct DataAssetMaterializationEvidence {
+    pub preparation_attempt_id: String,
+    pub authority: String,
+    pub materialization_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvalCaseEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_asset_materialization: Option<DataAssetMaterializationEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<BTreeMap<String, f64>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -298,7 +370,13 @@ pub(crate) struct EvalCaseEvidence {
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchCaseEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix_cache_reset: Option<PrefixCacheResetEvidence>,
+    pub preparation_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_asset_materialization: Option<DataAssetMaterializationEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_asset_materialization_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_preparation: Option<BenchCachePreparationEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<BTreeMap<String, f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,6 +396,8 @@ pub(crate) struct BenchCaseEvidence {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_cache_observations: Vec<inferlab_protocol::BenchPromptCacheObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_invocations: Vec<BenchNativeInvocation>,
 }
 
@@ -334,6 +414,8 @@ pub(crate) enum WorkloadEvidence {
         session_source: Option<Box<BenchSessionSourceEvidence>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agentic_source: Option<Box<BenchAgenticSourceEvidence>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_asset_materialization: Option<Box<DataAssetMaterializationEvidence>>,
         cases: Vec<BenchCaseRecord>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<AdaptiveBenchSummary>,
@@ -354,12 +436,13 @@ pub(crate) struct WorkloadRecord {
     pub skip_reason: Option<String>,
     pub error: Option<String>,
     pub capture: Option<CaptureRecord>,
+    pub data_assets: WorkloadDataAssetEvidence,
     #[serde(flatten)]
     pub evidence: WorkloadEvidence,
 }
 
 impl WorkloadRecord {
-    const SCHEMA_VERSION: u32 = 12;
+    const SCHEMA_VERSION: u32 = crate::workload::data_asset::EVIDENCE_WORKLOAD_SCHEMA_VERSION;
 }
 
 pub(super) struct WorkloadRecordSession {
@@ -374,6 +457,7 @@ impl WorkloadRecordSession {
         kind: WorkloadKind,
         definition_id: &str,
         resolved: ResolvedWorkloadPlan,
+        data_assets: WorkloadDataAssetEvidence,
     ) -> Result<Self, InferlabError> {
         validate_record_id("execution record", id)?;
         let record_dir = root.join(RECORDS_DIR).join(id);
@@ -394,12 +478,14 @@ impl WorkloadRecordSession {
             skip_reason: None,
             error: None,
             capture: None,
+            data_assets,
             evidence: match kind {
                 WorkloadKind::Eval => WorkloadEvidence::Eval { cases: Vec::new() },
                 WorkloadKind::Bench => WorkloadEvidence::Bench {
                     request_source: None,
                     session_source: None,
                     agentic_source: None,
+                    data_asset_materialization: None,
                     cases: Vec::new(),
                     summary: None,
                 },
@@ -417,6 +503,65 @@ impl WorkloadRecordSession {
         &mut self.record
     }
 
+    pub(super) fn data_asset_attempt_id(&self) -> Option<&str> {
+        match &self.record.data_assets {
+            WorkloadDataAssetEvidence::Recipe { attempt_ids, .. } => {
+                attempt_ids.first().map(String::as_str)
+            }
+            WorkloadDataAssetEvidence::Standalone { attempts, .. } => {
+                attempts.first().map(|attempt| attempt.attempt_id.as_str())
+            }
+            WorkloadDataAssetEvidence::None => None,
+        }
+    }
+
+    pub(super) fn prepared_eval_source(&self) -> Option<crate::workload::PreparedEvalSource> {
+        match &self.record.data_assets {
+            WorkloadDataAssetEvidence::Recipe {
+                prepared_source, ..
+            } => prepared_source.clone(),
+            WorkloadDataAssetEvidence::Standalone { .. } | WorkloadDataAssetEvidence::None => None,
+        }
+    }
+
+    pub(super) fn update_standalone_data_asset_attempt(
+        &mut self,
+        update: &crate::workload::data_asset::DataAssetPreparationAttempt,
+    ) -> Result<(), InferlabError> {
+        let WorkloadDataAssetEvidence::Standalone { attempts, .. } = &mut self.record.data_assets
+        else {
+            return Err(InferlabError::InvalidConfig {
+                message: "standalone data-asset update has no standalone owner".to_owned(),
+            });
+        };
+        let slot = attempts
+            .iter_mut()
+            .find(|attempt| attempt.attempt_id == update.attempt_id)
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "unknown standalone data-asset attempt {:?}",
+                    update.attempt_id
+                ),
+            })?;
+        *slot = update.clone();
+        self.rewrite()
+    }
+
+    pub(super) fn set_standalone_data_asset_timing(
+        &mut self,
+        timing: OperationTimingEvidence,
+    ) -> Result<(), InferlabError> {
+        let WorkloadDataAssetEvidence::Standalone { timing: slot, .. } =
+            &mut self.record.data_assets
+        else {
+            return Err(InferlabError::InvalidConfig {
+                message: "standalone data-asset timing has no standalone owner".to_owned(),
+            });
+        };
+        *slot = Some(timing);
+        self.rewrite()
+    }
+
     pub(super) fn set_prepared_bench_plan(&mut self, plan: BenchPlan) -> Result<(), InferlabError> {
         match &mut self.record.resolved {
             ResolvedWorkloadPlan::Bench(slot) => {
@@ -429,6 +574,21 @@ impl WorkloadRecordSession {
             }
             ResolvedWorkloadPlan::Eval(_) => Err(evidence_kind_error("bench", "eval")),
         }
+    }
+
+    pub(super) fn set_bench_data_asset_materialization(
+        &mut self,
+        materialization: DataAssetMaterializationEvidence,
+    ) -> Result<(), InferlabError> {
+        let WorkloadEvidence::Bench {
+            data_asset_materialization,
+            ..
+        } = &mut self.record.evidence
+        else {
+            return Err(evidence_kind_error("bench", "eval"));
+        };
+        *data_asset_materialization = Some(Box::new(materialization));
+        self.rewrite()
     }
 
     pub(super) fn push_eval_case(&mut self, case: EvalCaseRecord) -> Result<(), InferlabError> {

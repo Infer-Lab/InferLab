@@ -3,9 +3,9 @@
 use crate::InferlabError;
 use crate::bench_agentic_catalog;
 use crate::workload::plan::{
-    BenchCasePlan, BenchExecutionPlan, LoadShape, session_population_layout,
+    BenchCasePlan, BenchExecutionPlan, BenchPreparationStep, LoadShape, session_population_layout,
 };
-use crate::workspace::{BenchDefinition, RequestRate};
+use crate::workspace::{BenchCacheStart, BenchDefinition, RequestRate};
 
 pub(super) fn resolve_bench_execution(
     id: &str,
@@ -38,6 +38,12 @@ pub(super) fn resolve_bench_execution(
                         load_shape: LoadShape::ConcurrencyLimited { concurrency },
                         request_count: 0,
                         warmup_request_count: 0,
+                        preparation_order: preparation_order(
+                            true,
+                            0,
+                            None,
+                            cache_start(definition),
+                        ),
                         duration_seconds: Some(
                             duration_seconds.unwrap_or(profile.policy.default_duration_seconds),
                         ),
@@ -66,6 +72,12 @@ pub(super) fn resolve_bench_execution(
                         load_shape: LoadShape::ConcurrencyLimited { concurrency },
                         request_count: 0,
                         warmup_request_count: 0,
+                        preparation_order: preparation_order(
+                            false,
+                            0,
+                            Some(warmup_session_count),
+                            cache_start(definition),
+                        ),
                         duration_seconds: None,
                         session_count: Some(session_count),
                         warmup_session_count: Some(warmup_session_count),
@@ -91,6 +103,12 @@ pub(super) fn resolve_bench_execution(
                     load_shape: LoadShape::ConcurrencyLimited { concurrency },
                     request_count,
                     warmup_request_count,
+                    preparation_order: preparation_order(
+                        false,
+                        warmup_request_count,
+                        None,
+                        cache_start(definition),
+                    ),
                     duration_seconds: None,
                     session_count: None,
                     warmup_session_count: None,
@@ -106,6 +124,7 @@ pub(super) fn resolve_bench_execution(
                     },
                     request_count: count,
                     warmup_request_count: 0,
+                    preparation_order: preparation_order(false, 0, None, cache_start(definition)),
                     duration_seconds: *duration_seconds,
                     session_count: None,
                     warmup_session_count: None,
@@ -126,6 +145,7 @@ pub(super) fn resolve_bench_execution(
             initial_request_rates.dedup();
             Ok(BenchExecutionPlan::Adaptive {
                 policy: "highest-feasible-rate-v1".to_owned(),
+                preparation_order: preparation_order(false, 0, None, cache_start(definition)),
                 initial_request_rates,
                 max_search_steps: *max_search_steps,
                 min_rate_resolution: *min_rate_resolution,
@@ -134,6 +154,34 @@ pub(super) fn resolve_bench_execution(
             })
         }
     }
+}
+
+fn cache_start(definition: &BenchDefinition) -> BenchCacheStart {
+    match definition {
+        BenchDefinition::Serving { cache, .. } | BenchDefinition::AdaptiveServing { cache, .. } => {
+            cache.map_or(BenchCacheStart::Uncontrolled, |cache| cache.start)
+        }
+    }
+}
+
+fn preparation_order(
+    agentic: bool,
+    warmup_request_count: u32,
+    warmup_session_count: Option<u32>,
+    cache_start: BenchCacheStart,
+) -> Vec<BenchPreparationStep> {
+    let mut order = Vec::with_capacity(4);
+    if agentic || warmup_request_count > 0 || warmup_session_count.is_some_and(|count| count > 0) {
+        order.push(BenchPreparationStep::WarmupDrain);
+    }
+    if matches!(cache_start, BenchCacheStart::Cold | BenchCacheStart::Primed) {
+        order.push(BenchPreparationStep::CacheReset);
+    }
+    if cache_start == BenchCacheStart::Primed {
+        order.push(BenchPreparationStep::CacheConditioning);
+    }
+    order.push(BenchPreparationStep::ProfilingRelease);
+    order
 }
 
 pub(super) fn required_population_count(

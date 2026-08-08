@@ -1,12 +1,12 @@
 # Workspace definitions, placement, upgrades, and validation
 
-## Upgrading to 0.9
+## Upgrading to 0.10
 
-InferLab 0.9 retains adapter protocol version 7. Existing workspaces must
-update their exact package pins to `inferlab-adapter-sdk==0.6.1` and version
-`0.5.2` of the selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration.
+InferLab 0.10 retains adapter protocol version 7. Existing workspaces must
+update their exact package pins to `inferlab-adapter-sdk==0.7.0` and version
+`0.6.0` of the selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration.
 A Specialized Engine workspace uses
-`inferlab-integration-specialized-engine==0.2.2`. Update the SDK and selected
+`inferlab-integration-specialized-engine==0.3.0`. Update the SDK and selected
 integration together, then run `inferlab workspace lock` so the committed Pixi
 lock becomes the new workspace authority. The product-owned
 `inferlab-measurement-sdk` remains internal to the installed measurement

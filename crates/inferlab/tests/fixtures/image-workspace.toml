@@ -1,10 +1,10 @@
 schema_version = 2
 
-[models.dsv4]
-served_name = "dsv4"
+[models.deepseek-v4-flash]
+served_name = "deepseek-v4-flash"
 
-[models.dsv4b]
-served_name = "dsv4b"
+[models.deepseek-v4-pro]
+served_name = "deepseek-v4-pro"
 
 [stacks.vllm]
 integration = "vllm"
@@ -32,7 +32,7 @@ source_paths = ["vendor/flashinfer"]
 
 [servers.dsv4-qualify]
 stack = "vllm"
-model = "dsv4"
+model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
@@ -43,7 +43,7 @@ default_case = "base"
 
 [servers.dsv4-routed]
 stack = "vllm"
-model = "dsv4"
+model = "deepseek-v4-flash"
 topology = "single"
 gateway_backend = "fixture-gateway"
 readiness_timeout_seconds = 60
@@ -55,7 +55,7 @@ default_case = "base"
 
 [servers.dsv4b-qualify]
 stack = "vllm"
-model = "dsv4b"
+model = "deepseek-v4-pro"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
@@ -66,7 +66,7 @@ default_case = "base"
 
 [servers.dsv4-qualify-alt-env]
 stack = "vllm-alt"
-model = "dsv4"
+model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
@@ -77,7 +77,7 @@ default_case = "base"
 
 [servers.dsv4-qualify-alt-sources]
 stack = "flashinfer-only"
-model = "dsv4"
+model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
@@ -88,7 +88,7 @@ default_case = "base"
 
 [servers.dsv4-pair]
 stack = "vllm"
-model = "dsv4"
+model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "pair"
@@ -112,7 +112,7 @@ prompts_per_concurrency = 1
 request_rates = [1.0]
 request_count = 4
 burstiness = 1.0
-reset_prefix_cache = false
+cache = { start = "uncontrolled" }
 timeout_seconds = 60
 
 [workload_suites.smoke-only]

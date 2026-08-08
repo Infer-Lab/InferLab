@@ -57,6 +57,7 @@ class EvalCheckpointPublisher:
 
 def lm_eval_command(
     request: EvalClientRequest,
+    definition: EvalDefinitionInputLmEval,
     output_dir: Path,
     resolution: JsonObject,
     request_timeout_seconds: float | None = None,
@@ -65,10 +66,7 @@ def lm_eval_command(
     request_evidence_path: Path | None = None,
     seed: int | None = None,
 ) -> list[str]:
-    definition = request.definition.root
-    if not isinstance(definition, EvalDefinitionInputLmEval):
-        raise TypeError("lm_eval_command requires an lm-eval definition")
-    target = resolve_lm_eval_target(request, resolution)
+    target = resolve_lm_eval_target(request, definition, resolution)
     request_seed = definition.seed if seed is None else seed
     model_args: dict[str, object] = {
         "model": request.model.served_name,
@@ -149,6 +147,8 @@ def write_inference_request_config(
                 "payload_evidence_path": str(payload_evidence_path),
                 "native_model": target.model,
                 "apply_chat_template": target.apply_chat_template,
+                "prompt_authority": target.prompt_authority,
+                "declared_prompt_authority": target.declared_prompt_authority,
                 "tokenized_requests": False,
             },
             indent=2,
@@ -617,6 +617,7 @@ def run_repeated_lm_eval(
             process_path = output_dir / "lm-eval-process.json"
             command = lm_eval_command(
                 request,
+                definition,
                 output_dir,
                 resolution,
                 deadline.remaining(),

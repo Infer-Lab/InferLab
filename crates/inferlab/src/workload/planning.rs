@@ -110,6 +110,10 @@ pub(crate) fn resolve_manual_bench(
                         port_name: metrics.port_name.clone(),
                         url: metrics.url.clone(),
                     }),
+                prompt_cache_read_zero_representation: recorded
+                    .server
+                    .endpoint
+                    .prompt_cache_read_zero_representation,
             },
             model: MeasurementModel {
                 locator: model_locator,
@@ -127,6 +131,16 @@ pub(crate) fn resolve_manual_bench(
             command_env: &command_env,
             command_cwd: &root.join(".inferlab"),
         };
+    let bench = build_bench_plan(
+        bench_id,
+        declared_definition,
+        definition,
+        override_plan,
+        &context,
+        &toolchain,
+    )?;
+    let data_assets =
+        super::data_asset::plan_measurement_data_assets(root, &[], std::slice::from_ref(&bench))?;
     Ok(ManualBenchPlan {
         invoking_inferlab_version: env!("CARGO_PKG_VERSION").to_owned(),
         target: ManualBenchTarget {
@@ -136,14 +150,8 @@ pub(crate) fn resolve_manual_bench(
         },
         measurement_workspace: snapshot.clone(),
         overrides: overrides.to_vec(),
-        bench: build_bench_plan(
-            bench_id,
-            declared_definition,
-            definition,
-            override_plan,
-            &context,
-            &toolchain,
-        )?,
+        bench,
+        data_assets,
     })
 }
 
@@ -178,37 +186,42 @@ pub(crate) fn resolve_measurements(
     } else {
         Some(toolchain::require_bench()?)
     };
+    let evals = suite
+        .evals
+        .iter()
+        .map(|id| {
+            resolve_eval(
+                id,
+                evals,
+                &recipe_measurement_overrides("evals", id, overrides),
+                context,
+                eval_toolchain.as_ref(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let benches = suite
+        .benches
+        .iter()
+        .map(|id| {
+            resolve_bench(
+                id,
+                benches,
+                &recipe_measurement_overrides("benches", id, overrides),
+                context,
+                bench_toolchain
+                    .as_ref()
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: "Bench toolchain was not resolved".to_owned(),
+                    })?,
+            )
+        })
+        .collect::<Result<Vec<_>, InferlabError>>()?;
+    let data_assets =
+        super::data_asset::plan_measurement_data_assets(context.workspace_root, &evals, &benches)?;
     Ok(MeasurementPlan {
         gate: suite.gate.clone(),
-        evals: suite
-            .evals
-            .iter()
-            .map(|id| {
-                resolve_eval(
-                    id,
-                    evals,
-                    &recipe_measurement_overrides("evals", id, overrides),
-                    context,
-                    eval_toolchain.as_ref(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        benches: suite
-            .benches
-            .iter()
-            .map(|id| {
-                resolve_bench(
-                    id,
-                    benches,
-                    &recipe_measurement_overrides("benches", id, overrides),
-                    context,
-                    bench_toolchain
-                        .as_ref()
-                        .ok_or_else(|| InferlabError::InvalidConfig {
-                            message: "Bench toolchain was not resolved".to_owned(),
-                        })?,
-                )
-            })
-            .collect::<Result<Vec<_>, InferlabError>>()?,
+        evals,
+        benches,
+        data_assets,
     })
 }

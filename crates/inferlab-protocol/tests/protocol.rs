@@ -2,9 +2,10 @@ use inferlab_protocol::{
     AdapterRequest, AdapterResponse, AdapterResult, BenchClientRequest, BenchClientResult,
     BenchRequestSourceInput, EvalClientRequest, EvalClientResult, EvalDefinitionInput,
     EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput,
-    MEASUREMENT_SCHEMA_ID, PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe,
-    RenderInputDeclaration, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
-    measurement_schema, protocol_schema,
+    MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
+    ProtocolVersion, ReadinessProbe, RenderInputDeclaration, SettingValue, SuppliedRenderInput,
+    TargetEndpointScheme, measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -84,6 +85,14 @@ const VALID_BENCH_CLIENT_RESULT_AGENTIC: &str = include_str!(concat!(
 const VALID_BENCH_CLIENT_RESULT_AGENTIC_SOURCE_FAILED: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/bench-client-result-agentic-source-failed.json"
+));
+const VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/data-asset-preparation-request-eval.json"
+));
+const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/data-asset-preparation-result-opaque.json"
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -545,6 +554,36 @@ fn invalid_fixtures_are_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn data_asset_preparation_fixtures_preserve_opaque_readiness() -> Result<(), Box<dyn Error>> {
+    let request = serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
+        VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL,
+    )?;
+    assert_eq!(request.protocol_version, ProtocolVersion::V7);
+    let result = serde_json::from_str::<MeasurementDataAssetPreparationResult>(
+        VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE,
+    )?;
+    let selection = result
+        .effective_selection
+        .as_ref()
+        .ok_or("data-asset fixture omitted effective selection")?;
+    assert!(matches!(
+        selection,
+        inferlab_protocol::MeasurementDataAssetEffectiveSelection::Eval {
+            data_files: Some(files),
+            ..
+        } if files.0.get("test").is_some_and(|paths| paths.len() == 2)
+    ));
+    assert!(matches!(
+        result.readiness,
+        Some(MeasurementDataAssetReadiness::Opaque {
+            deferred_source_access: true,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[test]
 fn generated_schemas_are_current_versioned_and_disjoint() -> Result<(), Box<dyn Error>> {
     let mut adapter_rendered = serde_json::to_string_pretty(&protocol_schema())?;
     adapter_rendered.push('\n');
@@ -587,6 +626,8 @@ fn generated_schemas_are_current_versioned_and_disjoint() -> Result<(), Box<dyn 
         "BenchClientResult",
         "EvalClientRequest",
         "EvalClientResult",
+        "MeasurementDataAssetPreparationRequest",
+        "MeasurementDataAssetPreparationResult",
     ] {
         assert!(
             measurement_definitions.contains_key(measurement_type),

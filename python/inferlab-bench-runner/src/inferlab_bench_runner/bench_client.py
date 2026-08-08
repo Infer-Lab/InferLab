@@ -14,9 +14,14 @@ from inferlab_measurement_sdk import (
     CaseBudgetExpired,
     CaseDeadline,
     ClientStatus,
+    MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetPreparationResult,
+    MeasurementDataAssetRemoteMetadataOutcome,
+    MeasurementDataAssetSourceBytesOutcome,
     parse_args,
 )
 
+from inferlab_bench_runner.data_asset import prepare_agentic_data_asset
 from inferlab_bench_runner.execution import execute
 from inferlab_bench_runner.population import prepare_population
 from inferlab_bench_runner.result_metrics import NORMALIZATION_SCHEMA
@@ -41,6 +46,11 @@ def handle_bench_execution(input_text: str) -> BenchClientResult:
     return result
 
 
+def handle_data_asset_preparation(input_text: str) -> MeasurementDataAssetPreparationResult:
+    request = MeasurementDataAssetPreparationRequest.model_validate_json(input_text)
+    return prepare_agentic_data_asset(request)
+
+
 def main() -> int:
     args = parse_args()
     if args.handshake:
@@ -56,16 +66,31 @@ def main() -> int:
     if args.input is None or args.output is None:
         raise ValueError("--input and --output are required")
     output = Path(args.output)
-    result: BenchPopulationPreparationResult | BenchClientResult
+    result: (
+        BenchPopulationPreparationResult | BenchClientResult | MeasurementDataAssetPreparationResult
+    )
     try:
         input_text = Path(args.input).read_text(encoding="utf-8")
-        if args.prepare:
+        if args.prepare_source:
+            result = handle_data_asset_preparation(input_text)
+        elif args.prepare:
             result = handle_population_preparation(input_text)
         else:
             result = handle_bench_execution(input_text)
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
-        if args.prepare:
+        if args.prepare_source:
+            result = MeasurementDataAssetPreparationResult(
+                schema_version=1,
+                status=ClientStatus.failed,
+                effective_selection=None,
+                readiness=None,
+                cache_stores=[],
+                remote_metadata=MeasurementDataAssetRemoteMetadataOutcome.unavailable,
+                source_bytes=MeasurementDataAssetSourceBytesOutcome.unavailable,
+                error=str(error),
+            )
+        elif args.prepare:
             result = BenchPopulationPreparationResult(
                 schema_version=1,
                 status=ClientStatus.failed,

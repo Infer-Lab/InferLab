@@ -29,6 +29,7 @@ from inferlab_adapter_sdk import (
     PlanServeInput,
     PlanServeResult,
     ProcessSpec,
+    PromptCacheReadZeroRepresentation,
     ReadinessProbe,
     ReadinessProbeHttp,
     ReadinessProbeProcessAlive,
@@ -55,7 +56,7 @@ from inferlab_adapter_sdk import (
     split_serve_allocations,
     validate_settings,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _ADAPTER_DISTRIBUTION = "inferlab-integration-specialized-engine"
 _GATEWAY_BACKEND = "smg"
@@ -63,13 +64,51 @@ _GATEWAY_IMPLEMENTATION = "tokenspeed-smg"
 _DEFERRED_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
 
 
+class PrefixCacheRank(BaseModel):
+    """Explicit host prefix-cache placement for one tensor-parallel rank.
+
+    Pairing bytes with their NUMA node in one entry keeps the worker's two
+    positionally matched argument lists from drifting apart in configuration.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpu_bytes: Annotated[int, Field(ge=1)]
+    numa_node: Annotated[int, Field(ge=0)]
+
+
 class EngineContractSettings(BaseModel):
-    """Settings shared by every implementation of the token Engine contract."""
+    """Settings shared by every implementation of the token Engine contract.
+
+    An omitted optional setting renders no worker argument, so the worker's own
+    default governs and InferLab does not restate it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     default_max_output_tokens: Annotated[int, Field(ge=1)] = 16
     max_num_batched_tokens: Annotated[int, Field(ge=1)] = 12_288
+    gpu_memory_utilization_percent: Annotated[int, Field(ge=1, le=100)] | None = None
+    workspace_reserve_mib: Annotated[int, Field(ge=0)] | None = None
+    prefix_cache_gpu_entries: Annotated[int, Field(ge=1)] | None = None
+    prefix_cache_host_memory_percent: Annotated[int, Field(ge=1, le=100)] | None = None
+    prefix_cache_ranks: list[PrefixCacheRank] | None = None
+
+    @model_validator(mode="after")
+    def _one_host_prefix_cache_authority(self) -> "EngineContractSettings":
+        if self.prefix_cache_ranks is None:
+            return self
+        if not self.prefix_cache_ranks:
+            raise ValueError("prefix_cache_ranks must declare at least one rank when present")
+        if self.prefix_cache_host_memory_percent is not None:
+            # The worker ignores the percent once an explicit list sizes the
+            # host cache, so accepting both would record a value that did not
+            # participate in the capacity it appears to describe.
+            raise ValueError(
+                "prefix_cache_host_memory_percent does not size the host cache when "
+                "prefix_cache_ranks is declared; declare exactly one host sizing authority"
+            )
+        return self
 
 
 def _identity() -> IntegrationIdentity:
@@ -157,6 +196,9 @@ def _public_endpoint() -> EndpointRequirement:
         chat_completions_path="/v1/chat/completions",
         server_metrics=ServerMetricsEndpointRequirement(path="/metrics", port="prometheus"),
         prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
+        # The worker protocol carries an unconditional cached-token count, so a
+        # zero cache read is reported rather than omitted.
+        prompt_cache_read_zero_representation=PromptCacheReadZeroRepresentation.explicit,
     )
 
 
@@ -351,28 +393,46 @@ def _render_engine(
         allocation.effective_parallelism,
         AdapterErrorCode.invalid_request,
     )
-    return rendered_model_rank(
-        allocation,
-        ProcessSpec(
-            argv=[
-                "inferlab-token-engine",
-                "smg-worker",
-                "--listen",
-                f"{endpoint.host}:{endpoint.port}",
-                "--model",
-                allocation.model_locator,
-                "--served-model-name",
-                input.model.served_name,
-                "--tensor-parallel-size",
-                str(tensor_parallel_size),
-                "--default-max-output-tokens",
-                str(settings.default_max_output_tokens),
-                "--max-num-batched-tokens",
-                str(settings.max_num_batched_tokens),
-            ],
-            env={},
-        ),
-    )
+    if (
+        settings.prefix_cache_ranks is not None
+        and len(settings.prefix_cache_ranks) != tensor_parallel_size
+    ):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"prefix_cache_ranks declares {len(settings.prefix_cache_ranks)} ranks "
+            f"but the resolved tensor-parallel size is {tensor_parallel_size}",
+        )
+    argv = [
+        "inferlab-token-engine",
+        "smg-worker",
+        "--listen",
+        f"{endpoint.host}:{endpoint.port}",
+        "--model",
+        allocation.model_locator,
+        "--served-model-name",
+        input.model.served_name,
+        "--tensor-parallel-size",
+        str(tensor_parallel_size),
+        "--default-max-output-tokens",
+        str(settings.default_max_output_tokens),
+        "--max-num-batched-tokens",
+        str(settings.max_num_batched_tokens),
+    ]
+    for option, value in (
+        ("--gpu-memory-utilization-percent", settings.gpu_memory_utilization_percent),
+        ("--workspace-reserve-mib", settings.workspace_reserve_mib),
+        ("--prefix-cache-gpu-entries", settings.prefix_cache_gpu_entries),
+        ("--prefix-cache-host-memory-percent", settings.prefix_cache_host_memory_percent),
+    ):
+        if value is not None:
+            argv.extend([option, str(value)])
+    # The worker pairs these two lists by occurrence order, so each is emitted
+    # once per rank in rank order.
+    for rank in settings.prefix_cache_ranks or ():
+        argv.extend(["--prefix-cache-cpu-bytes-per-rank", str(rank.cpu_bytes)])
+    for rank in settings.prefix_cache_ranks or ():
+        argv.extend(["--prefix-cache-numa-node-per-rank", str(rank.numa_node)])
+    return rendered_model_rank(allocation, ProcessSpec(argv=argv, env={}))
 
 
 def _render_gateway(

@@ -2,7 +2,7 @@ use super::app::View;
 use super::views::{definition_display, record_display, unavailable_entry, workspace_display};
 use super::{
     Authority, DisplayEntry, EntryKind, JournalView, OverviewSection, OverviewSummary, Snapshot,
-    State, search,
+    State, metrics, search,
 };
 use std::collections::HashMap;
 
@@ -87,6 +87,7 @@ pub(super) struct Presentation {
     records: ViewIndex,
     workspace: ViewIndex,
     global: ViewIndex,
+    record_metrics: HashMap<String, metrics::RecordMetrics>,
     overview_summary: OverviewSummary,
 }
 
@@ -99,6 +100,12 @@ impl Presentation {
             records: ViewIndex::default(),
             workspace: ViewIndex::default(),
             global: ViewIndex::default(),
+            record_metrics: snapshot
+                .records
+                .iter()
+                .filter_map(metrics::presentation)
+                .map(|record| (record.record_key.clone(), record))
+                .collect(),
             overview_summary: OverviewSummary::default(),
         };
         let operation_error = snapshot.operations_error.as_deref().map(|reason| {
@@ -398,6 +405,10 @@ impl Presentation {
 
     pub(super) fn overview_summary(&self) -> OverviewSummary {
         self.overview_summary
+    }
+
+    pub(super) fn record_metrics(&self, record_key: &str) -> Option<&metrics::RecordMetrics> {
+        self.record_metrics.get(record_key)
     }
 
     fn normalize_search_fields(entry: &mut DisplayEntry) {

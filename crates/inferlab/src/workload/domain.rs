@@ -1,7 +1,7 @@
 use crate::bench_metric::BenchMetric;
 use crate::workspace::{
-    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,
-    BenchTokenSelector, JsonValue, RequestSlo,
+    BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
+    BenchSharedSystemContent, BenchTokenSelector, JsonValue, RequestSlo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -21,6 +21,8 @@ pub(crate) struct WorkloadEndpoint {
     pub completions_path: String,
     pub chat_completions_path: String,
     pub server_metrics: Option<WorkloadServerMetricsEndpoint>,
+    pub prompt_cache_read_zero_representation:
+        Option<inferlab_protocol::PromptCacheReadZeroRepresentation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -100,8 +102,8 @@ pub(crate) struct BenchAgenticCatalog {
     pub revision: String,
     pub filename: String,
     pub sha256: String,
-    pub cache_path: PathBuf,
-    pub cache_state: DatasetCacheState,
+    pub cache_path: Option<PathBuf>,
+    pub cache_state: Option<DatasetCacheState>,
     pub trace_count: u32,
     pub approximate_bytes: u64,
     pub license: String,
@@ -302,7 +304,7 @@ pub(crate) struct ResolvedBenchDefinition {
     pub request_body: BTreeMap<String, JsonValue>,
     pub request_slo: Option<RequestSlo>,
     pub timeout_seconds: u64,
-    pub reset_prefix_cache: bool,
+    pub cache_start: BenchCacheStart,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -312,6 +314,7 @@ pub(crate) struct BenchPopulation {
     pub sha256: String,
     pub entries: u32,
     pub tpot_applicable: bool,
+    pub prefix_conditioning: Option<inferlab_protocol::BenchPrefixConditioningInput>,
     pub session_templates: Vec<BenchSessionTemplate>,
 }
 

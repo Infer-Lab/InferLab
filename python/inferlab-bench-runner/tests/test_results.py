@@ -2,21 +2,24 @@ import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from inferlab_bench_runner import result_metrics
 from inferlab_bench_runner.aiperf import (
     run_aiperf,
 )
 from inferlab_bench_runner.bench_client import main
 from inferlab_bench_runner.execution import execute
-from inferlab_bench_runner.result_metrics import normalize_summary
+from inferlab_bench_runner.result_metrics import normalize_summary, prompt_cache_evidence
 from inferlab_bench_runner.result_policy import warmup_counts
 from inferlab_bench_runner.result_records import request_counts
 from inferlab_measurement_sdk import (
     BenchClientResult,
     CaseDeadline,
     ClientStatus,
+    PromptCacheReadZeroRepresentation,
 )
 
 from .support import (
@@ -108,6 +111,132 @@ def test_normalization_preserves_optional_weighted_cache_ratio() -> None:
     summary["overall_usage_prompt_cache_read_pct"] = {"unit": "%", "avg": 101.0}
     with pytest.raises(ValueError, match="overall_usage_prompt_cache_read_pct"):
         normalize_summary(summary, tpot_applicable=True)
+
+
+def test_required_cache_evidence_uses_backend_usage_and_weighted_token_ratio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "metadata": {
+                        "benchmark_phase": "profiling",
+                        "session_num": request_id,
+                        "was_cancelled": False,
+                    },
+                    "error": None,
+                    "metrics": {
+                        "usage_prompt_tokens": {"value": prompt},
+                        "usage_prompt_cache_read_tokens": {"value": cache},
+                    },
+                }
+            )
+            for request_id, prompt, cache in [(4, 10, 6), (9, 20, 8)]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    observed_distributions: list[tuple[str, list[int]]] = []
+
+    def native_distribution(family: str, values: list[int]) -> SimpleNamespace:
+        observed_distributions.append((family, values))
+        if values == [6, 8]:
+            return SimpleNamespace(
+                avg=7.0, min=6.0, max=8.0, std=1.0, p50=7.0, p90=7.8, p95=7.9, p99=7.98
+            )
+        return SimpleNamespace(
+            avg=8.0, min=4.0, max=12.0, std=4.0, p50=8.0, p90=11.2, p95=11.6, p99=11.92
+        )
+
+    monkeypatch.setattr(result_metrics, "_aiperf_metric_result", native_distribution)
+    observations, metrics, error = prompt_cache_evidence(
+        records, required=True, zero_representation=None
+    )
+
+    assert error is None
+    assert [item.request_id for item in observations] == [4, 9]
+    assert [item.uncached_prompt_tokens for item in observations] == [4, 12]
+    assert metrics["mean_prompt_cache_read_tokens"] == 7.0
+    assert metrics["p90_prompt_cache_read_tokens"] == pytest.approx(7.8)
+    assert metrics["prompt_cache_read_ratio"] == pytest.approx(14 / 30)
+    assert observed_distributions == [
+        ("prompt_cache_read_tokens", [6, 8]),
+        ("uncached_prompt_tokens", [4, 12]),
+    ]
+
+
+def test_required_cache_evidence_rejects_missing_backend_cache_usage(tmp_path: Path) -> None:
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "benchmark_phase": "profiling",
+                    "session_num": 1,
+                    "was_cancelled": False,
+                },
+                "error": None,
+                "metrics": {"usage_prompt_tokens": {"value": 10}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _, _, error = prompt_cache_evidence(records, required=True, zero_representation=None)
+
+    assert error is not None
+    assert "omitted backend cache usage" in error
+
+
+def test_declared_omitted_zero_cache_usage_normalizes_to_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "benchmark_phase": "profiling",
+                    "session_num": 3,
+                    "was_cancelled": False,
+                },
+                "error": None,
+                "metrics": {"usage_prompt_tokens": {"value": 10}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        result_metrics,
+        "_aiperf_metric_result",
+        lambda _family, values: SimpleNamespace(
+            avg=float(values[0]),
+            min=float(values[0]),
+            max=float(values[0]),
+            std=0.0,
+            p50=float(values[0]),
+            p90=float(values[0]),
+            p95=float(values[0]),
+            p99=float(values[0]),
+        ),
+    )
+
+    observations, metrics, error = prompt_cache_evidence(
+        records,
+        required=True,
+        zero_representation=PromptCacheReadZeroRepresentation.omitted,
+    )
+
+    assert error is None
+    assert observations[0].cache_read_tokens == 0
+    assert observations[0].uncached_prompt_tokens == 10
+    assert metrics["prompt_cache_read_ratio"] == 0.0
 
 
 def test_invalid_summary_preserves_native_failure_evidence(

@@ -41,6 +41,7 @@ lint-python = "ruff check python crates/inferlab/tests/fixtures/bin scripts"
 check-fixture-shell = "sh -n crates/inferlab/tests/fixtures/bin/*.sh"
 typecheck-python = "mypy python scripts"
 test-python = "pytest"
+test-eval-data-asset-semantics = "PYTHONNOUSERSITE=1 HF_DATASETS_OFFLINE=1 PYTHONPATH=python/inferlab-eval-runner/src:python/inferlab-measurement-sdk/src pixi run -m crates/inferlab/resources/eval-toolchain/pixi.toml -e eval python scripts/tests/eval_data_asset_semantics.py"
 test-release-versioning = "bash scripts/tests/release-versioning.sh && python -m unittest scripts/tests/test_product_release_assets.py && bash scripts/tests/product-release-finalization.sh"
 build-python = "scripts/build-python-packages.sh"
 verify-python = { depends-on = ["protocol-check", "format-python-check", "lint-python", "check-fixture-shell", "typecheck-python", "test-python", "test-release-versioning", "build-python"] }

@@ -76,6 +76,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             length = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(length))
+            if request.get("prompt") == "canonical prefix":
+                conditioning_request = os.environ.get("FIXTURE_CONDITIONING_REQUEST")
+                if conditioning_request:
+                    with open(conditioning_request, "w") as handle:
+                        json.dump(request, handle)
+                if os.environ.get("FIXTURE_RECORD_CACHE_PREPARATION") == "1":
+                    record_capture_event("cache_conditioning")
             marker = os.environ.get("FIXTURE_SMOKE_MARKER")
             if marker:
                 with open(f"{marker}.tmp", "w") as handle:
@@ -88,6 +95,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "model": request["model"],
                 "choices": [{"index": 0, "text": " San Francisco", "finish_reason": "stop"}],
             }
+            if request.get("prompt") == "canonical prefix":
+                response["usage"] = {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 1,
+                    "total_tokens": 9,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }
             if "kv_transfer_params" in request:
                 response["kv_transfer_params"] = request["kv_transfer_params"]
             body = json.dumps(response).encode()
@@ -135,6 +149,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         )
         if self.path == "/reset_prefix_cache":
             status = int(os.environ.get("FIXTURE_RESET_STATUS", "200"))
+            if os.environ.get("FIXTURE_RECORD_CACHE_PREPARATION") == "1":
+                record_capture_event("cache_reset")
         self.send_response(status)
         self.end_headers()
 

@@ -22,7 +22,11 @@ use crate::server;
 use crate::workload::record::{
     WorkloadKind, WorkloadRecord, WorkloadRecordSession, WorkloadStatus,
 };
-use crate::workload::{BenchExecutionPlan, BenchPlan, ResolvedWorkloadPlan, WorkloadServerAccess};
+use crate::workload::{
+    BenchExecutionPlan, BenchPlan, ResolvedWorkloadPlan, WorkloadDataAssetEvidence,
+    WorkloadServerAccess, prepare_data_assets,
+};
+use inferlab_runtime::operation_bound::{OperationBound, OperationTerminalCause};
 use std::path::Path;
 
 pub(crate) fn run_bench(
@@ -32,17 +36,27 @@ pub(crate) fn run_bench(
     server_access: WorkloadServerAccess<'_>,
     record_evidence: ResolvedWorkloadPlan,
     progress: &Progress,
+    data_assets: WorkloadDataAssetEvidence,
 ) -> Result<WorkloadRecord, InferlabError> {
     // Earlier runs' unclean exits leave recorded client groups behind;
     // terminate identity-matching survivors before this run launches its
     // own clients ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     sweep_stale_client_groups(root);
+    let mut standalone_attempts = match &data_assets {
+        WorkloadDataAssetEvidence::Standalone { attempts, .. } => attempts.clone(),
+        WorkloadDataAssetEvidence::Recipe { .. } | WorkloadDataAssetEvidence::None => Vec::new(),
+    };
+    let data_asset_plans = match &record_evidence {
+        ResolvedWorkloadPlan::ManualBench(manual) => manual.data_assets.clone(),
+        ResolvedWorkloadPlan::Bench(_) | ResolvedWorkloadPlan::Eval(_) => Vec::new(),
+    };
     let mut session = WorkloadRecordSession::begin(
         root,
         record_id,
         WorkloadKind::Bench,
         &plan.id,
         record_evidence,
+        data_assets,
     )?;
     progress.phase(Phase::named("record created").record(
         record_id,
@@ -54,6 +68,39 @@ pub(crate) fn run_bench(
             execute_bench(root, &server_record_id, plan, &mut session, progress)?
         }
         WorkloadServerAccess::ManagedServer { record_id } => {
+            if !standalone_attempts.is_empty() {
+                let preparation_bound = OperationBound::unbounded();
+                let owner_record_id = session.record_mut().id.clone();
+                let preparation = prepare_data_assets(
+                    root,
+                    &owner_record_id,
+                    &data_asset_plans,
+                    &mut standalone_attempts,
+                    progress,
+                    |updates| {
+                        for update in updates {
+                            session.update_standalone_data_asset_attempt(update)?;
+                        }
+                        Ok(())
+                    },
+                );
+                if let Err(error) = preparation {
+                    session.set_standalone_data_asset_timing(preparation_bound.timing(
+                        "before_first_source_preparation_effect",
+                        if inferlab_runtime::interrupt::received() {
+                            OperationTerminalCause::Interrupted
+                        } else {
+                            OperationTerminalCause::Failed
+                        },
+                    ))?;
+                    finish_failed_bench(&mut session, error.to_string())?;
+                    return Ok(session.into_record());
+                }
+                session.set_standalone_data_asset_timing(preparation_bound.timing(
+                    "before_first_source_preparation_effect",
+                    OperationTerminalCause::Succeeded,
+                ))?;
+            }
             let operation = match server::acquire_operation(root, record_id) {
                 Ok(operation) => operation,
                 Err(error) => {
@@ -145,6 +192,7 @@ fn execute_bench(
         }
         BenchExecutionPlan::Adaptive {
             policy,
+            preparation_order,
             initial_request_rates,
             max_search_steps,
             min_rate_resolution,
@@ -153,6 +201,7 @@ fn execute_bench(
         } => run_adaptive(
             &plan,
             policy,
+            preparation_order,
             initial_request_rates,
             *max_search_steps,
             *min_rate_resolution,
@@ -212,20 +261,18 @@ fn finish_failed_bench(
     session.finish(WorkloadStatus::Failed)
 }
 
-pub(crate) fn skip<T>(
+pub(crate) fn skip(
     root: &Path,
     record_id: &str,
-    kind: WorkloadKind,
-    definition_id: &str,
-    plan: &T,
+    resolved: ResolvedWorkloadPlan,
     reason: &str,
     progress: &Progress,
-) -> Result<WorkloadRecord, InferlabError>
-where
-    T: Clone + Into<ResolvedWorkloadPlan>,
-{
-    let resolved = plan.clone().into();
-    let mut session = WorkloadRecordSession::begin(root, record_id, kind, definition_id, resolved)?;
+    data_assets: WorkloadDataAssetEvidence,
+) -> Result<WorkloadRecord, InferlabError> {
+    let kind = resolved.kind();
+    let definition_id = resolved.definition_id().to_owned();
+    let mut session =
+        WorkloadRecordSession::begin(root, record_id, kind, &definition_id, resolved, data_assets)?;
     progress.phase(Phase::named("record created").record(
         record_id,
         root.join(crate::record::RECORDS_DIR).join(record_id),

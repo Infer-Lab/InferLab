@@ -9,12 +9,14 @@ use super::client::{
     sweep_stale_client_groups, wait_for_interrupt,
 };
 use super::{
-    AcceptedClient, AdjudicatedClient, ClientCasePaths, ClientRun, EvalCaseEvidence,
-    EvalCaseRecord, EvalExecutionPlan, EvalPlan, ResolvedWorkloadPlan, WorkloadEndpointProtocol,
-    WorkloadKind, WorkloadRecord, WorkloadRecordSession, WorkloadStatus, write_json,
+    AcceptedClient, AdjudicatedClient, ClientCasePaths, ClientRun,
+    DataAssetMaterializationEvidence, EvalCaseEvidence, EvalCaseRecord, EvalExecutionPlan,
+    EvalPlan, ResolvedWorkloadPlan, WorkloadEndpointProtocol, WorkloadKind, WorkloadRecord,
+    WorkloadRecordSession, WorkloadStatus, write_json,
 };
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
+use crate::workload::WorkloadDataAssetEvidence;
 use crate::workload::wire;
 use crate::workspace::EvalDefinition;
 use inferlab_protocol::{
@@ -75,14 +77,21 @@ pub(crate) fn run_eval(
     plan: &EvalPlan,
     server_record_id: &str,
     progress: &Progress,
+    data_assets: WorkloadDataAssetEvidence,
 ) -> Result<WorkloadRecord, InferlabError> {
     // Earlier runs' unclean exits leave recorded client groups behind;
     // terminate identity-matching survivors before this run launches its
     // own clients ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     sweep_stale_client_groups(root);
     let resolved = ResolvedWorkloadPlan::Eval(Box::new(plan.clone()));
-    let mut session =
-        WorkloadRecordSession::begin(root, record_id, WorkloadKind::Eval, &plan.id, resolved)?;
+    let mut session = WorkloadRecordSession::begin(
+        root,
+        record_id,
+        WorkloadKind::Eval,
+        &plan.id,
+        resolved,
+        data_assets,
+    )?;
     progress.phase(Phase::named("record created").record(
         record_id,
         root.join(crate::record::RECORDS_DIR).join(record_id),
@@ -202,6 +211,12 @@ pub(super) fn execute_eval(
         process: accepted.run.process,
         timing: accepted.timing,
         evidence: EvalCaseEvidence {
+            preparation_attempt_id: session.data_asset_attempt_id().map(str::to_owned),
+            data_asset_materialization: eval_data_asset_materialization(
+                plan,
+                session,
+                native_started,
+            ),
             metrics: result.as_ref().map(|result| result.metrics.clone()),
             normalized_metrics: result
                 .as_ref()
@@ -238,6 +253,42 @@ pub(super) fn execute_eval(
     Ok(case_passed && capture_succeeded)
 }
 
+fn eval_data_asset_materialization(
+    plan: &EvalPlan,
+    session: &WorkloadRecordSession,
+    native_started: bool,
+) -> Option<DataAssetMaterializationEvidence> {
+    if !native_started {
+        return None;
+    }
+    let attempt_id = session.data_asset_attempt_id()?;
+    let EvalExecutionPlan::LmEval { toolchain, .. } = &plan.execution else {
+        return None;
+    };
+    let crate::workspace::EvalDefinition::LmEval { task, .. } = &plan.definition else {
+        return None;
+    };
+    let task_identity = match task {
+        crate::workspace::EvalTaskSource::BuiltIn(task) => task.clone(),
+        crate::workspace::EvalTaskSource::Bundled { bundled } => bundled.clone(),
+        crate::workspace::EvalTaskSource::WorkspaceYaml { yaml } => {
+            yaml.to_string_lossy().into_owned()
+        }
+    };
+    Some(DataAssetMaterializationEvidence {
+        preparation_attempt_id: attempt_id.to_owned(),
+        authority: "lm_eval_case".to_owned(),
+        materialization_identity: format!(
+            "lm-eval:{}:{}:{}",
+            toolchain.lm_eval_version, toolchain.lock_sha256, task_identity
+        ),
+        dataset_fingerprint: None,
+        unavailable_reason: Some(
+            "the pinned lm-eval result interface did not report a dataset fingerprint".to_owned(),
+        ),
+    })
+}
+
 pub(super) fn run_eval_operation(
     workspace_root: &Path,
     plan: &EvalPlan,
@@ -259,6 +310,12 @@ pub(super) fn run_eval_operation(
                 endpoint: wire::endpoint_input(&plan.endpoint),
                 model: wire::model_input(&plan.model),
                 definition: wire::eval_definition_input(&plan.definition, bundled_task.as_deref())?,
+                prepared_source: session.prepared_eval_source().map(|source| {
+                    inferlab_protocol::EvalPreparedSourceBinding {
+                        workspace_root: source.workspace_root,
+                        task_path: source.task_path,
+                    }
+                }),
                 case_budget_seconds: remaining_seconds(bound),
                 artifact_dir: paths.artifact_dir.clone(),
             };

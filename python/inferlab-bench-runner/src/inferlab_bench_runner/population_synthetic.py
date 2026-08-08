@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    BenchCacheStartInput,
     BenchInclusiveUniformInput,
     BenchPopulationInput,
     BenchPopulationPreparationRequest,
     BenchPopulationPreparationResult,
+    BenchPrefixConditioningInput,
     BenchPrefixGeometrySummary,
     BenchPrefixSharingInput1,
     BenchPrefixSharingInput2,
@@ -807,6 +809,27 @@ def write_synthetic_population(
             "canonical-system-content",
         )
 
+    prefix_conditioning: BenchPrefixConditioningInput | None = None
+    if (
+        request.cache_start is BenchCacheStartInput.primed
+        and maximum_prefix_tokens is not None
+        and maximum_prefix_tokens > 0
+    ):
+        if canonical_ids is None:
+            raise ValueError("canonical prefix token stream was not frozen")
+        canonical_prefix = _decode_exact(
+            tokenizer,
+            canonical_ids[:maximum_prefix_tokens],
+            "canonical prefix conditioning prompt",
+        )
+        conditioning_path = artifact_dir / "canonical-prefix.txt"
+        conditioning_path.write_text(canonical_prefix, encoding="utf-8")
+        prefix_conditioning = BenchPrefixConditioningInput(
+            path=str(conditioning_path),
+            sha256=hashlib.sha256(canonical_prefix.encode()).hexdigest(),
+            prompt_tokens=maximum_prefix_tokens,
+        )
+
     pre_template_content_counts: list[int] = []
     with population_path.open("wb") as population_file, evidence_path.open("wb") as evidence_file:
         for index, (input_tokens, output_tokens) in enumerate(selected_shapes):
@@ -1007,6 +1030,7 @@ def write_synthetic_population(
             if prefix_counts
             else None
         ),
+        prefix_conditioning=prefix_conditioning,
         shared_system_content=(
             BenchSharedSystemContentSummary(
                 system_content_tokens=count_summary(system_counts),

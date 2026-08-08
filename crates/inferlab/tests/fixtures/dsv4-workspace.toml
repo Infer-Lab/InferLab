@@ -1,7 +1,7 @@
 schema_version = 2
 
-[models.dsv4]
-served_name = "dsv4"
+[models.deepseek-v4-flash]
+served_name = "deepseek-v4-flash"
 
 [stacks.vllm]
 integration = "vllm"
@@ -10,7 +10,7 @@ source_paths = ["vendor/vllm", "vendor/flashinfer"]
 
 [servers.dsv4-qualify]
 stack = "vllm"
-model = "dsv4"
+model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 900
 default_case = "tp2"
@@ -46,6 +46,9 @@ timeout_seconds = 60
 [evals.gsm8k]
 kind = "lm-eval"
 task = "gsm8k"
+# The threshold below was calibrated on the completions route; keep that basis
+# explicit so a future route change cannot silently invalidate it.
+prompt = { kind = "flat" }
 limit = 64
 metric = "exact_match"
 metric_filter = "strict-match"
@@ -60,7 +63,7 @@ prompts_per_concurrency = 4
 request_rates = [1.0, "inf"]
 request_count = 32
 burstiness = 1.0
-reset_prefix_cache = true
+cache = { start = "cold" }
 timeout_seconds = 900
 
 [benches.adaptive-c8k1k]
@@ -76,7 +79,7 @@ max_search_steps = 3
 min_rate_resolution = 0.25
 request_count = 32
 burstiness = 1.0
-reset_prefix_cache = true
+cache = { start = "cold" }
 timeout_seconds = 900
 
 [workload_suites.qualify]

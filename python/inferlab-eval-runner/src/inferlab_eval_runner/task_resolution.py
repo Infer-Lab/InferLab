@@ -30,6 +30,8 @@ class LmEvalRequestTarget:
     route_name: str
     url: str
     apply_chat_template: bool
+    prompt_authority: str
+    declared_prompt_authority: str | None
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,8 @@ def workspace_yaml_include_closure(
     task_yaml: Path,
     workspace_root: Path,
     source_exclusions: Sequence[Path] = (),
+    *,
+    enforce_source_identity: bool = True,
 ) -> list[Path]:
     """Resolve lm-eval YAML includes without importing task functions."""
     try:
@@ -146,6 +150,8 @@ def workspace_yaml_include_closure(
         visited.add(resolved)
 
     visit(task_yaml, "task YAML")
+    if not enforce_source_identity:
+        return ordered
     for path in ordered:
         repo_root = path.parent
         while repo_root != resolved_root and not (repo_root / ".git").exists():
@@ -195,7 +201,49 @@ def resolved_output_type(identity: str, value: object) -> str:
     return value
 
 
-def load_builtin_lm_eval_task(name: str) -> tuple[str, JsonObject, str]:
+def observed_request_types(
+    identity: str, task: object, limit: int | None
+) -> tuple[frozenset[str], int]:
+    """Observe the request types a resolved task emits, and how many documents backed that.
+
+    Only `Instance.request_type` is read, so no prompt context is built: a task
+    places the context in `Instance.arguments`, which this never inspects. The
+    document set is the one the run itself uses, because `doc_iterator` applies
+    the same deterministic limit that the native run applies. A task may vary the
+    type per document (`scrolls_qasper` branches on `doc["is_yes_no"]`), so the
+    scan is exhaustive over that set rather than sampled.
+    """
+    doc_iterator = getattr(task, "doc_iterator", None)
+    construct_requests = getattr(task, "construct_requests", None)
+    if not callable(doc_iterator) or not callable(construct_requests):
+        raise ValueError(f"lm-eval task {identity!r} cannot report the requests it emits")
+
+    emitted: set[str] = set()
+    observed_documents = 0
+    for _, doc in doc_iterator(rank=0, limit=limit, world_size=1):
+        observed_documents += 1
+        instances = construct_requests(doc=doc, ctx="")
+        if not isinstance(instances, list):
+            instances = [instances]
+        for instance in instances:
+            request_type = getattr(instance, "request_type", None)
+            if not isinstance(request_type, str) or not request_type:
+                raise ValueError(f"lm-eval task {identity!r} emitted a request without a type")
+            emitted.add(request_type)
+        if len(emitted) > 1:
+            # `generate_until` is the only generative type, so two distinct types
+            # already fix both decisions: a loglikelihood request is present and
+            # the task does not reduce to one type. Scanning on would only look
+            # like continued verification.
+            break
+    if not emitted:
+        raise ValueError(f"lm-eval task {identity!r} emitted no requests for its documents")
+    return frozenset(emitted), observed_documents
+
+
+def load_builtin_lm_eval_task(
+    name: str, limit: int | None = None
+) -> tuple[str, JsonObject, str, frozenset[str], int | None]:
     manager = load_lm_eval_task_manager()
     catalog = getattr(manager, "all_tasks", None)
     individual_tasks = getattr(manager, "all_subtasks", None)
@@ -240,13 +288,21 @@ def load_builtin_lm_eval_task(name: str) -> tuple[str, JsonObject, str]:
     indexed_entry = task_index.get(name) if isinstance(task_index, dict) else None
     indexed_kind = getattr(indexed_entry, "kind", None)
     kind_name = str(getattr(indexed_kind, "name", indexed_kind)).lower()
-    output_type = (
-        "dynamic"
-        if kind_name == "py_task"
-        else resolved_output_type(identity, getattr(task, "OUTPUT_TYPE", None))
-    )
+    if kind_name != "py_task":
+        # A configurable task dispatches construct_requests on its own
+        # OUTPUT_TYPE, so the declared type is the emitted type by construction
+        # and nothing has to be observed.
+        output_type = resolved_output_type(identity, getattr(task, "OUTPUT_TYPE", None))
+        emitted, observed_documents = frozenset({output_type}), None
+    else:
+        # A Python-defined task builds its own requests and may emit more than
+        # one type per document, so its OUTPUT_TYPE is not authoritative.
+        emitted, observed_documents = observed_request_types(identity, task, limit)
+        output_type = next(iter(emitted)) if len(emitted) == 1 else "dynamic"
+        if output_type != "dynamic":
+            output_type = resolved_output_type(identity, output_type)
     config = {**config, "output_type": output_type}
-    return identity, config, output_type
+    return identity, config, output_type, emitted, observed_documents
 
 
 def effective_dataset_selection(config: JsonObject) -> JsonObject:
@@ -256,72 +312,124 @@ def effective_dataset_selection(config: JsonObject) -> JsonObject:
     fewshot_split = config.get("fewshot_split")
     if fewshot_split is None:
         fewshot_split = config.get("training_split")
+    dataset_kwargs = config.get("dataset_kwargs")
+    data_files = dataset_kwargs.get("data_files") if isinstance(dataset_kwargs, dict) else None
     return {
         "dataset_path": config.get("dataset_path"),
         "dataset_name": config.get("dataset_name"),
         "evaluation_split": evaluation_split,
         "fewshot_split": fewshot_split,
+        "data_files": data_files,
     }
 
 
+def resolved_request_types(resolution: JsonObject) -> tuple[str, frozenset[str]]:
+    identity = resolution.get("task_identity")
+    emitted = resolution.get("emitted_request_types")
+    if not isinstance(identity, str):
+        raise ValueError("resolved lm-eval task has no identity")
+    if (
+        not isinstance(emitted, list)
+        or not emitted
+        or not all(isinstance(item, str) for item in emitted)
+    ):
+        raise ValueError(f"lm-eval task {identity!r} has no observed request types")
+    unsupported = sorted(
+        set(emitted) - PROMPT_LOGPROB_OUTPUT_TYPES - {"generate_until"},
+    )
+    if unsupported:
+        raise ValueError(f"lm-eval task {identity!r} emits unsupported request types {unsupported}")
+    return identity, frozenset(cast(list[str], emitted))
+
+
 def task_requires_prompt_logprobs(resolution: JsonObject) -> bool:
-    identity = resolution.get("task_identity")
-    output_type = resolution.get("output_type")
-    if not isinstance(identity, str) or not isinstance(output_type, str):
-        raise ValueError("resolved lm-eval task has no identity or output_type")
-    if output_type in PROMPT_LOGPROB_OUTPUT_TYPES or output_type == "dynamic":
-        return True
-    if output_type != "generate_until":
-        raise ValueError(f"lm-eval task {identity!r} has unsupported output_type {output_type!r}")
-    return False
+    # The requirement follows the requests the task actually emits, not the
+    # language its definition is written in.
+    _, emitted = resolved_request_types(resolution)
+    return bool(emitted & PROMPT_LOGPROB_OUTPUT_TYPES)
 
 
-def resolve_lm_eval_target(
-    request: EvalClientRequest, resolution: JsonObject
-) -> LmEvalRequestTarget:
-    identity = resolution.get("task_identity")
-    output_type = resolution.get("output_type")
-    if not isinstance(identity, str) or not isinstance(output_type, str):
-        raise ValueError("resolved lm-eval task has no identity or output_type")
-    if output_type == "generate_until":
-        return LmEvalRequestTarget(
-            family="chat_completions",
-            model="local-chat-completions",
-            route_name="chat_completions_path",
-            url=endpoint_url(request.endpoint, request.endpoint.chat_completions_path),
-            apply_chat_template=True,
-        )
-    if output_type in PROMPT_LOGPROB_OUTPUT_TYPES or output_type == "dynamic":
-        return LmEvalRequestTarget(
-            family="completions",
-            model="local-completions",
-            route_name="completions_path",
-            url=endpoint_url(request.endpoint, request.endpoint.completions_path),
-            apply_chat_template=False,
-        )
-    raise ValueError(
-        f"lm-eval task {identity!r} has output_type {output_type!r}, "
-        "so its request route cannot be selected"
+def prompt_authority_kind(prompt: object) -> str:
+    kind = getattr(getattr(prompt, "root", prompt), "kind", None)
+    if kind not in {"flat", "server_chat"}:
+        raise ValueError(f"lm-eval prompt authority {kind!r} is not a supported kind")
+    return cast(str, kind)
+
+
+def flat_target(request: EvalClientRequest, declared: str | None) -> LmEvalRequestTarget:
+    return LmEvalRequestTarget(
+        family="completions",
+        model="local-completions",
+        route_name="completions_path",
+        url=endpoint_url(request.endpoint, request.endpoint.completions_path),
+        apply_chat_template=False,
+        prompt_authority="flat",
+        declared_prompt_authority=declared,
     )
 
 
-def resolve_lm_eval_task(
-    request: EvalClientRequest, definition: EvalDefinitionInputLmEval
+def resolve_lm_eval_target(
+    request: EvalClientRequest,
+    definition: EvalDefinitionInputLmEval,
+    resolution: JsonObject,
+) -> LmEvalRequestTarget:
+    identity, emitted = resolved_request_types(resolution)
+    declared = (
+        None
+        if definition.declared_prompt is None
+        else prompt_authority_kind(definition.declared_prompt)
+    )
+    if emitted != frozenset({"generate_until"}):
+        # The pinned chat client does not implement loglikelihood scoring, so a
+        # task that emits any such request cannot place any request on the chat
+        # route and has no authority to choose.
+        if declared is not None:
+            raise ValueError(
+                f"lm-eval task {identity!r} emits {sorted(emitted)}, so it does not "
+                "reduce to one generative request type and must not declare a prompt "
+                f"authority; remove the declared {declared!r} prompt"
+            )
+        return flat_target(request, declared)
+    if prompt_authority_kind(definition.prompt) == "flat":
+        return flat_target(request, declared)
+    return LmEvalRequestTarget(
+        family="chat_completions",
+        model="local-chat-completions",
+        route_name="chat_completions_path",
+        url=endpoint_url(request.endpoint, request.endpoint.chat_completions_path),
+        apply_chat_template=True,
+        prompt_authority="server_chat",
+        declared_prompt_authority=declared,
+    )
+
+
+def resolve_lm_eval_data_source(
+    definition: EvalDefinitionInputLmEval,
+    workspace_root: Path,
+    workspace_source_exclusions: Sequence[Path],
+    tokenizer_locator: str | None,
+    *,
+    enforce_workspace_source_identity: bool = True,
 ) -> JsonObject:
     source = definition.task.root
     if isinstance(source, EvalTaskSourceInputBuiltIn):
-        task_identity, config, output_type = load_builtin_lm_eval_task(source.name)
+        task_identity, config, output_type, emitted, observed_documents = load_builtin_lm_eval_task(
+            source.name, definition.limit
+        )
         return {
             "schema_version": 1,
             "status": "resolved",
             "task_source": {"kind": "built_in", "name": source.name},
             "task_identity": task_identity,
             "output_type": output_type,
+            "emitted_request_types": sorted(emitted),
+            "reduces_to_one_request_type": len(emitted) == 1,
+            "observed_request_documents": observed_documents,
             "include_closure": [],
             "effective_task_config": config,
             "effective_dataset_selection": effective_dataset_selection(config),
             "tokenizer": {
-                "locator": request.model.locator,
+                "locator": tokenizer_locator,
                 "backend": "huggingface",
                 "tokenized_requests": False,
             },
@@ -388,6 +496,9 @@ def resolve_lm_eval_task(
             },
             "task_identity": source.task_identity,
             "output_type": output_type,
+            "emitted_request_types": [output_type],
+            "reduces_to_one_request_type": True,
+            "observed_request_documents": None,
             "include_closure": [str(path) for path in assets.values()],
             "bundled_assets": {
                 "task_definition_sha256": source.task_definition_sha256,
@@ -398,18 +509,18 @@ def resolve_lm_eval_task(
             "effective_task_config": config,
             "effective_dataset_selection": effective_dataset_selection(config),
             "tokenizer": {
-                "locator": request.model.locator,
+                "locator": tokenizer_locator,
                 "backend": "huggingface",
                 "tokenized_requests": False,
             },
         }
     if isinstance(source, EvalTaskSourceInputWorkspaceYaml):
         task_yaml = Path(source.path)
-        workspace_root = Path(request.workspace_root)
         closure = workspace_yaml_include_closure(
             task_yaml,
             workspace_root,
-            [Path(path) for path in request.workspace_source_exclusions],
+            workspace_source_exclusions,
+            enforce_source_identity=enforce_workspace_source_identity,
         )
         resolved_task_yaml = closure[0]
         resolved_workspace_root = workspace_root.resolve(strict=True)
@@ -444,16 +555,55 @@ def resolve_lm_eval_task(
             },
             "task_identity": workspace_task_identity,
             "output_type": output_type,
+            "emitted_request_types": [output_type],
+            "reduces_to_one_request_type": True,
+            "observed_request_documents": None,
             "include_closure": [str(path) for path in closure],
             "effective_task_config": config,
             "effective_dataset_selection": effective_dataset_selection(config),
             "tokenizer": {
-                "locator": request.model.locator,
+                "locator": tokenizer_locator,
                 "backend": "huggingface",
                 "tokenized_requests": False,
             },
         }
     raise TypeError(f"unsupported lm-eval task source {type(source).__name__}")
+
+
+def resolve_lm_eval_task(
+    request: EvalClientRequest, definition: EvalDefinitionInputLmEval
+) -> JsonObject:
+    if request.prepared_source is not None:
+        return resolve_lm_eval_data_source(
+            definition,
+            Path(request.prepared_source.workspace_root),
+            [],
+            request.model.locator,
+            enforce_workspace_source_identity=False,
+        )
+    return resolve_lm_eval_data_source(
+        definition,
+        Path(request.workspace_root),
+        [Path(path) for path in request.workspace_source_exclusions],
+        request.model.locator,
+    )
+
+
+def bind_prepared_task(
+    request: EvalClientRequest, definition: EvalDefinitionInputLmEval
+) -> EvalDefinitionInputLmEval:
+    if request.prepared_source is None:
+        return definition
+    if not isinstance(definition.task.root, EvalTaskSourceInputWorkspaceYaml):
+        raise ValueError("an Eval source binding applies only to a workspace YAML task")
+    bound = definition.model_copy(deep=True)
+    bound.task = bound.task.model_validate(
+        {
+            "kind": "workspace_yaml",
+            "path": request.prepared_source.task_path,
+        }
+    )
+    return bound
 
 
 def prepare_lm_eval_task(
@@ -467,7 +617,7 @@ def prepare_lm_eval_task(
             f"lm-eval task {identity!r} has resolved output_type {output_type!r}; "
             "trials greater than one require a resolved generate_until task"
         )
-    target = resolve_lm_eval_target(request, resolution)
+    target = resolve_lm_eval_target(request, definition, resolution)
     requires_probe = task_requires_prompt_logprobs(resolution)
     resolution["request_target"] = {
         "family": target.family,
@@ -475,6 +625,9 @@ def prepare_lm_eval_task(
         "selected_named_route": target.route_name,
         "effective_public_url": target.url,
         "apply_chat_template": target.apply_chat_template,
+        "prompt_authority": target.prompt_authority,
+        "declared_prompt_authority": target.declared_prompt_authority,
+        "requires_prompt_logprobs": requires_probe,
     }
     return PreparedLmEvalTask(
         resolution=resolution,

@@ -9,19 +9,20 @@ use crate::InferlabError;
 use crate::adapter::project_setting_values;
 use crate::toolchain::BundledEvalTask;
 use crate::workspace::{
-    BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent, BenchTokenSelector, EvalDefinition,
-    EvalTaskSource, RequestSlo,
+    BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent, BenchTokenSelector,
+    EvalDefinition, EvalPrompt, EvalTaskSource, RequestSlo,
 };
 use inferlab_protocol::{
-    BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchDatasetCacheState,
-    BenchDatasetCatalogInput, BenchDatasetFilterInput, BenchDefinitionInput,
-    BenchInclusiveUniformInput, BenchPopulationInput, BenchPrefixSharingInput, BenchPromptInput,
-    BenchPromptRouteInput, BenchRandomShapeInput, BenchRenderingAuthorityInput,
-    BenchRequestRepresentationInput, BenchRequestSloInput, BenchRequestSourceInput,
-    BenchSessionDatasetCatalogInput, BenchSessionSourceInput, BenchSessionTemplateInput,
-    BenchSharedSystemContentInput, BenchTokenDistributionKindInput, BenchTokenSelectorInput,
-    ClientEndpointInput, EndpointProtocol, EvalDefinitionInput, EvalTaskSourceInput,
-    MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
+    BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchCacheStartInput,
+    BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
+    BenchDefinitionInput, BenchInclusiveUniformInput, BenchPopulationInput,
+    BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput, BenchRandomShapeInput,
+    BenchRenderingAuthorityInput, BenchRequestRepresentationInput, BenchRequestSloInput,
+    BenchRequestSourceInput, BenchSessionDatasetCatalogInput, BenchSessionSourceInput,
+    BenchSessionTemplateInput, BenchSharedSystemContentInput, BenchTokenDistributionKindInput,
+    BenchTokenSelectorInput, ClientEndpointInput, EndpointProtocol, EvalDefinitionInput,
+    EvalPromptInput, EvalTaskSourceInput, MeasurementModelInput, ServerMetricsEndpointInput,
+    SettingValue,
 };
 use std::collections::BTreeMap;
 
@@ -41,6 +42,7 @@ pub(super) fn endpoint_input(endpoint: &WorkloadEndpoint) -> ClientEndpointInput
                 url: metrics.url.clone(),
             }
         }),
+        prompt_cache_read_zero_representation: endpoint.prompt_cache_read_zero_representation,
     }
 }
 
@@ -118,11 +120,17 @@ pub(super) fn bench_definition_input(
         request_body: bench_request_body_input(definition)?,
         request_slo: definition.request_slo.as_ref().map(request_slo_input),
         timeout_seconds: definition.timeout_seconds,
-        reset_prefix_cache: definition.reset_prefix_cache,
+        cache_start: match definition.cache_start {
+            BenchCacheStart::Uncontrolled => BenchCacheStartInput::Uncontrolled,
+            BenchCacheStart::Cold => BenchCacheStartInput::Cold,
+            BenchCacheStart::Primed => BenchCacheStartInput::Primed,
+        },
     })
 }
 
-fn bench_agentic_source_input(source: &ResolvedBenchAgenticSource) -> BenchAgenticSourceInput {
+pub(super) fn bench_agentic_source_input(
+    source: &ResolvedBenchAgenticSource,
+) -> BenchAgenticSourceInput {
     BenchAgenticSourceInput {
         dataset: source.dataset.clone(),
         profile: source.profile.clone(),
@@ -137,10 +145,10 @@ fn bench_agentic_catalog_input(catalog: &BenchAgenticCatalog) -> BenchAgenticCat
         filename: catalog.filename.clone(),
         sha256: catalog.sha256.clone(),
         cache_path: catalog.cache_path.clone(),
-        cache_state: match catalog.cache_state {
+        cache_state: catalog.cache_state.map(|state| match state {
             DatasetCacheState::Missing => BenchDatasetCacheState::Missing,
             DatasetCacheState::Present => BenchDatasetCacheState::Present,
-        },
+        }),
         trace_count: catalog.trace_count,
         approximate_bytes: catalog.approximate_bytes,
         license: catalog.license.clone(),
@@ -401,6 +409,13 @@ pub(super) fn population_input(population: &BenchPopulation) -> BenchPopulationI
     }
 }
 
+fn eval_prompt_input(prompt: &EvalPrompt) -> EvalPromptInput {
+    match prompt {
+        EvalPrompt::Flat => EvalPromptInput::Flat,
+        EvalPrompt::ServerChat => EvalPromptInput::ServerChat,
+    }
+}
+
 pub(super) fn eval_definition_input(
     definition: &EvalDefinition,
     bundled_task: Option<&BundledEvalTask>,
@@ -417,6 +432,7 @@ pub(super) fn eval_definition_input(
         },
         EvalDefinition::LmEval {
             task,
+            prompt,
             request_body,
             limit,
             few_shot,
@@ -456,6 +472,8 @@ pub(super) fn eval_definition_input(
                     EvalTaskSourceInput::WorkspaceYaml { path: yaml.clone() }
                 }
             }),
+            prompt: eval_prompt_input(prompt.effective()),
+            declared_prompt: prompt.declared().map(eval_prompt_input),
             request_body: project_setting_values("Eval request body", request_body)?,
             limit: *limit,
             few_shot: *few_shot,

@@ -2,14 +2,6 @@
   --sl-color-accent-low: color-mix(in srgb, var(--inferlab-blue) 20%, var(--sl-color-black));
   --sl-color-accent: var(--inferlab-blue);
   --sl-color-accent-high: color-mix(in srgb, var(--inferlab-blue) 35%, var(--sl-color-white));
-  --sl-color-white: #eef8fa;
-  --sl-color-gray-1: #d7e7ea;
-  --sl-color-gray-2: #9fb4bc;
-  --sl-color-gray-3: #6f8994;
-  --sl-color-gray-4: #3b5560;
-  --sl-color-gray-5: #20343c;
-  --sl-color-gray-6: #122229;
-  --sl-color-black: #071015;
   --sl-font: Inter, ui-sans-serif, system-ui, sans-serif;
   --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

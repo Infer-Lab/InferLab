@@ -2,6 +2,7 @@
 //! consume that plan; record projection remains a separate evidence owner.
 
 mod adaptive;
+mod data_asset;
 mod domain;
 mod plan;
 mod planning;
@@ -9,19 +10,23 @@ mod record;
 mod runtime;
 mod wire;
 
+pub(crate) use data_asset::{
+    DataAssetConsumerKind, DataAssetPreparationAttempt, EVIDENCE_WORKLOAD_SCHEMA_VERSION,
+    PreparedEvalSource, WorkloadDataAssetEvidence, attempt_id_for, attempts_from_plans,
+    observe_data_asset_dry_run, prepare_data_assets,
+};
 pub(crate) use domain::{
     MeasurementModel, WorkloadEndpoint, WorkloadEndpointProtocol, WorkloadHttpAction,
     WorkloadHttpMethod, WorkloadServerMetricsEndpoint,
 };
-pub(crate) use record::WorkloadKind;
 pub(crate) use record::WorkloadStatus;
 pub(crate) use runtime::skip;
 pub(crate) use runtime::{run_bench, run_eval};
 
 pub(crate) use plan::{
-    BenchCasePlan, BenchExecutionPlan, BenchPlan, ClientCommandPlan, EvalExecutionPlan, EvalPlan,
-    LoadShape, MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan,
-    WorkloadServerAccess,
+    BenchCasePlan, BenchExecutionPlan, BenchPlan, BenchPrefixCacheConditioningPlan,
+    BenchPreparationStep, ClientCommandPlan, EvalExecutionPlan, EvalPlan, LoadShape,
+    MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan, WorkloadServerAccess,
 };
 pub(crate) use planning::{resolve_manual_bench, resolve_measurements, resolved_request_count};
 

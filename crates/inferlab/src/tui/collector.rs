@@ -496,6 +496,7 @@ fn definition_views(
         kind: kind.to_owned(),
         id,
         relationship,
+        fact_sections: Vec::new(),
         state: State::Live,
         observed_unix_ms,
         last_success_unix_ms: observed_unix_ms,
@@ -531,12 +532,19 @@ fn definition_views(
             .into_keys()
             .map(|id| definition("eval", id, "workload definition".to_owned())),
     );
-    definitions.extend(
-        config
-            .benches
-            .into_keys()
-            .map(|id| definition("bench", id, "workload definition".to_owned())),
-    );
+    definitions.extend(config.benches.into_iter().map(|(id, bench)| {
+        let detail = super::bench_detail::definition(&bench);
+        DefinitionView {
+            kind: "bench".to_owned(),
+            id,
+            relationship: detail.relationship,
+            fact_sections: detail.sections,
+            state: State::Live,
+            observed_unix_ms,
+            last_success_unix_ms: observed_unix_ms,
+            reason: None,
+        }
+    }));
     definitions.extend(config.workload_suites.into_iter().map(|(id, suite)| {
         definition(
             "workload-suite",
@@ -598,6 +606,9 @@ mod tests {
             child_refs: Vec::new(),
             topology: None,
             cases: Vec::new(),
+            outcome_facts: Vec::new(),
+            bench_details: Vec::new(),
+            artifact_refs: Vec::new(),
             process_observation: None,
         }
     }

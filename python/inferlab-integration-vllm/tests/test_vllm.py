@@ -9,6 +9,7 @@ from inferlab_adapter_sdk import (
     AdapterRequestPlanServe,
     AdapterRequestRenderServe,
     AdapterResponse,
+    PromptCacheReadZeroRepresentation,
     RenderedServeProcessFrontend,
     handle_request,
 )
@@ -138,6 +139,33 @@ def test_single_topology_declares_its_server_metrics_capability() -> None:
     assert endpoint.server_metrics.port is None
 
 
+def test_single_topology_declares_explicit_zero_cache_usage_when_enabled() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["topology"] = "single"
+    input_payload["gateway_backend"] = None
+    input_payload["pd_router_backend"] = None
+    input_payload["kv_transfer"] = None
+    input_payload["roles"] = [
+        {
+            "id": "serve",
+            "kind": "serve",
+            "replica_count": 1,
+            "parallelism": {"outer": {"tensor_parallel_size": 1}},
+            "settings": {"enable_prompt_tokens_details": True},
+        }
+    ]
+    request = AdapterRequest.model_validate(payload)
+
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+    endpoint = result.roles[0].public_endpoint
+    assert endpoint is not None
+    assert (
+        endpoint.prompt_cache_read_zero_representation is PromptCacheReadZeroRepresentation.explicit
+    )
+
+
 def test_vllm_rejects_an_expert_size_that_does_not_match_tp_times_dp() -> None:
     payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
@@ -189,6 +217,21 @@ def test_render_merges_extra_args_with_inferlab_owned_options() -> None:
     assert [
         rank_zero[index + 1] for index, value in enumerate(rank_zero) if value == "--max-num-seqs"
     ] == ["16", "32"]
+
+
+def test_render_enables_prompt_token_details_when_declared() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    settings = cast(dict[str, object], allocations[0]["effective_settings"])
+    settings["enable_prompt_tokens_details"] = True
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    assert "--enable-prompt-tokens-details" in result.processes[0].root.command.argv
+    assert "--enable-prompt-tokens-details" not in result.processes[1].root.command.argv
 
 
 def test_render_serve_matches_the_shared_vllm_fixture() -> None:

@@ -103,7 +103,7 @@ fn install_validates_the_shipped_package_and_drives_both_clis() -> Result<(), Bo
     );
     let report: Value = serde_json::from_slice(&output.stdout)?;
     assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("progress:"),
+        output.stderr.is_empty(),
         "fast agent operations must stay on the shared batch path without progress instrumentation"
     );
     let rows = report["rows"].as_array().ok_or("rows")?;

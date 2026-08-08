@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 fn repeated_eval_rejects_a_gate_conclusion_that_disagrees_with_its_threshold() {
     let definition = EvalDefinition::LmEval {
         task: EvalTaskSource::BuiltIn("fixture".to_owned()),
+        prompt: Default::default(),
         request_body: BTreeMap::new(),
         limit: Some(1),
         few_shot: None,
@@ -29,6 +30,7 @@ fn repeated_eval_rejects_a_gate_conclusion_that_disagrees_with_its_threshold() {
         native_metric_key: "inferlab:pass_rate".to_owned(),
         value: 0.5,
         higher_is_better: true,
+        prompt_authority: inferlab_protocol::EvalPromptInput::Flat,
     };
     let result = EvalClientResult {
         schema_version: 1,

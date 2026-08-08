@@ -203,6 +203,7 @@ def random_preparation_request(
     artifact_name: str = "population",
     request_body: dict[str, object] | None = None,
     seed: int = 7,
+    cache_start: str = "uncontrolled",
 ) -> BenchPopulationPreparationRequest:
     effective_source = dict(request_source)
     prompt = effective_source.pop("prompt", {"kind": "server_chat"})
@@ -217,6 +218,7 @@ def random_preparation_request(
             "transformers_version": "5.12.1",
             "request_source": effective_source,
             "prompt": effective_prompt,
+            "cache_start": cache_start,
             "source_path": None,
             "required_entries": required_entries,
             "seed": seed,
@@ -608,6 +610,34 @@ def test_flat_prefix_geometry_supports_zero_and_full_sharing(
     assert (len(set(prompts)) == 1) is (expected_shared == 8)
 
 
+def test_primed_flat_population_freezes_the_exact_maximum_prefix_artifact(
+    tmp_path: Path,
+) -> None:
+    tokenizer = PeriodicCorpusTokenizer()
+    result = prepare_population(
+        random_preparation_request(
+            tmp_path,
+            3,
+            request_source={
+                "kind": "random",
+                "prompt": {"kind": "flat"},
+                "input_tokens": {"kind": "inclusive_uniform", "min": 8, "max": 12},
+                "output_tokens": 2,
+                "prefix_sharing": {"shared_prefix_ratio": 0.5},
+            },
+            cache_start="primed",
+        ),
+        tokenizer,
+    )
+
+    assert result.prefix_conditioning is not None
+    conditioning = result.prefix_conditioning
+    content = Path(conditioning.path).read_text(encoding="utf-8")
+    assert conditioning.prompt_tokens == 6
+    assert len(tokenizer.encode(content, add_special_tokens=False)) == 6
+    assert hashlib.sha256(content.encode()).hexdigest() == conditioning.sha256
+
+
 def test_distributed_flat_ratio_uses_nested_prefixes_and_equivalent_fixed_geometry(
     tmp_path: Path,
 ) -> None:
@@ -774,6 +804,27 @@ def test_rendered_prefix_does_not_require_the_template_frame_to_round_trip_alone
     token_rows = [tokenizer.encode(row["text_input"], add_special_tokens=False) for row in rows]
     assert all(len(tokens) == 8 for tokens in token_rows)
     assert len({tuple(tokens[:4]) for tokens in token_rows}) == 1
+
+
+def test_primed_rendered_prefix_requires_an_independently_exact_conditioning_prompt(
+    tmp_path: Path,
+) -> None:
+    request = random_preparation_request(
+        tmp_path,
+        2,
+        request_source={
+            "kind": "random",
+            "prompt": {"kind": "rendered_chat"},
+            "input_tokens": 8,
+            "output_tokens": 2,
+            "prefix_sharing": {"shared_prefix_tokens": 4},
+        },
+        request_body={},
+        cache_start="primed",
+    )
+
+    with pytest.raises(ValueError, match="conditioning prompt token stream"):
+        prepare_population(request, NonRoundTripTemplatePrefixTokenizer())
 
 
 def test_weighted_mixture_uses_one_canonical_prefix_stream_across_shapes(

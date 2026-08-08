@@ -1,6 +1,6 @@
 use super::{App, AppAction, View};
 use crate::tui::presentation::EntryIdentity;
-use crate::tui::{EntryKind, RecordView, metrics};
+use crate::tui::{EntryKind, metrics};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(in crate::tui) struct MetricSelection {
@@ -10,8 +10,9 @@ pub(in crate::tui) struct MetricSelection {
 }
 
 pub(in crate::tui) struct MetricPage<'a> {
-    pub(in crate::tui) record: &'a RecordView,
-    pub(in crate::tui) catalog: Vec<metrics::MetricDescriptor>,
+    pub(in crate::tui) record: &'a metrics::RecordMetrics,
+    pub(in crate::tui) catalog: &'a [metrics::MetricDescriptor],
+    pub(in crate::tui) points: &'a [metrics::MetricPoint],
     pub(in crate::tui) selected: usize,
     pub(in crate::tui) case_scroll: usize,
 }
@@ -69,17 +70,14 @@ impl App {
         let Some(record_key) = selected else {
             return;
         };
-        let catalog = self
-            .snapshot
+        let record = self
+            .presentation
             .as_ref()
-            .and_then(|snapshot| {
-                snapshot
-                    .records
-                    .iter()
-                    .find(|record| record.id.as_deref() == Some(record_key.as_str()))
-            })
-            .map_or_else(Vec::new, |record| metrics::catalog(&record.cases));
-        let Some(metric) = default_metric(&catalog) else {
+            .and_then(|presentation| presentation.record_metrics(&record_key));
+        let Some(metric_name) = record
+            .and_then(|record| default_metric(&record.catalog))
+            .map(|metric| metric.name.clone())
+        else {
             self.status = "selected record has no case metrics".to_owned();
             return;
         };
@@ -88,7 +86,7 @@ impl App {
         self.reanchor(&EntryIdentity::new(EntryKind::Record, record_key.clone()));
         self.metric_selection = Some(MetricSelection {
             record_key,
-            metric_name: metric.name.clone(),
+            metric_name,
             case_scroll: 0,
         });
         self.detail = true;
@@ -101,27 +99,33 @@ impl App {
         };
         let record_key = selection.record_key.clone();
         let selected_name = selection.metric_name.clone();
-        let Some((catalog, case_count)) = self.snapshot.as_ref().and_then(|snapshot| {
-            snapshot
-                .records
-                .iter()
-                .find(|record| record.id.as_deref() == Some(record_key.as_str()))
-                .map(|record| (metrics::catalog(&record.cases), record.cases.len()))
-        }) else {
+        let Some((catalog_empty, selected_exists, fallback, case_count)) =
+            self.presentation.as_ref().and_then(|presentation| {
+                presentation.record_metrics(&record_key).map(|record| {
+                    (
+                        record.catalog.is_empty(),
+                        record
+                            .catalog
+                            .iter()
+                            .any(|metric| metric.name == selected_name),
+                        default_metric(&record.catalog).map(|metric| metric.name.clone()),
+                        record.case_count,
+                    )
+                })
+            })
+        else {
             self.metric_selection = None;
             return;
         };
         self.view = View::Records;
         self.rebuild_visible();
         self.reanchor(&EntryIdentity::new(EntryKind::Record, record_key.clone()));
-        if catalog.is_empty() {
+        if catalog_empty {
             self.metric_selection = None;
-        } else if !catalog.iter().any(|metric| metric.name == selected_name)
-            && let Some(metric) = default_metric(&catalog)
-        {
+        } else if !selected_exists && let Some(metric_name) = fallback {
             self.metric_selection = Some(MetricSelection {
                 record_key,
-                metric_name: metric.name.clone(),
+                metric_name,
                 case_scroll: 0,
             });
         } else if let Some(selection) = &mut self.metric_selection {
@@ -132,18 +136,17 @@ impl App {
     pub(in crate::tui) fn metric_page(&self) -> Option<MetricPage<'_>> {
         let selection = self.metric_selection.as_ref()?;
         let record = self
-            .snapshot
+            .presentation
             .as_ref()?
-            .records
-            .iter()
-            .find(|record| record.id.as_deref() == Some(selection.record_key.as_str()))?;
-        let catalog = metrics::catalog(&record.cases);
-        let selected = catalog
+            .record_metrics(&selection.record_key)?;
+        let selected = record
+            .catalog
             .iter()
             .position(|metric| metric.name == selection.metric_name)?;
         Some(MetricPage {
             record,
-            catalog,
+            catalog: &record.catalog,
+            points: record.points.get(selected)?.as_slice(),
             selected,
             case_scroll: selection.case_scroll,
         })
@@ -153,14 +156,11 @@ impl App {
         self.selected_entry()
             .filter(|entry| entry.kind == EntryKind::Record)
             .and_then(|entry| {
-                self.snapshot.as_ref().and_then(|snapshot| {
-                    snapshot
-                        .records
-                        .iter()
-                        .find(|record| record.id.as_deref() == Some(entry.key.as_str()))
-                })
+                self.presentation
+                    .as_ref()
+                    .and_then(|presentation| presentation.record_metrics(&entry.key))
             })
-            .is_some_and(|record| !metrics::catalog(&record.cases).is_empty())
+            .is_some_and(|record| !record.catalog.is_empty())
     }
 
     fn move_metric(&mut self, delta: isize) {
@@ -175,10 +175,11 @@ impl App {
                 .saturating_add(delta as usize)
                 .min(page.catalog.len().saturating_sub(1))
         };
-        if let Some(metric) = page.catalog.get(next)
+        let metric_name = page.catalog.get(next).map(|metric| metric.name.clone());
+        if let Some(metric_name) = metric_name
             && let Some(selection) = &mut self.metric_selection
         {
-            selection.metric_name = metric.name.clone();
+            selection.metric_name = metric_name;
             selection.case_scroll = 0;
         }
     }
@@ -186,7 +187,7 @@ impl App {
     fn move_metric_cases(&mut self, delta: isize) {
         let maximum = self
             .metric_page()
-            .map_or(0, |page| page.record.cases.len().saturating_sub(1));
+            .map_or(0, |page| page.record.case_count.saturating_sub(1));
         if let Some(selection) = &mut self.metric_selection {
             selection.case_scroll = if delta.is_negative() {
                 selection.case_scroll.saturating_sub(delta.unsigned_abs())

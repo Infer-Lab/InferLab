@@ -2,13 +2,14 @@
 //! and record production.
 
 use super::domain::{
-    BenchPopulation, MeasurementModel, ResolvedBenchDefinition, ResolvedBenchSloPolicy,
-    WorkloadEndpoint, WorkloadHttpAction,
+    BenchPopulation, MeasurementModel, ResolvedBenchDefinition, ResolvedBenchPrompt,
+    ResolvedBenchSloPolicy, WorkloadEndpoint, WorkloadHttpAction,
 };
 use crate::execution::ResolvedExecution;
 use crate::toolchain::{BenchToolchainIdentity, BundledEvalTask, EvalToolchainIdentity};
 use crate::workspace::{
-    BenchDefinition, BenchTpotApplicability, EvalDefinition, RequestRate, WorkspaceSnapshot,
+    BenchDefinition, BenchTpotApplicability, EvalDefinition, JsonValue, RequestRate,
+    WorkspaceSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -20,6 +21,7 @@ pub(crate) struct MeasurementPlan {
     pub gate: Option<String>,
     pub evals: Vec<EvalPlan>,
     pub benches: Vec<BenchPlan>,
+    pub data_assets: Vec<super::data_asset::DataAssetPlan>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -28,6 +30,11 @@ pub(crate) struct EvalPlan {
     pub capture: bool,
     pub declared_definition: EvalDefinition,
     pub definition: EvalDefinition,
+    /// The prompt authority the workspace definition actually declared. The
+    /// definitions above serialize their effective authority, so this is the
+    /// only place a defaulted authority is distinguishable from a declared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_prompt: Option<crate::workspace::EvalPrompt>,
     pub overrides: Vec<MeasurementOverridePlan>,
     pub endpoint: WorkloadEndpoint,
     pub model: MeasurementModel,
@@ -58,6 +65,23 @@ pub(crate) enum ResolvedWorkloadPlan {
     Eval(Box<EvalPlan>),
     Bench(Box<BenchPlan>),
     ManualBench(Box<ManualBenchPlan>),
+}
+
+impl ResolvedWorkloadPlan {
+    pub(crate) fn kind(&self) -> super::record::WorkloadKind {
+        match self {
+            Self::Eval(_) => super::record::WorkloadKind::Eval,
+            Self::Bench(_) | Self::ManualBench(_) => super::record::WorkloadKind::Bench,
+        }
+    }
+
+    pub(crate) fn definition_id(&self) -> &str {
+        match self {
+            Self::Eval(plan) => &plan.id,
+            Self::Bench(plan) => &plan.id,
+            Self::ManualBench(plan) => &plan.bench.id,
+        }
+    }
 }
 
 impl From<EvalPlan> for ResolvedWorkloadPlan {
@@ -99,6 +123,7 @@ pub(crate) struct ManualBenchPlan {
     pub measurement_workspace: WorkspaceSnapshot,
     pub overrides: Vec<String>,
     pub bench: BenchPlan,
+    pub data_assets: Vec<super::data_asset::DataAssetPlan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +134,7 @@ pub(crate) struct ManualBenchDryRun<'a> {
     pub measurement_workspace: &'a WorkspaceSnapshot,
     pub overrides: &'a [String],
     pub bench: &'a BenchPlan,
+    pub data_assets: &'a [super::data_asset::DataAssetPlan],
 }
 
 impl ManualBenchPlan {
@@ -120,6 +146,7 @@ impl ManualBenchPlan {
             measurement_workspace: &self.measurement_workspace,
             overrides: &self.overrides,
             bench: &self.bench,
+            data_assets: &self.data_assets,
         }
     }
 }
@@ -152,6 +179,19 @@ pub(crate) struct BenchClientPlan {
     pub command: ClientCommandPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<WorkloadHttpAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_conditioning: Option<BenchPrefixCacheConditioningPlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct BenchPrefixCacheConditioningPlan {
+    pub route: String,
+    pub model: String,
+    pub prompt: ResolvedBenchPrompt,
+    pub request_body: BTreeMap<String, JsonValue>,
+    pub maximum_shared_prefix_tokens: u32,
+    pub output_tokens: u32,
+    pub consumes_population_entry: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -169,6 +209,8 @@ pub(crate) enum BenchExecutionPlan {
     },
     Adaptive {
         policy: String,
+        #[serde(default)]
+        preparation_order: Vec<BenchPreparationStep>,
         initial_request_rates: Vec<f64>,
         max_search_steps: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,12 +228,23 @@ pub(crate) struct BenchCasePlan {
     pub load_shape: LoadShape,
     pub request_count: u32,
     pub warmup_request_count: u32,
+    #[serde(default)]
+    pub preparation_order: Vec<BenchPreparationStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warmup_session_count: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BenchPreparationStep {
+    WarmupDrain,
+    CacheReset,
+    CacheConditioning,
+    ProfilingRelease,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

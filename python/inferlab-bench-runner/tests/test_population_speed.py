@@ -68,6 +68,7 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
                 },
             },
             "prompt": resolved_prompt_input({"kind": "server_chat"}),
+            "cache_start": "uncontrolled",
             "source_path": str(source_path),
             "required_entries": 2,
             "seed": 7,

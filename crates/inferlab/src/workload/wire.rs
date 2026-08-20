@@ -9,20 +9,20 @@ use crate::InferlabError;
 use crate::adapter::project_setting_values;
 use crate::toolchain::BundledEvalTask;
 use crate::workspace::{
-    BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent, BenchTokenSelector,
-    EvalDefinition, EvalPrompt, EvalTaskSource, RequestSlo,
+    BenchArtifactLevel, BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent,
+    BenchTokenSelector, EvalDefinition, EvalPrompt, EvalTaskSource, RequestSlo,
 };
 use inferlab_protocol::{
-    BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchCacheStartInput,
-    BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
-    BenchDefinitionInput, BenchInclusiveUniformInput, BenchPopulationInput,
-    BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput, BenchRandomShapeInput,
-    BenchRenderingAuthorityInput, BenchRequestRepresentationInput, BenchRequestSloInput,
-    BenchRequestSourceInput, BenchSessionDatasetCatalogInput, BenchSessionSourceInput,
-    BenchSessionTemplateInput, BenchSharedSystemContentInput, BenchTokenDistributionKindInput,
-    BenchTokenSelectorInput, ClientEndpointInput, EndpointProtocol, EvalDefinitionInput,
-    EvalPromptInput, EvalTaskSourceInput, MeasurementModelInput, ServerMetricsEndpointInput,
-    SettingValue,
+    BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchArtifactLevelInput,
+    BenchCacheStartInput, BenchDatasetCacheState, BenchDatasetCatalogInput,
+    BenchDatasetFilterInput, BenchDefinitionInput, BenchInclusiveUniformInput,
+    BenchPopulationInput, BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput,
+    BenchRandomShapeInput, BenchRenderingAuthorityInput, BenchRequestRepresentationInput,
+    BenchRequestSloInput, BenchRequestSourceInput, BenchSessionDatasetCatalogInput,
+    BenchSessionSourceInput, BenchSessionTemplateInput, BenchSharedSystemContentInput,
+    BenchTokenDistributionKindInput, BenchTokenSelectorInput, ClientEndpointInput,
+    EndpointProtocol, EvalDefinitionInput, EvalPromptInput, EvalTaskSourceInput,
+    MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
 };
 use std::collections::BTreeMap;
 
@@ -116,6 +116,10 @@ pub(super) fn bench_definition_input(
         agentic_source: sources.agentic,
         prompt: prompt_input(&definition.prompt)?,
         server_metrics: definition.server_metrics,
+        artifact_level: match definition.artifact_level {
+            BenchArtifactLevel::Performance => BenchArtifactLevelInput::Performance,
+            BenchArtifactLevel::Diagnostic => BenchArtifactLevelInput::Diagnostic,
+        },
         seed: definition.seed,
         request_body: bench_request_body_input(definition)?,
         request_slo: definition.request_slo.as_ref().map(request_slo_input),

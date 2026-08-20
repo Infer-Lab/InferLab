@@ -87,6 +87,7 @@ from .runtime import (
     require_role,
     run_adapter,
     split_serve_allocations,
+    validate_extra_args,
     validate_settings,
 )
 
@@ -177,5 +178,6 @@ __all__ = [
     "require_role",
     "run_adapter",
     "split_serve_allocations",
+    "validate_extra_args",
     "validate_settings",
 ]

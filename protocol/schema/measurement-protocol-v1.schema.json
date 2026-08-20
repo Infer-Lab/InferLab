@@ -395,8 +395,13 @@
           "$ref": "#/$defs/BenchAgenticBranchStats"
         },
         "cache_bust_records": {
-          "type": "integer",
+          "description": "Profiling records carrying a raw cache-bust marker observation;\nabsent when the artifact level makes that observation unavailable.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
+          "default": null,
           "minimum": 0
         },
         "context_overflow_count": {
@@ -410,8 +415,13 @@
           "minimum": 0
         },
         "distinct_source_traces": {
-          "type": "integer",
+          "description": "Distinct source traces identified through the raw-derived coordinate\nmapping; absent when the artifact level makes it unavailable.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
+          "default": null,
           "minimum": 0
         },
         "distinct_transport_requests": {
@@ -436,14 +446,24 @@
           "minimum": 0
         },
         "raw_records_artifact": {
-          "type": "string"
+          "description": "The raw request/response artifact; absent at the `performance`\nartifact level, where raw export is not requested.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "scenario": {
           "type": "string"
         },
         "source_coordinate_records": {
-          "type": "integer",
+          "description": "Profiling records whose raw-derived source coordinates were observed;\nabsent when the artifact level makes that mapping unavailable.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
+          "default": null,
           "minimum": 0
         },
         "submission_invalid_reasons": {
@@ -474,8 +494,13 @@
           "minimum": 0
         },
         "warmup_source_coordinate_records": {
-          "type": "integer",
+          "description": "Warmup records whose raw-derived source coordinates were observed;\nabsent when the artifact level makes that mapping unavailable.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
+          "default": null,
           "minimum": 0
         },
         "warmup_succeeded": {
@@ -489,20 +514,15 @@
         "submission_valid",
         "warmup_records",
         "warmup_error_records",
-        "warmup_source_coordinate_records",
         "warmup_succeeded",
         "profiling_began_after_warmup_and_drain",
         "profiling_records",
-        "source_coordinate_records",
-        "distinct_source_traces",
         "distinct_runtime_conversations",
         "distinct_transport_requests",
-        "cache_bust_records",
         "context_overflow_count",
         "ordinary_failure_count",
         "branch_stats",
-        "aggregate_artifact",
-        "raw_records_artifact"
+        "aggregate_artifact"
       ]
     },
     "BenchAgenticSourceInput": {
@@ -591,6 +611,14 @@
         "expected_revision",
         "filename",
         "expected_sha256"
+      ]
+    },
+    "BenchArtifactLevelInput": {
+      "description": "The artifact level a Bench case requests from the measurement runtime.\nOmission resolves to `diagnostic`, which retains the full raw\nrequest/response export; `performance` keeps only normalized per-request\nrecords and the summary export ([[RFC-0004:C-BENCH-ARTIFACT-LEVEL]]).",
+      "type": "string",
+      "enum": [
+        "performance",
+        "diagnostic"
       ]
     },
     "BenchCacheStartInput": {
@@ -955,6 +983,10 @@
             }
           ],
           "default": null
+        },
+        "artifact_level": {
+          "$ref": "#/$defs/BenchArtifactLevelInput",
+          "default": "diagnostic"
         },
         "cache_start": {
           "$ref": "#/$defs/BenchCacheStartInput"
@@ -2249,7 +2281,12 @@
           "type": "boolean"
         },
         "native_requests_reconciled": {
-          "type": "boolean"
+          "description": "Whether raw requests reconcile to normalized metric records; absent at\nthe `performance` artifact level, where no raw artifact exists.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         },
         "population_slice_reconciled": {
           "type": "boolean"
@@ -2275,6 +2312,14 @@
             "$ref": "#/$defs/BenchSessionTurnResult"
           }
         },
+        "unavailable_dimensions": {
+          "description": "Evidence dimensions recorded as unavailable due to the effective\nartifact level ([[RFC-0004:C-BENCH-ARTIFACT-LEVEL]]).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "warmup": {
           "$ref": "#/$defs/BenchSessionPhaseSummary"
         }
@@ -2289,7 +2334,6 @@
         "sessions_reconciled",
         "turn_order_reconciled",
         "inter_turn_delays_reconciled",
-        "native_requests_reconciled",
         "counts_reconciled"
       ]
     },
@@ -2406,8 +2450,13 @@
           "default": false
         },
         "pre_template_content_tokens": {
-          "type": "integer",
+          "description": "Measured from the raw request payload; absent when the artifact level\ndoes not produce the raw request/response artifact.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
+          "default": null,
           "minimum": 0
         },
         "preceding_native_session_num": {
@@ -2447,7 +2496,6 @@
         "phase",
         "runtime_session_id",
         "turn_index",
-        "pre_template_content_tokens",
         "native_session_num",
         "request_start_ns",
         "native_artifact_name"

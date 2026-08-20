@@ -49,6 +49,7 @@ from inferlab_adapter_sdk import (
     require_integration_fused_frontend,
     require_role,
     split_serve_allocations,
+    validate_extra_args,
     validate_settings,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -145,7 +146,9 @@ def _runtime_cache_env(root: str) -> dict[str, str]:
 
 
 def _settings(values: dict[str, SettingValue]) -> TokenspeedServeSettings:
-    return validate_settings(TokenspeedServeSettings, values)
+    settings = validate_settings(TokenspeedServeSettings, values)
+    validate_extra_args(settings.extra_args or [], _INFERLAB_OPTION_ARITY)
+    return settings
 
 
 def _identity() -> IntegrationIdentity:

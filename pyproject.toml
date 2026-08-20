@@ -13,6 +13,16 @@ mypy_path = [
     "python/inferlab-measurement-sdk/src",
 ]
 
+# Generated protocol models assign raw schema defaults to enum-typed fields;
+# correctness of the generated assignments is owned by the code generator and
+# the cross-language fixture tests.
+[[tool.mypy.overrides]]
+module = [
+    "inferlab_adapter_sdk._generated",
+    "inferlab_measurement_sdk._generated",
+]
+disable_error_code = ["assignment"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

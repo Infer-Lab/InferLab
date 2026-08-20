@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-19
+
+### Added
+
+- Serving Bench definitions accept `artifact_level = "diagnostic" | "performance"`.
+  The `diagnostic` default retains the complete raw capture, including
+  per-request raw records and the raw-derived AgentX evidence dimensions.
+  The `performance` level trims raw capture for measurement runs where
+  client-side instrumentation must not perturb the result, and records the
+  trimmed dimensions as explicitly unavailable rather than fabricating them.
+
+### Fixed
+
+- Serving integrations no longer silently drop `extra_args` entries that name
+  an InferLab-owned option (for example `--block-size`). Plan and render now
+  fail with a typed `invalid_settings` error naming the offending flag and its
+  remedy — use the owning typed setting, or place the flag after a `--`
+  sentinel for a deliberate verbatim override — so the returned and recorded
+  escape-hatch contents match the executed command. Adapter SDK 0.7.1; vLLM,
+  SGLang, TensorRT-LLM, and TokenSpeed integrations 0.6.1; Specialized Engine
+  0.3.1.
+
 ## [0.10.0] - 2026-08-08
 
 ### Added

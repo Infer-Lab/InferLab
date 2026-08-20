@@ -5,6 +5,7 @@ from typing import cast
 import inferlab_measurement_sdk
 import pytest
 from inferlab_measurement_sdk import (
+    BenchArtifactLevelInput,
     BenchClientRequest,
     BenchRequestSourceInputRandomMixture,
     CaseBudgetExpired,
@@ -117,6 +118,11 @@ def test_weighted_random_mixture_fixture_round_trips() -> None:
     assert isinstance(source, BenchRequestSourceInputRandomMixture)
     assert source.total_weight == 10
     assert len(source.shapes) == 2
+    # The fixture omits the artifact level; omission resolves to diagnostic.
+    # The generated model keeps the schema default as a plain string, so
+    # normalize it to the enum before the serialization round-trip.
+    assert request.definition.artifact_level == BenchArtifactLevelInput.diagnostic
+    request.definition.artifact_level = BenchArtifactLevelInput.diagnostic
     assert BenchClientRequest.model_validate(request.model_dump()) == request
 
 
@@ -126,6 +132,7 @@ def test_agentic_bench_fixtures_round_trip() -> None:
     )
     assert request.definition.agentic_source is not None
     assert request.definition.agentic_source.catalog.scenario == "inferencex-agentx-mvp"
+    assert request.definition.artifact_level is BenchArtifactLevelInput.diagnostic
 
     result = inferlab_measurement_sdk.BenchClientResult.model_validate(
         load_json(FIXTURES / "valid" / "bench-client-result-agentic.json")

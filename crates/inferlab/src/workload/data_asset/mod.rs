@@ -12,4 +12,4 @@ pub(crate) use model::{
 pub(crate) use planning::{attempt_id_for, attempts_from_plans, plan_measurement_data_assets};
 pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 14;
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 15;

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    BenchArtifactLevelInput,
     BenchClientRequest,
     BenchLoadInputConcurrencyLimited,
     BenchLoadInputRequestRateLimited,
@@ -195,6 +196,7 @@ def inference_request_config(request: BenchClientRequest) -> JsonObject:
         "schema_version": 1,
         "selected_named_route": selected_name,
         "effective_public_url": endpoint_url(request.endpoint, selected_path),
+        "artifact_level": str(request.definition.artifact_level),
         "prompt_authority": {
             "kind": prompt.kind,
             "request_representation": prompt.request_representation.value,
@@ -383,7 +385,7 @@ def aiperf_config(
         "dir": str(request.artifact_dir),
         "summary": ["json"],
         "records": ["jsonl"],
-        "raw": True,
+        "raw": definition.artifact_level == BenchArtifactLevelInput.diagnostic,
     }
     if not definition.server_metrics:
         artifacts["prefix"] = ARTIFACT_PREFIX

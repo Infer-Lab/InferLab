@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    BenchArtifactLevelInput,
     BenchClientRequest,
     BenchRuntimeSessionResult,
     BenchSessionPhaseSummary,
@@ -17,7 +18,17 @@ from inferlab_measurement_sdk import (
 
 from inferlab_bench_runner.aiperf import aiperf_session_population_layout
 from inferlab_bench_runner.chat_tokens import ContentTokenizer, messages_content_tokens
-from inferlab_bench_runner.result_records import profiling_records, raw_phase_records
+from inferlab_bench_runner.result_records import phase_records, profiling_records, raw_phase_records
+
+# Raw-artifact-derived evidence dimensions recorded as unavailable at the
+# performance artifact level (RFC-0005:C-BENCH-LINEAR-SESSION-EVIDENCE). The
+# Rust control plane requires exactly this list for performance-level evidence.
+PERFORMANCE_UNAVAILABLE_DIMENSIONS = [
+    "pre_template_content_tokens",
+    "max_input_tokens_bound_check",
+    "preceding_live_response_pairwise_history",
+    "raw_native_request_reconciliation",
+]
 
 
 def _session_population(
@@ -141,12 +152,29 @@ def _observed_prompt_tokens(record: JsonObject) -> int | None:
     return observed
 
 
-def _response_failure(record: JsonObject) -> tuple[str | None, str | None]:
+def _normalized_prompt_tokens(record: JsonObject) -> int | None:
+    metrics = record.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    input_length = metrics.get("input_sequence_length")
+    if not isinstance(input_length, dict):
+        return None
+    value = input_length.get("value")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _response_failure(record: JsonObject, raw_available: bool) -> tuple[str | None, str | None]:
     metadata = record.get("metadata")
     if isinstance(metadata, dict) and metadata.get("was_cancelled") is True:
         return "cancelled", "native request was cancelled"
     if record.get("error") is not None:
         return "transport_error", str(record.get("error"))
+    if not raw_available:
+        # Response status and content are raw-artifact dimensions; they are
+        # unavailable at the performance artifact level.
+        return None, None
     status = record.get("status")
     if isinstance(status, int) and not isinstance(status, bool) and not 200 <= status < 300:
         return "transport_error", f"native request returned HTTP {status}"
@@ -180,6 +208,7 @@ def _phase_session_evidence(
     tokenizer: ContentTokenizer,
     max_input_tokens: int,
     native_artifact_name: str,
+    raw_available: bool,
 ) -> tuple[
     BenchSessionPhaseSummary,
     list[BenchRuntimeSessionResult],
@@ -194,15 +223,15 @@ def _phase_session_evidence(
     for record_number, record in enumerate(records, start=1):
         metadata = record.get("metadata")
         if not isinstance(metadata, dict):
-            errors.append(f"AIPerf {phase} raw record {record_number} has no metadata")
+            errors.append(f"AIPerf {phase} record {record_number} has no metadata")
             continue
         runtime_id = metadata.get("x_correlation_id")
         native_id = metadata.get("session_num")
         if not isinstance(runtime_id, str) or not runtime_id:
-            errors.append(f"AIPerf {phase} raw record {record_number} has no x_correlation_id")
+            errors.append(f"AIPerf {phase} record {record_number} has no x_correlation_id")
             continue
         if isinstance(native_id, bool) or not isinstance(native_id, int) or native_id < 0:
-            errors.append(f"AIPerf {phase} raw record {record_number} has no native session_num")
+            errors.append(f"AIPerf {phase} record {record_number} has no native session_num")
             continue
         if native_id in native_ids:
             errors.append(f"AIPerf {phase} duplicates native session_num {native_id}")
@@ -277,14 +306,20 @@ def _phase_session_evidence(
                     f"AIPerf {phase} session {runtime_id!r} turn {turn_index} has invalid timing"
                 )
                 continue
-            content_tokens = _pre_template_content_tokens(record, tokenizer)
-            if content_tokens is None:
-                errors.append(
-                    f"AIPerf {phase} session {runtime_id!r} turn {turn_index} "
-                    "has no structured messages"
-                )
-                content_tokens = 0
-            observed_prompt_tokens = _observed_prompt_tokens(record)
+            content_tokens: int | None = None
+            if raw_available:
+                content_tokens = _pre_template_content_tokens(record, tokenizer)
+                if content_tokens is None:
+                    errors.append(
+                        f"AIPerf {phase} session {runtime_id!r} turn {turn_index} "
+                        "has no structured messages"
+                    )
+                    content_tokens = 0
+            observed_prompt_tokens = (
+                _observed_prompt_tokens(record)
+                if raw_available
+                else _normalized_prompt_tokens(record)
+            )
             effective_delay = delays[turn_index] if turn_index < len(delays) else 0.0
             delay_reconciled = (
                 None
@@ -309,8 +344,10 @@ def _phase_session_evidence(
                     pre_template_content_tokens=content_tokens,
                     observed_prompt_tokens=observed_prompt_tokens,
                     native_session_num=native_id,
-                    preceding_native_session_num=previous_native_id,
-                    preceding_terminal_response_receipt_ns=previous_end_ns,
+                    preceding_native_session_num=(previous_native_id if raw_available else None),
+                    preceding_terminal_response_receipt_ns=(
+                        previous_end_ns if raw_available else None
+                    ),
                     effective_inter_turn_delay_seconds=(
                         None if turn_index == 0 else effective_delay
                     ),
@@ -325,11 +362,16 @@ def _phase_session_evidence(
                 failed_requests += 1
             else:
                 completed_requests += 1
-            turn_failure, turn_diagnostic = _response_failure(record)
+            turn_failure, turn_diagnostic = _response_failure(record, raw_available)
             if turn_failure is None and observed_prompt_tokens is None:
                 turn_failure = "missing_prompt_token_usage"
                 turn_diagnostic = "terminal backend response has no prompt-token usage"
-            if content_tokens > max_input_tokens and turn_failure is None:
+            if (
+                raw_available
+                and content_tokens is not None
+                and content_tokens > max_input_tokens
+                and turn_failure is None
+            ):
                 turn_failure = "context_limit_exceeded_after_transport"
                 turn_diagnostic = (
                     f"pre-template content tokens {content_tokens} exceed "
@@ -410,6 +452,7 @@ def session_result_evidence(
     tokenizer: ContentTokenizer,
 ) -> tuple[BenchSessionResultEvidence, str | None]:
     source = request.definition.session_source
+    raw_available = request.definition.artifact_level == BenchArtifactLevelInput.diagnostic
     rows, errors = _session_population(request)
     warmup_count = request.case.warmup_session_count or 0
     profiling_count = request.case.session_count or 0
@@ -417,17 +460,31 @@ def session_result_evidence(
     population_slice_reconciled = len(rows) >= required and not errors
     warmup_plan = rows[:warmup_count]
     profiling_plan = rows[profiling_start:required]
-    raw_warmup, warmup_parse_error = raw_phase_records(raw_path, "warmup")
-    raw_profiling, profiling_parse_error = raw_phase_records(raw_path, "profiling")
+    if raw_available:
+        raw_warmup, warmup_parse_error = raw_phase_records(raw_path, "warmup")
+        raw_profiling, profiling_parse_error = raw_phase_records(raw_path, "profiling")
+        artifact_name = "aiperf_raw_records" if raw_path.is_file() else "aiperf_partial_raw_records"
+    else:
+        # The performance artifact level produces no raw export; session
+        # identity, phase, turn order, and delay reconciliation read the
+        # normalized per-request records instead.
+        raw_warmup, warmup_parse_error = phase_records(profiling_path, "warmup")
+        raw_profiling, profiling_parse_error = phase_records(profiling_path, "profiling")
+        artifact_name = "aiperf_records"
     if warmup_parse_error is not None:
         errors.append(warmup_parse_error)
     if profiling_parse_error is not None:
         errors.append(profiling_parse_error)
     max_input_tokens = source.max_input_tokens if source is not None else 0
-    artifact_name = "aiperf_raw_records" if raw_path.is_file() else "aiperf_partial_raw_records"
     warmup, warmup_sessions, warmup_turns, warmup_turn_order, warmup_errors = (
         _phase_session_evidence(
-            "warmup", warmup_plan, raw_warmup, tokenizer, max_input_tokens, artifact_name
+            "warmup",
+            warmup_plan,
+            raw_warmup,
+            tokenizer,
+            max_input_tokens,
+            artifact_name,
+            raw_available,
         )
     )
     (
@@ -437,30 +494,38 @@ def session_result_evidence(
         profiling_turn_order,
         profiling_errors,
     ) = _phase_session_evidence(
-        "profiling", profiling_plan, raw_profiling, tokenizer, max_input_tokens, artifact_name
+        "profiling",
+        profiling_plan,
+        raw_profiling,
+        tokenizer,
+        max_input_tokens,
+        artifact_name,
+        raw_available,
     )
     errors.extend(warmup_errors)
     errors.extend(profiling_errors)
-    profiling_native_records, native_parse_error = profiling_records(profiling_path)
-    if native_parse_error is not None:
-        errors.append(native_parse_error)
-    raw_native_ids = {
-        metadata["session_num"]
-        for record in raw_profiling
-        if isinstance((metadata := record.get("metadata")), dict)
-        and isinstance(metadata.get("session_num"), int)
-        and not isinstance(metadata.get("session_num"), bool)
-    }
-    profiling_native_ids = {
-        metadata["session_num"]
-        for record in profiling_native_records
-        if isinstance((metadata := record.get("metadata")), dict)
-        and isinstance(metadata.get("session_num"), int)
-        and not isinstance(metadata.get("session_num"), bool)
-    }
-    native_requests_reconciled = raw_native_ids == profiling_native_ids
-    if not native_requests_reconciled:
-        errors.append("AIPerf profiling metric records do not reconcile to raw requests")
+    native_requests_reconciled: bool | None = None
+    if raw_available:
+        profiling_native_records, native_parse_error = profiling_records(profiling_path)
+        if native_parse_error is not None:
+            errors.append(native_parse_error)
+        raw_native_ids = {
+            metadata["session_num"]
+            for record in raw_profiling
+            if isinstance((metadata := record.get("metadata")), dict)
+            and isinstance(metadata.get("session_num"), int)
+            and not isinstance(metadata.get("session_num"), bool)
+        }
+        profiling_native_ids = {
+            metadata["session_num"]
+            for record in profiling_native_records
+            if isinstance((metadata := record.get("metadata")), dict)
+            and isinstance(metadata.get("session_num"), int)
+            and not isinstance(metadata.get("session_num"), bool)
+        }
+        native_requests_reconciled = raw_native_ids == profiling_native_ids
+        if not native_requests_reconciled:
+            errors.append("AIPerf profiling metric records do not reconcile to raw requests")
     sessions = warmup_sessions + profiling_sessions
     turns = warmup_turns + profiling_turns
     runtime_session_ids = [session.runtime_session_id for session in sessions]
@@ -477,7 +542,7 @@ def session_result_evidence(
     counts_reconciled = (
         warmup.attempted_requests == warmup.completed_requests + warmup.failed_requests
         and profiling.attempted_requests == profiling.completed_requests + profiling.failed_requests
-        and native_requests_reconciled
+        and native_requests_reconciled is not False
     )
     if warmup.failed_sessions or profiling.failed_sessions:
         errors.append(
@@ -495,5 +560,6 @@ def session_result_evidence(
         inter_turn_delays_reconciled=inter_turn_delays_reconciled,
         native_requests_reconciled=native_requests_reconciled,
         counts_reconciled=counts_reconciled,
+        unavailable_dimensions=[] if raw_available else PERFORMANCE_UNAVAILABLE_DIMENSIONS,
     )
     return evidence, "; ".join(dict.fromkeys(errors)) or None

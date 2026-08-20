@@ -60,6 +60,32 @@ def test_config_maps_one_concurrency_case_to_headless_aiperf(tmp_path: Path) -> 
     assert runtime["ui"] == "none"
 
 
+def test_config_artifact_level_controls_raw_export(tmp_path: Path) -> None:
+    diagnostic = request(tmp_path / "diagnostic", {"kind": "concurrency_limited", "concurrency": 1})
+    diagnostic_benchmark = cast(dict[str, object], aiperf_config(diagnostic)["benchmark"])
+    diagnostic_artifacts = cast(dict[str, object], diagnostic_benchmark["artifacts"])
+    assert diagnostic_artifacts == {
+        "dir": str(diagnostic.artifact_dir),
+        "summary": ["json"],
+        "records": ["jsonl"],
+        "raw": True,
+        "prefix": "inferlab-bench",
+    }
+    assert inference_request_config(diagnostic)["artifact_level"] == "diagnostic"
+
+    performance = request(
+        tmp_path / "performance",
+        {"kind": "concurrency_limited", "concurrency": 1},
+        artifact_level="performance",
+    )
+    performance_benchmark = cast(dict[str, object], aiperf_config(performance)["benchmark"])
+    performance_artifacts = cast(dict[str, object], performance_benchmark["artifacts"])
+    assert performance_artifacts["raw"] is False
+    assert performance_artifacts["records"] == ["jsonl"]
+    assert performance_artifacts["summary"] == ["json"]
+    assert inference_request_config(performance)["artifact_level"] == "performance"
+
+
 def test_server_side_chat_template_survives_aiperf_config_rendering(tmp_path: Path) -> None:
     template = "{% for message in messages %}{{ message.content }}{% endfor %}"
     value = request(

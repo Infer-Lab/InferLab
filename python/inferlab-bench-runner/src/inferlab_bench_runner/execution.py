@@ -5,6 +5,7 @@ import json
 from inferlab_measurement_sdk import (
     BenchAgenticResultEvidence,
     BenchAgenticSourceVerification,
+    BenchArtifactLevelInput,
     BenchCacheStartInput,
     BenchClientRequest,
     BenchClientResult,
@@ -133,8 +134,8 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             every_failed_request_has_inference_error,
             count_error,
         ) = request_slo_evidence(records_path, request.case.request_count, request_slo, summary)
-    phase_error = warmup_error(warmup_counts(raw_records_path, request.case.warmup_request_count))
-    identity_error = population_identity_error(request, records_path, raw_records_path)
+    phase_error = warmup_error(warmup_counts(records_path, request.case.warmup_request_count))
+    identity_error = population_identity_error(request, records_path)
     prompt_reconciliation, prompt_reconciliation_error = prompt_token_reconciliation(
         request, records_path
     )
@@ -160,7 +161,12 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
                 agentic_source,
                 summary,
                 summary_path,
-                raw_records_path,
+                records_path,
+                (
+                    raw_records_path
+                    if request.definition.artifact_level == BenchArtifactLevelInput.diagnostic
+                    else None
+                ),
             )
             agentic_evidence = BenchAgenticResultEvidence(
                 source=source_verification,

@@ -11,7 +11,17 @@ from inferlab_measurement_sdk import (
     JsonObject,
 )
 
-from .result_records import raw_phase_records
+from .result_records import phase_records, raw_phase_records
+
+# Raw-artifact-derived evidence dimensions recorded as unavailable at the
+# performance artifact level (RFC-0005:C-BENCH-AGENTIC-TRACE-EVIDENCE). The
+# Rust control plane requires exactly the catalog dimensions plus this list,
+# in this order, for performance-level evidence.
+PERFORMANCE_UNAVAILABLE_DIMENSIONS = [
+    "source_coordinate_mapping",
+    "cache_bust_observations",
+    "warmup_source_coordinate_records",
+]
 
 _BRANCH_FIELDS = (
     "children_spawned",
@@ -105,6 +115,17 @@ def _request_coordinates(record: JsonObject, index: int, phase: str) -> tuple[st
     return source_trace_id, conversation_id, request_id
 
 
+def _runtime_identities(record: JsonObject, index: int, phase: str) -> tuple[str, str]:
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"AIPerf AgentX {phase} record {index} has no metadata")
+    request_id = metadata.get("x_request_id")
+    conversation_id = metadata.get("x_correlation_id")
+    if not isinstance(request_id, str) or not isinstance(conversation_id, str):
+        raise ValueError(f"AIPerf AgentX {phase} record {index} lacks runtime identities")
+    return conversation_id, request_id
+
+
 def _record_failed(record: JsonObject) -> bool:
     metadata = record.get("metadata")
     return record.get("error") is not None or (
@@ -116,33 +137,52 @@ def agentic_result_evidence(
     source: BenchAgenticSourceInput,
     summary: JsonObject,
     summary_path: Path,
-    raw_records_path: Path,
+    records_path: Path,
+    raw_records_path: Path | None,
 ) -> BenchAgenticRunEvidence:
     submission_valid, invalid_reasons = _scenario_metadata(summary, source)
-    warmup, warmup_error = raw_phase_records(raw_records_path, "warmup")
-    profiling, profiling_error = raw_phase_records(raw_records_path, "profiling")
+    raw_available = raw_records_path is not None
+    if raw_records_path is not None:
+        warmup, warmup_error = raw_phase_records(raw_records_path, "warmup")
+        profiling, profiling_error = raw_phase_records(raw_records_path, "profiling")
+    else:
+        # The performance artifact level produces no raw export; phase,
+        # runtime identities, terminal outcomes, and counts read the
+        # normalized per-request records instead.
+        warmup, warmup_error = phase_records(records_path, "warmup")
+        profiling, profiling_error = phase_records(records_path, "profiling")
     parse_error = warmup_error or profiling_error
     if parse_error is not None:
         raise ValueError(parse_error)
     if not profiling:
-        raise ValueError("AIPerf AgentX raw artifact has no profiling records")
-    warmup_coordinates = [
-        _request_coordinates(record, index, "warmup")
-        for index, record in enumerate(warmup, start=1)
-    ]
+        artifact = "raw artifact" if raw_available else "records artifact"
+        raise ValueError(f"AIPerf AgentX {artifact} has no profiling records")
+    warmup_coordinates = 0
+    if raw_available:
+        warmup_coordinates = len(
+            [
+                _request_coordinates(record, index, "warmup")
+                for index, record in enumerate(warmup, start=1)
+            ]
+        )
     coordinate_records = 0
     cache_bust_records = 0
     source_traces: set[str] = set()
     runtime_conversations: set[str] = set()
     transport_requests: set[str] = set()
     for index, record in enumerate(profiling, start=1):
-        source_trace, runtime_conversation, transport_request = _request_coordinates(
-            record, index, "profiling"
-        )
-        source_traces.add(source_trace)
+        if raw_available:
+            source_trace, runtime_conversation, transport_request = _request_coordinates(
+                record, index, "profiling"
+            )
+            source_traces.add(source_trace)
+            coordinate_records += 1
+        else:
+            runtime_conversation, transport_request = _runtime_identities(
+                record, index, "profiling"
+            )
         runtime_conversations.add(runtime_conversation)
         transport_requests.add(transport_request)
-        coordinate_records += 1
         marker = record.get("cache_bust_marker")
         target = record.get("cache_bust_target")
         if marker is not None or target is not None:
@@ -168,20 +208,27 @@ def agentic_result_evidence(
         submission_invalid_reasons=invalid_reasons,
         warmup_records=len(warmup),
         warmup_error_records=warmup_errors,
-        warmup_source_coordinate_records=len(warmup_coordinates),
         warmup_succeeded=warmup_errors == 0,
         profiling_began_after_warmup_and_drain=warmup_errors == 0,
         profiling_records=len(profiling),
-        source_coordinate_records=coordinate_records,
-        distinct_source_traces=len(source_traces),
         distinct_runtime_conversations=len(runtime_conversations),
         distinct_transport_requests=len(transport_requests),
-        cache_bust_records=cache_bust_records,
         context_overflow_count=context_overflow,
         ordinary_failure_count=ordinary_failures,
         branch_stats=_branch_stats(summary),
         aggregate_artifact=str(summary_path),
-        raw_records_artifact=str(raw_records_path),
-        unavailable_dimensions=source.catalog.unavailable_dimensions,
+        raw_records_artifact=str(raw_records_path) if raw_available else None,
+        unavailable_dimensions=(
+            source.catalog.unavailable_dimensions
+            if raw_available
+            else [
+                *source.catalog.unavailable_dimensions,
+                *PERFORMANCE_UNAVAILABLE_DIMENSIONS,
+            ]
+        ),
+        warmup_source_coordinate_records=warmup_coordinates if raw_available else None,
+        source_coordinate_records=coordinate_records if raw_available else None,
+        distinct_source_traces=len(source_traces) if raw_available else None,
+        cache_bust_records=cache_bust_records if raw_available else None,
     )
     return evidence

@@ -52,6 +52,7 @@ from inferlab_adapter_sdk import (
     require_integration_fused_frontend,
     require_role,
     split_serve_allocations,
+    validate_extra_args,
     validate_settings,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -135,7 +136,9 @@ def _runtime_cache_env(root: str) -> dict[str, str]:
 
 
 def _settings(values: dict[str, SettingValue]) -> TrtllmServeSettings:
-    return validate_settings(TrtllmServeSettings, values)
+    settings = validate_settings(TrtllmServeSettings, values)
+    validate_extra_args(settings.extra_args or [], _INFERLAB_OPTION_ARITY)
+    return settings
 
 
 def _yaml_mapping(value: object, source: str) -> dict[str, object]:
@@ -441,7 +444,12 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     roles = [prefill_result, decode_result]
     replicas = [*prefill_replicas, *decode_replicas]
     for role in roles:
-        path = _settings(role.effective_settings).extra_llm_api_options
+        settings = _settings(role.effective_settings)
+        # Engine roles in this topology own additional render flags (e.g.
+        # --backend), so the escape hatch is validated against the extended
+        # prefill/decode table rather than only the base table.
+        validate_extra_args(settings.extra_args or [], _PREFILL_DECODE_OPTION_ARITY)
+        path = settings.extra_llm_api_options
         if path is not None:
             role.render_inputs = [RenderInputDeclaration(source_path=_render_source_path(path))]
     links = [

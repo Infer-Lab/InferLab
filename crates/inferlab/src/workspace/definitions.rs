@@ -487,6 +487,8 @@ pub(crate) enum BenchDefinition {
         #[serde(default)]
         server_metrics: bool,
         #[serde(default)]
+        artifact_level: BenchArtifactLevel,
+        #[serde(default)]
         request_body: BTreeMap<String, JsonValue>,
         #[serde(
             default,
@@ -524,6 +526,8 @@ pub(crate) enum BenchDefinition {
         seed: u64,
         #[serde(default)]
         server_metrics: bool,
+        #[serde(default)]
+        artifact_level: BenchArtifactLevel,
         #[serde(default)]
         request_body: BTreeMap<String, JsonValue>,
         #[serde(
@@ -563,6 +567,17 @@ pub(crate) enum BenchCacheStart {
     Uncontrolled,
     Cold,
     Primed,
+}
+
+/// The Bench artifact level: `diagnostic` retains the full raw
+/// request/response export; `performance` keeps normalized per-request
+/// records and the summary only ([[RFC-0004:C-BENCH-ARTIFACT-LEVEL]]).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BenchArtifactLevel {
+    Performance,
+    #[default]
+    Diagnostic,
 }
 
 pub(super) fn deserialize_defaulted_bench_definitions<'de, D>(

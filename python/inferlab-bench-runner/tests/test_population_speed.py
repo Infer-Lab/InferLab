@@ -125,4 +125,4 @@ def test_speed_population_reconciles_upstream_question_identities(tmp_path: Path
         encoding="utf-8",
     )
 
-    assert population_identity_error(bench_request, profiling_path, tmp_path / "raw.jsonl") is None
+    assert population_identity_error(bench_request, profiling_path) is None

@@ -16,6 +16,7 @@ fn expectations(request_count: u32) -> BenchResultExpectations<'static> {
         speed_bench_server_metrics: false,
         sessions: None,
         agentic_source: None,
+        artifact_level: crate::workspace::BenchArtifactLevel::Diagnostic,
         request_count,
         request_slo: None,
         prompt_cache_evidence: false,
@@ -94,15 +95,11 @@ fn complete_agentic_evidence(source: &ResolvedBenchAgenticSource) -> BenchAgenti
             submission_invalid_reasons: Vec::new(),
             warmup_records: 3,
             warmup_error_records: 0,
-            warmup_source_coordinate_records: 3,
             warmup_succeeded: true,
             profiling_began_after_warmup_and_drain: true,
             profiling_records: 2,
-            source_coordinate_records: 2,
-            distinct_source_traces: 1,
             distinct_runtime_conversations: 1,
             distinct_transport_requests: 2,
-            cache_bust_records: 1,
             context_overflow_count: 0,
             ordinary_failure_count: 1,
             branch_stats: BenchAgenticBranchStats {
@@ -117,8 +114,12 @@ fn complete_agentic_evidence(source: &ResolvedBenchAgenticSource) -> BenchAgenti
                 joins_suppressed: 0,
             },
             aggregate_artifact: PathBuf::from("aggregate.json"),
-            raw_records_artifact: PathBuf::from("raw.jsonl"),
+            raw_records_artifact: Some(PathBuf::from("raw.jsonl")),
             unavailable_dimensions: source.catalog.unavailable_dimensions.clone(),
+            warmup_source_coordinate_records: Some(3),
+            source_coordinate_records: Some(2),
+            distinct_source_traces: Some(1),
+            cache_bust_records: Some(1),
         })),
     }
 }
@@ -157,7 +158,10 @@ fn agentic_bench_defers_failed_request_threshold_to_native_scenario()
         RawArtifact {
             name: "aiperf_raw_records".to_owned(),
             kind: "aiperf-raw-records".to_owned(),
-            path: run.raw_records_artifact.clone(),
+            path: run
+                .raw_records_artifact
+                .clone()
+                .ok_or("complete agentic evidence lacks a raw artifact")?,
         },
     ];
     result.agentic_evidence = Some(Box::new(evidence));
@@ -214,6 +218,71 @@ fn agentic_bench_defers_failed_request_threshold_to_native_scenario()
         &result,
         BenchResultExpectations {
             agentic_source: Some(&source),
+            ..expectations(0)
+        },
+    );
+    assert!(error.is_some_and(|error| error.contains("required native artifact")));
+    Ok(())
+}
+
+#[test]
+fn performance_agentic_evidence_records_raw_derived_dimensions_as_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source = agentic_source();
+    let mut evidence = complete_agentic_evidence(&source);
+    let mut result = prefill_bench_result();
+    result.completed_requests = 1;
+    result.failed_requests = 1;
+    result.raw_artifacts = vec![
+        RawArtifact {
+            name: "aiperf_summary".to_owned(),
+            kind: "aiperf-summary".to_owned(),
+            path: PathBuf::from("aggregate.json"),
+        },
+        RawArtifact {
+            name: "aiperf_records".to_owned(),
+            kind: "aiperf-records".to_owned(),
+            path: PathBuf::from("records.json"),
+        },
+    ];
+    if let Some(run) = evidence.run.as_mut() {
+        run.warmup_source_coordinate_records = None;
+        run.source_coordinate_records = None;
+        run.distinct_source_traces = None;
+        run.cache_bust_records = None;
+        run.raw_records_artifact = None;
+        run.unavailable_dimensions.extend(
+            super::PERFORMANCE_AGENTIC_UNAVAILABLE_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_owned()),
+        );
+    }
+    result.agentic_evidence = Some(Box::new(evidence));
+    let performance = BenchResultExpectations {
+        agentic_source: Some(&source),
+        artifact_level: crate::workspace::BenchArtifactLevel::Performance,
+        ..expectations(0)
+    };
+
+    assert_eq!(bench_result_error(&result, performance), None);
+
+    // The same degraded evidence remains invalid at the diagnostic level.
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            agentic_source: Some(&source),
+            ..expectations(0)
+        },
+    );
+    assert!(error.is_some_and(|error| error.contains("artifact level")));
+
+    // A performance case still requires the aggregate and records artifacts.
+    result.raw_artifacts.clear();
+    let error = bench_result_error(
+        &result,
+        BenchResultExpectations {
+            agentic_source: Some(&source),
+            artifact_level: crate::workspace::BenchArtifactLevel::Performance,
             ..expectations(0)
         },
     );

@@ -153,6 +153,10 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
         "server_chat"
     );
     assert_eq!(
+        recipe["measurements"]["benches"][0]["client"]["effective_definition"]["artifact_level"],
+        "diagnostic"
+    );
+    assert_eq!(
         recipe["measurements"]["benches"][0]["definition"]["warmup_prompts_per_concurrency"],
         0
     );

@@ -12,7 +12,7 @@ from inferlab_measurement_sdk import (
     BenchRequestSourceInputRandomMixture,
 )
 
-from inferlab_bench_runner.result_records import profiling_records, raw_phase_records
+from inferlab_bench_runner.result_records import phase_records, profiling_records
 
 
 def prompt_token_reconciliation(
@@ -98,8 +98,7 @@ def prompt_token_reconciliation(
 
 def population_identity_error(
     request: BenchClientRequest,
-    profiling_path: Path,
-    raw_path: Path,
+    records_path: Path,
 ) -> str | None:
     if request.population is None or request.definition.request_source is None:
         return None
@@ -134,13 +133,13 @@ def population_identity_error(
     phases = [
         (
             "warmup",
-            *raw_phase_records(raw_path, "warmup"),
+            *phase_records(records_path, "warmup"),
             0,
             request.case.warmup_request_count,
         ),
         (
             "profiling",
-            *profiling_records(profiling_path),
+            *profiling_records(records_path),
             request.case.warmup_request_count,
             request.case.request_count,
         ),

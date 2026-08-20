@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-integration-sglang"
-version = "0.6.0"
+version = "0.6.1"
 description = "Inferlab adapter integration for SGLang"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["inferlab-adapter-sdk==0.7.0"]
+dependencies = ["inferlab-adapter-sdk==0.7.1"]
 
 [project.scripts]
 inferlab-adapter-sglang = "inferlab_integration_sglang.__main__:main"

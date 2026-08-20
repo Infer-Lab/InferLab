@@ -339,18 +339,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
 
 
 def _prefill_decode_render_input() -> RenderServeInput:
-    plan_input = _prefill_decode_plan_input(
-        extra_args=[
-            "--disaggregation-mode",
-            "null",
-            "--disaggregation-transfer-backend",
-            "mooncake_async",
-            "--disaggregation-bootstrap-port",
-            "1",
-            "--pdlb-url",
-            "http://shadow",
-        ]
-    )
+    plan_input = _prefill_decode_plan_input()
     plan = plan_serve(plan_input)
     roles = {role.id: role for role in plan.roles}
     allocations: list[ServeProcessAllocation] = []
@@ -471,41 +460,21 @@ def test_render_launches_tokenspeed_with_the_effective_dsv4_shape() -> None:
     assert env["TORCHINDUCTOR_CACHE_DIR"] == "/cache/server/torchinductor"
 
 
-def test_render_merges_extra_args_without_yielding_inferlab_owned_values() -> None:
+def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
     settings = _dsv4_settings()
-    settings["extra_args"] = SettingValue.model_validate(
-        [
-            "--model",
-            "/models/shadow",
-            "--port=1",
-            "--control-port",
-            "2",
-            "--dist-init-addr",
-            "127.0.0.1:3",
-            "--tp",
-            "99",
-            "--world-size",
-            "99",
-            "--data-parallel-size",
-            "1",
-            "--moe-backend",
-            "auto",
-            "--log-level",
-            "debug",
-        ]
-    )
+    settings["extra_args"] = SettingValue.model_validate(["--model", "/models/shadow"])
+
+    with pytest.raises(AdapterOperationError, match="--model"):
+        plan_serve(_plan_input(settings=settings))
+
+
+def test_render_passes_through_unrecognized_extra_args() -> None:
+    settings = _dsv4_settings()
+    settings["extra_args"] = SettingValue.model_validate(["--log-level", "debug"])
     plan = plan_serve(_plan_input(settings=settings))
     result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
     argv = result.processes[0].root.command.argv
 
-    assert "/models/shadow" not in argv
-    assert argv[argv.index("--port") + 1] == "8000"
-    assert argv[argv.index("--control-port") + 1] == "8001"
-    assert argv[argv.index("--dist-init-addr") + 1] == "127.0.0.1:8002"
-    assert argv[argv.index("--world-size") + 1] == "4"
-    assert argv[argv.index("--data-parallel-size") + 1] == "4"
-    assert argv[argv.index("--moe-backend") + 1] == "mega_moe"
-    assert "--tp" not in argv
     assert argv[argv.index("--log-level") + 1] == "debug"
 
 

@@ -314,6 +314,7 @@ fn resolve_bench_definition(
             agentic_source,
             seed,
             server_metrics,
+            artifact_level,
             request_body,
             request_slo,
             cache,
@@ -354,6 +355,7 @@ fn resolve_bench_definition(
                 source,
                 prompt,
                 server_metrics: *server_metrics,
+                artifact_level: *artifact_level,
                 seed: *seed,
                 request_body: request_body.clone(),
                 request_slo: request_slo.clone(),
@@ -365,6 +367,7 @@ fn resolve_bench_definition(
             request_source,
             seed,
             server_metrics,
+            artifact_level,
             request_body,
             request_slo,
             cache,
@@ -379,6 +382,7 @@ fn resolve_bench_definition(
                 request_source,
             ),
             server_metrics: *server_metrics,
+            artifact_level: *artifact_level,
             seed: *seed,
             request_body: request_body.clone(),
             request_slo: request_slo.clone(),
@@ -835,6 +839,74 @@ timeout_seconds = 60
             error
                 .to_string()
                 .contains("may change only its inter-turn delay controls")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_level_defaults_to_diagnostic_and_preserves_an_explicit_level()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let defaulted = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let explicit = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+artifact_level = "performance"
+request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("defaulted", &defaulted)?;
+        validate_bench("explicit", &explicit)?;
+        let defaulted = serde_json::to_value(resolve_bench_definition(&defaulted, &defaulted)?)?;
+        let explicit = serde_json::to_value(resolve_bench_definition(&explicit, &explicit)?)?;
+        assert_eq!(defaulted["artifact_level"], "diagnostic");
+        assert_eq!(explicit["artifact_level"], "performance");
+        Ok(())
+    }
+
+    #[test]
+    fn performance_artifact_level_remains_valid_for_session_and_agentic_sources()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let session = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+artifact_level = "performance"
+session_source = { dataset = "sharegpt", max_input_tokens = 8192 }
+concurrency = [1]
+sessions_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let agentic = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+artifact_level = "performance"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [2]
+timeout_seconds = 3600
+"#,
+        )?;
+
+        validate_bench("session", &session)?;
+        validate_bench("agentic", &agentic)?;
+        assert_eq!(
+            serde_json::to_value(resolve_bench_definition(&session, &session)?)?["artifact_level"],
+            "performance"
+        );
+        assert_eq!(
+            serde_json::to_value(resolve_bench_definition(&agentic, &agentic)?)?["artifact_level"],
+            "performance"
         );
         Ok(())
     }

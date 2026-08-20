@@ -19,11 +19,11 @@ pub(crate) use composition::{snapshot_workspace, workspace_identity};
 #[cfg(test)]
 pub(crate) use definitions::BenchRandomShape;
 pub(crate) use definitions::{
-    AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchRequestSource,
-    BenchSessionSource, BenchTokenSelector, BenchTpotApplicability, EvalDefinition, EvalPrompt,
-    EvalTaskSource, JsonValue, ModelDefinition, RecipeDefinition, RequestRate, RequestSlo,
-    ServerCaseDefinition, ServerDefinition, StackDefinition, WorkloadSuiteDefinition,
-    WorkspaceConfig,
+    AggregateSlo, BenchAgenticSource, BenchArtifactLevel, BenchCacheStart, BenchDefinition,
+    BenchRequestSource, BenchSessionSource, BenchTokenSelector, BenchTpotApplicability,
+    EvalDefinition, EvalPrompt, EvalTaskSource, JsonValue, ModelDefinition, RecipeDefinition,
+    RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition, StackDefinition,
+    WorkloadSuiteDefinition, WorkspaceConfig,
 };
 pub(crate) use definitions::{
     BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,

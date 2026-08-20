@@ -12,7 +12,7 @@ from inferlab_measurement_sdk import (
 )
 
 from inferlab_bench_runner.result_metrics import metric_value, record_metric_value
-from inferlab_bench_runner.result_records import profiling_records, raw_phase_records
+from inferlab_bench_runner.result_records import phase_records, profiling_records
 
 
 def required_request_metric_tags(slo: BenchRequestSloInput) -> list[str]:
@@ -173,7 +173,7 @@ class WarmupCounts:
 
 
 def warmup_counts(path: Path, expected: int) -> WarmupCounts:
-    records, parse_error = raw_phase_records(path, "warmup")
+    records, parse_error = phase_records(path, "warmup")
     observed = len(records)
     completed = 0
     errored = 0
@@ -181,11 +181,11 @@ def warmup_counts(path: Path, expected: int) -> WarmupCounts:
     for record in records:
         metadata = record.get("metadata")
         if not isinstance(metadata, dict):
-            parse_error = "AIPerf raw warmup record has no metadata"
+            parse_error = "AIPerf warmup record has no metadata"
             break
         was_cancelled = metadata.get("was_cancelled")
         if not isinstance(was_cancelled, bool):
-            parse_error = "AIPerf raw warmup record has no cancellation status"
+            parse_error = "AIPerf warmup record has no cancellation status"
             break
         has_error = record.get("error") is not None
         if has_error:

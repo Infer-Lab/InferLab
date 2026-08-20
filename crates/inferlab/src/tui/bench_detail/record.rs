@@ -339,13 +339,13 @@ pub(in crate::tui) fn case_evidence(evidence: CaseEvidence<'_>) -> (Vec<FactSect
     if let Some(agentic) = evidence.agentic {
         sections.push(agentic_result(case, agentic));
         if let Some(run) = agentic.run.as_deref() {
-            artifacts.extend([
-                format!("agentic aggregate · {}", run.aggregate_artifact.display()),
-                format!(
-                    "agentic raw records · {}",
-                    run.raw_records_artifact.display()
-                ),
-            ]);
+            artifacts.push(format!(
+                "agentic aggregate · {}",
+                run.aggregate_artifact.display()
+            ));
+            if let Some(raw_records) = run.raw_records_artifact.as_ref() {
+                artifacts.push(format!("agentic raw records · {}", raw_records.display()));
+            }
         }
     } else if evidence.agentic_unavailable {
         sections.push(unavailable_case_source("AGENTIC REPLAY RESULT", case));
@@ -542,10 +542,19 @@ fn session_result(case: &str, value: &BenchSessionResultEvidence) -> FactSection
         ),
         fact(
             "Native requests reconciled",
-            yes_no(value.native_requests_reconciled),
+            value.native_requests_reconciled.map_or_else(
+                || "unavailable".to_owned(),
+                |reconciled| yes_no(reconciled).to_owned(),
+            ),
         ),
         fact("Counts reconciled", yes_no(value.counts_reconciled)),
     ]);
+    if !value.unavailable_dimensions.is_empty() {
+        rows.push(fact(
+            "Unavailable dimensions",
+            value.unavailable_dimensions.join(", "),
+        ));
+    }
     if let Some(failure) = value
         .sessions
         .iter()
@@ -594,6 +603,10 @@ fn phase_summary(prefix: &str, value: &BenchSessionPhaseSummary) -> Vec<(String,
         ),
         fact(format!("{prefix} reconciled"), yes_no(value.reconciled)),
     ]
+}
+
+fn unavailable_count(value: Option<u64>) -> String {
+    value.map_or_else(|| "unavailable".to_owned(), |count| count.to_string())
 }
 
 fn agentic_result(case: &str, value: &BenchAgenticResultEvidence) -> FactSection {
@@ -645,7 +658,7 @@ fn agentic_result(case: &str, value: &BenchAgenticResultEvidence) -> FactSection
             ),
             fact(
                 "Warmup source coordinates",
-                run.warmup_source_coordinate_records.to_string(),
+                unavailable_count(run.warmup_source_coordinate_records),
             ),
             fact(
                 "Profiling handoff",
@@ -654,9 +667,12 @@ fn agentic_result(case: &str, value: &BenchAgenticResultEvidence) -> FactSection
             fact("Profiling records", run.profiling_records.to_string()),
             fact(
                 "Profiling source coordinates",
-                run.source_coordinate_records.to_string(),
+                unavailable_count(run.source_coordinate_records),
             ),
-            fact("Source traces", run.distinct_source_traces.to_string()),
+            fact(
+                "Source traces",
+                unavailable_count(run.distinct_source_traces),
+            ),
             fact(
                 "Runtime conversations",
                 run.distinct_runtime_conversations.to_string(),
@@ -665,7 +681,7 @@ fn agentic_result(case: &str, value: &BenchAgenticResultEvidence) -> FactSection
                 "Transport requests",
                 run.distinct_transport_requests.to_string(),
             ),
-            fact("Cache busts", run.cache_bust_records.to_string()),
+            fact("Cache busts", unavailable_count(run.cache_bust_records)),
             fact("Context overflows", run.context_overflow_count.to_string()),
             fact("Ordinary failures", run.ordinary_failure_count.to_string()),
             fact(

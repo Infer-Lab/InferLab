@@ -92,7 +92,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("missing matrix bench record id")?;
     let matrix = workspace.load_record(matrix_id)?;
-    assert_eq!(matrix["schema_version"], 14);
+    assert_eq!(matrix["schema_version"], 15);
     assert_eq!(matrix["kind"], "bench");
     assert_eq!(matrix["passed"], true);
     assert!(

@@ -641,21 +641,28 @@ def test_render_profiling_keeps_model_server_commands_unchanged() -> None:
     assert profiled_pd.processes == ordinary_pd.processes
 
 
-def test_render_merges_extra_args_with_inferlab_precedence() -> None:
+def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
+    with pytest.raises(AdapterOperationError, match="--port"):
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(["--port", "1"]),
+                }
+            )
+        )
+
+
+def test_render_passes_through_unrecognized_extra_args() -> None:
     plan = plan_serve(
         _plan_input(
             settings={
-                "trust_remote_code": SettingValue(root=True),
                 "mem_fraction_static": SettingValue(root=0.8),
-                "extra_args": SettingValue.model_validate(
-                    ["--port", "1", "--log-level", "debug", "--mem-fraction-static=0.5"]
-                ),
+                "extra_args": SettingValue.model_validate(["--log-level", "debug"]),
             }
         )
     )
     result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
     argv = result.processes[0].root.command.argv
-    assert argv[argv.index("--port") + 1] == "8000", "inferlab owns the endpoint"
     assert argv[argv.index("--mem-fraction-static") + 1] == "0.8"
     assert "--log-level" in argv, "unrecognized extra args pass through"
 

@@ -315,7 +315,7 @@ def test_request_counts_preserve_complete_records_before_a_partial_line(
     assert "line 2" in error
 
 
-def test_warmup_counts_use_the_phase_tagged_raw_aiperf_records(tmp_path: Path) -> None:
+def test_warmup_counts_use_the_phase_tagged_normalized_records(tmp_path: Path) -> None:
     records = tmp_path / "raw.jsonl"
     records.write_text(
         "\n".join(
@@ -367,6 +367,48 @@ def test_warmup_counts_use_the_phase_tagged_raw_aiperf_records(tmp_path: Path) -
     assert counts.missing == 1
     assert counts.observed == 3
     assert counts.parse_error is None
+
+
+def test_performance_artifact_level_runs_without_raw_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_fake_aiperf(tmp_path, monkeypatch, "#!/bin/sh\nexit 0\n")
+    summary_fixture = Path(__file__).parent / "fixtures" / "aiperf-0.12.0-summary.json"
+    (tmp_path / "inferlab-bench.json").write_text(
+        summary_fixture.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    profiling_record = '{"metadata":{"benchmark_phase":"profiling"},"error":null}\n'
+    warmup_record = (
+        '{"metadata":{"benchmark_phase":"warmup","conversation_id":"session_000000",'
+        '"was_cancelled":false},"error":null}\n'
+    )
+    (tmp_path / "inferlab-bench.jsonl").write_text(
+        profiling_record * 4 + warmup_record * 2,
+        encoding="utf-8",
+    )
+
+    result = execute(
+        request(
+            tmp_path,
+            {"kind": "concurrency_limited", "concurrency": 2},
+            warmup_request_count=2,
+            artifact_level="performance",
+        )
+    )
+
+    assert result.status == ClientStatus.succeeded
+    assert result.completed_requests == 4
+    assert result.failed_requests == 0
+    artifact_names = {artifact.name for artifact in result.raw_artifacts}
+    assert "aiperf_records" in artifact_names
+    assert "aiperf_raw_records" not in artifact_names
+    assert "aiperf_partial_raw_records" not in artifact_names
+    config = cast(
+        dict[str, object],
+        json.loads((tmp_path / "aiperf-config.json").read_text(encoding="utf-8")),
+    )
+    benchmark = cast(dict[str, object], config["benchmark"])
+    assert cast(dict[str, object], benchmark["artifacts"])["raw"] is False
 
 
 def test_pinned_aiperf_native_warmup_qualification(tmp_path: Path) -> None:
@@ -424,9 +466,12 @@ def test_incomplete_native_warmup_fails_with_phase_counts(
         summary_fixture.read_text(encoding="utf-8"), encoding="utf-8"
     )
     profiling_record = '{"metadata":{"benchmark_phase":"profiling"},"error":null}\n'
-    (tmp_path / "inferlab-bench.jsonl").write_text(profiling_record * 4, encoding="utf-8")
-    (tmp_path / "inferlab-bench_raw.jsonl").write_text(
-        '{"metadata":{"benchmark_phase":"warmup","conversation_id":"session_000000","was_cancelled":false},"error":null}\n',
+    warmup_record = (
+        '{"metadata":{"benchmark_phase":"warmup","conversation_id":"session_000000",'
+        '"was_cancelled":false},"error":null}\n'
+    )
+    (tmp_path / "inferlab-bench.jsonl").write_text(
+        profiling_record * 4 + warmup_record,
         encoding="utf-8",
     )
 
@@ -647,6 +692,10 @@ def test_main_preserves_native_timeout_and_partial_warmup_evidence(
     partial_dir = tmp_path / "artifacts" / "raw_records"
     partial_dir.mkdir(parents=True)
     (partial_dir / "raw_records_processor_qual.jsonl").write_text(
+        '{"metadata":{"benchmark_phase":"warmup","conversation_id":"session_000000","was_cancelled":false},"error":null}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "artifacts" / "inferlab-bench.jsonl").write_text(
         '{"metadata":{"benchmark_phase":"warmup","conversation_id":"session_000000","was_cancelled":false},"error":null}\n',
         encoding="utf-8",
     )

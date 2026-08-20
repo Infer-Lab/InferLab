@@ -4,7 +4,9 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import pytest
 from inferlab_adapter_sdk import (
+    AdapterOperationError,
     AdapterRequest,
     AdapterRequestPlanServe,
     AdapterRequestRenderServe,
@@ -179,23 +181,46 @@ def test_vllm_rejects_an_expert_size_that_does_not_match_tp_times_dp() -> None:
     assert response.root.error.code == "invalid_settings"
 
 
-def test_render_merges_extra_args_with_inferlab_owned_options() -> None:
+def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    cast(dict[str, object], roles[0]["settings"])["extra_args"] = ["--block-size", "32"]
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert "--block-size" in response.root.error.message
+
+
+def test_render_rejects_inferlab_owned_option_in_extra_args() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    for allocation in allocations[:2]:
+        settings = cast(dict[str, object], allocation["effective_settings"])
+        settings["extra_args"] = ["--tensor-parallel-size", "99"]
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    with pytest.raises(AdapterOperationError, match="--tensor-parallel-size"):
+        render_serve(request.root.input)
+
+
+def test_render_passes_through_unrecognized_and_passthrough_extra_args() -> None:
     payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
     allocations = cast(list[dict[str, object]], input_payload["allocations"])
     for allocation in allocations[:2]:
         settings = cast(dict[str, object], allocation["effective_settings"])
         settings["extra_args"] = [
-            "--served-model-name",
-            "shadow-a",
-            "shadow-b",
-            "--port=9000",
-            "--tensor-parallel-size",
-            "99",
-            "--headless",
             "--max-num-seqs",
             "16",
             "--max-num-seqs",
+            "32",
+            "--",
+            "--block-size",
             "32",
         ]
 
@@ -204,19 +229,10 @@ def test_render_merges_extra_args_with_inferlab_owned_options() -> None:
     result = render_serve(request.root.input)
 
     rank_zero = result.processes[0].root.command.argv
-    rank_one = result.processes[1].root.command.argv
-    assert rank_zero.count("--port") == 1
-    assert rank_zero[rank_zero.index("--port") + 1] == "8000"
-    assert rank_zero[rank_zero.index("--served-model-name") + 1] == "dsv4"
-    assert rank_zero.count("--tensor-parallel-size") == 1
-    assert rank_zero[rank_zero.index("--tensor-parallel-size") + 1] == "2"
-    assert "shadow-a" not in rank_zero
-    assert "shadow-b" not in rank_zero
-    assert "--headless" not in rank_zero
-    assert "--headless" not in rank_one
     assert [
         rank_zero[index + 1] for index, value in enumerate(rank_zero) if value == "--max-num-seqs"
     ] == ["16", "32"]
+    assert "--block-size" in rank_zero[rank_zero.index("--") :]
 
 
 def test_render_enables_prompt_token_details_when_declared() -> None:

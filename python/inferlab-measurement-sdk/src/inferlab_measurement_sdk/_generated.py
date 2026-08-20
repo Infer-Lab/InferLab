@@ -34,25 +34,59 @@ class BenchAgenticRunEvidence(BaseModel):
     )
     aggregate_artifact: str
     branch_stats: BenchAgenticBranchStats
-    cache_bust_records: Annotated[int, Field(ge=0)]
+    cache_bust_records: Annotated[
+        int | None,
+        Field(
+            description='Profiling records carrying a raw cache-bust marker observation;\nabsent when the artifact level makes that observation unavailable.',
+            ge=0,
+        ),
+    ] = None
     context_overflow_count: Annotated[int, Field(ge=0)]
     distinct_runtime_conversations: Annotated[int, Field(ge=0)]
-    distinct_source_traces: Annotated[int, Field(ge=0)]
+    distinct_source_traces: Annotated[
+        int | None,
+        Field(
+            description='Distinct source traces identified through the raw-derived coordinate\nmapping; absent when the artifact level makes it unavailable.',
+            ge=0,
+        ),
+    ] = None
     distinct_transport_requests: Annotated[int, Field(ge=0)]
     native_run_id: str
     ordinary_failure_count: Annotated[int, Field(ge=0)]
     profiling_began_after_warmup_and_drain: bool
     profiling_records: Annotated[int, Field(ge=0)]
-    raw_records_artifact: str
+    raw_records_artifact: Annotated[
+        str | None,
+        Field(
+            description='The raw request/response artifact; absent at the `performance`\nartifact level, where raw export is not requested.'
+        ),
+    ] = None
     scenario: str
-    source_coordinate_records: Annotated[int, Field(ge=0)]
+    source_coordinate_records: Annotated[
+        int | None,
+        Field(
+            description='Profiling records whose raw-derived source coordinates were observed;\nabsent when the artifact level makes that mapping unavailable.',
+            ge=0,
+        ),
+    ] = None
     submission_invalid_reasons: list[str] = []
     submission_valid: bool
     unavailable_dimensions: list[str] = []
     warmup_error_records: Annotated[int, Field(ge=0)]
     warmup_records: Annotated[int, Field(ge=0)]
-    warmup_source_coordinate_records: Annotated[int, Field(ge=0)]
+    warmup_source_coordinate_records: Annotated[
+        int | None,
+        Field(
+            description='Warmup records whose raw-derived source coordinates were observed;\nabsent when the artifact level makes that mapping unavailable.',
+            ge=0,
+        ),
+    ] = None
     warmup_succeeded: bool
+
+
+class BenchArtifactLevelInput(StrEnum):
+    performance = 'performance'
+    diagnostic = 'diagnostic'
 
 
 class BenchCacheStartInput(StrEnum):
@@ -311,7 +345,13 @@ class BenchSessionTurnResult(BaseModel):
     observed_prompt_tokens: Annotated[int | None, Field(ge=0)] = None
     phase: str
     post_failure_continuation: bool = False
-    pre_template_content_tokens: Annotated[int, Field(ge=0)]
+    pre_template_content_tokens: Annotated[
+        int | None,
+        Field(
+            description='Measured from the raw request payload; absent when the artifact level\ndoes not produce the raw request/response artifact.',
+            ge=0,
+        ),
+    ] = None
     preceding_native_session_num: Annotated[int | None, Field(ge=0)] = None
     preceding_terminal_response_receipt_ns: Annotated[int | None, Field(ge=0)] = None
     request_start_ns: Annotated[int, Field(ge=0)]
@@ -921,13 +961,24 @@ class BenchSessionResultEvidence(BaseModel):
     )
     counts_reconciled: bool
     inter_turn_delays_reconciled: bool
-    native_requests_reconciled: bool
+    native_requests_reconciled: Annotated[
+        bool | None,
+        Field(
+            description='Whether raw requests reconcile to normalized metric records; absent at\nthe `performance` artifact level, where no raw artifact exists.'
+        ),
+    ] = None
     population_slice_reconciled: bool
     profiling: BenchSessionPhaseSummary
     sessions: list[BenchRuntimeSessionResult]
     sessions_reconciled: bool
     turn_order_reconciled: bool
     turns: list[BenchSessionTurnResult]
+    unavailable_dimensions: Annotated[
+        list[str],
+        Field(
+            description='Evidence dimensions recorded as unavailable due to the effective\nartifact level ([[RFC-0004:C-BENCH-ARTIFACT-LEVEL]]).'
+        ),
+    ] = []
     warmup: BenchSessionPhaseSummary
 
 
@@ -1294,6 +1345,7 @@ class BenchDefinitionInput(BaseModel):
         extra='forbid',
     )
     agentic_source: BenchAgenticSourceInput | None = None
+    artifact_level: BenchArtifactLevelInput = 'diagnostic'
     cache_start: BenchCacheStartInput
     prompt: BenchPromptInput
     request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}

@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-integration-vllm"
-version = "0.6.0"
+version = "0.6.1"
 description = "Inferlab adapter integration for vLLM"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["inferlab-adapter-sdk==0.7.0"]
+dependencies = ["inferlab-adapter-sdk==0.7.1"]
 
 [project.scripts]
 inferlab-adapter-vllm = "inferlab_integration_vllm.__main__:main"

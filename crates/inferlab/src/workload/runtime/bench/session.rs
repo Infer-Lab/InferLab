@@ -7,6 +7,16 @@ mod tests;
 use inferlab_protocol::{BenchClientResult, BenchSessionResultEvidence, ClientStatus};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Raw-artifact-derived session evidence dimensions recorded as unavailable at
+/// the `performance` artifact level
+/// ([[RFC-0005:C-BENCH-LINEAR-SESSION-EVIDENCE]]).
+pub(crate) const PERFORMANCE_SESSION_UNAVAILABLE_DIMENSIONS: [&str; 4] = [
+    "pre_template_content_tokens",
+    "max_input_tokens_bound_check",
+    "preceding_live_response_pairwise_history",
+    "raw_native_request_reconciliation",
+];
+
 pub(crate) fn duplicate_runtime_session_identity<'a>(
     existing: impl Iterator<Item = &'a BenchSessionResultEvidence>,
     candidate: &BenchSessionResultEvidence,
@@ -27,12 +37,32 @@ pub(crate) fn linear_session_result_error(
     expected_warmup_sessions: u32,
     expected_profiling_sessions: u32,
     expected_profiling_requests: u32,
+    artifact_level: crate::workspace::BenchArtifactLevel,
 ) -> Option<String> {
+    let raw_expected = artifact_level == crate::workspace::BenchArtifactLevel::Diagnostic;
+    let expected_unavailable: Vec<String> = if raw_expected {
+        Vec::new()
+    } else {
+        PERFORMANCE_SESSION_UNAVAILABLE_DIMENSIONS
+            .iter()
+            .map(|dimension| (*dimension).to_owned())
+            .collect()
+    };
+    if evidence.unavailable_dimensions != expected_unavailable {
+        return Some("unavailable dimensions do not match the effective artifact level".to_owned());
+    }
+    // Diagnostic evidence MUST reconcile raw requests to normalized metric
+    // records; performance evidence MUST leave that raw-derived reconciliation
+    // absent.
+    if evidence.native_requests_reconciled != raw_expected.then_some(true) {
+        return Some(
+            "native request reconciliation disagrees with the effective artifact level".to_owned(),
+        );
+    }
     if !evidence.population_slice_reconciled
         || !evidence.sessions_reconciled
         || !evidence.turn_order_reconciled
         || !evidence.inter_turn_delays_reconciled
-        || !evidence.native_requests_reconciled
         || !evidence.counts_reconciled
     {
         return Some("one or more reconciliation conclusions are false".to_owned());
@@ -123,6 +153,7 @@ pub(crate) fn linear_session_result_error(
         if turn.phase != session.phase
             || turn.native_artifact_name.is_empty()
             || turn.observed_prompt_tokens.is_none()
+            || turn.pre_template_content_tokens.is_some() != raw_expected
             || turn.inter_turn_delay_reconciled != Some(true)
             || turn.post_failure_continuation
             || !native_ids.insert((turn.phase.as_str(), turn.native_session_num))
@@ -154,7 +185,7 @@ pub(crate) fn linear_session_result_error(
                 {
                     return Some("first turn carries preceding-turn evidence".to_owned());
                 }
-            } else {
+            } else if raw_expected {
                 let (Some(receipt_ns), Some(delay_seconds)) = (
                     turn.preceding_terminal_response_receipt_ns,
                     turn.effective_inter_turn_delay_seconds,
@@ -176,6 +207,22 @@ pub(crate) fn linear_session_result_error(
                     return Some(
                         "a later turn began before its effective delay elapsed".to_owned(),
                     );
+                }
+            } else {
+                // The raw-derived pairwise history is unavailable at the
+                // performance artifact level; the client still reconciles the
+                // effective delay from normalized record timing.
+                if turn.preceding_native_session_num.is_some()
+                    || turn.preceding_terminal_response_receipt_ns.is_some()
+                {
+                    return Some(
+                        "a later turn carries raw-derived predecessor evidence without a raw artifact"
+                            .to_owned(),
+                    );
+                }
+                match turn.effective_inter_turn_delay_seconds {
+                    Some(delay_seconds) if delay_seconds.is_finite() && delay_seconds >= 0.0 => {}
+                    _ => return Some("a later turn omits delay evidence".to_owned()),
                 }
             }
             previous_native_id = Some(turn.native_session_num);

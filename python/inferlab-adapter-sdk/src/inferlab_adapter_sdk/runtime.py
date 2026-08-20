@@ -294,11 +294,31 @@ def append_option(argv: list[str], name: str, value: str | int | float | None) -
         argv.extend([name, str(value)])
 
 
+def validate_extra_args(extra_args: list[str], option_arity: dict[str, int | None]) -> None:
+    """Reject InferLab-owned options in the extra-args escape hatch.
+
+    Only tokens before the `--` passthrough sentinel are checked; anything
+    after it is a deliberate verbatim override and passes through untouched.
+    """
+    for argument in extra_args:
+        if argument == "--":
+            return
+        name, _separator, _value = argument.partition("=")
+        if name in option_arity:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                f"extra_args entry {argument!r} names InferLab-owned option {name!r}; "
+                "set it through the typed serve settings instead, or place it "
+                "after a '--' sentinel for a deliberate verbatim override",
+            )
+
+
 def merge_serve_args(
     extra_args: list[str],
     inferlab_args: list[str],
     option_arity: dict[str, int | None],
 ) -> list[str]:
+    validate_extra_args(extra_args, option_arity)
     merged = []
     remainder = []
     index = 0
@@ -307,24 +327,8 @@ def merge_serve_args(
         if argument == "--":
             remainder = extra_args[index:]
             break
-        name, separator, _value = argument.partition("=")
-        arity = option_arity.get(name, -1)
-        if arity == -1:
-            merged.append(argument)
-            index += 1
-            continue
-
+        merged.append(argument)
         index += 1
-        if arity == 0:
-            continue
-        if arity == 1:
-            if not separator and index < len(extra_args) and not extra_args[index].startswith("--"):
-                index += 1
-            continue
-        # Options whose arity is unbounded (None) consume every following
-        # value token until the next flag or the "--" passthrough sentinel.
-        while index < len(extra_args) and not extra_args[index].startswith("--"):
-            index += 1
 
     merged.extend(inferlab_args)
     merged.extend(remainder)

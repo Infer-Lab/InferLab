@@ -76,7 +76,7 @@ pub(super) fn complete_session_evidence() -> BenchSessionResultEvidence {
                 phase: "profiling".to_owned(),
                 runtime_session_id: "runtime-0".to_owned(),
                 turn_index: 0,
-                pre_template_content_tokens: 1,
+                pre_template_content_tokens: Some(1),
                 observed_prompt_tokens: Some(4),
                 native_session_num: 0,
                 preceding_native_session_num: None,
@@ -91,7 +91,7 @@ pub(super) fn complete_session_evidence() -> BenchSessionResultEvidence {
                 phase: "profiling".to_owned(),
                 runtime_session_id: "runtime-0".to_owned(),
                 turn_index: 1,
-                pre_template_content_tokens: 3,
+                pre_template_content_tokens: Some(3),
                 observed_prompt_tokens: Some(6),
                 native_session_num: 1,
                 preceding_native_session_num: Some(0),
@@ -107,7 +107,8 @@ pub(super) fn complete_session_evidence() -> BenchSessionResultEvidence {
         sessions_reconciled: true,
         turn_order_reconciled: true,
         inter_turn_delays_reconciled: true,
-        native_requests_reconciled: true,
+        native_requests_reconciled: Some(true),
         counts_reconciled: true,
+        unavailable_dimensions: Vec::new(),
     }
 }

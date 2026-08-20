@@ -99,7 +99,9 @@ keepalive policy remain in the selected OpenSSH target configuration.
 Framework settings belong under `settings`, either on the server or on a
 canonical role. Integrations validate their typed fields. `extra_args` remains
 the explicit backend escape hatch and is replaced as one complete array by a
-case or invocation patch.
+case or invocation patch. An `extra_args` entry naming an InferLab-owned option
+is rejected with a typed `invalid_settings` error rather than silently dropped;
+place it after a `--` sentinel for a deliberate verbatim override.
 
 A stack selects one integration and Pixi environment. Its `source_paths` name
 workspace-relative framework sources; declared checks verify the realized

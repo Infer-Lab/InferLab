@@ -20,7 +20,7 @@ from inferlab_measurement_sdk import (
 from .support import FakeTokenizer, resolved_prompt_input
 
 
-def session_request(tmp_path: Path) -> BenchClientRequest:
+def session_request(tmp_path: Path, artifact_level: str = "diagnostic") -> BenchClientRequest:
     population_path = tmp_path / "session-population.jsonl"
     population_path.write_text(
         "".join(
@@ -84,6 +84,7 @@ def session_request(tmp_path: Path) -> BenchClientRequest:
                 "request_slo": None,
                 "timeout_seconds": 120,
                 "cache_start": "uncontrolled",
+                "artifact_level": artifact_level,
             },
             "population": {
                 "path": str(population_path),
@@ -455,3 +456,76 @@ def test_session_result_preserves_native_continuation_after_a_failed_turn(
     assert evidence.turns[1].preceding_native_session_num is None
     assert evidence.turns[1].preceding_terminal_response_receipt_ns is None
     assert evidence.turns[1].inter_turn_delay_reconciled is None
+
+
+def test_performance_session_result_reads_normalized_records_and_marks_raw_dimensions(
+    tmp_path: Path,
+) -> None:
+    value = session_request(tmp_path, artifact_level="performance")
+    records_path = tmp_path / "session-records.jsonl"
+    record_lines: list[str] = []
+    timing_sequence = 0
+    for phase, start, count in (("warmup", 0, 2), ("profiling", 3, 6)):
+        for phase_session in range(count):
+            template_index = start + phase_session
+            runtime_id = f"runtime-{phase}-{phase_session}"
+            previous_end = 0
+            for turn_index in range(2):
+                native_request = phase_session * 2 + turn_index
+                request_start = 1_000_000_000 + timing_sequence * 10_000_000
+                if previous_end:
+                    request_start = previous_end
+                request_end = request_start + 5_000_000
+                record_lines.append(
+                    json.dumps(
+                        {
+                            "metadata": {
+                                "benchmark_phase": phase,
+                                "conversation_id": f"template-{template_index}",
+                                "x_correlation_id": runtime_id,
+                                "session_num": native_request,
+                                "turn_index": turn_index,
+                                "request_start_ns": request_start,
+                                "request_end_ns": request_end,
+                                "was_cancelled": False,
+                            },
+                            "metrics": {
+                                "input_sequence_length": {
+                                    "value": 5 + turn_index,
+                                    "unit": "tokens",
+                                }
+                            },
+                            "error": None,
+                        }
+                    )
+                )
+                timing_sequence += 1
+                previous_end = request_end
+    records_path.write_text("\n".join(record_lines) + "\n", encoding="utf-8")
+
+    evidence, error = session_result_evidence(
+        value, records_path, tmp_path / "session-raw.jsonl", FakeTokenizer()
+    )
+
+    assert error is None
+    assert evidence.profiling.completed_requests == 12
+    assert len(evidence.sessions) == 8
+    assert len(evidence.turns) == 16
+    assert evidence.turns[0].pre_template_content_tokens is None
+    assert evidence.turns[0].observed_prompt_tokens == 5
+    assert evidence.turns[1].pre_template_content_tokens is None
+    assert evidence.turns[1].observed_prompt_tokens == 6
+    assert evidence.turns[1].preceding_native_session_num is None
+    assert evidence.turns[1].preceding_terminal_response_receipt_ns is None
+    assert evidence.turns[1].inter_turn_delay_reconciled is True
+    assert evidence.turns[1].native_artifact_name == "aiperf_records"
+    assert evidence.population_slice_reconciled is True
+    assert evidence.inter_turn_delays_reconciled is True
+    assert evidence.native_requests_reconciled is None
+    assert evidence.counts_reconciled is True
+    assert evidence.unavailable_dimensions == [
+        "pre_template_content_tokens",
+        "max_input_tokens_bound_check",
+        "preceding_live_response_pairwise_history",
+        "raw_native_request_reconciliation",
+    ]

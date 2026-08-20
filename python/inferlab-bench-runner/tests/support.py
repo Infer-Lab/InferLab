@@ -46,6 +46,7 @@ def request(
     request_slo: dict[str, float] | None = None,
     request_source: dict[str, object] | None = None,
     server_metrics: bool = False,
+    artifact_level: str = "diagnostic",
 ) -> BenchClientRequest:
     effective_source = (
         dict(request_source)
@@ -96,6 +97,7 @@ def request(
                 "request_slo": request_slo,
                 "timeout_seconds": 120,
                 "cache_start": "uncontrolled",
+                "artifact_level": artifact_level,
             },
             "case": {
                 "load_shape": load_shape,

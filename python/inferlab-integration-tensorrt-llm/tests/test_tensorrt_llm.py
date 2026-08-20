@@ -615,9 +615,7 @@ backend: tensorrt
                 "backend": "tensorrt",
             }
         ),
-        "extra_args": SettingValue.model_validate(
-            ["--config", "escape.yaml", "--backend", "tensorrt"]
-        ),
+        "extra_args": SettingValue.model_validate(["--log_level", "debug"]),
     }
 
     result = render_serve(_prefill_decode_render_input(settings=settings))
@@ -703,32 +701,39 @@ def test_render_native_router_targets_every_rank_zero_worker() -> None:
     }
 
 
-def test_render_merges_extra_args_with_inferlab_precedence() -> None:
+def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
+    with pytest.raises(AdapterOperationError, match="--tp_size"):
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(["--tp_size", "8"]),
+                }
+            )
+        )
+
+
+def test_prefill_decode_plan_rejects_role_owned_option_in_extra_args() -> None:
+    with pytest.raises(AdapterOperationError, match="--backend"):
+        plan_serve(
+            _prefill_decode_plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(["--backend", "tensorrt"]),
+                }
+            )
+        )
+
+
+def test_render_passes_through_unrecognized_extra_args() -> None:
     plan = plan_serve(
         _plan_input(
             settings={
                 "free_gpu_memory_fraction": SettingValue(root=0.8),
-                "extra_args": SettingValue.model_validate(
-                    [
-                        "--port",
-                        "1",
-                        "--tp_size",
-                        "8",
-                        "--kv_cache_free_gpu_memory_fraction=0.5",
-                        "--log_level",
-                        "debug",
-                    ]
-                ),
+                "extra_args": SettingValue.model_validate(["--log_level", "debug"]),
             }
         )
     )
     result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
     argv = result.processes[0].root.command.argv
-    assert argv[argv.index("--port") + 1] == "8000", "inferlab owns the endpoint"
-    assert "--tp_size" not in argv, "alias spellings of owned options are claimed"
-    assert argv.count("--tensor_parallel_size") == 1
-    assert argv[argv.index("--tensor_parallel_size") + 1] == "2"
-    assert "--kv_cache_free_gpu_memory_fraction" not in argv
     assert argv[argv.index("--free_gpu_memory_fraction") + 1] == "0.8"
     assert "--log_level" in argv, "unrecognized extra args pass through"
 

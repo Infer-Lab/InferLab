@@ -1,4 +1,4 @@
-"""Read the pinned AIPerf raw-record artifacts by benchmark phase."""
+"""Read the pinned AIPerf normalized-record artifacts by benchmark phase."""
 
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ from typing import cast
 from inferlab_measurement_sdk import JsonObject
 
 
-def profiling_records(path: Path) -> tuple[list[JsonObject], str | None]:
+def phase_records(path: Path, phase: str) -> tuple[list[JsonObject], str | None]:
     if not path.is_file():
         return [], None
     records: list[JsonObject] = []
@@ -23,9 +23,13 @@ def profiling_records(path: Path) -> tuple[list[JsonObject], str | None]:
         metadata = record.get("metadata")
         if not isinstance(metadata, dict):
             return records, f"AIPerf records JSONL line {line_number} has no metadata"
-        if metadata.get("benchmark_phase") == "profiling":
+        if metadata.get("benchmark_phase") == phase:
             records.append(cast(JsonObject, record))
     return records, None
+
+
+def profiling_records(path: Path) -> tuple[list[JsonObject], str | None]:
+    return phase_records(path, "profiling")
 
 
 def raw_phase_records(path: Path, phase: str) -> tuple[list[JsonObject], str | None]:

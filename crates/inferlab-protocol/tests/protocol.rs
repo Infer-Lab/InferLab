@@ -1,8 +1,8 @@
 use inferlab_protocol::{
-    AdapterRequest, AdapterResponse, AdapterResult, BenchClientRequest, BenchClientResult,
-    BenchRequestSourceInput, EvalClientRequest, EvalClientResult, EvalDefinitionInput,
-    EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput,
-    MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
+    AdapterRequest, AdapterResponse, AdapterResult, BenchArtifactLevelInput, BenchClientRequest,
+    BenchClientResult, BenchRequestSourceInput, EvalClientRequest, EvalClientResult,
+    EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion,
+    EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
     MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
     ProtocolVersion, ReadinessProbe, RenderInputDeclaration, SettingValue, SuppliedRenderInput,
     TargetEndpointScheme, measurement_schema, protocol_schema,
@@ -138,6 +138,11 @@ fn weighted_random_mixture_fixture_round_trips() -> Result<(), Box<dyn Error>> {
 
     assert_eq!(shapes.len(), 2);
     assert_eq!(*total_weight, 10);
+    // The fixture omits the artifact level; omission resolves to diagnostic.
+    assert_eq!(
+        request.definition.artifact_level,
+        BenchArtifactLevelInput::Diagnostic
+    );
     assert_eq!(
         serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
         request
@@ -155,6 +160,10 @@ fn agentic_bench_fixtures_round_trip() -> Result<(), Box<dyn Error>> {
         .ok_or("AgentX fixture omitted its agentic source")?;
     assert_eq!(source.catalog.scenario, "inferencex-agentx-mvp");
     assert_eq!(request.case.duration_seconds, Some(900));
+    assert_eq!(
+        request.definition.artifact_level,
+        BenchArtifactLevelInput::Diagnostic
+    );
 
     let result: BenchClientResult = serde_json::from_str(VALID_BENCH_CLIENT_RESULT_AGENTIC)?;
     let evidence = result

@@ -14,14 +14,23 @@ use crate::workload::record::{
     SloEvaluationOutcome,
 };
 use crate::workload::{BenchCasePlan, BenchPlan};
-use crate::workspace::{BenchCacheStart, RequestSlo};
+use crate::workspace::{BenchArtifactLevel, BenchCacheStart, RequestSlo};
 use inferlab_protocol::{BenchClientResult, ClientStatus};
+
+/// Raw-artifact-derived agentic evidence dimensions recorded as unavailable at
+/// the `performance` artifact level ([[RFC-0005:C-BENCH-AGENTIC-TRACE-EVIDENCE]]).
+pub(super) const PERFORMANCE_AGENTIC_UNAVAILABLE_DIMENSIONS: [&str; 3] = [
+    "source_coordinate_mapping",
+    "cache_bust_observations",
+    "warmup_source_coordinate_records",
+];
 
 pub(super) struct BenchResultExpectations<'a> {
     pub(super) tpot_applicable: bool,
     pub(super) speed_bench_server_metrics: bool,
     pub(super) sessions: Option<(u32, u32)>,
     pub(super) agentic_source: Option<&'a ResolvedBenchAgenticSource>,
+    pub(super) artifact_level: BenchArtifactLevel,
     pub(super) request_count: u32,
     pub(super) request_slo: Option<&'a RequestSlo>,
     pub(super) prompt_cache_evidence: bool,
@@ -45,6 +54,7 @@ impl<'a> BenchResultExpectations<'a> {
                 ResolvedBenchSource::Agentic { agentic_source } => Some(agentic_source),
                 ResolvedBenchSource::Requests { .. } | ResolvedBenchSource::Sessions { .. } => None,
             },
+            artifact_level: plan.client.effective_definition.artifact_level,
             request_count: case.request_count,
             request_slo: plan.client.slo.request.as_ref(),
             prompt_cache_evidence: requires_prompt_cache_evidence(plan),
@@ -61,6 +71,7 @@ pub(super) fn bench_result_error(
         speed_bench_server_metrics,
         sessions: expected_sessions,
         agentic_source: expected_agentic_source,
+        artifact_level,
         request_count,
         request_slo,
         prompt_cache_evidence: requires_prompt_cache_evidence,
@@ -94,6 +105,7 @@ pub(super) fn bench_result_error(
             warmup_sessions,
             profiling_sessions,
             request_count,
+            artifact_level,
         ) {
             return Some(format!(
                 "Bench client returned invalid linear-session evidence: {error}"
@@ -108,7 +120,7 @@ pub(super) fn bench_result_error(
         let Some(evidence) = result.agentic_evidence.as_deref() else {
             return Some("Bench client omitted agentic evidence".to_owned());
         };
-        if let Some(error) = agentic_result_error(result, evidence, source) {
+        if let Some(error) = agentic_result_error(result, evidence, source, artifact_level) {
             return Some(format!(
                 "Bench client returned invalid agentic evidence: {error}"
             ));
@@ -382,6 +394,7 @@ fn agentic_result_error(
     result: &BenchClientResult,
     evidence: &inferlab_protocol::BenchAgenticResultEvidence,
     source: &ResolvedBenchAgenticSource,
+    artifact_level: BenchArtifactLevel,
 ) -> Option<String> {
     let catalog = &source.catalog;
     if evidence.source.repository != catalog.repository
@@ -402,10 +415,32 @@ fn agentic_result_error(
     if run.native_run_id.is_empty() {
         return Some("native run identity is empty".to_owned());
     }
+    let raw_expected = artifact_level == BenchArtifactLevel::Diagnostic;
+    let mut expected_unavailable = catalog.unavailable_dimensions.clone();
+    if !raw_expected {
+        expected_unavailable.extend(
+            PERFORMANCE_AGENTIC_UNAVAILABLE_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_owned()),
+        );
+    }
+    if raw_expected
+        != (run.warmup_source_coordinate_records.is_some()
+            && run.source_coordinate_records.is_some()
+            && run.distinct_source_traces.is_some()
+            && run.cache_bust_records.is_some()
+            && run.raw_records_artifact.is_some())
+    {
+        return Some(
+            "raw-derived agentic evidence dimensions disagree with the artifact level".to_owned(),
+        );
+    }
     if !run.warmup_succeeded
         || run.warmup_error_records != 0
         || !run.profiling_began_after_warmup_and_drain
-        || run.warmup_source_coordinate_records != run.warmup_records
+        || run
+            .warmup_source_coordinate_records
+            .is_some_and(|coordinates| coordinates != run.warmup_records)
     {
         return Some(
             "native warmup outcome does not establish a clean profiling handoff".to_owned(),
@@ -423,8 +458,10 @@ fn agentic_result_error(
         return Some("valid native scenario includes invalidity reasons".to_owned());
     }
     if run.profiling_records == 0
-        || run.profiling_records != run.source_coordinate_records
-        || run.distinct_source_traces == 0
+        || run
+            .source_coordinate_records
+            .is_some_and(|coordinates| coordinates != run.profiling_records)
+        || run.distinct_source_traces.is_some_and(|traces| traces == 0)
         || run.distinct_runtime_conversations == 0
         || run.distinct_transport_requests != run.profiling_records
     {
@@ -437,8 +474,11 @@ fn agentic_result_error(
     {
         return Some("failure classifications exceed native profiling counts".to_owned());
     }
-    if run.unavailable_dimensions != catalog.unavailable_dimensions {
-        return Some("unavailable dimensions do not match the resolved release profile".to_owned());
+    if run.unavailable_dimensions != expected_unavailable {
+        return Some(
+            "unavailable dimensions do not match the resolved release profile and artifact level"
+                .to_owned(),
+        );
     }
     let has_path = |path: &std::path::Path| {
         result
@@ -453,7 +493,11 @@ fn agentic_result_error(
                 .raw_artifacts
                 .iter()
                 .any(|artifact| artifact.name == "aiperf_records"),
-            "raw_records" => has_path(&run.raw_records_artifact),
+            "raw_records" if raw_expected => run
+                .raw_records_artifact
+                .as_ref()
+                .is_some_and(|path| has_path(path)),
+            "raw_records" => true,
             _ => false,
         };
         if !present {

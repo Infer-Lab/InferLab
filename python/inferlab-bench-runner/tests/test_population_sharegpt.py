@@ -151,8 +151,7 @@ def test_config_consumes_a_frozen_dataset_population_sequentially(tmp_path: Path
 
 
 def test_native_request_identities_reconcile_to_the_population_slices(tmp_path: Path) -> None:
-    profiling_path = tmp_path / "profiling.jsonl"
-    raw_path = tmp_path / "raw.jsonl"
+    records_path = tmp_path / "records.jsonl"
     profiling = [
         {
             "metadata": {
@@ -173,18 +172,19 @@ def test_native_request_identities_reconcile_to_the_population_slices(tmp_path: 
         }
         for index in range(2)
     ]
-    profiling_path.write_text(
-        "\n".join(json.dumps(record) for record in profiling) + "\n", encoding="utf-8"
+    records_path.write_text(
+        "\n".join(json.dumps(record) for record in [*warmup, *profiling]) + "\n",
+        encoding="utf-8",
     )
-    raw_path.write_text("\n".join(json.dumps(record) for record in warmup) + "\n", encoding="utf-8")
     bench_request = dataset_request(tmp_path, warmup_request_count=2)
 
-    assert population_identity_error(bench_request, profiling_path, raw_path) is None
+    assert population_identity_error(bench_request, records_path) is None
 
     profiling[0]["metadata"]["conversation_id"] = "inferlab-00000000"
-    profiling_path.write_text(
-        "\n".join(json.dumps(record) for record in profiling) + "\n", encoding="utf-8"
+    records_path.write_text(
+        "\n".join(json.dumps(record) for record in [*warmup, *profiling]) + "\n",
+        encoding="utf-8",
     )
-    error = population_identity_error(bench_request, profiling_path, raw_path)
+    error = population_identity_error(bench_request, records_path)
     assert error is not None
     assert "expected 'inferlab-00000002'" in error

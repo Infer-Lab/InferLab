@@ -957,7 +957,7 @@ mod tests {
         std::fs::write(
             &current,
             format!(
-                r#"{{"schema_version":14,"id":"current","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"data-asset-1"}},"cases":[]}}"#,
+                r#"{{"schema_version":15,"id":"current","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"data-asset-1"}},"cases":[]}}"#,
             ),
         )?;
         std::fs::write(
@@ -969,7 +969,7 @@ mod tests {
         std::fs::write(
             &future,
             format!(
-                r#"{{"schema_version":15,"id":"future","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"must-not-be-read"}},"cases":[]}}"#,
+                r#"{{"schema_version":16,"id":"future","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"must-not-be-read"}},"cases":[]}}"#,
             ),
         )?;
 

@@ -404,7 +404,9 @@ def test_agentic_result_preserves_public_scenario_coordinates_and_branch_stats(
         },
     }
 
-    evidence = agentic_result_evidence(source, summary, tmp_path / "summary.json", raw_path)
+    evidence = agentic_result_evidence(
+        source, summary, tmp_path / "summary.json", tmp_path / "records.jsonl", raw_path
+    )
     assert evidence.warmup_records == 1
     assert evidence.warmup_succeeded
     assert evidence.warmup_source_coordinate_records == 1
@@ -425,7 +427,93 @@ def test_agentic_result_preserves_public_scenario_coordinates_and_branch_stats(
         "submission_invalid_reasons": ["context_overflow_rate_exceeded"],
     }
     invalid_evidence = agentic_result_evidence(
-        source, invalid_summary, tmp_path / "summary.json", raw_path
+        source, invalid_summary, tmp_path / "summary.json", tmp_path / "records.jsonl", raw_path
     )
     assert not invalid_evidence.submission_valid
     assert invalid_evidence.submission_invalid_reasons == ["context_overflow_rate_exceeded"]
+
+
+def test_performance_agentic_result_degrades_raw_derived_dimensions(
+    tmp_path: Path,
+) -> None:
+    request_value = agentic_request(tmp_path)
+    source = request_value.definition.agentic_source
+    assert source is not None
+    records_path = tmp_path / "records.jsonl"
+    records_path.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in [
+                {
+                    "metadata": {
+                        "benchmark_phase": "warmup",
+                        "x_request_id": "warmup-request-1",
+                        "x_correlation_id": "session-1",
+                        "was_cancelled": False,
+                    },
+                    "error": None,
+                },
+                {
+                    "metadata": {
+                        "benchmark_phase": "profiling",
+                        "x_request_id": "request-1",
+                        "x_correlation_id": "session-1",
+                        "was_cancelled": False,
+                    },
+                    "error": None,
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary: dict[str, object] = {
+        "benchmark_id": "agentx-run-1",
+        "metadata": {
+            "scenario": "inferencex-agentx-mvp",
+            "submission_valid": True,
+            "dataset": {
+                "loader": "semianalysis_cc_traces_weka_062126_256k",
+                "hf_dataset_name": "semianalysisai/cc-traces-weka-062126-256k",
+                "num_dataset_entries": 393,
+            },
+        },
+        "context_overflow_count": {"avg": 1.0},
+        "skipped_context_overflow_count": {"avg": 1.0},
+        "error_request_count": {"avg": 2.0},
+        "branch_stats": {
+            "children_spawned": 4,
+            "children_completed": 3,
+            "children_errored": 0,
+            "children_truncated": 1,
+            "children_delayed": 2,
+            "parents_suspended": 2,
+            "parents_resumed": 2,
+            "parents_failed_due_to_child_error": 0,
+            "joins_suppressed": 1,
+        },
+    }
+
+    evidence = agentic_result_evidence(
+        source, summary, tmp_path / "summary.json", records_path, None
+    )
+
+    assert evidence.warmup_records == 1
+    assert evidence.warmup_succeeded
+    assert evidence.profiling_records == 1
+    assert evidence.distinct_runtime_conversations == 1
+    assert evidence.distinct_transport_requests == 1
+    assert evidence.context_overflow_count == 1
+    assert evidence.ordinary_failure_count == 2
+    assert evidence.branch_stats.children_truncated == 1
+    assert evidence.warmup_source_coordinate_records is None
+    assert evidence.source_coordinate_records is None
+    assert evidence.distinct_source_traces is None
+    assert evidence.cache_bust_records is None
+    assert evidence.raw_records_artifact is None
+    assert evidence.unavailable_dimensions == [
+        *source.catalog.unavailable_dimensions,
+        "source_coordinate_mapping",
+        "cache_bust_observations",
+        "warmup_source_coordinate_records",
+    ]

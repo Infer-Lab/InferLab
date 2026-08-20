@@ -235,6 +235,14 @@ publishes the CSV cells as `acceptance_length` and `acceptance_rate`; other
 request sources retain the raw server metrics but do not publish those two
 SPEED-specific scalars.
 
+Set `artifact_level = "performance"` to skip AIPerf's full raw
+request/response export while keeping the normalized per-request records and
+summary; omission resolves to `"diagnostic"`, which retains the raw export.
+Warmup validation and population-identity reconciliation read the normalized
+records under either level. Session- and agentic-source cases remain valid at
+the performance level; their raw-derived evidence dimensions are recorded as
+unavailable due to the artifact level rather than failing the case.
+
 ## Serving Bench SLOs
 
 A static or adaptive serving Bench may constrain normalized aggregate metrics,

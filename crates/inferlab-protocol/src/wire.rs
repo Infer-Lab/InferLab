@@ -418,6 +418,8 @@ pub struct BenchDefinitionInput {
     pub prompt: BenchPromptInput,
     #[serde(default)]
     pub server_metrics: bool,
+    #[serde(default)]
+    pub artifact_level: BenchArtifactLevelInput,
     pub seed: u64,
     #[serde(default)]
     pub request_body: BTreeMap<String, SettingValue>,
@@ -425,6 +427,18 @@ pub struct BenchDefinitionInput {
     pub request_slo: Option<BenchRequestSloInput>,
     pub timeout_seconds: u64,
     pub cache_start: BenchCacheStartInput,
+}
+
+/// The artifact level a Bench case requests from the measurement runtime.
+/// Omission resolves to `diagnostic`, which retains the full raw
+/// request/response export; `performance` keeps only normalized per-request
+/// records and the summary export ([[RFC-0004:C-BENCH-ARTIFACT-LEVEL]]).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchArtifactLevelInput {
+    Performance,
+    #[default]
+    Diagnostic,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1703,22 +1717,37 @@ pub struct BenchAgenticRunEvidence {
     pub submission_invalid_reasons: Vec<String>,
     pub warmup_records: u64,
     pub warmup_error_records: u64,
-    pub warmup_source_coordinate_records: u64,
     pub warmup_succeeded: bool,
     pub profiling_began_after_warmup_and_drain: bool,
     pub profiling_records: u64,
-    pub source_coordinate_records: u64,
-    pub distinct_source_traces: u64,
     pub distinct_runtime_conversations: u64,
     pub distinct_transport_requests: u64,
-    pub cache_bust_records: u64,
     pub context_overflow_count: u64,
     pub ordinary_failure_count: u64,
     pub branch_stats: BenchAgenticBranchStats,
     pub aggregate_artifact: PathBuf,
-    pub raw_records_artifact: PathBuf,
+    /// The raw request/response artifact; absent at the `performance`
+    /// artifact level, where raw export is not requested.
+    #[serde(default)]
+    pub raw_records_artifact: Option<PathBuf>,
     #[serde(default)]
     pub unavailable_dimensions: Vec<String>,
+    /// Warmup records whose raw-derived source coordinates were observed;
+    /// absent when the artifact level makes that mapping unavailable.
+    #[serde(default)]
+    pub warmup_source_coordinate_records: Option<u64>,
+    /// Profiling records whose raw-derived source coordinates were observed;
+    /// absent when the artifact level makes that mapping unavailable.
+    #[serde(default)]
+    pub source_coordinate_records: Option<u64>,
+    /// Distinct source traces identified through the raw-derived coordinate
+    /// mapping; absent when the artifact level makes it unavailable.
+    #[serde(default)]
+    pub distinct_source_traces: Option<u64>,
+    /// Profiling records carrying a raw cache-bust marker observation;
+    /// absent when the artifact level makes that observation unavailable.
+    #[serde(default)]
+    pub cache_bust_records: Option<u64>,
 }
 
 /// One synthetic profiling request's planned-to-observed prompt-token check.
@@ -1774,7 +1803,10 @@ pub struct BenchSessionTurnResult {
     pub phase: String,
     pub runtime_session_id: String,
     pub turn_index: u32,
-    pub pre_template_content_tokens: u32,
+    /// Measured from the raw request payload; absent when the artifact level
+    /// does not produce the raw request/response artifact.
+    #[serde(default)]
+    pub pre_template_content_tokens: Option<u32>,
     #[serde(default)]
     pub observed_prompt_tokens: Option<u32>,
     pub native_session_num: u64,
@@ -1804,8 +1836,15 @@ pub struct BenchSessionResultEvidence {
     pub sessions_reconciled: bool,
     pub turn_order_reconciled: bool,
     pub inter_turn_delays_reconciled: bool,
-    pub native_requests_reconciled: bool,
+    /// Whether raw requests reconcile to normalized metric records; absent at
+    /// the `performance` artifact level, where no raw artifact exists.
+    #[serde(default)]
+    pub native_requests_reconciled: Option<bool>,
     pub counts_reconciled: bool,
+    /// Evidence dimensions recorded as unavailable due to the effective
+    /// artifact level ([[RFC-0004:C-BENCH-ARTIFACT-LEVEL]]).
+    #[serde(default)]
+    pub unavailable_dimensions: Vec<String>,
 }
 
 /// One bounded native post-processing command and its terminal outcome.

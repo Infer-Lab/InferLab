@@ -1,6 +1,6 @@
 use crate::bench_metric::BenchMetric;
 use crate::workspace::{
-    BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
+    BenchArtifactLevel, BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
     BenchSharedSystemContent, BenchTokenSelector, JsonValue, RequestSlo,
 };
 use serde::{Deserialize, Serialize};
@@ -300,6 +300,7 @@ pub(crate) struct ResolvedBenchDefinition {
     pub source: ResolvedBenchSource,
     pub prompt: ResolvedBenchPrompt,
     pub server_metrics: bool,
+    pub artifact_level: BenchArtifactLevel,
     pub seed: u64,
     pub request_body: BTreeMap<String, JsonValue>,
     pub request_slo: Option<RequestSlo>,

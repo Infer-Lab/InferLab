@@ -197,6 +197,10 @@ def _public_endpoint() -> EndpointRequirement:
         chat_completions_path="/v1/chat/completions",
         server_metrics=ServerMetricsEndpointRequirement(path="/metrics", port="prometheus"),
         prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
+        # SMG serves the conditioning fan-out at the admin router next to
+        # flush_cache, so a multi-target primed start can plan through the
+        # declared capability.
+        prefix_cache_conditioning=HttpActionSpec(method=HttpMethod(), path="/prime_prefix_cache"),
         # The worker protocol carries an unconditional cached-token count, so a
         # zero cache read is reported rather than omitted.
         prompt_cache_read_zero_representation=PromptCacheReadZeroRepresentation.explicit,

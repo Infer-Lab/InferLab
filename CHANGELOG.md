@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-22
+
+### Added
+
+- The Specialized Engine integration 0.5.0 declares the prefix-cache
+  conditioning fan-out capability on its SMG Gateway frontend endpoint
+  (`POST /prime_prefix_cache`), so a primed Bench against a multi-target
+  SMG-fronted shape plans through the declared capability instead of being
+  rejected; single-target shapes continue to condition through the ordinary
+  serving flow.
+
+### Fixed
+
+- Gateway-fronted `cache.start = "primed"` no longer requires the frontend
+  conditioning fan-out capability when the serving shape resolves to exactly
+  one cache-owning target (one prefill replica with attention data-parallel
+  size one): ordinary frontend routing cannot miss the sole target, so
+  conditioning issues one untagged request through the ordinary serving flow
+  exactly as on a direct Engine endpoint. The 0.12.0 release rejected such
+  single-target shapes at planning, which broke established single-topology
+  Gateway-fronted primed comparators; multi-target shapes (multiple prefill
+  replicas or attention DP above one) still require the declared capability.
+
 ## [0.12.0] - 2026-08-22
 
 ### Added

@@ -1094,6 +1094,61 @@ fn primed_cache_start_rejects_gateway_without_conditioning_fanout() -> Result<()
     Ok(())
 }
 
+// 0.12.0 regression (cuda-oxide decode-primed-8k): a Gateway fronting
+// exactly one cache-owning target (one prefill replica, DP1) cannot misroute
+// conditioning, so the declared fan-out capability is not required
+// ([[RFC-0004:C-BENCH-CACHE-STATE]] 0.30.2).
+#[test]
+fn primed_cache_start_allows_single_target_gateway_without_conditioning_fanout()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_pd("mooncake")?;
+    workspace.configure_pd_primed_prefix_bench()?;
+    // Shrink both roles to one replica: a single prefill replica at DP1 is
+    // one cache-owning target behind the Gateway; decode is incidental.
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replace("replicas = 2", "replicas = 1");
+    fs::write(manifest, text)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_PD", "mooncake")
+        .env("FIXTURE_GATEWAY_NO_CONDITIONING", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; case errors: {}; stderr: {}",
+        bench["error"],
+        bench["cases"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conditioning = &bench["cases"][0]["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["succeeded"], true);
+    // Conditioning goes through the ordinary serving flow on the Gateway
+    // endpoint, not a fan-out route, as one untagged request.
+    assert_eq!(
+        conditioning["url"]
+            .as_str()
+            .map(|url| url.ends_with("/v1/completions")),
+        Some(true)
+    );
+    let ranks = conditioning["ranks"]
+        .as_array()
+        .ok_or("conditioning has no per-rank evidence")?;
+    assert_eq!(ranks.len(), 1);
+    assert_eq!(ranks[0]["rank"], 0);
+    assert!(ranks[0]["target"].is_null());
+    assert_eq!(ranks[0]["http_status"], 200);
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
 #[test]
 fn primed_prefix_conditioning_fans_out_through_gateway_to_each_replica_and_rank()
 -> Result<(), Box<dyn Error>> {

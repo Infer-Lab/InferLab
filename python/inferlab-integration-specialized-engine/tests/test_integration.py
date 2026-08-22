@@ -72,6 +72,11 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
     # A primed or prefix-sharing Bench needs cache-read usage, so the endpoint
     # states the reporting capability rather than leaving it unsaid.
     assert result.gateway.endpoint.prefix_cache_reset is not None
+    # The SMG Gateway serves the primed conditioning fan-out, so a multi-target
+    # primed Bench plans through the declared capability.
+    conditioning = result.gateway.endpoint.prefix_cache_conditioning
+    assert conditioning is not None
+    assert conditioning.path == "/prime_prefix_cache"
     assert (
         result.gateway.endpoint.prompt_cache_read_zero_representation
         is PromptCacheReadZeroRepresentation.explicit

@@ -216,7 +216,7 @@ fn prefix_cache_conditioning_plan(
             shared_prefix_ratio,
         } => (f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32,
     };
-    let (route, frontend_fanout) = if serving.gateway_frontend {
+    let (route, frontend_fanout) = if serving.gateway_frontend && serving.conditioning_targets > 1 {
         let Some(action) = frontend_conditioning else {
             return Err(InferlabError::InvalidConfig {
                 message: format!(

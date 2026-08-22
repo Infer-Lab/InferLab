@@ -96,6 +96,8 @@ pub(crate) fn resolve_manual_bench(
         recorded.server.roles.iter().map(|role| {
             (
                 role.public_endpoint.is_some(),
+                role.kind,
+                role.effective_replica_count,
                 role.effective_parallelism
                     .attention
                     .as_ref()

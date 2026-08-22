@@ -85,8 +85,12 @@ cache = { start = "cold" }   # warmup drains, then reset, then profiling
   proxies serve `POST /prime_prefix_cache` and route that fan-out through the
   ordinary pairing flow. The record preserves per-(replica, rank) status,
   token usage, and timing evidence, and any rank's conditioning failure fails
-  the case. The `vllm-router` and `sglang-router` pairs declare no primed
-  capability and reject a primed start at planning.
+  the case. The fan-out capability is required only when more than one
+  prefill-side cache-owning target (replica × attention DP rank) sits behind
+  the frontend; a single-target Gateway-fronted shape conditions through the
+  ordinary serving flow without it. The `vllm-router` and `sglang-router`
+  pairs declare no primed fan-out capability and reject a multi-target primed
+  start at planning.
 - The built-in vLLM Mooncake and NIXL pairs also serve
   `POST /reset_prefix_cache`, fanning out to every prefill and decode engine,
   so a cold start passes planning on those pairs. The `vllm-router` pairing

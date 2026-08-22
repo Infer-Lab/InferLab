@@ -203,34 +203,51 @@ pub(crate) struct BenchPrefixCacheConditioningPlan {
 }
 
 /// The public-serving shape prefix-cache conditioning plans against: whether
-/// the public workload endpoint belongs to a Gateway, and the effective
-/// attention data-parallel size the conditioning loop must cover
+/// the public workload endpoint belongs to a Gateway, the effective attention
+/// data-parallel size the conditioning loop must cover, and the number of
+/// cache-owning conditioning targets behind the endpoint
 /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ConditioningServingShape {
     pub gateway_frontend: bool,
+    /// Effective attention data-parallel size of the cache-owning (prefill
+    /// side) roles: behind a Gateway this is the prefill-side maximum; on a
+    /// direct endpoint it is the public serving role's size.
     pub attention_data_parallel_size: u32,
+    /// Cache-owning targets behind a Gateway: prefill-side replicas times
+    /// their attention data-parallel sizes. Decode-side cache state is
+    /// incidental to conditioning and does not count. A single target cannot
+    /// be missed by ordinary frontend routing, so the declared fan-out
+    /// capability is required only when this exceeds one.
+    pub conditioning_targets: u32,
 }
 
 impl ConditioningServingShape {
-    /// `roles` yields `(serves_public_endpoint, effective attention
-    /// data-parallel size)` per model-serving role. A Gateway frontend makes
-    /// every role relevant because any role's data-parallel size forces the
-    /// Gateway rejection; a direct endpoint conditions the role that serves
-    /// it.
+    /// `roles` yields `(serves_public_endpoint, kind, effective replica count,
+    /// effective attention data-parallel size)` per model-serving role. A
+    /// Gateway frontend makes every prefill-side role relevant because its
+    /// targets force the fan-out capability requirement; a direct endpoint
+    /// conditions the role that serves it.
     pub(crate) fn resolve(
         gateway_frontend: bool,
-        roles: impl IntoIterator<Item = (bool, u32)>,
+        roles: impl IntoIterator<Item = (bool, inferlab_protocol::ServeRoleKind, u32, u32)>,
     ) -> Self {
-        let attention_data_parallel_size = roles
-            .into_iter()
-            .filter(|(serves_public, _)| gateway_frontend || *serves_public)
-            .map(|(_, size)| size)
-            .max()
-            .unwrap_or(1);
+        let mut attention_data_parallel_size = 1u32;
+        let mut conditioning_targets = 0u32;
+        for (serves_public, kind, replicas, data_parallel_size) in roles {
+            if !gateway_frontend && !serves_public {
+                continue;
+            }
+            if gateway_frontend && kind == inferlab_protocol::ServeRoleKind::Decode {
+                continue;
+            }
+            attention_data_parallel_size = attention_data_parallel_size.max(data_parallel_size);
+            conditioning_targets += replicas * data_parallel_size;
+        }
         Self {
             gateway_frontend,
             attention_data_parallel_size,
+            conditioning_targets,
         }
     }
 }
@@ -336,7 +353,8 @@ pub(crate) struct MeasurementResolveContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionPopulationLayout, session_population_layout};
+    use super::{ConditioningServingShape, SessionPopulationLayout, session_population_layout};
+    use inferlab_protocol::ServeRoleKind;
 
     #[test]
     fn positive_warmup_reserves_the_native_terminal_prefetch_entry() {
@@ -354,5 +372,55 @@ mod tests {
                 required_entries: 9,
             })
         );
+    }
+
+    // [[RFC-0004:C-BENCH-CACHE-STATE]] 0.30.2: the fan-out capability is
+    // required only when more than one cache-owning (prefill-side) target
+    // sits behind the Gateway; decode roles are incidental and never count.
+    #[test]
+    fn conditioning_targets_count_prefill_side_replicas_times_attention_dp() {
+        let serve = |public, kind, replicas, dp| (public, kind, replicas, dp);
+
+        // Direct single endpoint: only the public role is relevant.
+        let shape =
+            ConditioningServingShape::resolve(false, [serve(true, ServeRoleKind::Serve, 1, 1)]);
+        assert!(!shape.gateway_frontend);
+        assert_eq!(shape.attention_data_parallel_size, 1);
+        assert_eq!(shape.conditioning_targets, 1);
+
+        // Gateway-fronted single topology, one replica, DP1: the 0.12.0
+        // regression shape (cuda-oxide decode-primed-8k) is a single target.
+        let shape =
+            ConditioningServingShape::resolve(true, [serve(true, ServeRoleKind::Serve, 1, 1)]);
+        assert!(shape.gateway_frontend);
+        assert_eq!(shape.conditioning_targets, 1);
+
+        // Gateway-fronted P/D with one prefill and one decode replica, DP1:
+        // decode is incidental, so this is still a single-target shape.
+        let shape = ConditioningServingShape::resolve(
+            true,
+            [
+                serve(false, ServeRoleKind::Prefill, 1, 1),
+                serve(false, ServeRoleKind::Decode, 1, 1),
+            ],
+        );
+        assert_eq!(shape.conditioning_targets, 1);
+        assert_eq!(shape.attention_data_parallel_size, 1);
+
+        // Attention DP on the single role multiplies targets.
+        let shape =
+            ConditioningServingShape::resolve(true, [serve(true, ServeRoleKind::Serve, 1, 2)]);
+        assert_eq!(shape.conditioning_targets, 2);
+        assert_eq!(shape.attention_data_parallel_size, 2);
+
+        // Two prefill replicas force the fan-out requirement even at DP1.
+        let shape = ConditioningServingShape::resolve(
+            true,
+            [
+                serve(false, ServeRoleKind::Prefill, 2, 1),
+                serve(false, ServeRoleKind::Decode, 2, 1),
+            ],
+        );
+        assert_eq!(shape.conditioning_targets, 2);
     }
 }

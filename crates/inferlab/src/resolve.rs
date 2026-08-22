@@ -196,6 +196,8 @@ pub(crate) fn resolve<C: AdapterClient>(
         planned.roles.iter().map(|role| {
             (
                 role.public_endpoint.is_some(),
+                role.kind,
+                role.effective_replica_count,
                 role.effective_parallelism
                     .attention
                     .as_ref()

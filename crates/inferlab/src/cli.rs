@@ -248,6 +248,10 @@ struct VllmNixlProxyArgs {
     port: u16,
     #[arg(long, action = clap::ArgAction::Append)]
     prefill: Vec<String>,
+    /// Effective attention data-parallel size of each `--prefill` replica,
+    /// in the same order ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[arg(long = "prefill-dp", action = clap::ArgAction::Append)]
+    prefill_dp: Vec<u32>,
     #[arg(long, action = clap::ArgAction::Append)]
     decode: Vec<String>,
 }
@@ -260,6 +264,10 @@ struct SglangProxyArgs {
     port: u16,
     #[arg(long, num_args = 3, action = clap::ArgAction::Append)]
     prefill: Vec<String>,
+    /// Effective attention data-parallel size of each `--prefill` replica,
+    /// in the same order ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[arg(long = "prefill-dp", action = clap::ArgAction::Append)]
+    prefill_dp: Vec<u32>,
     #[arg(long, action = clap::ArgAction::Append)]
     decode: Vec<String>,
 }
@@ -386,7 +394,8 @@ struct RecipeRunArgs {
     #[command(flatten)]
     selection: SelectionArgs,
 
-    /// Capture one selected Eval or Bench with Nsight Systems. May be repeated.
+    /// Capture one selected Eval or Bench with the server's profiler
+    /// mechanism. May be repeated.
     #[arg(long, value_name = "WORKLOAD_ID")]
     capture: Vec<String>,
 }
@@ -449,7 +458,7 @@ struct BenchArgs {
     #[arg(long = "set", value_name = "PATH=VALUE", long_help = help::BENCH_OVERRIDE)]
     overrides: Vec<String>,
 
-    /// Capture this Bench with Nsight Systems.
+    /// Capture this Bench with the server's profiler mechanism.
     #[arg(long)]
     capture: bool,
 
@@ -771,7 +780,7 @@ fn run_internal(args: InternalArgs) -> Result<(), InferlabError> {
                 inferlab_proxy::vllm_nixl::run(inferlab_proxy::vllm_nixl::Config {
                     host: args.host,
                     port: args.port,
-                    prefill: args.prefill,
+                    prefill: nixl_prefill_targets(&args.prefill, &args.prefill_dp)?,
                     decode: args.decode,
                 })?;
                 Ok(())
@@ -780,7 +789,7 @@ fn run_internal(args: InternalArgs) -> Result<(), InferlabError> {
                 inferlab_proxy::sglang::run(inferlab_proxy::sglang::Config {
                     host: args.host,
                     port: args.port,
-                    prefill: sglang_prefill_targets(&args.prefill)?,
+                    prefill: sglang_prefill_targets(&args.prefill, &args.prefill_dp)?,
                     decode: args.decode,
                 })?;
                 Ok(())
@@ -816,8 +825,34 @@ fn mooncake_prefill_targets(
         .collect())
 }
 
+fn nixl_prefill_targets(
+    urls: &[String],
+    data_parallel_sizes: &[u32],
+) -> Result<Vec<inferlab_proxy::vllm_nixl::PrefillTarget>, InferlabError> {
+    if urls.is_empty() || urls.len() != data_parallel_sizes.len() {
+        return Err(InferlabError::InvalidConfig {
+            message: "NIXL proxy requires one --prefill-dp N per --prefill URL".to_owned(),
+        });
+    }
+    urls.iter()
+        .zip(data_parallel_sizes)
+        .map(|(url, data_parallel_size)| {
+            if *data_parallel_size == 0 {
+                return Err(InferlabError::InvalidConfig {
+                    message: "NIXL proxy --prefill-dp must be at least 1".to_owned(),
+                });
+            }
+            Ok(inferlab_proxy::vllm_nixl::PrefillTarget {
+                url: url.clone(),
+                data_parallel_size: *data_parallel_size,
+            })
+        })
+        .collect()
+}
+
 fn sglang_prefill_targets(
     values: &[String],
+    data_parallel_sizes: &[u32],
 ) -> Result<Vec<inferlab_proxy::sglang::PrefillTarget>, InferlabError> {
     if values.is_empty() || !values.len().is_multiple_of(3) {
         return Err(InferlabError::InvalidConfig {
@@ -826,19 +861,31 @@ fn sglang_prefill_targets(
                     .to_owned(),
         });
     }
+    if data_parallel_sizes.len() != values.len() / 3 {
+        return Err(InferlabError::InvalidConfig {
+            message: "SGLang proxy requires one --prefill-dp N per --prefill triple".to_owned(),
+        });
+    }
     values
         .chunks_exact(3)
-        .map(|values| {
+        .zip(data_parallel_sizes)
+        .map(|(values, data_parallel_size)| {
             let bootstrap_port =
                 values[2]
                     .parse::<u16>()
                     .map_err(|error| InferlabError::InvalidConfig {
                         message: format!("invalid SGLang bootstrap port {:?}: {error}", values[2]),
                     })?;
+            if *data_parallel_size == 0 {
+                return Err(InferlabError::InvalidConfig {
+                    message: "SGLang proxy --prefill-dp must be at least 1".to_owned(),
+                });
+            }
             Ok(inferlab_proxy::sglang::PrefillTarget {
                 url: values[0].clone(),
                 bootstrap_host: values[1].clone(),
                 bootstrap_port,
+                data_parallel_size: *data_parallel_size,
             })
         })
         .collect()

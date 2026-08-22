@@ -3,7 +3,7 @@ mod preflight;
 mod record;
 
 use crate::InferlabError;
-use crate::execution::{ProcessPlan, ResolvedExecution};
+use crate::execution::{ProcessContext, ProcessPlan, ResolvedExecution};
 use crate::progress::{Phase, Progress};
 use crate::workspace::WorkspaceSnapshot;
 use fs2::FileExt;
@@ -244,145 +244,242 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
     ))?;
     progress.phase(Phase::named("local and remote preflight"))?;
 
-    // Launch preflight against the local workspace realization
-    // ([[RFC-0002:C-ENVIRONMENT-CHECKS]],
-    // [[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]): declared checks run before
-    // any process launches. Image-backed launches skip this — their
-    // realization was checked during assembly.
-    let stack = &resolved.stack;
-    if stack.realization == crate::environment::CheckRealization::LocalWorkspace
-        && !stack.checks.is_empty()
-    {
-        // Even an infrastructure failure (Pixi unavailable) must finalize
-        // the record rather than leave it Starting.
-        let run = match crate::environment::run_local_checks(
-            root,
-            &stack.pixi_environment,
-            &stack.checks,
-            progress,
-            "local and remote preflight",
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let message = format!("environment check execution failed: {error}");
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Preflight,
-                    process_id: None,
-                    message: message.clone(),
-                });
-                persist_failed(&mut session, true)?;
-                return Err(lifecycle_error(&session, message));
-            }
-        };
-        session.record_mut().environment_checks = run
-            .completed
-            .into_iter()
-            .map(crate::environment::CompletedLocalCheck::into_record_evidence)
-            .collect();
-        session.rewrite()?;
-        match run.conclusion {
-            crate::environment::LocalCheckConclusion::Passed => {}
-            crate::environment::LocalCheckConclusion::Failed(failure) => {
-                let message = failure.message(&stack.pixi_environment);
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Preflight,
-                    process_id: None,
-                    message: message.clone(),
-                });
-                persist_failed(&mut session, true)?;
-                return Err(lifecycle_error(&session, message));
-            }
-            crate::environment::LocalCheckConclusion::ExecutionError(failure) => {
-                let message = failure.diagnostics();
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Preflight,
-                    process_id: None,
-                    message: message.clone(),
-                });
-                persist_failed(&mut session, true)?;
-                return Err(lifecycle_error(&session, message));
-            }
-        }
+    run_preflight_checks(root, &resolved, &mut session, runtime, progress)?;
+    probe_hardware(&resolved, &mut session, runtime, progress)?;
+    let spawned = spawn_processes(&resolved, &mut session, runtime, progress)?;
+    wait_until_ready(&resolved, &mut session, runtime, progress, &spawned)?;
 
-        // Each remote machine hosts its own installation of the same lock —
-        // a distinct realization that gets the same declared set before any
-        // process launches ([[RFC-0002:C-ENVIRONMENT-CHECKS]]). The remote
-        // preflight already proved revision equality, so the committed
-        // scripts exist in the remote checkout.
-        let mut checked_machines = std::collections::BTreeSet::new();
-        for process in resolved.server.processes() {
-            let inferlab_runtime::plan::LaunchPlan::Ssh { target } = &process.launch else {
-                continue;
-            };
-            if !checked_machines.insert(process.machine.clone()) {
-                continue;
-            }
-            let mut remote_root = process.command.cwd.clone();
-            remote_root.pop();
-            let outcome = process
-                .command
-                .argv
-                .first()
-                .ok_or_else(|| RemoteCheckError::MissingExecutable {
-                    process: process.id.clone(),
-                })
-                .and_then(|pixi| {
-                    runtime.run_remote_checks(RemoteCheckRequest {
-                        target,
-                        root: &remote_root,
-                        pixi,
-                        pixi_environment: &stack.pixi_environment,
-                        checks: &stack.checks,
-                        machine: &process.machine,
-                        progress,
-                    })
-                });
-            let (evidence, failure) = match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let message = format!(
-                        "environment check execution failed on machine {:?}: {error}",
-                        process.machine
-                    );
-                    session.record_mut().failure = Some(FailureEvidence {
-                        phase: FailurePhase::Preflight,
-                        process_id: None,
-                        message: message.clone(),
-                    });
-                    persist_failed(&mut session, true)?;
-                    return Err(lifecycle_error(&session, message));
-                }
-            };
-            session.record_mut().environment_checks.extend(evidence);
-            session.rewrite()?;
-            if let Some(failure) = failure {
-                let repair = failure
-                    .repair_hint
-                    .as_ref()
-                    .map(|hint| format!("; repair on {:?}: {hint}", process.machine))
-                    .unwrap_or_default();
-                let message = format!(
-                    "environment check {:?} failed on machine {:?} realization of Pixi \
-                     environment {:?}: {}{repair}",
-                    failure.id,
-                    process.machine,
-                    stack.pixi_environment,
-                    failure.output.trim(),
-                );
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Preflight,
-                    process_id: None,
-                    message: message.clone(),
-                });
-                persist_failed(&mut session, true)?;
-                return Err(lifecycle_error(&session, message));
-            }
+    fail_if_startup_interrupted(&mut session, runtime, &spawned.started, None)?;
+    session.record_mut().status = ServerStatus::Running;
+    if let Err(error) = session.rewrite() {
+        let message = format!("failed to persist running server state: {error}");
+        return Err(fail_after_record_error(
+            &mut session,
+            runtime,
+            &spawned.started,
+            None,
+            message,
+        )?);
+    }
+    Ok(session.into_record())
+}
+
+/// The spawn-phase products consumed by readiness waiting and the final
+/// startup-interrupt check.
+struct SpawnedProcesses<'a> {
+    contexts: Vec<ProcessContext<'a>>,
+    started: Vec<String>,
+    handles: Vec<ProcessHandle>,
+}
+
+/// Record a startup failure, roll back the started processes, persist the
+/// failed record, and produce the lifecycle error for the caller to return.
+/// `cleanup_ok` folds site-specific cleanup outcomes (profiler cleanup,
+/// container ownership) into the cleanup-verified verdict.
+fn fail_with<R: ProcessCleanup + ProcessObserver>(
+    session: &mut ServerRecordSession,
+    runtime: &R,
+    started: &[String],
+    phase: FailurePhase,
+    process_id: Option<&str>,
+    message: String,
+    cleanup_ok: bool,
+) -> Result<InferlabError, InferlabError> {
+    session.record_mut().failure = Some(FailureEvidence {
+        phase,
+        process_id: process_id.map(str::to_owned),
+        message: message.clone(),
+    });
+    let cleanup_verified = rollback_started(session, runtime, started)? && cleanup_ok;
+    persist_failed(session, cleanup_verified)?;
+    Ok(lifecycle_error(session, message))
+}
+
+/// The failing operation is the record write itself, so the best-effort
+/// failure persist must not mask the original error behind a second one.
+fn fail_after_record_error<R: ProcessCleanup + ProcessObserver>(
+    session: &mut ServerRecordSession,
+    runtime: &R,
+    started: &[String],
+    process_id: Option<&str>,
+    message: String,
+) -> Result<InferlabError, InferlabError> {
+    session.record_mut().failure = Some(FailureEvidence {
+        phase: FailurePhase::Record,
+        process_id: process_id.map(str::to_owned),
+        message: message.clone(),
+    });
+    let cleanup_verified = rollback_started(session, runtime, started)?;
+    let _ = persist_failed(session, cleanup_verified);
+    Ok(lifecycle_error(session, message))
+}
+
+/// Launch preflight against the local workspace realization
+/// ([[RFC-0002:C-ENVIRONMENT-CHECKS]],
+/// [[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]): declared checks run before
+/// any process launches. Image-backed launches skip this — their
+/// realization was checked during assembly.
+fn run_preflight_checks<R: ServerRuntime + PreflightObserver>(
+    root: &Path,
+    resolved: &ResolvedExecution,
+    session: &mut ServerRecordSession,
+    runtime: &R,
+    progress: &Progress,
+) -> Result<(), InferlabError> {
+    let stack = &resolved.stack;
+    if stack.realization != crate::environment::CheckRealization::LocalWorkspace
+        || stack.checks.is_empty()
+    {
+        return Ok(());
+    }
+
+    // Even an infrastructure failure (Pixi unavailable) must finalize
+    // the record rather than leave it Starting.
+    let run = match crate::environment::run_local_checks(
+        root,
+        &stack.pixi_environment,
+        &stack.checks,
+        progress,
+        "local and remote preflight",
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let message = format!("environment check execution failed: {error}");
+            return Err(fail_with(
+                session,
+                runtime,
+                &[],
+                FailurePhase::Preflight,
+                None,
+                message,
+                true,
+            )?);
+        }
+    };
+    session.record_mut().environment_checks = run
+        .completed
+        .into_iter()
+        .map(crate::environment::CompletedLocalCheck::into_record_evidence)
+        .collect();
+    session.rewrite()?;
+    match run.conclusion {
+        crate::environment::LocalCheckConclusion::Passed => {}
+        crate::environment::LocalCheckConclusion::Failed(failure) => {
+            let message = failure.message(&stack.pixi_environment);
+            return Err(fail_with(
+                session,
+                runtime,
+                &[],
+                FailurePhase::Preflight,
+                None,
+                message,
+                true,
+            )?);
+        }
+        crate::environment::LocalCheckConclusion::ExecutionError(failure) => {
+            let message = failure.diagnostics();
+            return Err(fail_with(
+                session,
+                runtime,
+                &[],
+                FailurePhase::Preflight,
+                None,
+                message,
+                true,
+            )?);
         }
     }
 
-    // Device hardware identity is probed once per hosting machine through the
-    // same launch path as its serving processes, and a failed probe fails
-    // the launch before any process starts ([[RFC-0005:C-EVIDENCE]]).
+    // Each remote machine hosts its own installation of the same lock —
+    // a distinct realization that gets the same declared set before any
+    // process launches ([[RFC-0002:C-ENVIRONMENT-CHECKS]]). The remote
+    // preflight already proved revision equality, so the committed
+    // scripts exist in the remote checkout.
+    let mut checked_machines = std::collections::BTreeSet::new();
+    for process in resolved.server.processes() {
+        let inferlab_runtime::plan::LaunchPlan::Ssh { target } = &process.launch else {
+            continue;
+        };
+        if !checked_machines.insert(process.machine.clone()) {
+            continue;
+        }
+        let mut remote_root = process.command.cwd.clone();
+        remote_root.pop();
+        let outcome = process
+            .command
+            .argv
+            .first()
+            .ok_or_else(|| RemoteCheckError::MissingExecutable {
+                process: process.id.clone(),
+            })
+            .and_then(|pixi| {
+                runtime.run_remote_checks(RemoteCheckRequest {
+                    target,
+                    root: &remote_root,
+                    pixi,
+                    pixi_environment: &stack.pixi_environment,
+                    checks: &stack.checks,
+                    machine: &process.machine,
+                    progress,
+                })
+            });
+        let (evidence, failure) = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let message = format!(
+                    "environment check execution failed on machine {:?}: {error}",
+                    process.machine
+                );
+                return Err(fail_with(
+                    session,
+                    runtime,
+                    &[],
+                    FailurePhase::Preflight,
+                    None,
+                    message,
+                    true,
+                )?);
+            }
+        };
+        session.record_mut().environment_checks.extend(evidence);
+        session.rewrite()?;
+        if let Some(failure) = failure {
+            let repair = failure
+                .repair_hint
+                .as_ref()
+                .map(|hint| format!("; repair on {:?}: {hint}", process.machine))
+                .unwrap_or_default();
+            let message = format!(
+                "environment check {:?} failed on machine {:?} realization of Pixi \
+                 environment {:?}: {}{repair}",
+                failure.id,
+                process.machine,
+                stack.pixi_environment,
+                failure.output.trim(),
+            );
+            return Err(fail_with(
+                session,
+                runtime,
+                &[],
+                FailurePhase::Preflight,
+                None,
+                message,
+                true,
+            )?);
+        }
+    }
+    Ok(())
+}
+
+/// Device hardware identity is probed once per hosting machine through the
+/// same launch path as its serving processes, and a failed probe fails
+/// the launch before any process starts ([[RFC-0005:C-EVIDENCE]]).
+fn probe_hardware<R: ServerRuntime + PreflightObserver>(
+    resolved: &ResolvedExecution,
+    session: &mut ServerRecordSession,
+    runtime: &R,
+    progress: &Progress,
+) -> Result<(), InferlabError> {
     let mut probe_targets = std::collections::BTreeMap::new();
     for process in resolved.server.processes() {
         let entry = probe_targets
@@ -405,25 +502,35 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
             Err(error) => {
                 let message =
                     format!("device hardware probe failed on machine {machine:?}: {error}");
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Preflight,
-                    process_id: None,
-                    message: message.clone(),
-                });
-                persist_failed(&mut session, true)?;
-                return Err(lifecycle_error(&session, message));
+                return Err(fail_with(
+                    session,
+                    runtime,
+                    &[],
+                    FailurePhase::Preflight,
+                    None,
+                    message,
+                    true,
+                )?);
             }
         }
     }
     session.rewrite()?;
+    Ok(())
+}
 
+fn spawn_processes<'a, R: ServerRuntime>(
+    resolved: &'a ResolvedExecution,
+    session: &mut ServerRecordSession,
+    runtime: &R,
+    progress: &Progress,
+) -> Result<SpawnedProcesses<'a>, InferlabError> {
     let process_contexts = resolved.server.process_contexts().collect::<Vec<_>>();
     let mut started = Vec::new();
     let mut handles = Vec::with_capacity(process_contexts.len());
     let process_total = process_contexts.len();
     for (process_index, context) in process_contexts.iter().enumerate() {
         let process = context.process;
-        fail_if_startup_interrupted(&mut session, runtime, &started, Some(&process.id))?;
+        fail_if_startup_interrupted(session, runtime, &started, Some(&process.id))?;
         let stdout = session.absolute_stdout(&process.id)?;
         let stderr = session.absolute_stderr(&process.id)?;
         progress.phase(
@@ -446,6 +553,12 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                 replica_index: context.replica_index,
                 process_id: &process.id,
                 rank: process.rank(),
+                rank_count: match &process.identity {
+                    crate::execution::ProcessIdentityPlan::ModelRank { rank_count, .. } => {
+                        Some(*rank_count)
+                    }
+                    crate::execution::ProcessIdentityPlan::Frontend { .. } => None,
+                },
                 command: &process.command,
                 launch: &process.launch,
                 capture: process.capture_target.as_ref(),
@@ -455,14 +568,15 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
             Ok(prepared) => prepared,
             Err(error) => {
                 let message = InferlabError::from(error).to_string();
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Launch,
-                    process_id: Some(process.id.clone()),
-                    message: message.clone(),
-                });
-                let cleanup_verified = rollback_started(&mut session, runtime, &started)?;
-                persist_failed(&mut session, cleanup_verified)?;
-                return Err(lifecycle_error(&session, message));
+                return Err(fail_with(
+                    session,
+                    runtime,
+                    &started,
+                    FailurePhase::Launch,
+                    Some(&process.id),
+                    message,
+                    true,
+                )?);
             }
         };
         session.process_mut(&process.id)?.profiler = prepared.target;
@@ -482,11 +596,6 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
             Ok(handle) => handle,
             Err(failure) => {
                 let message = failure.message();
-                session.record_mut().failure = Some(FailureEvidence {
-                    phase: FailurePhase::Launch,
-                    process_id: Some(process.id.clone()),
-                    message: message.clone(),
-                });
                 if let Some(cleanup) = failure.cleanup {
                     session.process_mut(&process.id)?.cleanup.push(*cleanup);
                 } else if let Some(removal) = failure.container_removal {
@@ -515,15 +624,19 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                         ));
                 }
                 let profiler_cleaned = cleanup_profiler_process(
-                    &mut session,
+                    session,
                     &process.id,
                     inferlab_profiler::cleanup::ProfilerCleanupTrigger::StartupRollback,
                 )?;
-                let cleanup_verified = rollback_started(&mut session, runtime, &started)?
-                    && profiler_cleaned
-                    && !failure.ownership_unknown;
-                persist_failed(&mut session, cleanup_verified)?;
-                return Err(lifecycle_error(&session, message));
+                return Err(fail_with(
+                    session,
+                    runtime,
+                    &started,
+                    FailurePhase::Launch,
+                    Some(&process.id),
+                    message,
+                    profiler_cleaned && !failure.ownership_unknown,
+                )?);
             }
         };
         session.process_mut(&process.id)?.handle = Some(handle.clone());
@@ -534,22 +647,34 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                 "failed to persist handle for process {:?}: {error}",
                 process.id
             );
-            session.record_mut().failure = Some(FailureEvidence {
-                phase: FailurePhase::Record,
-                process_id: Some(process.id.clone()),
-                message: message.clone(),
-            });
-            let cleanup_verified = rollback_started(&mut session, runtime, &started)?;
-            let _ = persist_failed(&mut session, cleanup_verified);
-            return Err(lifecycle_error(&session, message));
+            return Err(fail_after_record_error(
+                session,
+                runtime,
+                &started,
+                Some(&process.id),
+                message,
+            )?);
         }
-        fail_if_startup_interrupted(&mut session, runtime, &started, Some(&process.id))?;
+        fail_if_startup_interrupted(session, runtime, &started, Some(&process.id))?;
     }
+    Ok(SpawnedProcesses {
+        contexts: process_contexts,
+        started,
+        handles,
+    })
+}
 
-    // One readiness owner starts only after every process has spawned and
-    // remains authoritative across every process readiness wait. Capture-
-    // armed startup is intentionally unbounded; ordinary startup uses the
-    // server's one resolved readiness budget.
+/// One readiness owner starts only after every process has spawned and
+/// remains authoritative across every process readiness wait. Capture-
+/// armed startup is intentionally unbounded; ordinary startup uses the
+/// server's one resolved readiness budget.
+fn wait_until_ready<R: ServerRuntime>(
+    resolved: &ResolvedExecution,
+    session: &mut ServerRecordSession,
+    runtime: &R,
+    progress: &Progress,
+    spawned: &SpawnedProcesses<'_>,
+) -> Result<(), InferlabError> {
     let readiness_bound = if resolved.server.profiling {
         OperationBound::unbounded()
     } else {
@@ -557,9 +682,12 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
             resolved.server.readiness_timeout_seconds,
         ))
     };
-    for (process_index, (context, handle)) in process_contexts.iter().zip(&handles).enumerate() {
+    let process_total = spawned.contexts.len();
+    for (process_index, (context, handle)) in
+        spawned.contexts.iter().zip(&spawned.handles).enumerate()
+    {
         let process = context.process;
-        fail_if_startup_interrupted(&mut session, runtime, &started, Some(&process.id))?;
+        fail_if_startup_interrupted(session, runtime, &spawned.started, Some(&process.id))?;
         let stderr = session.absolute_stderr(&process.id)?;
         progress.phase(
             Phase::named("readiness")
@@ -581,16 +709,15 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                         "failed to persist readiness for process {:?}: {error}",
                         process.id
                     );
-                    session.record_mut().failure = Some(FailureEvidence {
-                        phase: FailurePhase::Record,
-                        process_id: Some(process.id.clone()),
-                        message: message.clone(),
-                    });
-                    let cleanup_verified = rollback_started(&mut session, runtime, &started)?;
-                    let _ = persist_failed(&mut session, cleanup_verified);
-                    return Err(lifecycle_error(&session, message));
+                    return Err(fail_after_record_error(
+                        session,
+                        runtime,
+                        &spawned.started,
+                        Some(&process.id),
+                        message,
+                    )?);
                 }
-                fail_if_startup_interrupted(&mut session, runtime, &started, Some(&process.id))?;
+                fail_if_startup_interrupted(session, runtime, &spawned.started, Some(&process.id))?;
             }
             Err(failure) => {
                 session.process_mut(&process.id)?.readiness_failure = Some(failure.clone());
@@ -600,32 +727,19 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
                         FailurePhase::Readiness
                     }
                 };
-                session.record_mut().failure = Some(FailureEvidence {
+                return Err(fail_with(
+                    session,
+                    runtime,
+                    &spawned.started,
                     phase,
-                    process_id: Some(process.id.clone()),
-                    message: failure.message.clone(),
-                });
-                let cleanup_verified = rollback_started(&mut session, runtime, &started)?;
-                persist_failed(&mut session, cleanup_verified)?;
-                return Err(lifecycle_error(&session, failure.message));
+                    Some(&process.id),
+                    failure.message,
+                    true,
+                )?);
             }
         }
     }
-
-    fail_if_startup_interrupted(&mut session, runtime, &started, None)?;
-    session.record_mut().status = ServerStatus::Running;
-    if let Err(error) = session.rewrite() {
-        let message = format!("failed to persist running server state: {error}");
-        session.record_mut().failure = Some(FailureEvidence {
-            phase: FailurePhase::Record,
-            process_id: None,
-            message: message.clone(),
-        });
-        let cleanup_verified = rollback_started(&mut session, runtime, &started)?;
-        let _ = persist_failed(&mut session, cleanup_verified);
-        return Err(lifecycle_error(&session, message));
-    }
-    Ok(session.into_record())
+    Ok(())
 }
 
 fn fail_if_startup_interrupted<R: ProcessCleanup + ProcessObserver>(
@@ -991,8 +1105,9 @@ fn finalize_profiler_process(
     let action = inferlab_profiler::finalization::finalize_target(
         &target,
         None,
+        false,
         bound,
-        inferlab_profiler::finalization::SERVER_FINALIZATION_START,
+        inferlab_profiler::record::SERVER_FINALIZATION_START,
     );
     let succeeded = action.succeeded();
     session.process_mut(process_id)?.profiler_finalization = Some(action);
@@ -1007,6 +1122,11 @@ fn cleanup_profiler_process(
     let Some(target) = session.process(process_id)?.profiler.clone() else {
         return Ok(true);
     };
+    // An engine-trace target runs unwrapped: there is no managed collection
+    // agent to discover or stop ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    if target.mechanism == inferlab_protocol::CaptureMechanism::EngineTrace {
+        return Ok(true);
+    }
     let cleanup = inferlab_profiler::cleanup::cleanup_target_agent(&target, trigger);
     let verified = cleanup.verified;
     session.process_mut(process_id)?.profiler_cleanup = Some(cleanup);
@@ -1226,7 +1346,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 6);
+        assert_eq!(value["schema_version"], 7);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1278,7 +1398,37 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 3; expected 6"),
+                .contains("unsupported schema version 3; expected 7"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_record_loader_gates_an_old_record_before_strict_decoding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let record_dir = root.path().join(".inferlab/records/schema-test");
+        std::fs::create_dir_all(&record_dir)?;
+        // A protocol-v7-era record: version 6 with a body that no longer
+        // decodes as the current ServerRecord shape. The version gate must
+        // still catch it instead of surfacing a bare serde variant error.
+        std::fs::write(
+            record_dir.join("record.json"),
+            br#"{"schema_version":6,"status":"running"}"#,
+        )?;
+
+        let Err(error) = load_record(root.path(), "schema-test") else {
+            return Err(std::io::Error::other(
+                "a version-6 record must be stopped by the version gate",
+            )
+            .into());
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported schema version 6; expected 7"),
             "{error}"
         );
         Ok(())
@@ -1492,7 +1642,7 @@ mod tests {
                     framework: "fixture".to_owned(),
                     framework_version: "test".to_owned(),
                     executable: "fixture".to_owned(),
-                    protocol_version: ProtocolVersion::V7,
+                    protocol_version: ProtocolVersion::V8,
                     plan_request_sha256: "request".to_owned(),
                     plan_response_sha256: "response".to_owned(),
                     render_request_sha256: "request".to_owned(),
@@ -1584,6 +1734,7 @@ mod tests {
                     chat_completions_path: "/v1/chat/completions".to_owned(),
                     server_metrics: None,
                     prefix_cache_reset: None,
+                    prefix_cache_conditioning: None,
                     prompt_cache_read_zero_representation: None,
                 },
             },

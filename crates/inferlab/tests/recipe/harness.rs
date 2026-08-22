@@ -39,6 +39,7 @@ pub(crate) struct TestWorkspace {
     eval_marker: PathBuf,
     capture_events: PathBuf,
     conditioning_request: PathBuf,
+    conditioning_log: PathBuf,
 }
 
 impl TestWorkspace {
@@ -130,6 +131,7 @@ impl TestWorkspace {
         let eval_marker = root.path().join("eval-ran");
         let capture_events = root.path().join("capture-events");
         let conditioning_request = root.path().join("conditioning-request.json");
+        let conditioning_log = root.path().join("conditioning-log.jsonl");
         Ok(Self {
             reaper,
             root,
@@ -139,6 +141,7 @@ impl TestWorkspace {
             eval_marker,
             capture_events,
             conditioning_request,
+            conditioning_log,
         })
     }
 
@@ -155,6 +158,7 @@ impl TestWorkspace {
             .env("FIXTURE_EVAL_MARKER", &self.eval_marker)
             .env("FIXTURE_CAPTURE_EVENTS", &self.capture_events)
             .env("FIXTURE_CONDITIONING_REQUEST", &self.conditioning_request)
+            .env("FIXTURE_CONDITIONING_LOG", &self.conditioning_log)
             .env(
                 "FIXTURE_NSYS_STATE",
                 self.root.path().join(".inferlab/nsys-state"),
@@ -257,6 +261,10 @@ impl TestWorkspace {
 
     pub(crate) fn conditioning_request(&self) -> &Path {
         &self.conditioning_request
+    }
+
+    pub(crate) fn conditioning_log(&self) -> &Path {
+        &self.conditioning_log
     }
 }
 

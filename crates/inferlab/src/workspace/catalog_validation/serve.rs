@@ -2,8 +2,9 @@
 
 use super::{invalid, require_id, require_nonempty, require_reference};
 use crate::InferlabError;
-use crate::workspace::definitions::{ProfilerEscapes, WorkspaceConfig};
-use inferlab_protocol::{Parallelism, ServeTopology};
+use crate::workspace::definitions::{JsonValue, ProfilerEscapes, WorkspaceConfig};
+use inferlab_protocol::{CaptureMechanism, Parallelism, ServeTopology};
+use std::collections::BTreeMap;
 
 pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
     for (id, server) in &config.servers {
@@ -57,6 +58,7 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
         }
         validate_parallelism("server", id, &server.parallelism)?;
         validate_profiler_escapes(&format!("server {id:?}"), &server.profiler)?;
+        validate_extra_args(&format!("server {id:?}"), &server.settings)?;
         for (role_id, role) in &server.roles {
             require_id("serve role", role_id)?;
             validate_server_role(id, server.topology, role_id)?;
@@ -67,6 +69,7 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
             }
             validate_parallelism("serve role", role_id, &role.parallelism)?;
             validate_profiler_escapes(&format!("server {id:?} role {role_id:?}"), &role.profiler)?;
+            validate_extra_args(&format!("server {id:?} role {role_id:?}"), &role.settings)?;
         }
         if let Some(default_case) = &server.default_case
             && !server.cases.contains_key(default_case)
@@ -77,6 +80,12 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
         }
         for (case_id, case) in &server.cases {
             require_id("server case", case_id)?;
+            if !case.profiler.nsys.is_empty() {
+                return invalid(format!(
+                    "server case {case_id:?} declares nsys profiler escapes; escape inputs belong \
+                     to the server and its roles, a case may only declare profiler.mechanism"
+                ));
+            }
             if case.readiness_timeout_seconds == Some(0) {
                 return invalid(format!(
                     "server case {case_id:?} readiness_timeout_seconds must be nonzero"
@@ -129,6 +138,7 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
                 require_nonempty("server case P/D Router backend", case_id, backend)?;
             }
             validate_parallelism("server case", case_id, &case.parallelism)?;
+            validate_extra_args(&format!("server case {case_id:?}"), &case.settings)?;
             for (role_id, role) in &case.roles {
                 require_id("server case role", role_id)?;
                 validate_server_role(id, server.topology, role_id)?;
@@ -138,10 +148,40 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
                     ));
                 }
                 validate_parallelism("server case role", role_id, &role.parallelism)?;
+                validate_extra_args(
+                    &format!("server case {case_id:?} role {role_id:?}"),
+                    &role.settings,
+                )?;
             }
         }
     }
     Ok(())
+}
+
+/// [[RFC-0003:C-RESOLUTION]] extra_args segmentation is a workspace-load
+/// obligation, not only a composition-time one: a value token preceding any
+/// flag and a second bare `--` fail validation even when no overriding layer
+/// ever touches the array.
+fn validate_extra_args(
+    context: &str,
+    settings: &BTreeMap<String, JsonValue>,
+) -> Result<(), InferlabError> {
+    let Some(value) = settings.get("extra_args") else {
+        return Ok(());
+    };
+    let path = format!("{context} settings.extra_args");
+    let JsonValue::Array(items) = value else {
+        return invalid(format!("extra_args at {path} must be an array"));
+    };
+    let tokens = items
+        .iter()
+        .map(|item| match item {
+            JsonValue::String(token) => Ok(token.clone()),
+            _ => invalid(format!("extra_args entries at {path} must be strings")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::toml_override::validate_extra_args_segmentation(&tokens, &path)
+        .map_err(|message| InferlabError::InvalidConfig { message })
 }
 
 fn validate_server_role(
@@ -280,6 +320,15 @@ pub(in crate::workspace) fn validate_profiler_escapes(
     context: &str,
     escapes: &ProfilerEscapes,
 ) -> Result<(), InferlabError> {
+    // Engine-trace targets declare no profiler escape inputs
+    // ([[RFC-0004:C-WORKLOAD-PROFILING]]); the composed view is re-checked at
+    // resolution, where case and invocation layers are visible.
+    if escapes.mechanism == Some(CaptureMechanism::EngineTrace) && !escapes.nsys.is_empty() {
+        return invalid(format!(
+            "{context} declares profiler mechanism engine_trace together with nsys escape \
+             inputs; engine-trace targets declare no profiler escape inputs"
+        ));
+    }
     const MANAGED: &[&str] = MANAGED_ESCAPE_OPTIONS;
     const MANAGED_SHORT: &[&str] = &["-t", "-o", "-f", "-c", "-s"];
     for (field, options) in [
@@ -334,4 +383,160 @@ fn is_posix_identifier(name: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inferlab_profiler::plan::NsysEscapes;
+
+    #[test]
+    fn managed_and_dedicated_escape_options_are_rejected_in_both_lists() {
+        let rejected = [
+            "--session=other",
+            "--session-new=other",
+            "--output=/tmp/trace",
+            "-o=/tmp/trace",
+            "--export=sqlite",
+            "--force-overwrite=false",
+            "-f=false",
+            "--capture-range=none",
+            "-c=none",
+            "--capture-range-end=stop",
+            "--wait=none",
+            "--trace=cuda",
+            "-t=cuda",
+            "--sample=cpu",
+            "-s=cpu",
+            "--cpuctxsw=none",
+            "--wait",
+            "-tnone",
+            "-o/tmp/x",
+            "-ftrue",
+            "-cnone",
+            "-snone",
+            "--wai=all",
+            "--out=/tmp/x",
+            "--force=true",
+            "--sess=x",
+            "--w",
+            "--wai",
+        ];
+        for option in rejected {
+            for field in ["launch_options", "start_options"] {
+                let mut escapes = ProfilerEscapes::default();
+                let list = if field == "launch_options" {
+                    &mut escapes.nsys.launch_options
+                } else {
+                    &mut escapes.nsys.start_options
+                };
+                list.push(option.to_owned());
+                let error = validate_profiler_escapes("server \"pd\"", &escapes)
+                    .err()
+                    .map(|error| error.to_string());
+                let expected = format!(
+                    "server \"pd\" nsys {field} contains managed option {option:?}; \
+                     use the dedicated profiler escape field or the inferlab-managed value"
+                );
+                assert!(
+                    error
+                        .as_deref()
+                        .is_some_and(|error| error.contains(&expected)),
+                    "{option} in {field}: {error:?}"
+                );
+            }
+        }
+        // Launch's -w is --show-output and -e is --env-var on the qualified
+        // nsys; neither names a managed fact, in plain or attached form.
+        let permitted = NsysEscapes {
+            launch_options: vec![
+                "-w=true".to_owned(),
+                "-e=NSYS_FIXTURE=1".to_owned(),
+                "-eNSYS_ATTACHED=1".to_owned(),
+                "--cuda-graph-trace=node".to_owned(),
+            ],
+            start_options: vec![
+                "--nic-metrics=true".to_owned(),
+                "--stats=true".to_owned(),
+                "-x=true".to_owned(),
+                "-xtrue".to_owned(),
+            ],
+            ..NsysEscapes::default()
+        };
+        assert!(
+            validate_profiler_escapes(
+                "server \"pd\"",
+                &ProfilerEscapes {
+                    mechanism: None,
+                    nsys: permitted
+                },
+            )
+            .is_ok(),
+            "nsys-owned options that name no managed fact pass the load gate"
+        );
+    }
+
+    // A non-identifier key would be parsed as an option of the environment
+    // utility rather than applied as an assignment
+    // ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn escape_env_keys_must_be_posix_identifiers() {
+        for key in ["--unset", "1BAD", "BAD-KEY", "", "BAD KEY"] {
+            let mut escapes = ProfilerEscapes::default();
+            escapes.nsys.env.insert(key.to_owned(), "value".to_owned());
+            let error = validate_profiler_escapes("server \"pd\"", &escapes)
+                .err()
+                .map(|error| error.to_string());
+            let expected = format!(
+                "server \"pd\" nsys env contains key {key:?}, which is not a POSIX \
+                 identifier; environment entries reach the profiler commands as assignments"
+            );
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(&expected)),
+                "{key:?}: {error:?}"
+            );
+        }
+        for key in ["_OK", "OK2", "NSYS_FIXTURE"] {
+            let mut escapes = ProfilerEscapes::default();
+            escapes.nsys.env.insert(key.to_owned(), "value".to_owned());
+            assert!(
+                validate_profiler_escapes("server \"pd\"", &escapes).is_ok(),
+                "{key:?} is a POSIX identifier and passes the load gate"
+            );
+        }
+    }
+
+    // A standalone terminator would splice ahead of the managed tail and
+    // demote it to positionals of the wrapped command; on the qualified
+    // nsys the start side even swallows it silently
+    // ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn standalone_terminators_are_rejected_in_both_lists() {
+        for option in ["-", "--"] {
+            for field in ["launch_options", "start_options"] {
+                let mut escapes = ProfilerEscapes::default();
+                let list = if field == "launch_options" {
+                    &mut escapes.nsys.launch_options
+                } else {
+                    &mut escapes.nsys.start_options
+                };
+                list.push(option.to_owned());
+                let error = validate_profiler_escapes("server \"pd\"", &escapes)
+                    .err()
+                    .map(|error| error.to_string());
+                let expected = format!(
+                    "server \"pd\" nsys {field} contains standalone {option:?}, \
+                     which ends option parsing and displaces the inferlab-managed argv tail"
+                );
+                assert!(
+                    error
+                        .as_deref()
+                        .is_some_and(|error| error.contains(&expected)),
+                    "{option} in {field}: {error:?}"
+                );
+            }
+        }
+    }
 }

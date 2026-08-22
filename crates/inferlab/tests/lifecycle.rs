@@ -1248,7 +1248,7 @@ else:
     raise ValueError(operation)
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "7",
+    "protocol_version": "8",
     "result": {"operation": operation, "output": output}
 }))
 "#;

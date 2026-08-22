@@ -13,11 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(crate) use bench::validate_bench;
-#[cfg(test)]
-pub(super) use bench::validate_bench_slos;
 pub(crate) use eval::{validate_eval, validate_eval_task_source};
-#[cfg(test)]
-pub(super) use serve::validate_profiler_escapes;
 
 pub(super) fn validate_workspace(
     root: &Path,
@@ -179,6 +175,167 @@ pub(super) fn require_nonempty(label: &str, id: &str, value: &str) -> Result<(),
     if value.is_empty() {
         invalid(format!("{label} for {id:?} must not be empty"))
     } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate_manifest(manifest: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let config = toml::from_str::<WorkspaceConfig>(manifest)?;
+        validate_workspace(root.path(), &config)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prefill_decode_requires_both_frontend_components_on_the_server_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = validate_manifest(
+            r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "prefill_decode"
+readiness_timeout_seconds = 60
+
+[servers.server.cases.add-frontend]
+gateway_backend = "gateway"
+pd_router_backend = "router"
+"#,
+        );
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "a P/D case must not add frontend components absent from the server base",
+            )
+            .into());
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("prefill_decode server \"server\" must declare both gateway_backend and pd_router_backend"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn single_case_cannot_add_a_gateway_absent_from_the_server_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = validate_manifest(
+            r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "single"
+readiness_timeout_seconds = 60
+
+[servers.server.cases.add-gateway]
+gateway_backend = "gateway"
+"#,
+        );
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "a single case must not add a Gateway absent from the server base",
+            )
+            .into());
+        };
+
+        assert!(
+            error.to_string().contains(
+                "cannot add gateway_backend because the server base does not declare a Gateway"
+            ),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extra_args_segmentation_validates_at_workspace_load_across_layers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const HEADER: &str = r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "single"
+readiness_timeout_seconds = 60
+"#;
+        // A value token preceding any flag fails load validation at every
+        // settings layer, even when no overriding layer touches the array
+        // ([[RFC-0003:C-RESOLUTION]]).
+        for (layer, path) in [
+            (
+                "[servers.server.settings]\nextra_args = [\"stray\", \"--a\"]",
+                "server \"server\" settings.extra_args",
+            ),
+            (
+                "[servers.server.roles.serve.settings]\nextra_args = [\"stray\"]",
+                "server \"server\" role \"serve\" settings.extra_args",
+            ),
+            (
+                "[servers.server.cases.c.settings]\nextra_args = [\"stray\"]",
+                "server case \"c\" settings.extra_args",
+            ),
+            (
+                "[servers.server.cases.c.roles.serve.settings]\nextra_args = [\"stray\"]",
+                "server case \"c\" role \"serve\" settings.extra_args",
+            ),
+        ] {
+            let Err(error) = validate_manifest(&format!("{HEADER}\n{layer}\n")) else {
+                return Err(
+                    std::io::Error::other(format!("{layer} must fail load validation")).into(),
+                );
+            };
+            assert!(error.to_string().contains("precedes any flag"), "{error}");
+            assert!(error.to_string().contains(path), "{error}");
+        }
+
+        // A second bare `--` is malformed even without any patch layer.
+        let result = validate_manifest(&format!(
+            "{HEADER}\n[servers.server.settings]\nextra_args = [\"--\", \"--a\", \"--\", \"--b\"]\n"
+        ));
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "a second verbatim sentinel must fail load validation",
+            )
+            .into());
+        };
+        assert!(error.to_string().contains("second bare `--`"), "{error}");
+
+        // A well-segmented declaration, including one verbatim block, loads.
+        validate_manifest(&format!(
+            "{HEADER}\n[servers.server.settings]\nextra_args = [\"--max-num-seqs\", \"256\", \"--\", \"--block-size\", \"32\"]\n"
+        ))?;
         Ok(())
     }
 }

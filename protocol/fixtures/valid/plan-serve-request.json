@@ -1,6 +1,6 @@
 {
   "operation": "plan_serve",
-  "protocol_version": "7",
+  "protocol_version": "8",
   "input": {
     "model": {
       "id": "dsv4",
@@ -16,20 +16,28 @@
         "kind": "prefill",
         "replica_count": 1,
         "parallelism": {
-          "outer": {"tensor_parallel_size": 2}
+          "outer": {
+            "tensor_parallel_size": 2
+          }
         },
-        "settings": {"trust_remote_code": true}
+        "settings": {
+          "trust_remote_code": true
+        }
       },
       {
         "id": "decode",
         "kind": "decode",
         "replica_count": 1,
         "parallelism": {
-          "outer": {"tensor_parallel_size": 2}
+          "outer": {
+            "tensor_parallel_size": 2
+          }
         },
-        "settings": {"trust_remote_code": true}
+        "settings": {
+          "trust_remote_code": true
+        }
       }
     ],
-    "profiling": true
+    "profiling": "managed_collection"
   }
 }

@@ -1,6 +1,6 @@
 ---
 name: inferlab
-description: "Use when operating InferLab: run reproducible LLM inference experiments through a versioned workspace — serve lifecycles, closed-loop eval/bench recipes, standalone benches, Nsight Systems capture, runtime images, and the scratchpad journal — always reading results from file-first execution records."
+description: "Use when operating InferLab: run reproducible LLM inference experiments through a versioned workspace — serve lifecycles, closed-loop eval/bench recipes, standalone benches, workload-attached profiling (managed Nsight Systems collection or engine-native traces), runtime images, and the scratchpad journal — always reading results from file-first execution records."
 ---
 
 # InferLab Operator Workflow
@@ -38,7 +38,7 @@ the smallest matching reference completely:
 | Inspect a workspace or check, lock, and diagnose stack realization | [Workspaces and stacks](references/workspaces-and-stacks.md) |
 | Start, inspect, stop, or run a recipe around a managed server | [Serving and recipes](references/serving-and-recipes.md) |
 | Execute or inspect Eval, Bench, dataset, session, metric, SLO, or prompt evidence | [Measurements](references/measurements.md) |
-| Run or diagnose an Eval/Bench capture with Nsight Systems | [Profiling](references/profiling.md) |
+| Run or diagnose an Eval/Bench capture (managed Nsight Systems or engine-native trace) | [Profiling](references/profiling.md) |
 | Build, select, validate, or probe a runtime image | [Images and ad-hoc execution](references/images-and-run.md) |
 | Inspect records, compare results, use the TUI or scratchpad, or diagnose a failure | [Evidence and diagnosis](references/evidence-and-diagnosis.md) |
 | Install, update, diagnose, or remove the agent plugin | [Agent plugin](references/agent-plugin.md) |

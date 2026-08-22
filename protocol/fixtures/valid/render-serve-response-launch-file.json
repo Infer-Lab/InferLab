@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "7",
+  "protocol_version": "8",
   "result": {
     "operation": "render_serve",
     "output": {

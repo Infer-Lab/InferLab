@@ -34,7 +34,8 @@ you can inspect, compare, and reproduce.
   one command, with per-case metrics and raw artifacts preserved.
 - **Runtime images** — build and validate OCI images from the same workspace
   baseline, then launch recipes from them.
-- **Profiling** — attach Nsight Systems captures to selected workloads.
+- **Profiling** — attach managed Nsight Systems collection or engine-native
+  traces to selected workloads.
 - **Source identity** — records carry the workspace revision and a source
   digest; a clean-workspace run is reproducible from a fresh checkout.
 - **Operator journal** — an append-only scratchpad on the same time axis as

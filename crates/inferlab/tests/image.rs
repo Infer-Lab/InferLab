@@ -1656,6 +1656,55 @@ fn image_backed_capture_is_rejected() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Engine-trace capture is undefined for an image-backed launch: the
+/// engine's internal profiler would write inside the container and InferLab
+/// defines no in-container trace retrieval
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn image_backed_engine_trace_capture_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?;
+    fs::write(
+        &manifest_path,
+        format!("{manifest}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n"),
+    )?;
+    git(workspace.root.path(), &["add", "."])?;
+    git(workspace.root.path(), &["commit", "-qm", "engine-trace"])?;
+    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    assert!(
+        build.status.success(),
+        "bare image build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let report = stdout_json(&build)?;
+    let record_id = report["record_id"].as_str().ok_or("record id")?;
+
+    let output = workspace
+        .command()
+        .args([
+            "recipe",
+            "run",
+            "dsv4-qualify",
+            "--image",
+            record_id,
+            "--capture",
+            "smoke",
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "an image-backed engine-trace capture must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("engine-trace") && stderr.contains("image-backed launch"),
+        "the rejection names the missing capability: {stderr}"
+    );
+    Ok(())
+}
+
 #[test]
 fn adapter_container_device_is_declared_not_guessed() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;

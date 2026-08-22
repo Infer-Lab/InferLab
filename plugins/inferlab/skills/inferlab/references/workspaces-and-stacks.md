@@ -44,7 +44,7 @@ stack confirmation or portable experiment evidence.
 
 ## Lock And Upgrade Workflow
 
-Read [Upgrading](workspace-definition.md#upgrading-to-09) before changing
+Read [Upgrading](workspace-definition.md#upgrading-to-012) before changing
 workspace package pins. Update the committed manifest, then produce and inspect
 the lock through the workspace command:
 

@@ -308,6 +308,34 @@ pub(crate) struct ResolvedBenchDefinition {
     pub cache_start: BenchCacheStart,
 }
 
+impl ResolvedBenchDefinition {
+    /// A primed start or declared prefix geometry requires backend-reported
+    /// prompt cache-read usage for every successful profiling request
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]). Planning rejects benches with this
+    /// requirement against endpoints that expose no cache-read capability;
+    /// runtime normalization re-checks the same predicate.
+    pub(crate) fn requires_prompt_cache_evidence(&self) -> bool {
+        if self.cache_start == BenchCacheStart::Primed {
+            return true;
+        }
+        matches!(
+            self.source.request_source(),
+            Some(
+                ResolvedBenchRequestSource::Random {
+                    prefix_sharing: Some(_),
+                    ..
+                } | ResolvedBenchRequestSource::Random {
+                    shared_system_content: Some(_),
+                    ..
+                } | ResolvedBenchRequestSource::RandomMixture {
+                    prefix_sharing: Some(_),
+                    ..
+                }
+            )
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct BenchPopulation {
     pub path: PathBuf,

@@ -146,9 +146,22 @@ pub(in crate::tui) struct PrefixCacheResetProjection {
 }
 
 #[derive(Deserialize)]
+pub(in crate::tui) struct PrefixCacheConditioningRankProjection {
+    rank: u32,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    http_status: Option<u16>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(in crate::tui) struct PrefixCacheConditioningProjection {
     succeeded: bool,
     prompt_tokens: u32,
+    #[serde(default)]
+    ranks: Vec<PrefixCacheConditioningRankProjection>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -278,11 +291,41 @@ pub(in crate::tui) fn case_evidence(evidence: CaseEvidence<'_>) -> (Vec<FactSect
         common.push(fact("Prefix-cache reset", prefix_reset(&preparation.reset)));
         if let Some(conditioning) = &preparation.conditioning {
             let summary = if conditioning.succeeded {
-                format!("succeeded · {} tok", conditioning.prompt_tokens)
+                let ranks = if conditioning.ranks.len() > 1 {
+                    format!(" · {} ranks", conditioning.ranks.len())
+                } else {
+                    String::new()
+                };
+                format!("succeeded · {} tok{ranks}", conditioning.prompt_tokens)
             } else {
+                let reason = conditioning
+                    .error
+                    .as_deref()
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        conditioning
+                            .ranks
+                            .iter()
+                            .find(|rank| rank.error.is_some())
+                            .map(|rank| {
+                                let status = rank.http_status.map_or_else(
+                                    || "no response".to_owned(),
+                                    |code| format!("HTTP {code}"),
+                                );
+                                let target = rank
+                                    .target
+                                    .as_deref()
+                                    .map_or_else(String::new, |target| format!("{target} · "));
+                                format!(
+                                    "{target}rank {} · {status} · {}",
+                                    rank.rank,
+                                    rank.error.as_deref().unwrap_or("unknown error")
+                                )
+                            })
+                    });
                 format!(
                     "failed · {}",
-                    conditioning.error.as_deref().unwrap_or("unknown error")
+                    reason.unwrap_or_else(|| "unknown error".to_owned())
                 )
             };
             common.push(fact("Prefix conditioning", summary));

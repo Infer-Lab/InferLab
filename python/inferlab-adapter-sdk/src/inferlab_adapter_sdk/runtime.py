@@ -1,8 +1,9 @@
 import json
 import sys
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import TextIO
 
 from pydantic import BaseModel, ValidationError
@@ -57,7 +58,41 @@ type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
 type ServeAllocation = ServeProcessAllocationModelRank | ServeProcessAllocationFrontend
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-PROTOCOL_V7 = ProtocolVersion()
+PROTOCOL_V8 = ProtocolVersion()
+
+# Inferlab owns readiness; the router's internal guard must not expire first.
+ROUTER_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
+
+_RUNTIME_CACHE_SUBDIRS = {
+    "DG_JIT_CACHE_DIR": "deep_gemm_jit",
+    "FLASHINFER_WORKSPACE_BASE": "flashinfer",
+    "FLASHINFER_CUBIN_DIR": "flashinfer_cubin",
+    "TRITON_CACHE_DIR": "triton",
+    "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
+    "TORCH_EXTENSIONS_DIR": "torch_extensions",
+}
+
+
+def runtime_cache_env(root: str, extra_subdirs: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Map the shared JIT/runtime cache variables under one cache root."""
+    cache_root = Path(root)
+    subdirs = dict(_RUNTIME_CACHE_SUBDIRS)
+    subdirs.update(extra_subdirs or {})
+    return {name: str(cache_root / subdirectory) for name, subdirectory in subdirs.items()}
+
+
+def rank_zero_allocations(
+    allocations: list[ServeProcessAllocationModelRank], kind: ServeRoleKind
+) -> list[ServeProcessAllocationModelRank]:
+    """Select one role's rank-0 allocations in replica order."""
+    return sorted(
+        [
+            allocation
+            for allocation in allocations
+            if allocation.role_kind == kind and allocation.rank == 0
+        ],
+        key=lambda allocation: allocation.replica,
+    )
 
 
 def plain_setting(value: SettingValue) -> JsonValue:
@@ -294,7 +329,7 @@ def append_option(argv: list[str], name: str, value: str | int | float | None) -
         argv.extend([name, str(value)])
 
 
-def validate_extra_args(extra_args: list[str], option_arity: dict[str, int | None]) -> None:
+def validate_extra_args(extra_args: list[str], owned_options: Collection[str]) -> None:
     """Reject InferLab-owned options in the extra-args escape hatch.
 
     Only tokens before the `--` passthrough sentinel are checked; anything
@@ -304,7 +339,7 @@ def validate_extra_args(extra_args: list[str], option_arity: dict[str, int | Non
         if argument == "--":
             return
         name, _separator, _value = argument.partition("=")
-        if name in option_arity:
+        if name in owned_options:
             raise AdapterOperationError(
                 AdapterErrorCode.invalid_settings,
                 f"extra_args entry {argument!r} names InferLab-owned option {name!r}; "
@@ -316,16 +351,23 @@ def validate_extra_args(extra_args: list[str], option_arity: dict[str, int | Non
 def merge_serve_args(
     extra_args: list[str],
     inferlab_args: list[str],
-    option_arity: dict[str, int | None],
+    owned_options: Collection[str],
 ) -> list[str]:
-    validate_extra_args(extra_args, option_arity)
+    """Splice operator extra args around the managed argv tail.
+
+    The bare ``--`` sentinel is an InferLab-side composition marker and is
+    stripped here: argparse-based engine launchers reject a literal ``--``,
+    so only the tokens after it are appended verbatim after the managed tail
+    (engine last-wins parsing then applies the deliberate override).
+    """
+    validate_extra_args(extra_args, owned_options)
     merged = []
     remainder = []
     index = 0
     while index < len(extra_args):
         argument = extra_args[index]
         if argument == "--":
-            remainder = extra_args[index:]
+            remainder = extra_args[index + 1 :]
             break
         merged.append(argument)
         index += 1
@@ -345,13 +387,13 @@ class AdapterOperationError(Exception):
 def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     return AdapterResponse(
         root=AdapterResponseError(
-            protocol_version=PROTOCOL_V7,
+            protocol_version=PROTOCOL_V8,
             error=AdapterError(code=code, message=message),
         )
     )
 
 
-SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V7.root
+SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V8.root
 
 
 def handle_request(
@@ -402,7 +444,7 @@ def handle_request(
 
     return AdapterResponse(
         root=AdapterResponseOk(
-            protocol_version=PROTOCOL_V7,
+            protocol_version=PROTOCOL_V8,
             result=AdapterResult(root=result),
         )
     )

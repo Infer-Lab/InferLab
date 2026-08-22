@@ -83,6 +83,40 @@ impl TestWorkspace {
         Ok(())
     }
 
+    fn configure_attention_data_parallel(&self, size: u32) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?.replacen(
+            "context_parallel_size = 1",
+            &format!("context_parallel_size = 1\ndata_parallel_size = {size}"),
+            1,
+        );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    // `configure_pd` turned the cache start uncontrolled; select primed on
+    // top of the Gateway-backed layout.
+    fn configure_pd_primed_prefix_bench(&self) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let text = fs::read_to_string(&manifest)?
+            .replacen(
+                "request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }",
+                "request_source = { kind = \"random\", prompt = { kind = \"flat\" }, input_tokens = 8, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 1.0 } }",
+                1,
+            )
+            .replacen(
+                "cache = { start = \"uncontrolled\" }",
+                "cache = { start = \"primed\" }\nrequest_body = { temperature = 0.0 }",
+                1,
+            )
+            .replace(
+                "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "benches = [\"c8k1k\"]",
+            );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
     fn configure_uncontrolled_warmup_bench(&self) -> Result<(), Box<dyn Error>> {
         let manifest = self.root().join(".inferlab/workspace.toml");
         let text = fs::read_to_string(&manifest)?
@@ -144,7 +178,7 @@ fn source_preparation_failure_is_durable_before_server_launch() -> Result<(), Bo
 
     assert!(!output.status.success());
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(recipe["schema_version"], 3);
+    assert_eq!(recipe["schema_version"], 4);
     assert_eq!(recipe["source_preparation_completed"], false);
     assert_eq!(recipe["serving_launch_attempted"], false);
     assert_eq!(recipe["server"]["status"], Value::Null);
@@ -416,7 +450,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("smoke Eval has no record id")?;
     let eval = workspace.load_record(eval_id)?;
-    assert_eq!(eval["schema_version"], 15);
+    assert_eq!(eval["schema_version"], 19);
     assert_eq!(eval["kind"], "eval");
     assert_eq!(eval["resolved"]["execution"]["kind"], "native_openai_smoke");
     assert_eq!(eval["cases"][0]["process"], Value::Null);
@@ -820,7 +854,9 @@ fn primed_dry_run_projects_order_and_conditioning_values() -> Result<(), Box<dyn
             "request_body": {"temperature": 0.0},
             "maximum_shared_prefix_tokens": 8,
             "output_tokens": 1,
-            "consumes_population_entry": false
+            "consumes_population_entry": false,
+            "attention_data_parallel_size": 1,
+            "frontend_fanout": false
         })
     );
     Ok(())
@@ -857,13 +893,17 @@ fn primed_prefix_preparation_precedes_profiling_and_records_exact_request()
         8
     );
     assert_eq!(
-        case["cache_preparation"]["conditioning"]["backend_prompt_tokens"],
-        8
+        case["cache_preparation"]["conditioning"]["attention_data_parallel_size"],
+        1
     );
-    assert_eq!(
-        case["cache_preparation"]["conditioning"]["backend_cache_read_tokens"],
-        0
-    );
+    let ranks = case["cache_preparation"]["conditioning"]["ranks"]
+        .as_array()
+        .ok_or("conditioning has no per-rank evidence")?;
+    assert_eq!(ranks.len(), 1);
+    assert_eq!(ranks[0]["rank"], 0);
+    assert_eq!(ranks[0]["http_status"], 200);
+    assert_eq!(ranks[0]["backend_prompt_tokens"], 8);
+    assert_eq!(ranks[0]["backend_cache_read_tokens"], 0);
     assert_eq!(
         case["cache_preparation"]["conditioning"]["maximum_shared_prefix_tokens"],
         8
@@ -900,6 +940,252 @@ fn primed_prefix_preparation_precedes_profiling_and_records_exact_request()
         &events[..3],
         ["cache_reset", "cache_conditioning", "client_started",]
     );
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
+fn primed_prefix_conditioning_primes_each_data_parallel_rank() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    workspace.configure_attention_data_parallel(2)?;
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; case errors: {}; stderr: {}",
+        bench["error"],
+        bench["cases"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conditioning = &bench["cases"][0]["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["succeeded"], true);
+    assert_eq!(conditioning["attention_data_parallel_size"], 2);
+    let ranks = conditioning["ranks"]
+        .as_array()
+        .ok_or("conditioning has no per-rank evidence")?;
+    assert_eq!(ranks.len(), 2);
+    for (index, rank) in ranks.iter().enumerate() {
+        assert_eq!(rank["rank"], index as u64);
+        assert_eq!(rank["http_status"], 200);
+        assert_eq!(rank["backend_prompt_tokens"], 8);
+        assert_eq!(rank["backend_cache_read_tokens"], 0);
+        assert!(rank["elapsed_ms"].is_number());
+    }
+
+    // The bench runs four cases; each primes both ranks after its reset.
+    let log = fs::read_to_string(workspace.conditioning_log())?;
+    let requests = log
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?;
+    assert_eq!(requests.len(), 8);
+    for pair in requests.chunks_exact(2) {
+        assert_eq!(pair[0]["rank"], "0");
+        assert_eq!(pair[1]["rank"], "1");
+    }
+    for entry in &requests {
+        assert_eq!(entry["request"]["prompt"], "canonical prefix");
+        assert_eq!(entry["request"]["max_tokens"], 1);
+    }
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+#[test]
+fn primed_prefix_conditioning_rank_failure_fails_the_case_with_evidence()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    workspace.configure_attention_data_parallel(2)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_CONDITIONING_FAIL_RANK", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    let case = &bench["cases"][0];
+    assert_eq!(case["status"], "failed");
+    assert_eq!(case["error"], "prefix-cache conditioning failed");
+    let conditioning = &case["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["succeeded"], false);
+    assert!(
+        conditioning["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("data-parallel rank 1"))
+    );
+    let ranks = conditioning["ranks"]
+        .as_array()
+        .ok_or("conditioning has no per-rank evidence")?;
+    assert_eq!(ranks.len(), 2);
+    assert_eq!(ranks[0]["rank"], 0);
+    assert_eq!(ranks[0]["http_status"], 200);
+    assert!(ranks[0]["error"].is_null());
+    assert_eq!(ranks[1]["rank"], 1);
+    assert_eq!(ranks[1]["http_status"], 500);
+    assert!(
+        ranks[1]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("HTTP 500"))
+    );
+    assert!(case.get("metrics").is_none());
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+// A primed or shared-prefix Bench against a server without cache-read
+// reporting can never normalize; reject it at planning instead of failing
+// every request's normalization after a full run (0.11.0 downstream report).
+#[test]
+fn primed_bench_requires_server_cache_read_capability() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_NO_CACHE_READ_REPORTING", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\"c8k1k\""), "{stderr}");
+    assert!(stderr.contains("prompt cache-read"), "{stderr}");
+    assert!(stderr.contains("rebuild the server"), "{stderr}");
+    // The control plane must not spell out framework-specific launch flags.
+    assert!(!stderr.contains("enable_prompt_tokens_details"), "{stderr}");
+    assert!(!workspace.bench_marker().exists());
+    Ok(())
+}
+
+#[test]
+fn primed_cache_start_rejects_gateway_without_conditioning_fanout() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_pd("mooncake")?;
+    workspace.configure_pd_primed_prefix_bench()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_PD", "mooncake")
+        .env("FIXTURE_GATEWAY_NO_CONDITIONING", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cache.start = \"primed\""), "{stderr}");
+    assert!(
+        stderr.contains("prefix-cache conditioning fan-out capability"),
+        "{stderr}"
+    );
+    assert!(!workspace.bench_marker().exists());
+    Ok(())
+}
+
+#[test]
+fn primed_prefix_conditioning_fans_out_through_gateway_to_each_replica_and_rank()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_pd("mooncake")?;
+    workspace.configure_pd_primed_prefix_bench()?;
+    workspace.configure_attention_data_parallel(2)?;
+    // Keep the tp2 case: dp=2 multiplies every replica to four devices, so
+    // widen the fixture device inventory to fit.
+    let local = workspace.root().join(".inferlab/local.toml");
+    let text = fs::read_to_string(&local)?.replacen(
+        "devices = [0, 1, 2, 3, 4, 5, 6, 7]",
+        "devices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]",
+        1,
+    );
+    fs::write(local, text)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_PD", "mooncake")
+        .env("FIXTURE_DP_RANKS", "2")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; case errors: {}; stderr: {}",
+        bench["error"],
+        bench["cases"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conditioning = &bench["cases"][0]["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["succeeded"], true);
+    assert_eq!(
+        conditioning["url"]
+            .as_str()
+            .map(|url| url.ends_with("/prime_prefix_cache")),
+        Some(true)
+    );
+    let ranks = conditioning["ranks"]
+        .as_array()
+        .ok_or("conditioning has no per-rank evidence")?;
+    // Two prefill replicas, each pinned at data-parallel ranks 0 and 1.
+    assert_eq!(ranks.len(), 4);
+    let mut targets = std::collections::BTreeMap::new();
+    for rank in ranks {
+        assert_eq!(rank["http_status"], 200);
+        assert!(rank["error"].is_null());
+        let target = rank["target"]
+            .as_str()
+            .ok_or("fan-out rank has no target")?;
+        targets
+            .entry(target.to_owned())
+            .or_insert_with(Vec::new)
+            .push(
+                rank["rank"]
+                    .as_u64()
+                    .ok_or("fan-out rank is not an integer")?,
+            );
+    }
+    assert_eq!(targets.len(), 2);
+    for covered in targets.values() {
+        assert_eq!(covered, &[0, 1]);
+    }
+
+    // The engines observed exactly one rank-pinned request per (replica,
+    // rank) per case; decode-side traffic stays unpinned and incidental.
+    let log = fs::read_to_string(workspace.conditioning_log())?;
+    let requests = log
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?;
+    let cases = bench["cases"].as_array().ok_or("matrix has no cases")?;
+    let pinned = requests
+        .iter()
+        .filter(|entry| !entry["rank"].is_null())
+        .collect::<Vec<_>>();
+    let unpinned = requests
+        .iter()
+        .filter(|entry| entry["rank"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(pinned.len(), 4 * cases.len());
+    assert_eq!(unpinned.len(), 4 * cases.len());
+    for entry in &pinned {
+        assert!(matches!(entry["rank"].as_str(), Some("0") | Some("1")));
+        assert_eq!(entry["request"]["prompt"], "canonical prefix");
+        assert_eq!(entry["request"]["max_tokens"], 1);
+    }
     assert_eq!(recipe["cleanup"]["verified"], true);
     Ok(())
 }

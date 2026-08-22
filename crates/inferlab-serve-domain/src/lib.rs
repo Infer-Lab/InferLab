@@ -4,9 +4,10 @@ use inferlab_profiler::plan::{
     CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan, NsysEscapes, ProcessCapturePlan,
 };
 use inferlab_protocol::{
-    EndpointAssignment, EndpointProtocol, FrontendComponents, FrontendProcessRole, GatewayPlan,
-    Parallelism, PdRouterPlan, PlanServeResult, ReadinessProbe, RenderedServeProcess,
-    ServeProcessAllocation, ServeRoleKind, ServeRoleLink, SettingValue, SuppliedRenderInput,
+    CaptureMechanism, EndpointAssignment, EndpointProtocol, FrontendComponents,
+    FrontendProcessRole, GatewayPlan, Parallelism, PdRouterPlan, PlanServeResult, ReadinessProbe,
+    RenderedServeProcess, ServeProcessAllocation, ServeRoleKind, ServeRoleLink, SettingValue,
+    SuppliedRenderInput,
 };
 use inferlab_runtime::operation_bound::OperationTimingEvidence;
 use inferlab_runtime::plan::{
@@ -119,6 +120,10 @@ pub struct ContainerPlan {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProfilerEscapesPlan {
+    /// The raw mechanism declaration on the server, when present; omission
+    /// resolves to managed collection ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<CaptureMechanism>,
     #[serde(default, skip_serializing_if = "NsysEscapes::is_empty")]
     pub common: NsysEscapes,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -196,6 +201,8 @@ pub struct EndpointPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<inferlab_protocol::HttpActionSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_conditioning: Option<inferlab_protocol::HttpActionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_read_zero_representation:
         Option<inferlab_protocol::PromptCacheReadZeroRepresentation>,
 }
@@ -233,8 +240,13 @@ pub enum ProcessRequirementIdentity {
 
 #[derive(Clone)]
 pub struct PendingCaptureTargetPlan {
+    mechanism: CaptureMechanism,
     window_control_endpoint: CaptureWindowControlEndpointPlan,
     replica_entry_process_id: String,
+    /// The target replica's declared whole-replica device count: engine-trace
+    /// coverage verification expects one new trace artifact per device
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    device_count: u32,
     start: PendingCaptureWindowActionPlan,
     stop: PendingCaptureWindowActionPlan,
     escapes: NsysEscapes,
@@ -325,25 +337,35 @@ impl ProcessRequirement {
 
 impl PendingCaptureTargetPlan {
     pub fn new(
+        mechanism: CaptureMechanism,
         window_control_endpoint: CaptureWindowControlEndpointPlan,
         replica_entry_process_id: String,
+        device_count: u32,
         start: PendingCaptureWindowActionPlan,
         stop: PendingCaptureWindowActionPlan,
         escapes: NsysEscapes,
     ) -> Self {
         Self {
+            mechanism,
             window_control_endpoint,
             replica_entry_process_id,
+            device_count,
             start,
             stop,
             escapes,
         }
+    }
+    pub const fn mechanism(&self) -> CaptureMechanism {
+        self.mechanism
     }
     pub const fn window_control_endpoint(&self) -> CaptureWindowControlEndpointPlan {
         self.window_control_endpoint
     }
     pub fn replica_entry_process_id(&self) -> &str {
         &self.replica_entry_process_id
+    }
+    pub const fn device_count(&self) -> u32 {
+        self.device_count
     }
     pub fn start(&self) -> &PendingCaptureWindowActionPlan {
         &self.start

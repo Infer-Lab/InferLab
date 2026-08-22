@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-bench-runner"
-version = "0.11.0"
+version = "0.12.0"
 description = "Inferlab direct AIPerf Bench runner"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["huggingface-hub>=0.25,<2", "inferlab-measurement-sdk==0.11.0"]
+dependencies = ["huggingface-hub>=0.25,<2", "inferlab-measurement-sdk==0.12.0"]
 
 [project.scripts]
 inferlab-bench-runner = "inferlab_bench_runner.bench_client:main"

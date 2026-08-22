@@ -6,6 +6,17 @@ import sys
 request = json.load(sys.stdin)
 input = request["input"]
 operation = request["operation"]
+mechanism = input.get("profiling")
+
+
+def cache_read_capability():
+    # The fixture engine reports cache-read usage unless the test suppresses
+    # the capability to exercise the planning-time rejection.
+    if os.environ.get("FIXTURE_NO_CACHE_READ_REPORTING"):
+        return {}
+    return {"prompt_cache_read_zero_representation": "explicit"}
+
+
 if operation == "plan_serve":
     role = input["roles"][0]
     settings = role["settings"]
@@ -61,21 +72,32 @@ if operation == "plan_serve":
                     **(
                         {
                             "capture_target": {
+                                "mechanism": mechanism,
                                 "window_control": {
                                     "endpoint": "replica_entry",
                                     "start": {
                                         "method": "post",
                                         "path": "/start_profile",
-                                        "body": {"activities": ["CUDA_PROFILER"]},
+                                        **(
+                                            {
+                                                "body": {
+                                                    "activities": [
+                                                        "GPU"
+                                                        if mechanism == "engine_trace"
+                                                        else "CUDA_PROFILER"
+                                                    ]
+                                                }
+                                            }
+                                        ),
                                     },
                                     "stop": {
                                         "method": "post",
                                         "path": "/stop_profile",
                                     },
-                                }
+                                },
                             }
                         }
-                        if input["profiling"]
+                        if mechanism
                         else {}
                     ),
                 }
@@ -129,6 +151,7 @@ if operation == "plan_serve":
                             "completions_path": "/v1/completions",
                             "chat_completions_path": "/v1/chat/completions",
                             "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
+                            **cache_read_capability(),
                         }
                     }
                     if not transport
@@ -151,6 +174,18 @@ if operation == "plan_serve":
                         "protocol": "http",
                         "completions_path": "/v1/completions",
                         "chat_completions_path": "/v1/chat/completions",
+                        "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
+                        **cache_read_capability(),
+                        **(
+                            {}
+                            if os.environ.get("FIXTURE_GATEWAY_NO_CONDITIONING")
+                            else {
+                                "prefix_cache_conditioning": {
+                                    "method": "post",
+                                    "path": "/prime_prefix_cache",
+                                }
+                            }
+                        ),
                     },
                     "readiness": {"kind": "http", "path": "/healthcheck"},
                     "ports": [],
@@ -214,7 +249,11 @@ elif operation == "render_serve":
                             else []
                         ),
                     ],
-                    "env": {},
+                    "env": (
+                        {"FIXTURE_CAPTURE_STORAGE": allocation["capture_storage"]}
+                        if mechanism == "engine_trace" and allocation.get("capture_storage")
+                        else {}
+                    ),
                 },
             }
             for allocation in allocations
@@ -226,7 +265,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "7",
+            "protocol_version": "8",
             "result": {"operation": operation, "output": output},
         }
     )

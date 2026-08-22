@@ -24,7 +24,7 @@ if fault.get("adapter_reject"):
         json.dumps(
             {
                 "status": "error",
-                "protocol_version": "7",
+                "protocol_version": "8",
                 "error": {"code": "invalid_settings", "message": "fixture rejection"},
             }
         )
@@ -33,6 +33,7 @@ if fault.get("adapter_reject"):
 
 input = request["input"]
 operation = request["operation"]
+mechanism = input.get("profiling")
 if operation == "plan_serve":
     role = input["roles"][0]
     gateway_backend = input.get("gateway_backend")
@@ -98,21 +99,28 @@ if operation == "plan_serve":
                 **(
                     {
                         "capture_target": {
+                            "mechanism": mechanism,
                             "window_control": {
                                 "endpoint": "replica_entry",
                                 "start": {
                                     "method": "post",
                                     "path": "/start_profile",
-                                    "body": {"activities": ["CUDA_PROFILER"]},
+                                    "body": {
+                                        "activities": [
+                                            "GPU"
+                                            if mechanism == "engine_trace"
+                                            else "CUDA_PROFILER"
+                                        ]
+                                    },
                                 },
                                 "stop": {
                                     "method": "post",
                                     "path": "/stop_profile",
                                 },
-                            }
+                            },
                         }
                     }
-                    if input["profiling"]
+                    if mechanism
                     else {}
                 ),
             }
@@ -224,7 +232,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "7",
+            "protocol_version": "8",
             "result": {"operation": operation, "output": output},
         }
     )

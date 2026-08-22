@@ -13,11 +13,11 @@ use crate::workload::domain::{
     BenchSessionDatasetCatalog, DatasetCacheState, ResolvedAggregateSlo,
     ResolvedBenchAgenticSource, ResolvedBenchDefinition, ResolvedBenchPrompt,
     ResolvedBenchRandomShape, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
-    ResolvedBenchSloPolicy, ResolvedBenchSource,
+    ResolvedBenchSloPolicy, ResolvedBenchSource, WorkloadHttpAction,
 };
 use crate::workload::plan::{
     BenchClientPlan, BenchPlan, BenchPrefixCacheConditioningPlan, ClientCommandPlan,
-    MeasurementOverridePlan, MeasurementResolveContext,
+    ConditioningServingShape, MeasurementOverridePlan, MeasurementResolveContext,
 };
 use crate::workspace::{
     AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchPrefixSharing,
@@ -94,6 +94,18 @@ pub(super) fn build_bench_plan(
             ),
         });
     }
+    if resolved_definition.requires_prompt_cache_evidence()
+        && context
+            .endpoint
+            .prompt_cache_read_zero_representation
+            .is_none()
+    {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "bench {id:?} requires backend prompt cache-read usage, but the resolved server endpoint exposes no prompt cache-read capability; enable the serving integration's cache-read reporting setting and rebuild the server"
+            ),
+        });
+    }
     let slo = resolve_bench_slo_policy(&definition)?;
     let prefix_cache_reset = if matches!(
         resolved_definition.cache_start,
@@ -114,10 +126,13 @@ pub(super) fn build_bench_plan(
         None
     };
     let prefix_cache_conditioning = prefix_cache_conditioning_plan(
+        id,
         &resolved_definition,
         &context.endpoint.completions_path,
         &context.model.served_name,
-    );
+        context.prefix_cache_conditioning.as_ref(),
+        context.conditioning_serving,
+    )?;
     let mut env = context.command_env.clone();
     env.remove("HF_HUB_OFFLINE");
     env.insert(
@@ -160,14 +175,19 @@ pub(super) fn build_bench_plan(
 }
 
 fn prefix_cache_conditioning_plan(
+    id: &str,
     definition: &ResolvedBenchDefinition,
     completions_path: &str,
     model: &str,
-) -> Option<BenchPrefixCacheConditioningPlan> {
+    frontend_conditioning: Option<&WorkloadHttpAction>,
+    serving: ConditioningServingShape,
+) -> Result<Option<BenchPrefixCacheConditioningPlan>, InferlabError> {
     if definition.cache_start != BenchCacheStart::Primed {
-        return None;
+        return Ok(None);
     }
-    let request_source = definition.source.request_source()?;
+    let Some(request_source) = definition.source.request_source() else {
+        return Ok(None);
+    };
     let (maximum_input_tokens, sharing) = match request_source {
         ResolvedBenchRequestSource::Random {
             input_tokens,
@@ -178,13 +198,15 @@ fn prefix_cache_conditioning_plan(
             shapes,
             prefix_sharing: Some(sharing),
             ..
-        } => (
-            shapes.iter().map(|shape| shape.input_tokens).max()?,
-            sharing,
-        ),
+        } => {
+            let Some(maximum) = shapes.iter().map(|shape| shape.input_tokens).max() else {
+                return Ok(None);
+            };
+            (maximum, sharing)
+        }
         ResolvedBenchRequestSource::Random { .. }
         | ResolvedBenchRequestSource::RandomMixture { .. }
-        | ResolvedBenchRequestSource::Dataset { .. } => return None,
+        | ResolvedBenchRequestSource::Dataset { .. } => return Ok(None),
     };
     let maximum_shared_prefix_tokens = match sharing {
         BenchPrefixSharing::Tokens {
@@ -194,15 +216,29 @@ fn prefix_cache_conditioning_plan(
             shared_prefix_ratio,
         } => (f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32,
     };
-    Some(BenchPrefixCacheConditioningPlan {
-        route: completions_path.to_owned(),
+    let (route, frontend_fanout) = if serving.gateway_frontend {
+        let Some(action) = frontend_conditioning else {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "bench {id:?} selects cache.start = \"primed\", but the Gateway frontend does not declare a prefix-cache conditioning fan-out capability: frontend routing cannot address an individual replica or data-parallel rank, so conditioning cannot cover every cache-owning rank"
+                ),
+            });
+        };
+        (action.path.clone(), true)
+    } else {
+        (completions_path.to_owned(), false)
+    };
+    Ok(Some(BenchPrefixCacheConditioningPlan {
+        route,
         model: model.to_owned(),
         prompt: definition.prompt.clone(),
         request_body: definition.request_body.clone(),
         maximum_shared_prefix_tokens,
         output_tokens: 1,
         consumes_population_entry: false,
-    })
+        attention_data_parallel_size: serving.attention_data_parallel_size,
+        frontend_fanout,
+    }))
 }
 
 fn token_selector_maximum(selector: &BenchTokenSelector) -> u32 {

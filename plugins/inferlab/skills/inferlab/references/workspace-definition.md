@@ -1,34 +1,5 @@
 # Workspace definitions, placement, upgrades, and validation
 
-## Upgrading to 0.10
-
-InferLab 0.10 retains adapter protocol version 7. Existing workspaces must
-update their exact package pins to `inferlab-adapter-sdk==0.7.0` and version
-`0.6.0` of the selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration.
-A Specialized Engine workspace uses
-`inferlab-integration-specialized-engine==0.3.0`. Update the SDK and selected
-integration together, then run `inferlab workspace lock` so the committed Pixi
-lock becomes the new workspace authority. The product-owned
-`inferlab-measurement-sdk` remains internal to the installed measurement
-toolchain and must not be added to a serving workspace.
-
-Serving Bench continues to use a Bench definition rather than an
-engine-specific benchmark configuration. InferLab 0.9.0 introduced three
-prompt authorities: exact flat prompts, exact locally rendered chat, and
-server-rendered structured chat. Current authoring defaults an omitted
-synthetic prompt table to `flat`; declare `rendered_chat` or `server_chat`
-explicitly when those semantics are required. Dataset and linear-session
-sources remain server-rendered chat. The request route follows that authority
-and cannot be selected independently.
-
-Workspaces upgrading from 0.5 or earlier must replace the former
-`routing_backend` field because protocol version 7 does not interpret
-protocol-version-6 requests or responses.
-A direct `single` server declares neither frontend backend; a routed `single`
-declares `gateway_backend`; and a `prefill_decode` server declares both
-`gateway_backend` and `pd_router_backend`. The protocol-v7 control plane rejects
-the old combined field rather than guessing how to divide its ownership.
-
 ## Minimal workspace
 
 The root file owns the schema version. Definitions may live there or in
@@ -97,11 +68,27 @@ cadence are product policy rather than workspace settings; SSH connection and
 keepalive policy remain in the selected OpenSSH target configuration.
 
 Framework settings belong under `settings`, either on the server or on a
-canonical role. Integrations validate their typed fields. `extra_args` remains
-the explicit backend escape hatch and is replaced as one complete array by a
-case or invocation patch. An `extra_args` entry naming an InferLab-owned option
-is rejected with a typed `invalid_settings` error rather than silently dropped;
-place it after a `--` sentinel for a deliberate verbatim override.
+canonical role. Integrations validate their typed fields. `extra_args` is the
+explicit backend escape hatch, composed per flag group across the server base,
+the selected case, and invocation overrides:
+
+- A `--`-prefixed token opens a group; repeated flags coalesce into one group
+  per layer, and `--flag=value` counts as the same group.
+- A later layer's group replaces a same-named earlier group in place; new
+  groups append; unmentioned groups are inherited. Cases are additive over the
+  base — there is no removal path.
+- A bare `--` starts one verbatim passthrough block that a later layer
+  replaces as a whole. The sentinel is an InferLab-side composition marker:
+  it never reaches the engine argv, which carries only the post-sentinel
+  tokens appended after the managed tail so engine last-wins parsing applies
+  the deliberate override.
+- Naming an InferLab-owned option fails with a typed `invalid_settings` error
+  rather than being silently dropped; place it after `--` for a deliberate
+  verbatim override.
+- A post-`--` token that names a flag from a group the integration documents
+  as verbatim-replaceable suppresses the managed rendering of the whole group,
+  and the verbatim block owns the spelling. This exists because store-true
+  flags cannot be retracted by last-wins parsing.
 
 A stack selects one integration and Pixi environment. Its `source_paths` name
 workspace-relative framework sources; declared checks verify the realized
@@ -169,6 +156,43 @@ Frontend component presence is fixed by the server base for every topology: a
 direct `single` server cannot acquire a Gateway from a case or invocation
 patch, while a routed `single` server declares `gateway_backend` on its base
 and may replace only that identity later.
+
+## Context parallelism
+
+Declare attention context parallelism on the server or a canonical role under
+`parallelism.attention`:
+
+```toml
+[servers.example.roles.serve.parallelism.attention]
+context_parallel_size = 2
+```
+
+The integration lowers the declared value; it is not an engine flag spelling.
+vLLM lowers `single` and `decode` roles to decode context parallelism and
+`prefill_decode` prefill roles to device-multiplying prefill context
+parallelism. SGLang lowers `single` and `prefill` roles to prefill context
+parallelism (`--enable-prefill-cp` with a default `zigzag` strategy) and
+`decode` roles to decode context parallelism (`--dcp-size`). Context
+parallelism on a `single` server never adds devices; only a `prefill_decode`
+prefill role may grow its device count.
+
+Model- and hardware-dependent applicability (MLA-only prefill CP, attention
+head divisibility) remains the engine's launch-time verdict; planning cannot
+prove it. Consult the bundled backend support matrix before claiming a CP
+shape.
+
+For DeepSeek-family models on SGLang, declare CP and select the DSA prefill-CP
+spelling verbatim. The integration documents its whole prefill-CP flag group
+as verbatim-replaceable, so one post-`--` mention suppresses the managed group
+and the engine derives the remaining CP facts:
+
+```toml
+[servers.dsv4.parallelism.attention]
+context_parallel_size = 2
+
+[servers.dsv4.settings]
+extra_args = ["--", "--enable-dsa-prefill-context-parallel"]
+```
 
 ## Local bindings
 
@@ -335,3 +359,34 @@ declared repair hint but does not repair or otherwise mutate the realization.
 Dry-run then resolves local placement, effective settings, endpoints, device
 assignments, commands, environment, and override provenance without launching
 or writing an execution record.
+
+## Upgrading to 0.12
+
+InferLab 0.12 hard-cuts the adapter protocol to version 8: protocol version 7
+input or output is rejected rather than partially interpreted, and server and
+recipe records written before protocol version 8 fail through the
+schema-version gate instead of loading. Existing workspaces must update their
+exact package pins to `inferlab-adapter-sdk==0.8.0` and version `0.7.0` of the
+selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration. A Specialized
+Engine workspace uses `inferlab-integration-specialized-engine==0.4.0`.
+Update the SDK and selected integration together, then run
+`inferlab workspace lock` so the committed Pixi lock becomes the new workspace
+authority. The product-owned `inferlab-measurement-sdk` remains internal to
+the installed measurement toolchain and must not be added to a serving
+workspace.
+
+The release-owned measurement toolchain (lm-eval runner and AIPerf Bench
+runner `0.12.0`) is pinned by the product, not by the workspace. Re-run the
+installer after upgrading so the installed runtime matches the new release:
+
+```sh
+inferlab toolchain install
+```
+
+Workspaces upgrading from 0.5 or earlier must replace the former
+`routing_backend` field because the current control plane does not interpret
+protocol-version-6 requests or responses.
+A direct `single` server declares neither frontend backend; a routed `single`
+declares `gateway_backend`; and a `prefill_decode` server declares both
+`gateway_backend` and `pd_router_backend`. The control plane rejects the old
+combined field rather than guessing how to divide its ownership.

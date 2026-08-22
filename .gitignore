@@ -34,3 +34,14 @@ website/src/content/docs/docs/architecture/adr/ADR-*.md
 # Editor
 *.code-workspace
 
+# --- internal (stripped at export) ---
+.govctl.lock
+.govctl/
+spikes/
+explore/
+# Work-item renders never enter public git (ADR-0008); docs/rfc and docs/adr do
+# ship, and the public tree carries no gov/ to rebuild them from.
+docs/work/
+.claude/
+.omc/
+.inferlab/site-scan-patterns

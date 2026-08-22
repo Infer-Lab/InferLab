@@ -5,6 +5,7 @@ import inferlab_integration_specialized_engine as integration
 import pytest
 from inferlab_adapter_sdk import (
     AdapterOperationError,
+    CaptureMechanism,
     GatewayTargetEngine,
     Parallelism,
     PlanServeInput,
@@ -47,7 +48,7 @@ def _plan_input(
                 },
             )
         ],
-        "profiling": False,
+        "profiling": None,
     }
     base.update(overrides)
     return PlanServeInput.model_validate(base)
@@ -87,17 +88,23 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
     assert link.targets == ["serve"]
 
 
+def test_plan_rejects_engine_trace_capture() -> None:
+    with pytest.raises(AdapterOperationError, match="engine-trace"):
+        plan_serve(_plan_input(profiling=CaptureMechanism.engine_trace))
+
+
 def test_plan_profiles_the_engine_through_the_smg_gateway_window() -> None:
-    result = plan_serve(_plan_input(profiling=True))
+    result = plan_serve(_plan_input(profiling=CaptureMechanism.managed_collection))
 
     target = result.replicas[0].capture_target
     assert target is not None
     assert target.model_dump(mode="json") == {
+        "mechanism": "managed_collection",
         "window_control": {
             "endpoint": "gateway",
             "start": {"method": "post", "path": "/start_profile", "body": None},
             "stop": {"method": "post", "path": "/stop_profile", "body": None},
-        }
+        },
     }
 
 
@@ -238,7 +245,7 @@ def _render_input(
         gateway_backend=plan_input.gateway_backend,
         pd_router_backend=plan_input.pd_router_backend,
         kv_transfer=plan_input.kv_transfer,
-        profiling=False,
+        profiling=None,
         allocations=allocations,
     )
 

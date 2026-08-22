@@ -3,10 +3,10 @@ use crate::execution::ProfilerEscapesPlan;
 use crate::workspace::{PlacementBinding, PlacementRoleBinding, ServerDefinition};
 use inferlab_profiler::plan::{CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan};
 use inferlab_protocol::{
-    CaptureWindowControlEndpoint, EndpointAssignment, EndpointRequirement, FrontendComponents,
-    FrontendProcessRole, GatewayTarget, KvTransferMechanism, PlanServeResult, RenderSource,
-    ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeTopology,
-    SuppliedRenderInput,
+    CaptureMechanism, CaptureWindowControlEndpoint, EndpointAssignment, EndpointRequirement,
+    FrontendComponents, FrontendProcessRole, GatewayTarget, KvTransferMechanism, PlanServeResult,
+    RenderSource, ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink,
+    ServeTopology, SuppliedRenderInput,
 };
 use inferlab_serve_domain::{
     FixedDeviceAssignment, PendingCaptureTargetPlan, PendingCaptureWindowActionPlan,
@@ -81,12 +81,22 @@ fn is_absolute_origin_path(path: &str) -> bool {
 
 pub(super) fn validate_capture_targets(
     integration: &str,
-    profiling: bool,
+    profiling: Option<CaptureMechanism>,
     has_gateway: bool,
     replicas: &[ServeReplicaRequirement],
 ) -> Result<(), InferlabError> {
     for replica in replicas {
         if let Some(target) = &replica.capture_target {
+            if let Some(mechanism) = profiling
+                && target.mechanism != mechanism
+            {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "integration {integration:?} declared capture mechanism {:?} for replica {:?}, but the effective request mechanism is {mechanism:?}",
+                        target.mechanism, replica.id
+                    ),
+                });
+            }
             if target.window_control.endpoint == CaptureWindowControlEndpoint::Gateway
                 && !has_gateway
             {
@@ -110,7 +120,7 @@ pub(super) fn validate_capture_targets(
                 }
             }
         }
-        if !profiling {
+        if profiling.is_none() {
             continue;
         }
         if replica.capture_target.is_none() {
@@ -181,10 +191,11 @@ pub(super) fn profiler_escapes_plan(server: &ServerDefinition) -> Option<Profile
         .filter(|(_, role)| !role.profiler.nsys.is_empty())
         .map(|(id, role)| (id.clone(), role.profiler.nsys.clone()))
         .collect::<BTreeMap<_, _>>();
-    if server.profiler.nsys.is_empty() && roles.is_empty() {
+    if server.profiler.is_empty() && roles.is_empty() {
         return None;
     }
     Some(ProfilerEscapesPlan {
+        mechanism: server.profiler.mechanism,
         common: server.profiler.nsys.clone(),
         roles,
     })
@@ -350,13 +361,20 @@ pub(super) fn expand_replica_requirements(
             }
             let capture_target = replica.capture_target.as_ref().map(|target| {
                 PendingCaptureTargetPlan::new(
+                    target.mechanism,
                     capture_window_control_endpoint_plan(target.window_control.endpoint),
                     primary_id.clone(),
+                    // Engine-trace coverage is verified against the replica's
+                    // declared whole-replica device count: engine-internal
+                    // profilers write one artifact per worker, which the
+                    // device count bounds, while the rank model counts entry
+                    // processes ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+                    replica.device_count,
                     capture_window_action_plan(&target.window_control.start),
                     capture_window_action_plan(&target.window_control.stop),
                     server.roles.get(&replica.role_id).map_or_else(
                         || server.profiler.nsys.clone(),
-                        |role| server.profiler.nsys.merged_with(&role.profiler.nsys),
+                        |role| server.profiler.merged_with(&role.profiler).nsys,
                     ),
                 )
             });
@@ -891,5 +909,464 @@ pub(super) fn validate_integration_identity(
         Err(InferlabError::InvalidConfig {
             message: format!("integration {expected:?} returned framework identity {actual:?}"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inferlab_protocol::{
+        EndpointProtocol, FrontendCoRendering, FrontendHandoff, FrontendProcessRole, GatewayPlan,
+        IntegrationIdentity, Parallelism, PdRouterPlan, PdRoutingPolicies, ReadinessProbe,
+        ServeRoleResult, TargetEndpointScheme,
+    };
+
+    #[test]
+    fn rejects_an_integration_that_rebinds_a_named_workload_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let endpoint = EndpointRequirement {
+            protocol: EndpointProtocol::Http,
+            completions_path: "/v1/completions".to_owned(),
+            chat_completions_path: "/v1/completions".to_owned(),
+            server_metrics: None,
+            prefix_cache_reset: None,
+            prefix_cache_conditioning: None,
+            prompt_cache_read_zero_representation: None,
+        };
+
+        let error = validate_workload_endpoint("fixture", &endpoint, &[])
+            .err()
+            .ok_or("rebound chat-completions path was accepted")?;
+
+        assert!(error.to_string().contains("chat_completions_path"));
+        assert!(error.to_string().contains("/v1/chat/completions"));
+        Ok(())
+    }
+
+    #[test]
+    fn server_metrics_capability_is_an_origin_path_not_a_concrete_url()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let endpoint = |server_metrics_path: Option<&str>| EndpointRequirement {
+            protocol: EndpointProtocol::Http,
+            completions_path: "/v1/completions".to_owned(),
+            chat_completions_path: "/v1/chat/completions".to_owned(),
+            server_metrics: server_metrics_path.map(|path| {
+                inferlab_protocol::ServerMetricsEndpointRequirement {
+                    path: path.to_owned(),
+                    port: None,
+                }
+            }),
+            prefix_cache_reset: None,
+            prefix_cache_conditioning: None,
+            prompt_cache_read_zero_representation: None,
+        };
+
+        validate_workload_endpoint("fixture", &endpoint(Some("/metrics")), &[])?;
+        let error = validate_workload_endpoint(
+            "fixture",
+            &endpoint(Some("http://private.example/metrics")),
+            &[],
+        )
+        .err()
+        .ok_or("concrete server-metrics URL was accepted")?;
+
+        assert!(error.to_string().contains("absolute origin path"));
+        let whitespace_error =
+            validate_workload_endpoint("fixture", &endpoint(Some("/metrics bad")), &[])
+                .err()
+                .ok_or("server-metrics path with whitespace was accepted")?;
+        assert!(
+            whitespace_error
+                .to_string()
+                .contains("absolute origin path"),
+            "{whitespace_error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_metrics_named_port_must_belong_to_the_public_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let endpoint = EndpointRequirement {
+            protocol: EndpointProtocol::Http,
+            completions_path: "/v1/completions".to_owned(),
+            chat_completions_path: "/v1/chat/completions".to_owned(),
+            server_metrics: Some(inferlab_protocol::ServerMetricsEndpointRequirement {
+                path: "/metrics".to_owned(),
+                port: Some("prometheus".to_owned()),
+            }),
+            prefix_cache_reset: None,
+            prefix_cache_conditioning: None,
+            prompt_cache_read_zero_representation: None,
+        };
+
+        validate_workload_endpoint("fixture", &endpoint, &["prometheus".to_owned()])?;
+        let error = validate_workload_endpoint("fixture", &endpoint, &[])
+            .err()
+            .ok_or("unknown server-metrics port was accepted")?;
+
+        assert!(error.to_string().contains("public process"), "{error}");
+        Ok(())
+    }
+
+    fn bootstrap_prefill_decode_plan(framework: &str) -> (Vec<ServeRoleInput>, PlanServeResult) {
+        let role = |id: &str, kind| ServeRoleInput {
+            id: id.to_owned(),
+            kind,
+            replica_count: 1,
+            parallelism: Parallelism::default(),
+            settings: BTreeMap::new(),
+        };
+        let requested_roles = vec![
+            role("prefill", ServeRoleKind::Prefill),
+            role("decode", ServeRoleKind::Decode),
+        ];
+        let roles = requested_roles
+            .iter()
+            .map(|role| ServeRoleResult {
+                id: role.id.clone(),
+                kind: role.kind,
+                declared_replica_count: role.replica_count,
+                effective_replica_count: role.replica_count,
+                effective_settings: BTreeMap::new(),
+                effective_parallelism: Parallelism::default(),
+                public_endpoint: None,
+                render_inputs: Vec::new(),
+            })
+            .collect();
+        let replicas = requested_roles
+            .iter()
+            .map(|role| ServeReplicaRequirement {
+                id: role.id.clone(),
+                role_id: role.id.clone(),
+                replica_index: 0,
+                device_count: 1,
+                ports: if role.kind == ServeRoleKind::Prefill {
+                    vec!["bootstrap".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                primary_ports: vec!["master".to_owned()],
+                primary_readiness: ReadinessProbe::Http {
+                    path: "/v1/models".to_owned(),
+                },
+                worker_readiness: ReadinessProbe::ProcessAlive,
+                capture_target: None,
+            })
+            .collect();
+        let implementation = match framework {
+            "sglang" => "sglang",
+            "tensorrt-llm" => "trtllm",
+            _ => "vllm_nixl",
+        };
+        let co_rendering = FrontendCoRendering {
+            process_role: FrontendProcessRole::Gateway,
+        };
+        let readiness = ReadinessProbe::Http {
+            path: "/healthcheck".to_owned(),
+        };
+        let plan = PlanServeResult {
+            integration: IntegrationIdentity {
+                adapter_id: format!("inferlab-{framework}"),
+                adapter_version: "1".to_owned(),
+                framework: framework.to_owned(),
+                framework_version: "test".to_owned(),
+            },
+            roles,
+            replicas,
+            links: vec![
+                ServeRoleLink::RequestRouting {
+                    source: "gateway".to_owned(),
+                    targets: vec!["pd_router".to_owned()],
+                },
+                ServeRoleLink::RequestRouting {
+                    source: "pd_router".to_owned(),
+                    targets: vec!["prefill".to_owned(), "decode".to_owned()],
+                },
+                ServeRoleLink::KvTransfer {
+                    source: "prefill".to_owned(),
+                    target: "decode".to_owned(),
+                    mechanism: KvTransferMechanism::Nixl,
+                },
+                ServeRoleLink::Bootstrap {
+                    source: "pd_router".to_owned(),
+                    target: "prefill".to_owned(),
+                    port: "bootstrap".to_owned(),
+                },
+            ],
+            gateway: Some(GatewayPlan {
+                backend: "builtin".to_owned(),
+                implementation: implementation.to_owned(),
+                implementation_version: "1".to_owned(),
+                effective_settings: BTreeMap::new(),
+                endpoint: EndpointRequirement {
+                    protocol: EndpointProtocol::Http,
+                    completions_path: "/v1/completions".to_owned(),
+                    chat_completions_path: "/v1/chat/completions".to_owned(),
+                    server_metrics: None,
+                    prefix_cache_reset: None,
+                    prefix_cache_conditioning: None,
+                    prompt_cache_read_zero_representation: None,
+                },
+                readiness: readiness.clone(),
+                ports: Vec::new(),
+                targets: vec![GatewayTarget::PdRouter],
+                render_inputs: Vec::new(),
+                render_source: RenderSource::ControlPlane,
+                co_rendering: co_rendering.clone(),
+            }),
+            pd_router: Some(PdRouterPlan {
+                backend: "builtin".to_owned(),
+                implementation: implementation.to_owned(),
+                implementation_version: "1".to_owned(),
+                effective_settings: BTreeMap::new(),
+                policies: PdRoutingPolicies {
+                    prefill: "round_robin".to_owned(),
+                    decode: "round_robin".to_owned(),
+                },
+                prefill_role: "prefill".to_owned(),
+                decode_role: "decode".to_owned(),
+                target_scheme: TargetEndpointScheme::Http,
+                ports: Vec::new(),
+                readiness,
+                handoff: FrontendHandoff::InProcess,
+                render_inputs: Vec::new(),
+                render_source: RenderSource::ControlPlane,
+                co_rendering,
+            }),
+        };
+        (requested_roles, plan)
+    }
+
+    fn native_trtllm_prefill_decode_plan() -> (Vec<ServeRoleInput>, PlanServeResult) {
+        let (requested_roles, mut plan) = bootstrap_prefill_decode_plan("tensorrt-llm");
+        plan.links
+            .retain(|link| !matches!(link, ServeRoleLink::Bootstrap { .. }));
+        for replica in &mut plan.replicas {
+            replica.ports.clear();
+        }
+        if let Some(gateway) = &mut plan.gateway {
+            gateway.backend = "trtllm-disaggregated".to_owned();
+            gateway.implementation = "trtllm-disaggregated".to_owned();
+            gateway.render_source = RenderSource::Integration;
+        }
+        if let Some(pd_router) = &mut plan.pd_router {
+            pd_router.backend = "trtllm-disaggregated".to_owned();
+            pd_router.implementation = "trtllm-disaggregated".to_owned();
+            pd_router.render_source = RenderSource::Integration;
+        }
+        (requested_roles, plan)
+    }
+
+    #[test]
+    fn gateway_and_pd_router_backend_facts_are_validated_independently() {
+        let (roles, mut plan) = bootstrap_prefill_decode_plan("sglang");
+        if let Some(gateway) = &mut plan.gateway {
+            gateway.backend = "gateway-provider".to_owned();
+        }
+        if let Some(pd_router) = &mut plan.pd_router {
+            pd_router.backend = "pd-provider".to_owned();
+        }
+
+        assert!(
+            validate_serve_graph(
+                "sglang",
+                ServeTopology::PrefillDecode,
+                &roles,
+                Some("gateway-provider"),
+                Some("pd-provider"),
+                Some(KvTransferMechanism::Nixl),
+                &plan,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_serve_graph(
+                "sglang",
+                ServeTopology::PrefillDecode,
+                &roles,
+                Some("pd-provider"),
+                Some("gateway-provider"),
+                Some(KvTransferMechanism::Nixl),
+                &plan,
+            )
+            .is_err()
+        );
+    }
+
+    fn add_second_replica(
+        requested_roles: &mut [ServeRoleInput],
+        plan: &mut PlanServeResult,
+        role_id: &str,
+        ports: Vec<String>,
+    ) -> Result<(), String> {
+        requested_roles
+            .iter_mut()
+            .find(|role| role.id == role_id)
+            .ok_or_else(|| format!("missing requested role {role_id:?}"))?
+            .replica_count = 2;
+        plan.roles
+            .iter_mut()
+            .find(|role| role.id == role_id)
+            .ok_or_else(|| format!("missing planned role {role_id:?}"))?
+            .declared_replica_count = 2;
+        plan.roles
+            .iter_mut()
+            .find(|role| role.id == role_id)
+            .ok_or_else(|| format!("missing planned role {role_id:?}"))?
+            .effective_replica_count = 2;
+        let mut replica = plan
+            .replicas
+            .iter()
+            .find(|replica| replica.role_id == role_id)
+            .cloned()
+            .ok_or_else(|| format!("missing planned replica for role {role_id:?}"))?;
+        replica.id = format!("{role_id}-001");
+        replica.replica_index = 1;
+        replica.ports = ports;
+        plan.replicas.push(replica);
+        Ok(())
+    }
+
+    fn add_first_replica_port(
+        plan: &mut PlanServeResult,
+        role_id: &str,
+        port: &str,
+    ) -> Result<(), String> {
+        plan.replicas
+            .iter_mut()
+            .find(|replica| replica.role_id == role_id && replica.replica_index == 0)
+            .ok_or_else(|| format!("missing first replica for role {role_id:?}"))?
+            .ports
+            .push(port.to_owned());
+        Ok(())
+    }
+
+    #[test]
+    fn nixl_transport_link_is_framework_specific() -> Result<(), String> {
+        let (sglang_roles, sglang_plan) = bootstrap_prefill_decode_plan("sglang");
+        assert!(
+            validate_serve_graph(
+                "sglang",
+                ServeTopology::PrefillDecode,
+                &sglang_roles,
+                Some("builtin"),
+                Some("builtin"),
+                Some(KvTransferMechanism::Nixl),
+                &sglang_plan,
+            )
+            .is_ok()
+        );
+
+        let (vllm_roles, vllm_plan) = bootstrap_prefill_decode_plan("vllm");
+        let result = validate_serve_graph(
+            "vllm",
+            ServeTopology::PrefillDecode,
+            &vllm_roles,
+            Some("builtin"),
+            Some("builtin"),
+            Some(KvTransferMechanism::Nixl),
+            &vllm_plan,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("required KV transport link"))
+        );
+
+        let (trtllm_roles, trtllm_plan) = native_trtllm_prefill_decode_plan();
+        assert!(
+            validate_serve_graph(
+                "tensorrt-llm",
+                ServeTopology::PrefillDecode,
+                &trtllm_roles,
+                Some("trtllm-disaggregated"),
+                Some("trtllm-disaggregated"),
+                Some(KvTransferMechanism::Nixl),
+                &trtllm_plan,
+            )
+            .is_ok()
+        );
+
+        let mut endpoint_link_plan = trtllm_plan.clone();
+        add_first_replica_port(&mut endpoint_link_plan, "prefill", "bootstrap")?;
+        endpoint_link_plan.links.push(ServeRoleLink::Bootstrap {
+            source: "pd_router".to_owned(),
+            target: "prefill".to_owned(),
+            port: "bootstrap".to_owned(),
+        });
+        let result = validate_serve_graph(
+            "tensorrt-llm",
+            ServeTopology::PrefillDecode,
+            &trtllm_roles,
+            Some("trtllm-disaggregated"),
+            Some("trtllm-disaggregated"),
+            Some(KvTransferMechanism::Nixl),
+            &endpoint_link_plan,
+        );
+        assert!(result.is_err_and(|error| error.to_string().contains("in-band NIXL")));
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_link_requires_every_target_replica_endpoint() -> Result<(), String> {
+        let (mut roles, mut plan) = bootstrap_prefill_decode_plan("sglang");
+        add_first_replica_port(&mut plan, "decode", "diagnostic")?;
+        add_second_replica(&mut roles, &mut plan, "decode", Vec::new())?;
+        plan.links.push(ServeRoleLink::Bootstrap {
+            source: "pd_router".to_owned(),
+            target: "decode".to_owned(),
+            port: "diagnostic".to_owned(),
+        });
+
+        let result = validate_serve_graph(
+            "sglang",
+            ServeTopology::PrefillDecode,
+            &roles,
+            Some("builtin"),
+            Some("builtin"),
+            Some(KvTransferMechanism::Nixl),
+            &plan,
+        );
+
+        assert!(result.is_err_and(|error| error.to_string().contains("unknown component")));
+        Ok(())
+    }
+
+    #[test]
+    fn side_channel_link_requires_every_source_and_target_replica_endpoint() -> Result<(), String> {
+        for missing_role in ["prefill", "decode"] {
+            let (mut roles, mut plan) = bootstrap_prefill_decode_plan("sglang");
+            add_first_replica_port(&mut plan, "prefill", "diagnostic")?;
+            add_first_replica_port(&mut plan, "decode", "diagnostic")?;
+            let second_ports = if missing_role == "prefill" {
+                vec!["bootstrap".to_owned()]
+            } else {
+                Vec::new()
+            };
+            add_second_replica(&mut roles, &mut plan, missing_role, second_ports)?;
+            plan.links.push(ServeRoleLink::SideChannel {
+                source: "prefill".to_owned(),
+                target: "decode".to_owned(),
+                port: "diagnostic".to_owned(),
+            });
+
+            let result = validate_serve_graph(
+                "sglang",
+                ServeTopology::PrefillDecode,
+                &roles,
+                Some("builtin"),
+                Some("builtin"),
+                Some(KvTransferMechanism::Nixl),
+                &plan,
+            );
+
+            assert!(
+                result.is_err_and(|error| error.to_string().contains("unknown component")),
+                "side channel accepted a missing {missing_role} replica endpoint"
+            );
+        }
+        Ok(())
     }
 }

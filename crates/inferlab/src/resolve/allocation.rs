@@ -4,8 +4,8 @@ use crate::execution::{
 };
 use crate::workspace::{LaunchBinding, LoadedWorkspace, PlacementBinding};
 use inferlab_protocol::{
-    AllocationLaunch, EndpointAssignment, ReadinessProbe, ServeProcessAllocation, ServeRoleKind,
-    TargetEndpointScheme,
+    AllocationLaunch, CaptureMechanism, EndpointAssignment, ReadinessProbe, ServeProcessAllocation,
+    ServeRoleKind, TargetEndpointScheme,
 };
 use inferlab_runtime::plan::{LaunchPlan, ReadinessPlan, TargetRegistryExpectedTarget};
 use inferlab_serve_domain::{
@@ -15,9 +15,72 @@ use inferlab_serve_domain::{
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Engine-trace capture is confined to entirely local, non-containerized
+/// placements: InferLab defines no remote or in-container trace retrieval
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]). The gate runs before render so an
+/// unsupported placement is rejected before launch rather than after the
+/// integration has rendered commands it cannot honor.
+pub(super) fn gate_engine_trace_placement(
+    workspace: &LoadedWorkspace,
+    request: &super::ResolveRequest<'_>,
+    requirements: &[ProcessRequirement],
+    allocations: &[ResolvedProcessAllocation],
+) -> Result<(), InferlabError> {
+    for requirement in requirements {
+        let Some(target) = requirement.capture_target() else {
+            continue;
+        };
+        if target.mechanism() != CaptureMechanism::EngineTrace {
+            continue;
+        }
+        if request.image.is_some() || request.external.is_some() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "process {:?} is prepared as an engine-trace capture target, but \
+                     engine-trace capture is undefined for an image-backed launch: the \
+                     engine's internal profiler writes inside the container and InferLab \
+                     defines no in-container trace retrieval; use managed collection or a \
+                     launch from the locally installed serving environment",
+                    requirement.id()
+                ),
+            });
+        }
+        let allocation = allocations
+            .iter()
+            .find(|allocation| allocation.process() == requirement.id())
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "engine-trace capture target {:?} has no process allocation",
+                    requirement.id()
+                ),
+            })?;
+        let machine = workspace
+            .local
+            .machines
+            .get(allocation.machine())
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!("unknown machine {:?}", allocation.machine()),
+            })?;
+        if !matches!(machine.launch, LaunchBinding::Local) {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "process {:?} is prepared as an engine-trace capture target on machine \
+                     {:?}, but engine-trace capture requires an entirely local placement: \
+                     InferLab defines no remote trace retrieval; use managed collection or \
+                     select a local placement",
+                    requirement.id(),
+                    allocation.machine()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn allocate_processes(
     workspace: &LoadedWorkspace,
+    server_id: &str,
     placement_id: &str,
     placement: &crate::workspace::PlacementBinding,
     weight: &crate::workspace::ModelWeightBinding,
@@ -298,6 +361,36 @@ pub(super) fn allocate_processes(
                 .map_err(|_| InferlabError::InvalidConfig {
                     message: format!("replica {replica_id:?} has too many ranks"),
                 })?;
+                let capture_storage = match requirement.capture_target() {
+                    Some(target)
+                        if target.mechanism()
+                            == inferlab_protocol::CaptureMechanism::EngineTrace =>
+                    {
+                        // The record-owned persistent trace directory assigned
+                        // before render ([[RFC-0004:C-WORKLOAD-PROFILING]]);
+                        // every rank of the replica shares it and the engine
+                        // writes one trace artifact per device into it.
+                        let root = machine
+                            .workspace
+                            .clone()
+                            .unwrap_or_else(|| workspace.root.clone());
+                        let directory = root
+                            .join(".inferlab/runtime/engine-trace")
+                            .join(sanitize_path_segment(server_id))
+                            .join(sanitize_path_segment(replica_id));
+                        Some(
+                            directory
+                                .to_str()
+                                .ok_or_else(|| InferlabError::InvalidConfig {
+                                    message: format!(
+                                        "engine-trace storage path for replica {replica_id:?} is not valid UTF-8"
+                                    ),
+                                })?
+                                .to_owned(),
+                        )
+                    }
+                    _ => None,
+                };
                 (
                     ServeProcessAllocation::ModelRank {
                         process: requirement.id().to_owned(),
@@ -312,6 +405,7 @@ pub(super) fn allocate_processes(
                         endpoint: Some(endpoint),
                         ports: named_ports,
                         cache,
+                        capture_storage,
                         launch,
                         effective_settings: effective_settings.clone(),
                         effective_parallelism: effective_parallelism.clone(),
@@ -363,6 +457,19 @@ pub(super) fn allocate_processes(
         ));
     }
     Ok(allocations)
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn placement_machine_pool(placement: &PlacementBinding) -> Vec<String> {
@@ -585,4 +692,116 @@ fn target_endpoint_url(endpoint: &EndpointAssignment, scheme: TargetEndpointSche
         TargetEndpointScheme::Grpc => "grpc",
     };
     format!("{scheme}://{}:{}", endpoint.host, endpoint.port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inferlab_protocol::{HttpTargetRegistryReadiness, Parallelism};
+    use std::path::PathBuf;
+
+    #[test]
+    fn target_registry_readiness_derives_rank_zero_serving_targets() -> Result<(), InferlabError> {
+        let allocation =
+            |process_id: &str, role_id: &str, rank: u32, port: u16, bootstrap_port: Option<u16>| {
+                let mut ports = BTreeMap::new();
+                if let Some(bootstrap_port) = bootstrap_port {
+                    ports.insert(
+                        "bootstrap".to_owned(),
+                        EndpointAssignment {
+                            host: "node.example".to_owned(),
+                            port: bootstrap_port,
+                        },
+                    );
+                }
+                ResolvedProcessAllocation::new(
+                    ServeProcessAllocation::ModelRank {
+                        process: process_id.to_owned(),
+                        role: role_id.to_owned(),
+                        role_kind: if role_id == "prefill" {
+                            ServeRoleKind::Prefill
+                        } else {
+                            ServeRoleKind::Decode
+                        },
+                        replica: 0,
+                        rank,
+                        rank_count: if role_id == "prefill" { 2 } else { 1 },
+                        machine: "node".to_owned(),
+                        model_locator: "/models/example".to_owned(),
+                        devices: vec![0],
+                        endpoint: Some(EndpointAssignment {
+                            host: "node.example".to_owned(),
+                            port,
+                        }),
+                        ports,
+                        cache: format!("/cache/{process_id}"),
+                        capture_storage: None,
+                        launch: AllocationLaunch::Local,
+                        effective_settings: BTreeMap::new(),
+                        effective_parallelism: Parallelism::default(),
+                        links: Vec::new(),
+                        dependencies: Vec::new(),
+                        render_inputs: Vec::new(),
+                    },
+                    RuntimeCachePlan {
+                        storage_root: PathBuf::from("/cache"),
+                        storage_root_source: RuntimeCacheRootSource::WorkspaceDefault,
+                        namespace: RuntimeCacheNamespacePlan {
+                            workspace_source_digest: "source".to_owned(),
+                            pixi_environment: "sglang".to_owned(),
+                            image_id: None,
+                            machine: "node".to_owned(),
+                            process: process_id.to_owned(),
+                        },
+                        path: PathBuf::from(format!("/cache/{process_id}")),
+                    },
+                    Some(ModelLocatorSource::Fallback),
+                )
+            };
+        let allocations = vec![
+            allocation("prefill", "prefill", 0, 8000, Some(9000)),
+            allocation("prefill-rank-001", "prefill", 1, 8001, Some(9001)),
+            allocation("decode", "decode", 0, 8100, None),
+        ];
+        let probe = ReadinessProbe::HttpTargetRegistry(Box::new(HttpTargetRegistryReadiness {
+            target_scheme: TargetEndpointScheme::Grpc,
+            readiness_path: "/readiness".to_owned(),
+            registry_path: "/workers".to_owned(),
+            targets_field: "workers".to_owned(),
+            target_url_field: "url".to_owned(),
+            target_role_field: "worker_type".to_owned(),
+            target_healthy_field: "is_healthy".to_owned(),
+            target_bootstrap_port_field: "bootstrap_port".to_owned(),
+            prefill_role_value: "prefill".to_owned(),
+            decode_role_value: "decode".to_owned(),
+            prefill_bootstrap_port: "bootstrap".to_owned(),
+        }));
+
+        let readiness = readiness_plan(&probe, 900, 30, false, &allocations)?;
+        assert!(matches!(
+            &readiness,
+            ReadinessPlan::HttpTargetRegistry { .. }
+        ));
+        if let ReadinessPlan::HttpTargetRegistry {
+            expected_targets, ..
+        } = readiness
+        {
+            assert_eq!(
+                expected_targets,
+                vec![
+                    TargetRegistryExpectedTarget {
+                        url: "grpc://node.example:8000".to_owned(),
+                        role: "prefill".to_owned(),
+                        bootstrap_port: Some(9000),
+                    },
+                    TargetRegistryExpectedTarget {
+                        url: "grpc://node.example:8100".to_owned(),
+                        role: "decode".to_owned(),
+                        bootstrap_port: None,
+                    },
+                ]
+            );
+        }
+        Ok(())
+    }
 }

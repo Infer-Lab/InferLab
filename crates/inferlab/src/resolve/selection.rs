@@ -4,16 +4,20 @@ use crate::execution::{
     CaseSelectionSource, CommonDeclarationPlan, DeclarationSource, PlacementSelectionSource,
     RecipePlan, RoleDeclarationPlan, ServerDeclarationPlan, Workflow,
 };
-use crate::toml_override::{ExactTomlOverride, InvocationOverride, apply_toml_patch};
+use crate::toml_override::{
+    ExactTomlOverride, InvocationOverride, apply_settings_patch, apply_toml_patch,
+};
 use crate::workspace::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,
-    DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS, DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS,
-    JsonValue, LoadedWorkspace, ModelDefinition, ModelWeightBinding, PlacementBinding,
-    RecipeDefinition, ServerCaseDefinition, ServerDefinition, StackDefinition,
-    WorkloadSuiteDefinition,
+    DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS,
+    DEFAULT_ENGINE_TRACE_CAPTURE_FINALIZATION_DEADLINE_SECONDS,
+    DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS, JsonValue, LoadedWorkspace, ModelDefinition,
+    ModelWeightBinding, PlacementBinding, RecipeDefinition, ServerCaseDefinition, ServerDefinition,
+    StackDefinition, WorkloadSuiteDefinition,
 };
 use inferlab_protocol::{
-    KvTransferMechanism, Parallelism, ServeRoleInput, ServeRoleKind, ServeTopology, SettingValue,
+    CaptureMechanism, KvTransferMechanism, Parallelism, ServeRoleInput, ServeRoleKind,
+    ServeTopology, SettingValue,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +35,10 @@ pub(super) struct ServerOverridePatch {
     pub(super) pd_router_backend: Option<String>,
     pub(super) kv_transfer: Option<KvTransferMechanism>,
     pub(super) profiling: Option<bool>,
+    /// Invocation-scoped capture-mechanism override; the mechanism is the
+    /// only profiler field an invocation may set
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    pub(super) profiler: ProfilerOverridePatch,
     pub(super) parallelism: Parallelism,
     pub(super) roles: BTreeMap<String, ServerRoleOverridePatch>,
     pub(super) settings: BTreeMap<String, JsonValue>,
@@ -40,6 +48,12 @@ pub(super) struct IndexedServerOverride {
     pub(super) invocation: InvocationOverride,
     pub(super) assignment: ExactTomlOverride,
     pub(super) patch: ServerOverridePatch,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct ProfilerOverridePatch {
+    pub(super) mechanism: Option<CaptureMechanism>,
 }
 
 #[derive(Default, Deserialize)]
@@ -83,7 +97,10 @@ pub(super) struct EffectiveServerInput {
     pub(super) gateway_backend: Option<String>,
     pub(super) pd_router_backend: Option<String>,
     pub(super) kv_transfer: Option<KvTransferMechanism>,
-    pub(super) profiling: bool,
+    /// The effective capture request: the mechanism selected for a profiled
+    /// server, or `None` when profiling is off
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    pub(super) profiling: Option<CaptureMechanism>,
     pub(super) capture_arm_deadline_seconds: u64,
     pub(super) capture_control_deadline_seconds: u64,
     pub(super) capture_finalization_deadline_seconds: u64,
@@ -162,31 +179,49 @@ fn resolve_role_inputs(
         .collect()
 }
 
-fn server_declarations(
-    server_id: &str,
-    server: &ServerDefinition,
-    case_id: Option<&str>,
-    case: Option<&ServerCaseDefinition>,
-    overrides: &[IndexedServerOverride],
-) -> Result<Vec<ServerDeclarationPlan>, InferlabError> {
-    let mut declarations = vec![ServerDeclarationPlan {
-        source: DeclarationSource::Server {
-            id: server_id.to_owned(),
-        },
+/// One declaration layer (server base, case, or invocation override) rendered
+/// into a [`ServerDeclarationPlan`]; the three layers share field layout and
+/// differ only in source identity and settings scope label.
+struct DeclarationLayer<'a> {
+    source: DeclarationSource,
+    scope: &'a str,
+    readiness_timeout_seconds: Option<u64>,
+    readiness_attempt_timeout_seconds: Option<u64>,
+    capture_arm_deadline_seconds: Option<u64>,
+    gateway_backend: &'a Option<String>,
+    pd_router_backend: &'a Option<String>,
+    kv_transfer: Option<KvTransferMechanism>,
+    profiling: Option<bool>,
+    capture_control_deadline_seconds: Option<u64>,
+    capture_finalization_deadline_seconds: Option<u64>,
+    parallelism: &'a Parallelism,
+    settings: &'a BTreeMap<String, JsonValue>,
+    roles: Vec<(String, DeclarationLayerRole<'a>)>,
+}
+
+struct DeclarationLayerRole<'a> {
+    replicas: Option<u32>,
+    parallelism: &'a Parallelism,
+    settings: &'a BTreeMap<String, JsonValue>,
+}
+
+fn declaration_plan(layer: DeclarationLayer<'_>) -> Result<ServerDeclarationPlan, InferlabError> {
+    Ok(ServerDeclarationPlan {
+        source: layer.source,
         common: CommonDeclarationPlan {
-            readiness_timeout_seconds: Some(server.readiness_timeout_seconds),
-            readiness_attempt_timeout_seconds: server.readiness_attempt_timeout_seconds,
-            capture_arm_deadline_seconds: server.capture_arm_deadline_seconds,
-            gateway_backend: server.gateway_backend.clone(),
-            pd_router_backend: server.pd_router_backend.clone(),
-            kv_transfer: server.kv_transfer,
-            profiling: server.profiling,
-            capture_control_deadline_seconds: server.capture_control_deadline_seconds,
-            capture_finalization_deadline_seconds: server.capture_finalization_deadline_seconds,
-            parallelism: server.parallelism.clone(),
-            settings: declaration_settings("server common", &server.settings)?,
+            readiness_timeout_seconds: layer.readiness_timeout_seconds,
+            readiness_attempt_timeout_seconds: layer.readiness_attempt_timeout_seconds,
+            capture_arm_deadline_seconds: layer.capture_arm_deadline_seconds,
+            gateway_backend: layer.gateway_backend.clone(),
+            pd_router_backend: layer.pd_router_backend.clone(),
+            kv_transfer: layer.kv_transfer,
+            profiling: layer.profiling,
+            capture_control_deadline_seconds: layer.capture_control_deadline_seconds,
+            capture_finalization_deadline_seconds: layer.capture_finalization_deadline_seconds,
+            parallelism: layer.parallelism.clone(),
+            settings: declaration_settings(&format!("{} common", layer.scope), layer.settings)?,
         },
-        roles: server
+        roles: layer
             .roles
             .iter()
             .map(|(id, role)| {
@@ -196,92 +231,124 @@ fn server_declarations(
                         replicas: role.replicas,
                         parallelism: role.parallelism.clone(),
                         settings: declaration_settings(
-                            &format!("server role {id:?}"),
-                            &role.settings,
+                            &format!("{} role {id:?}", layer.scope),
+                            role.settings,
                         )?,
                     },
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, InferlabError>>()?,
-    }];
+    })
+}
+
+fn server_declarations(
+    server_id: &str,
+    server: &ServerDefinition,
+    case_id: Option<&str>,
+    case: Option<&ServerCaseDefinition>,
+    overrides: &[IndexedServerOverride],
+) -> Result<Vec<ServerDeclarationPlan>, InferlabError> {
+    let mut declarations = vec![declaration_plan(DeclarationLayer {
+        source: DeclarationSource::Server {
+            id: server_id.to_owned(),
+        },
+        scope: "server",
+        readiness_timeout_seconds: Some(server.readiness_timeout_seconds),
+        readiness_attempt_timeout_seconds: server.readiness_attempt_timeout_seconds,
+        capture_arm_deadline_seconds: server.capture_arm_deadline_seconds,
+        gateway_backend: &server.gateway_backend,
+        pd_router_backend: &server.pd_router_backend,
+        kv_transfer: server.kv_transfer,
+        profiling: server.profiling,
+        capture_control_deadline_seconds: server.capture_control_deadline_seconds,
+        capture_finalization_deadline_seconds: server.capture_finalization_deadline_seconds,
+        parallelism: &server.parallelism,
+        settings: &server.settings,
+        roles: server
+            .roles
+            .iter()
+            .map(|(id, role)| {
+                (
+                    id.clone(),
+                    DeclarationLayerRole {
+                        replicas: role.replicas,
+                        parallelism: &role.parallelism,
+                        settings: &role.settings,
+                    },
+                )
+            })
+            .collect(),
+    })?];
 
     if let Some(case) = case {
         let case_id = case_id.ok_or_else(|| InferlabError::InvalidConfig {
             message: "selected server case has no identity".to_owned(),
         })?;
-        declarations.push(ServerDeclarationPlan {
+        declarations.push(declaration_plan(DeclarationLayer {
             source: DeclarationSource::Case {
                 id: case_id.to_owned(),
             },
-            common: CommonDeclarationPlan {
-                readiness_timeout_seconds: case.readiness_timeout_seconds,
-                readiness_attempt_timeout_seconds: case.readiness_attempt_timeout_seconds,
-                capture_arm_deadline_seconds: case.capture_arm_deadline_seconds,
-                gateway_backend: case.gateway_backend.clone(),
-                pd_router_backend: case.pd_router_backend.clone(),
-                kv_transfer: case.kv_transfer,
-                profiling: case.profiling,
-                capture_control_deadline_seconds: case.capture_control_deadline_seconds,
-                capture_finalization_deadline_seconds: case.capture_finalization_deadline_seconds,
-                parallelism: case.parallelism.clone(),
-                settings: declaration_settings("case common", &case.settings)?,
-            },
+            scope: "case",
+            readiness_timeout_seconds: case.readiness_timeout_seconds,
+            readiness_attempt_timeout_seconds: case.readiness_attempt_timeout_seconds,
+            capture_arm_deadline_seconds: case.capture_arm_deadline_seconds,
+            gateway_backend: &case.gateway_backend,
+            pd_router_backend: &case.pd_router_backend,
+            kv_transfer: case.kv_transfer,
+            profiling: case.profiling,
+            capture_control_deadline_seconds: case.capture_control_deadline_seconds,
+            capture_finalization_deadline_seconds: case.capture_finalization_deadline_seconds,
+            parallelism: &case.parallelism,
+            settings: &case.settings,
             roles: case
                 .roles
                 .iter()
                 .map(|(id, role)| {
-                    Ok((
+                    (
                         id.clone(),
-                        RoleDeclarationPlan {
+                        DeclarationLayerRole {
                             replicas: role.replicas,
-                            parallelism: role.parallelism.clone(),
-                            settings: declaration_settings(
-                                &format!("case role {id:?}"),
-                                &role.settings,
-                            )?,
+                            parallelism: &role.parallelism,
+                            settings: &role.settings,
                         },
-                    ))
+                    )
                 })
-                .collect::<Result<BTreeMap<_, _>, InferlabError>>()?,
-        });
+                .collect(),
+        })?);
     }
 
     for item in overrides {
         let index = item.invocation.index();
         let patch = &item.patch;
-        declarations.push(ServerDeclarationPlan {
+        declarations.push(declaration_plan(DeclarationLayer {
             source: DeclarationSource::Invocation { index },
-            common: CommonDeclarationPlan {
-                readiness_timeout_seconds: patch.readiness_timeout_seconds,
-                readiness_attempt_timeout_seconds: patch.readiness_attempt_timeout_seconds,
-                capture_arm_deadline_seconds: patch.capture_arm_deadline_seconds,
-                gateway_backend: patch.gateway_backend.clone(),
-                pd_router_backend: patch.pd_router_backend.clone(),
-                kv_transfer: patch.kv_transfer,
-                profiling: patch.profiling,
-                capture_control_deadline_seconds: patch.capture_control_deadline_seconds,
-                capture_finalization_deadline_seconds: patch.capture_finalization_deadline_seconds,
-                parallelism: patch.parallelism.clone(),
-                settings: declaration_settings("invocation common", &patch.settings)?,
-            },
+            scope: "invocation",
+            readiness_timeout_seconds: patch.readiness_timeout_seconds,
+            readiness_attempt_timeout_seconds: patch.readiness_attempt_timeout_seconds,
+            capture_arm_deadline_seconds: patch.capture_arm_deadline_seconds,
+            gateway_backend: &patch.gateway_backend,
+            pd_router_backend: &patch.pd_router_backend,
+            kv_transfer: patch.kv_transfer,
+            profiling: patch.profiling,
+            capture_control_deadline_seconds: patch.capture_control_deadline_seconds,
+            capture_finalization_deadline_seconds: patch.capture_finalization_deadline_seconds,
+            parallelism: &patch.parallelism,
+            settings: &patch.settings,
             roles: patch
                 .roles
                 .iter()
                 .map(|(id, role)| {
-                    Ok((
+                    (
                         id.clone(),
-                        RoleDeclarationPlan {
+                        DeclarationLayerRole {
                             replicas: role.replicas,
-                            parallelism: role.parallelism.clone(),
-                            settings: declaration_settings(
-                                &format!("invocation role {id:?}"),
-                                &role.settings,
-                            )?,
+                            parallelism: &role.parallelism,
+                            settings: &role.settings,
                         },
-                    ))
+                    )
                 })
-                .collect::<Result<BTreeMap<_, _>, InferlabError>>()?,
-        });
+                .collect(),
+        })?);
     }
     Ok(declarations)
 }
@@ -306,8 +373,10 @@ fn effective_role_settings(
         let patch = toml::Value::try_from(role).map_err(|error| InferlabError::InvalidConfig {
             message: format!("failed to prepare {scope} role settings: {error}"),
         })?;
-        apply_toml_patch(&mut settings, patch).map_err(|message| InferlabError::InvalidConfig {
-            message: format!("invalid {scope} settings composition: {message}"),
+        apply_settings_patch(&mut settings, patch).map_err(|message| {
+            InferlabError::InvalidConfig {
+                message: format!("invalid {scope} settings composition: {message}"),
+            }
         })?;
     }
     let settings: BTreeMap<String, JsonValue> =
@@ -562,16 +631,56 @@ pub(super) fn resolve_effective_server_input(
     let capture_control_deadline_seconds = effective_server
         .capture_control_deadline_seconds
         .unwrap_or(DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS);
+    let capture_mechanism = resolve_capture_mechanism(&effective_server, topology)?;
+    // The finalization default follows the resolved capture mechanism
+    // ([[RFC-0003:C-RESOLUTION]]): an engine-trace close dispatch, its
+    // response consumption, and the artifact flush wait share this one
+    // budget ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     let capture_finalization_deadline_seconds = effective_server
         .capture_finalization_deadline_seconds
-        .unwrap_or(DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS);
+        .unwrap_or(match capture_mechanism {
+            Some(CaptureMechanism::EngineTrace) => {
+                DEFAULT_ENGINE_TRACE_CAPTURE_FINALIZATION_DEADLINE_SECONDS
+            }
+            _ => DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS,
+        });
     let gateway_backend = effective_server.gateway_backend.clone();
     let pd_router_backend = effective_server.pd_router_backend.clone();
     let kv_transfer = effective_server.kv_transfer;
-    let mut profiling = effective_server.profiling.unwrap_or(false);
-    if !request.captures.is_empty() {
-        profiling = true;
+    let profiling_enabled =
+        effective_server.profiling.unwrap_or(false) || !request.captures.is_empty();
+    // Profiler declarations must not silently drop when profiling resolves
+    // off ([[RFC-0004:C-WORKLOAD-PROFILING]]): name what was declared and how
+    // to enable it.
+    if !profiling_enabled {
+        let mut declared = Vec::new();
+        if capture_mechanism.is_some() {
+            declared.push("profiler.mechanism".to_owned());
+        }
+        if !effective_server.profiler.nsys.is_empty() {
+            declared.push("profiler.nsys".to_owned());
+        }
+        for (role_id, role) in &effective_server.roles {
+            if !role.profiler.nsys.is_empty() {
+                declared.push(format!("roles.{role_id}.profiler.nsys"));
+            }
+        }
+        if !declared.is_empty() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "server {:?} declares {} while profiling is off; set profiling = true to \
+                     enable capture or remove the profiler declarations",
+                    selection.server_id,
+                    declared.join(", ")
+                ),
+            });
+        }
     }
+    let profiling = if profiling_enabled {
+        Some(capture_mechanism.unwrap_or(CaptureMechanism::ManagedCollection))
+    } else {
+        None
+    };
     match topology {
         ServeTopology::Single if pd_router_backend.is_some() || kv_transfer.is_some() => {
             return Err(InferlabError::InvalidConfig {
@@ -620,6 +729,42 @@ pub(super) fn resolve_effective_server_input(
         declarations,
         role_inputs,
     })
+}
+
+/// The effective capture mechanism under [[RFC-0003:C-RESOLUTION]]: role
+/// declarations replace the server's scalar, every role must resolve to the
+/// same mechanism because protocol version 8 carries one effective mechanism
+/// per plan request, and an engine-trace target must not declare nsys escape
+/// inputs ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+fn resolve_capture_mechanism(
+    effective: &ServerDefinition,
+    topology: ServeTopology,
+) -> Result<Option<CaptureMechanism>, InferlabError> {
+    let mut mechanisms = BTreeSet::new();
+    for (role_id, _) in role_declarations(effective, topology)? {
+        let merged = effective.roles.get(&role_id).map_or_else(
+            || effective.profiler.clone(),
+            |role| effective.profiler.merged_with(&role.profiler),
+        );
+        if merged.mechanism == Some(CaptureMechanism::EngineTrace) && !merged.nsys.is_empty() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "server role {role_id:?} resolves capture mechanism engine_trace together \
+                     with nsys escape inputs; engine-trace targets declare no profiler escape \
+                     inputs"
+                ),
+            });
+        }
+        mechanisms.insert(merged.mechanism);
+    }
+    if mechanisms.len() > 1 {
+        return Err(InferlabError::InvalidConfig {
+            message: "capture mechanism declarations differ across roles; protocol version 8 \
+                      carries one effective capture mechanism per server"
+                .to_owned(),
+        });
+    }
+    Ok(mechanisms.into_iter().next().flatten())
 }
 
 fn compose_server_definition(
@@ -828,4 +973,105 @@ fn lookup<'a, T>(
         .ok_or_else(|| InferlabError::InvalidConfig {
             message: format!("unknown {label} {id:?}"),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_role_settings, validate_effective_parallelism};
+    use crate::workspace::JsonValue;
+    use inferlab_protocol::{
+        Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, SettingValue,
+    };
+    use std::collections::BTreeMap;
+
+    fn extra_args(tokens: &[&str]) -> JsonValue {
+        JsonValue::Array(
+            tokens
+                .iter()
+                .map(|token| JsonValue::String((*token).to_owned()))
+                .collect(),
+        )
+    }
+
+    fn settings(entries: &[(&str, JsonValue)]) -> BTreeMap<String, JsonValue> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn common_and_role_extra_args_compose_by_flag_group_merge() -> Result<(), String> {
+        let common = settings(&[(
+            "extra_args",
+            extra_args(&["--max-num-seqs", "256", "--", "--block-size", "32"]),
+        )]);
+        let role = settings(&[("extra_args", extra_args(&["--max-num-seqs", "512"]))]);
+
+        let resolved = effective_role_settings("test role", &common, Some(&role))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            resolved.get("extra_args"),
+            Some(&SettingValue::Array(vec![
+                SettingValue::String("--max-num-seqs".to_owned()),
+                SettingValue::String("512".to_owned()),
+                SettingValue::String("--".to_owned()),
+                SettingValue::String("--block-size".to_owned()),
+                SettingValue::String("32".to_owned()),
+            ])),
+            "common and role layers compose per flag group; the role does not replace wholesale"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn role_only_extra_args_still_owes_segmentation_validation() -> Result<(), String> {
+        let common = settings(&[]);
+        let role = settings(&[("extra_args", extra_args(&["stray-value", "--known", "1"]))]);
+
+        let error = effective_role_settings("test role", &common, Some(&role));
+        assert!(matches!(
+            error,
+            Err(ref error) if error.to_string().contains("precedes any flag")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn effective_parallelism_preserves_explicit_role_components() {
+        let declared = Parallelism {
+            outer: Some(ParallelismOuter {
+                tensor_parallel_size: Some(4),
+                pipeline_parallel_size: None,
+            }),
+            ..Parallelism::default()
+        };
+        let effective = Parallelism {
+            outer: Some(ParallelismOuter {
+                tensor_parallel_size: Some(2),
+                pipeline_parallel_size: Some(1),
+            }),
+            attention: Some(ParallelismAttention {
+                tensor_parallel_size: Some(2),
+                data_parallel_size: Some(1),
+                context_parallel_size: Some(1),
+            }),
+            experts: Some(ParallelismExperts {
+                tensor_parallel_size: Some(2),
+                data_parallel_size: Some(1),
+                expert_parallel_size: Some(1),
+                dense_tensor_parallel_size: Some(1),
+            }),
+        };
+
+        let result =
+            validate_effective_parallelism("fixture", "role \"prefill\"", &declared, &effective);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("outer.tensor_parallel_size"))
+        );
+    }
 }

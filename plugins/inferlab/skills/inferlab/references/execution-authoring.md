@@ -14,14 +14,49 @@ capture_control_deadline_seconds = 60
 capture_finalization_deadline_seconds = 300
 ```
 
+Select the capture mechanism on the server, a case, or an invocation patch
+(`--set server.profiler.mechanism=engine_trace`); omission resolves to
+managed collection:
+
+```toml
+[servers.example.profiler]
+mechanism = "engine_trace"   # default is "managed_collection"
+```
+
+Managed collection wraps each captured rank process tree with Nsight Systems.
+Engine trace instead lets the framework's own profiler write per-rank traces
+into a persistent record-owned directory that InferLab assigns at planning;
+vLLM renders it into `--profiler-config` and SGLang into
+`SGLANG_TORCH_PROFILER_DIR`. Engine trace requires a local, non-containerized
+placement, and coverage verifies that the dedicated directory gained at least
+one new trace artifact per model device of the replica. The TensorRT-LLM,
+TokenSpeed, and Specialized Engine integrations reject `engine_trace` with a
+typed error.
+
+Declaring `profiler.mechanism` or nsys escape inputs on a server whose
+profiling resolves off (no `profiling = true` and no requested `--capture`)
+fails resolution with a typed error naming the declaration and the
+enable-profiling remediation; profiler declarations never silently drop.
+
 `capture_arm_deadline_seconds` is one budget for preparing and arming every
 selected rank target. `capture_control_deadline_seconds` covers the complete
-HTTP response for each framework range action.
+HTTP response for each framework range action under managed collection.
 `capture_finalization_deadline_seconds` is one budget for session inspection,
 any required collection stop, asynchronous report completion, and report
 coverage across all targets. Capture-armed readiness is unbounded overall but
 retains `readiness_attempt_timeout_seconds` on every blocking attempt, so
 process exit and operator interruption remain observable.
+
+Engine-trace window closing does not draw the per-action control budget. The
+close request is dispatched when the measured phase ends, and its response
+consumption, the artifact flush wait, and coverage verification share the one
+global finalization budget without restarting it. A slow or absent stop
+response records neutral flush-pending evidence on the closing action rather
+than failing the capture; coverage still decides success. The undeclared
+finalization default follows the resolved mechanism: 300 seconds for managed
+collection and 3600 seconds for engine trace, because engine stop calls block
+until worker traces serialize — vLLM `stop_profile` has been observed to take
+over ten minutes on a TP2 27B capture.
 
 Managed Nsight Systems defaults use the `nsys` executable and the `cuda,nvtx`
 trace set. A server may replace the dedicated fields or add launch/start

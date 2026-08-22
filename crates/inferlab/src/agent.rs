@@ -703,7 +703,8 @@ fn package_requirements(runtime: AgentRuntime, checkout: &Path) -> Vec<PathBuf> 
         skill.join("references/workspace-authoring.md"),
         skill.join("references/workspace-definition.md"),
         skill.join("references/execution-authoring.md"),
-        skill.join("references/measurement-authoring.md"),
+        skill.join("references/eval-authoring.md"),
+        skill.join("references/bench-authoring.md"),
     ]
 }
 

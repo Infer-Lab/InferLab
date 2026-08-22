@@ -18,4 +18,5 @@ Read only the reference matching the authoring task:
 | --- | --- |
 | Workspace definitions, placement, upgrades, and validation | [workspace-definition.md](workspace-definition.md) |
 | Profiling, runtime images, and invocation patches | [execution-authoring.md](execution-authoring.md) |
-| Eval, Bench, datasets, sessions, metrics, and SLOs | [measurement-authoring.md](measurement-authoring.md) |
+| Eval tasks, datasets, and inference requests | [eval-authoring.md](eval-authoring.md) |
+| Serving Bench load, sources, sessions, metrics, and SLOs | [bench-authoring.md](bench-authoring.md) |

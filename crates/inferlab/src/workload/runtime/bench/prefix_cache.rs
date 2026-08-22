@@ -5,12 +5,14 @@ use crate::workload::domain::BenchPopulation;
 use crate::workload::domain::{WorkloadEndpoint, WorkloadHttpAction};
 use crate::workload::record::{
     BenchCachePreparationEvidence, BenchCachePreparationPhase, BenchCachePreparationTransition,
-    PrefixCacheConditioningEvidence, PrefixCacheResetEvidence,
+    PrefixCacheConditioningEvidence, PrefixCacheConditioningRankEvidence, PrefixCacheResetEvidence,
 };
 use crate::workspace::BenchCacheStart;
 use inferlab_protocol::PromptCacheReadZeroRepresentation;
+use inferlab_proxy::core::PrimePrefixCacheResponse;
 use inferlab_runtime::operation_bound::{OperationBound, Remaining};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 struct ConditioningResponse {
     status: u16,
@@ -63,7 +65,7 @@ fn reset_prefix_cache(
         Ok(status)
     })();
     match result {
-        Ok(status) if is_successful_cache_reset_status(status) => PrefixCacheResetEvidence {
+        Ok(status) if is_successful_preparation_status(status) => PrefixCacheResetEvidence {
             method: action.method,
             url,
             succeeded: true,
@@ -151,7 +153,30 @@ fn condition_prefix_cache(
     let sha256 = conditioning.map_or_else(String::new, |item| item.sha256.clone());
     let prompt_tokens = conditioning.map_or(0, |item| item.prompt_tokens);
     let url = format!("http://{}:{}{}", endpoint.host, endpoint.port, plan.route);
-    let outcome = conditioning
+    let data_parallel_size = plan.attention_data_parallel_size.max(1);
+    let evidence = |ranks: Vec<PrefixCacheConditioningRankEvidence>,
+                    succeeded: bool,
+                    error: Option<String>,
+                    bound: &OperationBound| {
+        PrefixCacheConditioningEvidence {
+            url: url.clone(),
+            model: plan.model.clone(),
+            prompt_path: path.clone(),
+            prompt_sha256: sha256.clone(),
+            prompt_tokens,
+            prompt: plan.prompt.clone(),
+            request_body: plan.request_body.clone(),
+            maximum_shared_prefix_tokens: plan.maximum_shared_prefix_tokens,
+            output_tokens: plan.output_tokens,
+            consumes_population_entry: plan.consumes_population_entry,
+            attention_data_parallel_size: data_parallel_size,
+            ranks,
+            succeeded,
+            elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
+            error,
+        }
+    };
+    let body = conditioning
         .ok_or_else(|| {
             CachePreparationError::Conditioning(
                 "primed cache start has no canonical prefix artifact".to_owned(),
@@ -192,18 +217,114 @@ fn condition_prefix_cache(
                 "max_tokens".to_owned(),
                 serde_json::Value::from(plan.output_tokens),
             );
-            let remaining = finite_remaining(bound)?;
-            let client = reqwest::blocking::Client::builder()
-                .timeout(remaining)
-                .connect_timeout(remaining)
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()
-                .map_err(|source| CachePreparationError::Request { source })?;
+            Ok(serde_json::Value::Object(body))
+        });
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => return evidence(Vec::new(), false, Some(error.to_string()), bound),
+    };
+    let client = finite_remaining(bound).and_then(|remaining| {
+        reqwest::blocking::Client::builder()
+            .timeout(remaining)
+            .connect_timeout(remaining)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|source| CachePreparationError::Request { source })
+    });
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => return evidence(Vec::new(), false, Some(error.to_string()), bound),
+    };
+    if plan.frontend_fanout {
+        let outcome = finite_remaining(bound).and_then(|remaining| {
             let response = client
                 .post(&url)
-                .timeout(finite_remaining(bound)?)
-                .json(&serde_json::Value::Object(body))
+                .timeout(remaining)
+                .json(&body)
+                .send()
+                .map_err(|source| CachePreparationError::Request { source })?;
+            let status = response.status().as_u16();
+            let body = response
+                .bytes()
+                .map_err(|source| CachePreparationError::Request { source })?;
+            finite_remaining(bound)?;
+            Ok((status, body))
+        });
+        let (status, body) = match outcome {
+            Ok(response) => response,
+            Err(error) => return evidence(Vec::new(), false, Some(error.to_string()), bound),
+        };
+        let fanout = serde_json::from_slice::<PrimePrefixCacheResponse>(&body).map_err(|source| {
+            CachePreparationError::Conditioning(format!(
+                "frontend conditioning fan-out returned HTTP {status} with an unrecognized response: {source}"
+            ))
+        });
+        let fanout = match fanout {
+            Ok(fanout) => fanout,
+            Err(error) => return evidence(Vec::new(), false, Some(error.to_string()), bound),
+        };
+        let mut ranks = Vec::new();
+        let mut first_error = None;
+        for target in fanout.targets {
+            // A target succeeded only when its recorded status is a success
+            // status AND the peer reported no error: the cross-process
+            // contract does not guarantee that a failing peer fills `error`,
+            // so the status is authoritative.
+            let failure = match target.http_status {
+                Some(status) if is_successful_preparation_status(status) => target.error.clone(),
+                Some(status) => Some(
+                    target
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| format!("conditioning target returned HTTP {status}")),
+                ),
+                None => Some(
+                    target
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "conditioning target returned no response".to_owned()),
+                ),
+            };
+            if first_error.is_none() {
+                first_error = failure.as_ref().map(|error| {
+                    format!(
+                        "replica {} data-parallel rank {}: {error}",
+                        target.url, target.rank
+                    )
+                });
+            }
+            ranks.push(PrefixCacheConditioningRankEvidence {
+                target: Some(target.url),
+                rank: target.rank,
+                http_status: target.http_status,
+                backend_prompt_tokens: None,
+                backend_cache_read_tokens: None,
+                elapsed_ms: target.elapsed_ms,
+                error: failure,
+            });
+        }
+        let coverage = reconcile_fanout_coverage(&ranks, data_parallel_size);
+        let succeeded = status == 200 && first_error.is_none() && coverage.is_ok();
+        let error =
+            if succeeded {
+                None
+            } else {
+                Some(first_error.or_else(|| coverage.err()).unwrap_or_else(|| {
+                    format!("frontend conditioning fan-out returned HTTP {status}")
+                }))
+            };
+        return evidence(ranks, succeeded, error, bound);
+    }
+    let mut ranks = Vec::new();
+    for rank in 0..data_parallel_size {
+        let rank_started_ms = bound.elapsed_ms();
+        let outcome = finite_remaining(bound).and_then(|remaining| {
+            let mut request = client.post(&url).timeout(remaining).json(&body);
+            if data_parallel_size > 1 {
+                request = request.header("X-Data-Parallel-Rank", rank.to_string());
+            }
+            let response = request
                 .send()
                 .map_err(|source| CachePreparationError::Request { source })?;
             let status = response.status().as_u16();
@@ -231,69 +352,93 @@ fn condition_prefix_cache(
                 cache_read_tokens,
             })
         });
-    let elapsed_ms = bound.elapsed_ms().saturating_sub(started_ms);
-    match outcome {
-        Ok(response) if (200..300).contains(&response.status) => PrefixCacheConditioningEvidence {
-            url,
-            model: plan.model.clone(),
-            prompt_path: path,
-            prompt_sha256: sha256,
-            prompt_tokens,
-            prompt: plan.prompt.clone(),
-            request_body: plan.request_body.clone(),
-            maximum_shared_prefix_tokens: plan.maximum_shared_prefix_tokens,
-            output_tokens: plan.output_tokens,
-            consumes_population_entry: plan.consumes_population_entry,
-            backend_prompt_tokens: response.prompt_tokens,
-            backend_cache_read_tokens: response.cache_read_tokens,
-            succeeded: true,
-            http_status: Some(response.status),
-            elapsed_ms,
-            error: None,
-        },
-        Ok(response) => PrefixCacheConditioningEvidence {
-            url,
-            model: plan.model.clone(),
-            prompt_path: path,
-            prompt_sha256: sha256,
-            prompt_tokens,
-            prompt: plan.prompt.clone(),
-            request_body: plan.request_body.clone(),
-            maximum_shared_prefix_tokens: plan.maximum_shared_prefix_tokens,
-            output_tokens: plan.output_tokens,
-            consumes_population_entry: plan.consumes_population_entry,
-            backend_prompt_tokens: response.prompt_tokens,
-            backend_cache_read_tokens: response.cache_read_tokens,
-            succeeded: false,
-            http_status: Some(response.status),
-            elapsed_ms,
-            error: Some(format!(
-                "prefix-cache conditioning returned HTTP {}",
-                response.status
-            )),
-        },
-        Err(error) => PrefixCacheConditioningEvidence {
-            url,
-            model: plan.model.clone(),
-            prompt_path: path,
-            prompt_sha256: sha256,
-            prompt_tokens,
-            prompt: plan.prompt.clone(),
-            request_body: plan.request_body.clone(),
-            maximum_shared_prefix_tokens: plan.maximum_shared_prefix_tokens,
-            output_tokens: plan.output_tokens,
-            consumes_population_entry: plan.consumes_population_entry,
-            backend_prompt_tokens: None,
-            backend_cache_read_tokens: None,
-            succeeded: false,
-            http_status: None,
-            elapsed_ms,
-            error: Some(error.to_string()),
-        },
+        let rank_elapsed_ms = bound.elapsed_ms().saturating_sub(rank_started_ms);
+        let rank_evidence = match outcome {
+            Ok(response) if is_successful_preparation_status(response.status) => {
+                PrefixCacheConditioningRankEvidence {
+                    target: None,
+                    rank,
+                    http_status: Some(response.status),
+                    backend_prompt_tokens: response.prompt_tokens,
+                    backend_cache_read_tokens: response.cache_read_tokens,
+                    elapsed_ms: rank_elapsed_ms,
+                    error: None,
+                }
+            }
+            Ok(response) => PrefixCacheConditioningRankEvidence {
+                target: None,
+                rank,
+                http_status: Some(response.status),
+                backend_prompt_tokens: response.prompt_tokens,
+                backend_cache_read_tokens: response.cache_read_tokens,
+                elapsed_ms: rank_elapsed_ms,
+                error: Some(format!(
+                    "prefix-cache conditioning returned HTTP {}",
+                    response.status
+                )),
+            },
+            Err(error) => PrefixCacheConditioningRankEvidence {
+                target: None,
+                rank,
+                http_status: None,
+                backend_prompt_tokens: None,
+                backend_cache_read_tokens: None,
+                elapsed_ms: rank_elapsed_ms,
+                error: Some(error.to_string()),
+            },
+        };
+        let rank_error = rank_evidence.error.clone();
+        ranks.push(rank_evidence);
+        if let Some(error) = rank_error {
+            return evidence(
+                ranks,
+                false,
+                Some(format!("data-parallel rank {rank}: {error}")),
+                bound,
+            );
+        }
     }
+    evidence(ranks, true, None, bound)
 }
 
-fn is_successful_cache_reset_status(status: u16) -> bool {
+/// The fan-out response must cover every data-parallel rank of every prefill
+/// replica it reports, with the replica count derived from the distinct
+/// target URLs: `ranks == replicas × attention_data_parallel_size`. An empty
+/// or partial set means ranks were never primed, even when every reported
+/// target succeeded ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+fn reconcile_fanout_coverage(
+    ranks: &[PrefixCacheConditioningRankEvidence],
+    data_parallel_size: u32,
+) -> Result<(), String> {
+    if ranks.is_empty() {
+        return Err("frontend conditioning fan-out returned no targets".to_owned());
+    }
+    let expected: Vec<u32> = (0..data_parallel_size).collect();
+    let mut by_replica: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
+    for rank in ranks {
+        let target = rank.target.as_deref().ok_or_else(|| {
+            "frontend conditioning fan-out target is missing its replica URL".to_owned()
+        })?;
+        by_replica.entry(target).or_default().push(rank.rank);
+    }
+    for (replica, mut covered) in by_replica {
+        covered.sort_unstable();
+        if covered != expected {
+            return Err(format!(
+                "frontend conditioning fan-out covered ranks {covered:?} for replica {replica}, expected {expected:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Shared cache-preparation success predicate. 206 Partial Content is never
+/// a success here: the built-in proxies use it to report partial fan-out
+/// failure, and neither a cache reset nor an engine completions conditioning
+/// response can legitimately carry it — a conditioning call that observes
+/// 206 is talking to an aggregating frontend whose partial failure must not
+/// be recorded as primed.
+fn is_successful_preparation_status(status: u16) -> bool {
     (200..300).contains(&status) && status != 206
 }
 
@@ -487,6 +632,204 @@ mod tests {
 
         assert!(!evidence.succeeded, "{evidence:?}");
         assert!(evidence.error.is_some());
+        Ok(())
+    }
+
+    use crate::workload::domain::{BenchPopulation, ResolvedBenchPrompt};
+    use crate::workspace::BenchPrompt;
+    use inferlab_protocol::BenchPrefixConditioningInput;
+
+    struct FanoutFixture {
+        _dir: tempfile::TempDir,
+        endpoint: WorkloadEndpoint,
+        plan: crate::workload::BenchPrefixCacheConditioningPlan,
+        population: BenchPopulation,
+    }
+
+    struct FanoutSetup {
+        fixture: FanoutFixture,
+        server: thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    /// A control-plane conditioning fixture: a one-connection mock frontend
+    /// answering the fan-out route with a canned status/body, plus the plan
+    /// and population `condition_prefix_cache` needs to reach that call.
+    fn fanout_fixture(
+        data_parallel_size: u32,
+        status: u16,
+        response_body: &'static str,
+    ) -> Result<FanoutSetup, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            read_request_headers(&mut stream)?;
+            let response = format!(
+                "HTTP/1.1 {status} Fanout\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes())?;
+            Ok(())
+        });
+        let dir = tempfile::tempdir()?;
+        let prompt_path = dir.path().join("prefix.txt");
+        std::fs::write(&prompt_path, "canonical prefix")?;
+        let (endpoint, _action) = reset_target(address);
+        let fixture = FanoutFixture {
+            _dir: dir,
+            endpoint,
+            plan: crate::workload::BenchPrefixCacheConditioningPlan {
+                route: "/prime_prefix_cache".to_owned(),
+                model: "m".to_owned(),
+                prompt: ResolvedBenchPrompt::from_definition(&BenchPrompt::Flat),
+                request_body: BTreeMap::new(),
+                maximum_shared_prefix_tokens: 8,
+                output_tokens: 1,
+                consumes_population_entry: false,
+                attention_data_parallel_size: data_parallel_size,
+                frontend_fanout: true,
+            },
+            population: BenchPopulation {
+                path: std::path::PathBuf::from("population.json"),
+                evidence_path: std::path::PathBuf::from("population-evidence.json"),
+                sha256: "unused".to_owned(),
+                entries: 1,
+                tpot_applicable: true,
+                prefix_conditioning: Some(BenchPrefixConditioningInput {
+                    path: prompt_path,
+                    sha256: "unused".to_owned(),
+                    prompt_tokens: 8,
+                }),
+                session_templates: Vec::new(),
+            },
+        };
+        Ok(FanoutSetup { fixture, server })
+    }
+
+    fn condition_fanout(
+        fixture: &FanoutFixture,
+    ) -> crate::workload::record::PrefixCacheConditioningEvidence {
+        condition_prefix_cache(
+            &fixture.endpoint,
+            &fixture.plan,
+            &fixture.population,
+            &OperationBound::finite(Duration::from_secs(5)),
+        )
+    }
+
+    #[test]
+    fn fanout_covers_every_rank_of_every_reported_replica() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let setup = fanout_fixture(
+            2,
+            200,
+            r#"{"targets": [
+                {"url": "http://replica-a", "rank": 0, "http_status": 200, "elapsed_ms": 1, "error": null},
+                {"url": "http://replica-a", "rank": 1, "http_status": 200, "elapsed_ms": 1, "error": null},
+                {"url": "http://replica-b", "rank": 0, "http_status": 200, "elapsed_ms": 1, "error": null},
+                {"url": "http://replica-b", "rank": 1, "http_status": 200, "elapsed_ms": 1, "error": null}
+            ]}"#,
+        )?;
+        let evidence = condition_fanout(&setup.fixture);
+        setup
+            .server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+
+        assert!(evidence.succeeded, "{evidence:?}");
+        assert_eq!(evidence.ranks.len(), 4);
+        Ok(())
+    }
+
+    /// A 200 over an empty target set primes nothing; it must not record a
+    /// successful primed start.
+    #[test]
+    fn fanout_rejects_an_empty_target_set() -> Result<(), Box<dyn std::error::Error>> {
+        let setup = fanout_fixture(2, 200, r#"{"targets": []}"#)?;
+        let evidence = condition_fanout(&setup.fixture);
+        setup
+            .server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+
+        assert!(!evidence.succeeded, "{evidence:?}");
+        let error = evidence.error.ok_or("empty fan-out recorded no error")?;
+        assert!(error.contains("no targets"), "{error}");
+        Ok(())
+    }
+
+    /// Coverage is reconciled against the planned data-parallel size: a
+    /// replica missing a rank fails the conditioning even when every
+    /// reported target succeeded.
+    #[test]
+    fn fanout_rejects_partial_rank_coverage() -> Result<(), Box<dyn std::error::Error>> {
+        let setup = fanout_fixture(
+            2,
+            200,
+            r#"{"targets": [
+                {"url": "http://replica-a", "rank": 0, "http_status": 200, "elapsed_ms": 1, "error": null}
+            ]}"#,
+        )?;
+        let evidence = condition_fanout(&setup.fixture);
+        setup
+            .server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+
+        assert!(!evidence.succeeded, "{evidence:?}");
+        let error = evidence.error.ok_or("partial coverage recorded no error")?;
+        assert!(error.contains("expected [0, 1]"), "{error}");
+        Ok(())
+    }
+
+    /// The cross-process contract does not guarantee that a failing peer
+    /// fills `error`: a target whose recorded status is not a success status
+    /// fails the conditioning even with a null error field.
+    #[test]
+    fn fanout_target_with_non_success_status_and_no_error_field_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let setup = fanout_fixture(
+            1,
+            200,
+            r#"{"targets": [
+                {"url": "http://replica-a", "rank": 0, "http_status": 500, "elapsed_ms": 1, "error": null}
+            ]}"#,
+        )?;
+        let evidence = condition_fanout(&setup.fixture);
+        setup
+            .server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+
+        assert!(!evidence.succeeded, "{evidence:?}");
+        let error = evidence.error.ok_or("failed target recorded no error")?;
+        assert!(error.contains("HTTP 500"), "{error}");
+        let rank_error = evidence.ranks[0]
+            .error
+            .as_deref()
+            .ok_or("failed rank recorded no error")?;
+        assert!(rank_error.contains("HTTP 500"), "{rank_error}");
+        Ok(())
+    }
+
+    /// The proxy-side empty-target rejection (502 with an error body) is not
+    /// a fan-out response: it fails the conditioning with the status named.
+    #[test]
+    fn fanout_rejection_status_is_not_primed() -> Result<(), Box<dyn std::error::Error>> {
+        let setup = fanout_fixture(
+            2,
+            502,
+            r#"{"error": "prefix cache conditioning fan-out has no targets"}"#,
+        )?;
+        let evidence = condition_fanout(&setup.fixture);
+        setup
+            .server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+
+        assert!(!evidence.succeeded, "{evidence:?}");
+        let error = evidence.error.ok_or("rejected fan-out recorded no error")?;
+        assert!(error.contains("HTTP 502"), "{error}");
         Ok(())
     }
 }

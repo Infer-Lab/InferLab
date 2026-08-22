@@ -1,6 +1,6 @@
 {
   "operation": "render_serve",
-  "protocol_version": "7",
+  "protocol_version": "8",
   "input": {
     "allocations": [
       {
@@ -126,7 +126,7 @@
       "id": "fixture-model",
       "served_name": "fixture-model"
     },
-    "profiling": false,
+    
     "topology": "single"
   }
 }

@@ -149,7 +149,12 @@ def prompt_cache_evidence(
                 return (
                     [],
                     {},
-                    (f"AIPerf profiling record {request_id} omitted backend cache usage"),
+                    (
+                        f"AIPerf profiling record {request_id} omitted backend cache usage; "
+                        "the server does not report prompt cache-read usage — enable the "
+                        "serving integration's cache-read reporting setting and rebuild the "
+                        "server"
+                    ),
                 )
         if not prompt_tokens.is_integer() or prompt_tokens <= 0:
             return [], {}, f"AIPerf profiling record {request_id} has invalid prompt usage"

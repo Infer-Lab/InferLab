@@ -1,8 +1,12 @@
 use crate::plan::{
     CaptureWindowActionPlan, CaptureWindowHttpMethodPlan, ProfilerControl, ProfilerLaunch,
-    ProfilerTargetRecord, env_prefix,
+    env_prefix,
 };
-use crate::record::{CaptureActionRecord, CaptureHttpFailureKind};
+use crate::poll::{Poll, poll_until};
+use crate::record::{
+    ARM_START_BOUNDARY, CONTROL_START_BOUNDARY, CaptureActionRecord, CaptureHttpFailureKind,
+    MEASUREMENT_FINALIZATION_START, ProfilerTargetRecord,
+};
 use inferlab_runtime::operation_bound::{OperationBound, OperationTerminalCause, Remaining};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -11,8 +15,6 @@ use std::time::Duration;
 
 const INITIAL_REPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_REPORT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const ARM_START_BOUNDARY: &str = "before_profiler_arm";
-const CONTROL_START_BOUNDARY: &str = "before_profiler_window_control_request";
 
 pub(crate) fn prepare_output(
     target: &ProfilerTargetRecord,
@@ -55,21 +57,19 @@ pub(crate) fn verify_report(
     bound: &OperationBound,
     start_boundary: &str,
 ) -> CaptureActionRecord {
-    let mut poll_interval = INITIAL_REPORT_POLL_INTERVAL;
-    loop {
-        let action = check_report(target, path, bound, start_boundary);
-        if action.succeeded() || bound.is_expired() {
-            return action;
-        }
-        match bound.remaining() {
-            Remaining::Finite(remaining) => std::thread::sleep(remaining.min(poll_interval)),
-            Remaining::Expired => {}
-            Remaining::Unbounded => std::thread::sleep(poll_interval),
-        }
-        poll_interval = poll_interval
-            .saturating_mul(2)
-            .min(MAX_REPORT_POLL_INTERVAL);
-    }
+    poll_until(
+        bound,
+        INITIAL_REPORT_POLL_INTERVAL,
+        MAX_REPORT_POLL_INTERVAL,
+        || {
+            let action = check_report(target, path, bound, start_boundary);
+            if action.succeeded() {
+                Poll::Done(action)
+            } else {
+                Poll::Pending(action)
+            }
+        },
+    )
 }
 
 pub(crate) fn check_report(
@@ -136,7 +136,7 @@ pub(crate) fn stop_collection(
 }
 
 pub(crate) fn start_windows(
-    targets: &[ProfilerTargetRecord],
+    targets: &[&ProfilerTargetRecord],
     deadline_seconds: u64,
 ) -> Vec<CaptureActionRecord> {
     let process_ids = targets
@@ -149,15 +149,125 @@ pub(crate) fn start_windows(
 }
 
 pub(crate) fn stop_windows(
-    targets: &[ProfilerTargetRecord],
+    targets: &[&ProfilerTargetRecord],
     process_ids: &BTreeSet<&str>,
     deadline_seconds: u64,
 ) -> Vec<CaptureActionRecord> {
     window_actions_for(targets, false, process_ids, deadline_seconds)
 }
 
+/// Engine-trace window closing is a dispatch into the one global finalization
+/// budget ([[RFC-0004:C-WORKLOAD-PROFILING]]): the close request is
+/// dispatched when the measured phase ends and its response consumption draws
+/// the shared budget rather than a per-action control budget. A delivery
+/// failure (transport error or a prompt error status) is window-closing
+/// control failure evidence; a slow or absent response is neutral
+/// flush-pending evidence, and coverage verification is the sole completion
+/// verdict.
+pub(crate) fn close_engine_trace_windows(
+    targets: &[&ProfilerTargetRecord],
+    process_ids: &BTreeSet<&str>,
+    bound: &OperationBound,
+) -> Vec<CaptureActionRecord> {
+    let mut seen = BTreeSet::new();
+    targets
+        .iter()
+        .filter_map(|target| match &target.control {
+            ProfilerControl::Http {
+                process_id, stop, ..
+            } if process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone()) => {
+                Some(engine_trace_close_action(process_id, stop, bound))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn engine_trace_close_action(
+    process_id: &str,
+    action: &CaptureWindowActionPlan,
+    bound: &OperationBound,
+) -> CaptureActionRecord {
+    let record = |status: Option<u16>,
+                  failure_kind: Option<CaptureHttpFailureKind>,
+                  flush_pending: bool,
+                  error: Option<String>,
+                  succeeded: bool,
+                  terminal_cause: OperationTerminalCause| {
+        CaptureActionRecord::Http {
+            process_id: process_id.to_owned(),
+            operation: "stop-range".to_owned(),
+            method: Some(action.method),
+            path: Some(action.path.clone()),
+            url: action.effective_url.clone(),
+            body: action.body.clone(),
+            status,
+            failure_kind,
+            flush_pending,
+            error,
+            succeeded,
+            timing: bound.timing(MEASUREMENT_FINALIZATION_START, terminal_cause),
+        }
+    };
+    // With no budget left the dispatch cannot complete; record the pending
+    // flush instead of pretending a request went out.
+    let timeout = match bound.remaining() {
+        Remaining::Finite(remaining) => Some(remaining),
+        Remaining::Expired => {
+            return record(
+                None,
+                None,
+                true,
+                None,
+                true,
+                OperationTerminalCause::TimedOut,
+            );
+        }
+        Remaining::Unbounded => None,
+    };
+    let result = send_control_request(action, timeout, None);
+    match result {
+        Ok(status) if status.is_success() => record(
+            Some(status.as_u16()),
+            None,
+            false,
+            None,
+            true,
+            OperationTerminalCause::Succeeded,
+        ),
+        // A prompt error status is a delivery failure: window-closing control
+        // failure evidence, adjudicated by coverage verification.
+        Ok(status) => record(
+            Some(status.as_u16()),
+            None,
+            false,
+            None,
+            false,
+            OperationTerminalCause::Failed,
+        ),
+        // A slow or absent response is neutral flush-pending evidence: no
+        // error, no deadline failure kind, no capture failure by itself.
+        Err(error) if error.is_response_wait_expiry() => record(
+            None,
+            None,
+            true,
+            None,
+            true,
+            OperationTerminalCause::TimedOut,
+        ),
+        Err(error) => record(
+            None,
+            Some(error.failure_kind()),
+            false,
+            Some(error.record_message()),
+            false,
+            OperationTerminalCause::Failed,
+        ),
+    }
+}
+
 fn window_actions_for(
-    targets: &[ProfilerTargetRecord],
+    targets: &[&ProfilerTargetRecord],
     start: bool,
     process_ids: &BTreeSet<&str>,
     deadline_seconds: u64,
@@ -194,35 +304,10 @@ fn http_action(
     let url = action.effective_url.clone();
     let deadline = Duration::from_secs(deadline_seconds);
     let bound = OperationBound::finite(deadline);
-    let result: Result<reqwest::StatusCode, CaptureHttpError> = (|| {
-        let timeout = finite_remaining(&bound)?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .map_err(|source| CaptureHttpError::Request { source })?;
-        let request = match (action.method, action.body.as_ref()) {
-            (CaptureWindowHttpMethodPlan::Post, Some(body)) => {
-                let payload = serde_json::to_vec(body)
-                    .map_err(|source| CaptureHttpError::Serialization { source })?;
-                client
-                    .post(&url)
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .body(payload)
-            }
-            (CaptureWindowHttpMethodPlan::Post, None) => client.post(&url),
-        };
-        let response = request
-            .timeout(finite_remaining(&bound)?)
-            .send()
-            .map_err(|source| CaptureHttpError::Request { source })?;
-        let status = response.status();
-        response
-            .bytes()
-            .map_err(|source| CaptureHttpError::Request { source })?;
-        Ok(status)
+    let result = (|| {
+        let client_timeout = finite_remaining(&bound)?;
+        let request_timeout = finite_remaining(&bound)?;
+        send_control_request(action, Some(client_timeout), Some(request_timeout))
     })();
     match result {
         Ok(response) => CaptureActionRecord::Http {
@@ -234,6 +319,7 @@ fn http_action(
             body: action.body.clone(),
             status: Some(response.as_u16()),
             failure_kind: None,
+            flush_pending: false,
             error: None,
             succeeded: response.is_success(),
             timing: bound.timing(
@@ -254,6 +340,7 @@ fn http_action(
             body: action.body.clone(),
             status: None,
             failure_kind: Some(error.failure_kind()),
+            flush_pending: false,
             error: Some(error.record_message()),
             succeeded: false,
             timing: bound.timing(
@@ -266,6 +353,50 @@ fn http_action(
             ),
         },
     }
+}
+
+/// The one window-control request construction shared by the per-action
+/// control budget and the engine-trace close dispatch: build a client under
+/// the caller's timeout classification, POST with an optional JSON body, then
+/// consume the complete response body so the deadline covers the full
+/// response wait. A `None` timeout leaves the client unbounded.
+fn send_control_request(
+    action: &CaptureWindowActionPlan,
+    client_timeout: Option<Duration>,
+    request_timeout: Option<Duration>,
+) -> Result<reqwest::StatusCode, CaptureHttpError> {
+    let mut client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if let Some(timeout) = client_timeout {
+        client = client.timeout(timeout).connect_timeout(timeout);
+    }
+    let client = client
+        .build()
+        .map_err(|source| CaptureHttpError::Request { source })?;
+    let request = match (action.method, action.body.as_ref()) {
+        (CaptureWindowHttpMethodPlan::Post, Some(body)) => {
+            let payload = serde_json::to_vec(body)
+                .map_err(|source| CaptureHttpError::Serialization { source })?;
+            client
+                .post(&action.effective_url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload)
+        }
+        (CaptureWindowHttpMethodPlan::Post, None) => client.post(&action.effective_url),
+    };
+    let request = match request_timeout {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
+    };
+    let response = request
+        .send()
+        .map_err(|source| CaptureHttpError::Request { source })?;
+    let status = response.status();
+    response
+        .bytes()
+        .map_err(|source| CaptureHttpError::Request { source })?;
+    Ok(status)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -285,6 +416,17 @@ enum CaptureHttpError {
 }
 
 impl CaptureHttpError {
+    /// The engine-trace close classification: the response wait expired
+    /// against the owning budget, which is neutral flush-pending evidence
+    /// rather than a delivery failure ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    fn is_response_wait_expiry(&self) -> bool {
+        match self {
+            Self::Deadline => true,
+            Self::Request { source } => source.is_timeout(),
+            Self::Serialization { .. } => false,
+        }
+    }
+
     fn failure_kind(&self) -> CaptureHttpFailureKind {
         match self {
             Self::Deadline => CaptureHttpFailureKind::Deadline,
@@ -506,15 +648,17 @@ fn ssh_control_script(cwd: &Path, argv: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ARM_START_BOUNDARY, CommandActionMode, command_action, http_action, ssh_control_script,
+        CommandActionMode, command_action, engine_trace_close_action, http_action,
+        ssh_control_script,
     };
-    use crate::finalization::MEASUREMENT_FINALIZATION_START;
     use crate::plan::{
         CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan,
-        NsysEscapes, ProfilerControl, ProfilerFinalization, ProfilerLaunch, ProfilerTargetRecord,
-        WindowControlKind,
+        NsysEscapes, ProfilerControl, ProfilerFinalization, ProfilerLaunch, WindowControlKind,
     };
-    use crate::record::CaptureActionRecord;
+    use crate::record::{
+        ARM_START_BOUNDARY, CaptureActionRecord, CaptureHttpFailureKind,
+        MEASUREMENT_FINALIZATION_START, ProfilerTargetRecord,
+    };
     use inferlab_protocol::EndpointAssignment;
     use inferlab_runtime::operation_bound::{
         OperationBound, OperationBudgetEvidence, OperationTerminalCause,
@@ -538,6 +682,10 @@ mod tests {
             replica_id: "prefill".to_owned(),
             replica_index: 0,
             rank: 0,
+            rank_count: 1,
+            device_count: 1,
+            mechanism: inferlab_protocol::CaptureMechanism::ManagedCollection,
+            trace_storage: None,
             session: "inferlab-serve-prefill-0".to_owned(),
             executable: "nsys".to_owned(),
             launch: ProfilerLaunch::Local,
@@ -673,6 +821,190 @@ mod tests {
             return Err("control fixture returned non-HTTP evidence".into());
         };
         assert!(timing.elapsed_ms >= 2_000);
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    fn engine_trace_stop(url: String) -> CaptureWindowActionPlan {
+        CaptureWindowActionPlan {
+            method: CaptureWindowHttpMethodPlan::Post,
+            path: "/stop_profile".to_owned(),
+            body: None,
+            effective_url: url,
+        }
+    }
+
+    /// A close response that outlasts the shared finalization budget is
+    /// neutral flush-pending evidence: succeeded, no error, no failure kind,
+    /// no status ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn engine_trace_close_records_flush_pending_when_the_response_outlasts_the_budget()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 1_024];
+            let _ = stream.read(&mut request)?;
+            std::thread::sleep(Duration::from_millis(600));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")?;
+            Ok(())
+        });
+        let bound = OperationBound::finite(Duration::from_millis(150));
+
+        let record = engine_trace_close_action(
+            "serve",
+            &engine_trace_stop(format!("http://{address}/stop_profile")),
+            &bound,
+        );
+
+        let CaptureActionRecord::Http {
+            succeeded,
+            flush_pending,
+            failure_kind,
+            status,
+            error,
+            timing,
+            ..
+        } = record
+        else {
+            return Err("engine-trace close fixture returned non-HTTP evidence".into());
+        };
+        assert!(succeeded);
+        assert!(flush_pending);
+        assert_eq!(failure_kind, None);
+        assert_eq!(status, None);
+        assert_eq!(error, None);
+        assert_eq!(timing.terminal_cause, OperationTerminalCause::TimedOut);
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    /// A refused close connection is a delivery failure: window-closing
+    /// control failure evidence adjudicated by coverage
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn engine_trace_close_records_a_delivery_failure_on_connection_refusal()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let bound = OperationBound::finite(Duration::from_secs(1));
+
+        let record = engine_trace_close_action(
+            "serve",
+            &engine_trace_stop(format!("http://{address}/stop_profile")),
+            &bound,
+        );
+
+        let CaptureActionRecord::Http {
+            succeeded,
+            flush_pending,
+            failure_kind,
+            error,
+            timing,
+            ..
+        } = record
+        else {
+            return Err("engine-trace close fixture returned non-HTTP evidence".into());
+        };
+        assert!(!succeeded);
+        assert!(!flush_pending);
+        assert_eq!(failure_kind, Some(CaptureHttpFailureKind::Transport));
+        assert!(error.is_some());
+        assert_eq!(timing.terminal_cause, OperationTerminalCause::Failed);
+        Ok(())
+    }
+
+    /// A prompt error status is a delivery failure, not flush-pending
+    /// evidence ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn engine_trace_close_records_a_prompt_error_status_as_a_delivery_failure()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 1_024];
+            let _ = stream.read(&mut request)?;
+            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
+            Ok(())
+        });
+        let bound = OperationBound::finite(Duration::from_secs(1));
+
+        let record = engine_trace_close_action(
+            "serve",
+            &engine_trace_stop(format!("http://{address}/stop_profile")),
+            &bound,
+        );
+
+        let CaptureActionRecord::Http {
+            succeeded,
+            flush_pending,
+            failure_kind,
+            status,
+            error,
+            timing,
+            ..
+        } = record
+        else {
+            return Err("engine-trace close fixture returned non-HTTP evidence".into());
+        };
+        assert!(!succeeded);
+        assert!(!flush_pending);
+        assert_eq!(failure_kind, None);
+        assert_eq!(status, Some(500));
+        assert_eq!(error, None);
+        assert_eq!(timing.terminal_cause, OperationTerminalCause::Failed);
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    /// A slow close response consumed inside the shared budget is ordinary
+    /// success evidence drawn from the finalization budget, not the
+    /// per-action control budget ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn engine_trace_close_consumes_a_slow_response_inside_the_shared_budget()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 1_024];
+            let _ = stream.read(&mut request)?;
+            std::thread::sleep(Duration::from_millis(100));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")?;
+            Ok(())
+        });
+        let bound = OperationBound::finite(Duration::from_secs(5));
+
+        let record = engine_trace_close_action(
+            "serve",
+            &engine_trace_stop(format!("http://{address}/stop_profile")),
+            &bound,
+        );
+
+        let CaptureActionRecord::Http {
+            succeeded,
+            flush_pending,
+            status,
+            timing,
+            ..
+        } = record
+        else {
+            return Err("engine-trace close fixture returned non-HTTP evidence".into());
+        };
+        assert!(succeeded);
+        assert!(!flush_pending);
+        assert_eq!(status, Some(200));
+        assert_eq!(timing.terminal_cause, OperationTerminalCause::Succeeded);
+        assert_eq!(
+            timing.budget,
+            OperationBudgetEvidence::Finite {
+                configured_ms: 5_000
+            }
+        );
+        assert_eq!(timing.start_boundary, MEASUREMENT_FINALIZATION_START);
         server.join().map_err(|_| "fixture server panicked")??;
         Ok(())
     }

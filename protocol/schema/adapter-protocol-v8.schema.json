@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v7",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v8",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -240,16 +240,36 @@
         }
       ]
     },
+    "CaptureMechanism": {
+      "description": "The workload-attached capture mechanism selected for a profiled serving\ntopology ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
+      "oneOf": [
+        {
+          "description": "InferLab wraps each target process with a managed Nsight Systems\ncollection.",
+          "type": "string",
+          "const": "managed_collection"
+        },
+        {
+          "description": "The serving framework's internal profiler writes per-rank trace\nartifacts under InferLab-directed storage.",
+          "type": "string",
+          "const": "engine_trace"
+        }
+      ]
+    },
     "CaptureTargetRequirement": {
       "description": "Marks a replica as a profiling capture target and carries its window\ncontrol ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
       "type": "object",
       "properties": {
+        "mechanism": {
+          "description": "The capture mechanism this target declares; it must equal the\neffective mechanism requested on the plan.",
+          "$ref": "#/$defs/CaptureMechanism"
+        },
         "window_control": {
           "$ref": "#/$defs/CaptureWindowControlRequirement"
         }
       },
       "additionalProperties": false,
       "required": [
+        "mechanism",
         "window_control"
       ]
     },
@@ -355,6 +375,17 @@
         "completions_path": {
           "type": "string"
         },
+        "prefix_cache_conditioning": {
+          "description": "A Gateway-backend conditioning fan-out action: the frontend routes one\nconditioning request per prefill replica and attention data-parallel\nrank ([[RFC-0004:C-BENCH-CACHE-STATE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpActionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "prefix_cache_reset": {
           "anyOf": [
             {
@@ -410,7 +441,7 @@
       ]
     },
     "FrontendComponents": {
-      "description": "The only two frontend bindings protocol v7 accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
+      "description": "The only two frontend bindings protocol v8 accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
       "anyOf": [
         {
           "$ref": "#/$defs/GatewayFrontendBinding"
@@ -442,7 +473,7 @@
       ]
     },
     "FrontendProcessRole": {
-      "description": "The one canonical process role available to a protocol-v7 frontend.",
+      "description": "The one canonical process role available to a protocol-v8 frontend.",
       "type": "string",
       "enum": [
         "gateway"
@@ -915,8 +946,15 @@
           ]
         },
         "profiling": {
-          "type": "boolean",
-          "default": false
+          "description": "The effective capture mechanism when profiling is requested; absent\nmeans no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureMechanism"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "roles": {
           "type": "array",
@@ -1021,12 +1059,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `7` (serialized as the\nstring `\"7\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `8` (serialized as the\nstring `\"8\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 7.",
+          "description": "Protocol version 8.",
           "type": "string",
-          "const": "7"
+          "const": "8"
         }
       ]
     },
@@ -1174,8 +1212,15 @@
           ]
         },
         "profiling": {
-          "type": "boolean",
-          "default": false
+          "description": "The effective capture mechanism when profiling is requested; absent\nmeans no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureMechanism"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "topology": {
           "$ref": "#/$defs/ServeTopology"
@@ -1332,6 +1377,13 @@
           "properties": {
             "cache": {
               "type": "string"
+            },
+            "capture_storage": {
+              "description": "The control-plane-assigned persistent trace directory; present\nonly when this rank belongs to an engine-trace capture target\n([[RFC-0004:C-WORKLOAD-PROFILING]]).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "dependencies": {
               "type": "array",

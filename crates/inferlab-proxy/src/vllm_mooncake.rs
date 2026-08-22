@@ -1,25 +1,28 @@
 use crate::core::{
-    self, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response, join_path,
-    outbound_authorization,
+    self, OnClientDrop, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response,
+    join_path, outbound_authorization,
 };
 use crate::error::ProxyError;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, Response, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Router, serve};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 /// Identity recorded in `BuiltinProxy` evidence for the Mooncake proxy.
 pub const ID: &str = "inferlab-vllm-mooncake-proxy";
 /// Evidence version for the Mooncake proxy identity.
 pub const VERSION: u32 = 1;
+
+/// Display name used in lifecycle/validation error messages.
+const PROXY_NAME: &str = "vLLM Mooncake proxy";
 
 /// Owned identity of the built-in Mooncake proxy.
 pub fn meta() -> ProxyMeta {
@@ -52,15 +55,7 @@ pub async fn run_async(config: Config) -> Result<(), ProxyError> {
     let port = config.port;
     let state = ProxyState::new(config)?;
     tokio::spawn(discover_prefillers(state.clone()));
-    let app = router(state);
-    let listener = TcpListener::bind((host.as_str(), port))
-        .await
-        .map_err(|error| ProxyError::Io {
-            message: format!("failed to bind vLLM Mooncake proxy on {host}:{port}: {error}"),
-        })?;
-    serve(listener, app).await.map_err(|error| ProxyError::Io {
-        message: format!("vLLM Mooncake proxy server failed: {error}"),
-    })
+    core::serve_router(PROXY_NAME, &host, port, router(state)).await
 }
 
 fn router(state: ProxyState) -> Router {
@@ -69,6 +64,8 @@ fn router(state: ProxyState) -> Router {
         .route("/v1/models", get(models))
         .route("/v1/completions", post(completions))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/reset_prefix_cache", post(reset_prefix_cache))
+        .route("/prime_prefix_cache", post(prime_prefix_cache))
         .with_state(state)
 }
 
@@ -104,19 +101,11 @@ struct SelectedPrefill {
 
 impl ProxyState {
     fn new(config: Config) -> Result<Self, ProxyError> {
-        if config.prefill.is_empty() {
-            return Err(ProxyError::Invalid {
-                message: "vLLM Mooncake proxy requires at least one prefill endpoint".to_owned(),
-            });
-        }
-        if config.decode.is_empty() {
-            return Err(ProxyError::Invalid {
-                message: "vLLM Mooncake proxy requires at least one decode endpoint".to_owned(),
-            });
-        }
-        let client = core::build_pooled_client().map_err(|error| ProxyError::Io {
-            message: format!("failed to create vLLM Mooncake proxy HTTP client: {error}"),
-        })?;
+        core::require_endpoints(
+            PROXY_NAME,
+            config.prefill.is_empty(),
+            config.decode.is_empty(),
+        )?;
         let prefill = config
             .prefill
             .into_iter()
@@ -124,7 +113,7 @@ impl ProxyState {
             .collect::<Result<Vec<_>, ProxyError>>()?;
         Ok(Self {
             inner: Arc::new(ProxyStateInner {
-                client,
+                client: core::pooled_client(PROXY_NAME)?,
                 prefill,
                 decode: config.decode,
                 ready: AtomicBool::new(false),
@@ -170,15 +159,9 @@ impl ProxyState {
         Ok(candidates.swap_remove(index))
     }
 
-    fn next_decode_url(&self) -> Result<String, ProxyHttpError> {
-        if self.inner.decode.is_empty() {
-            return Err(ProxyHttpError::status(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no decode endpoints configured",
-            ));
-        }
+    fn next_decode_url(&self) -> String {
         let index = core::round_robin_index(&self.inner.decode_cursor, self.inner.decode.len());
-        Ok(self.inner.decode[index].clone())
+        self.inner.decode[index].clone()
     }
 
     fn request_id(&self) -> String {
@@ -291,19 +274,10 @@ fn parse_engine_ids(body: &Value) -> Result<Vec<String>, ProxyError> {
 async fn healthcheck(
     State(state): State<ProxyState>,
 ) -> (StatusCode, Json<ProxyHealthcheckResponse>) {
-    let ready = state.ready();
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (
-        status,
-        Json(ProxyHealthcheckResponse {
-            ready,
-            prefill_instances: state.inner.prefill.len(),
-            decode_instances: state.inner.decode.len(),
-        }),
+    core::healthcheck_response(
+        state.ready(),
+        state.inner.prefill.len(),
+        state.inner.decode.len(),
     )
 }
 
@@ -314,7 +288,7 @@ async fn models(State(state): State<ProxyState>) -> Result<Response<Body>, Proxy
             "proxy is not ready",
         ));
     }
-    let decode_url = state.next_decode_url()?;
+    let decode_url = state.next_decode_url();
     let response = state
         .client()
         .get(join_path(&decode_url, "/v1/models"))
@@ -353,7 +327,7 @@ async fn completion_route(
         ));
     }
     let selected_prefill = state.next_prefill().await?;
-    let decode_url = state.next_decode_url()?;
+    let decode_url = state.next_decode_url();
     let request_id = state.request_id();
     let authorization = outbound_authorization(&headers);
     let client = state.client();
@@ -377,7 +351,7 @@ async fn completion_route(
         "decode request",
     )
     .await?;
-    core::stream_decode_response(decode_response, prefill_task)
+    core::stream_decode_response(decode_response, prefill_task, OnClientDrop::Abort)
 }
 
 fn prefill_body(body: &Value, request_id: &str) -> Result<Value, ProxyHttpError> {
@@ -506,6 +480,111 @@ async fn send_prefill_request(
     Ok(())
 }
 
+/// One paired prefill/decode conditioning flow with the prefill request
+/// pinned to `selected_prefill.dp_rank`; the decode side rides the ordinary
+/// round-robin pairing and is incidental coverage
+/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+async fn prime_flow(
+    state: &ProxyState,
+    selected_prefill: &SelectedPrefill,
+    authorization: Option<String>,
+    body: &Value,
+) -> Result<u16, core::PrimeFlowFailure> {
+    use core::PrimeFlowFailure;
+    let request_id = state.request_id();
+    let prefill_body = prefill_body(body, &request_id).map_err(PrimeFlowFailure::transport)?;
+    let decode_body =
+        decode_body(body, selected_prefill, &request_id).map_err(PrimeFlowFailure::transport)?;
+    let client = state.client();
+    let prefill_response = core::send_json_post_status(
+        client.clone(),
+        join_path(&selected_prefill.url, "/v1/completions"),
+        &prefill_body,
+        Some(&request_id),
+        authorization.as_deref(),
+        &[("X-data-parallel-rank", selected_prefill.dp_rank.to_string())],
+        "prefill conditioning request",
+    )
+    .await
+    .map_err(PrimeFlowFailure::transport)?;
+    let (prefill_status, _) = core::expect_2xx("prefill conditioning", prefill_response).await?;
+    let decode_url = state.next_decode_url();
+    let decode_response = core::send_json_post_status(
+        client,
+        join_path(&decode_url, "/v1/completions"),
+        &decode_body,
+        Some(&request_id),
+        authorization.as_deref(),
+        &[],
+        "decode conditioning request",
+    )
+    .await
+    .map_err(PrimeFlowFailure::transport)?;
+    core::expect_2xx("decode conditioning", decode_response).await?;
+    Ok(prefill_status)
+}
+
+impl core::PrimeFanoutTarget for SelectedPrefill {
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn rank(&self) -> u32 {
+        self.dp_rank as u32
+    }
+}
+
+async fn prime_prefix_cache(
+    State(state): State<ProxyState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    if !state.ready() {
+        return ProxyHttpError::status(StatusCode::SERVICE_UNAVAILABLE, "proxy is not ready")
+            .into_response();
+    }
+    let authorization = outbound_authorization(&headers);
+    let mut targets = Vec::new();
+    for prefill in &state.inner.prefill {
+        let engine_ids = prefill.engine_ids.read().await.clone();
+        for (dp_rank, engine_id) in engine_ids.iter().enumerate() {
+            targets.push(SelectedPrefill {
+                url: prefill.url.clone(),
+                bootstrap_addr: prefill.bootstrap_addr.clone(),
+                dp_rank,
+                engine_id: engine_id.clone(),
+            });
+        }
+    }
+    core::run_prime_fanout("prefix cache conditioning", targets, |selected| {
+        let state = state.clone();
+        let authorization = authorization.clone();
+        let body = body.clone();
+        async move { prime_flow(&state, &selected, authorization, &body).await }
+    })
+    .await
+}
+
+async fn reset_prefix_cache(State(state): State<ProxyState>, headers: HeaderMap) -> Response<Body> {
+    let authorization = outbound_authorization(&headers);
+    let targets = core::fanout_target_urls(
+        state
+            .inner
+            .prefill
+            .iter()
+            .map(|prefill| prefill.url.as_str()),
+        state.inner.decode.iter().map(String::as_str),
+    );
+    core::run_sweep_fanout(
+        state.client(),
+        "prefix cache reset",
+        "/reset_prefix_cache",
+        targets,
+        authorization,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,10 +593,13 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{HeaderValue, header};
     use axum::response::IntoResponse;
+    use axum::serve;
     use bytes::Bytes;
     use futures_util::StreamExt;
     use serde_json::json;
+    use std::sync::atomic::AtomicU16;
     use std::time::Duration;
+    use tokio::net::TcpListener;
     use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
 
@@ -818,17 +900,85 @@ mod tests {
             "p0-r0"
         );
 
-        assert_eq!(state.next_decode_url()?, "http://127.0.0.1:8020");
-        assert_eq!(state.next_decode_url()?, "http://127.0.0.1:8021");
-        assert_eq!(state.next_decode_url()?, "http://127.0.0.1:8020");
+        assert_eq!(state.next_decode_url(), "http://127.0.0.1:8020");
+        assert_eq!(state.next_decode_url(), "http://127.0.0.1:8021");
+        assert_eq!(state.next_decode_url(), "http://127.0.0.1:8020");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_prefix_cache_attempts_all_targets_and_reports_partial_failure() -> Result<()> {
+        let prefill_backend = ResetBackend::new();
+        let decode_backend = ResetBackend::new();
+        let (prefill, prefill_server) = spawn_reset_backend(prefill_backend.clone()).await?;
+        let (decode, decode_server) = spawn_reset_backend(decode_backend.clone()).await?;
+        let state = ProxyState::new(Config {
+            host: "127.0.0.1".to_owned(),
+            port: 8000,
+            prefill: vec![PrefillTarget {
+                url: prefill,
+                bootstrap_url: "http://127.0.0.1:8998".to_owned(),
+            }],
+            decode: vec![decode],
+        })?;
+
+        let all_succeeded = reset_prefix_cache(State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(all_succeeded.status(), StatusCode::OK);
+
+        decode_backend
+            .status
+            .store(StatusCode::PARTIAL_CONTENT.as_u16(), Ordering::SeqCst);
+        let partial = reset_prefix_cache(State(state), HeaderMap::new()).await;
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(partial.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["successful"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["failed"].as_array().map(Vec::len), Some(1));
+        assert_eq!(prefill_backend.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(decode_backend.requests.load(Ordering::SeqCst), 2);
+        prefill_server.abort();
+        decode_server.abort();
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct ResetBackend {
+        status: Arc<AtomicU16>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl ResetBackend {
+        fn new() -> Self {
+            Self {
+                status: Arc::new(AtomicU16::new(StatusCode::OK.as_u16())),
+                requests: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    async fn mock_reset(State(state): State<ResetBackend>) -> Response<Body> {
+        state.requests.fetch_add(1, Ordering::SeqCst);
+        let status = StatusCode::from_u16(state.status.load(Ordering::SeqCst))
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, "reset").into_response()
+    }
+
+    async fn spawn_reset_backend(state: ResetBackend) -> Result<(String, JoinHandle<()>)> {
+        let app = Router::new()
+            .route("/reset_prefix_cache", post(mock_reset))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let _result = serve(listener, app).await;
+        });
+        Ok((format!("http://{address}"), server))
     }
 
     #[derive(Clone, Default)]
     struct MockBackend {
         requests: Arc<Mutex<Vec<Value>>>,
     }
-
     async fn mock_chat(
         State(state): State<MockBackend>,
         Json(body): Json<Value>,
@@ -897,6 +1047,178 @@ mod tests {
         let app = Router::new()
             .route("/v1/completions", post(streaming_response))
             .route("/v1/chat/completions", post(streaming_response))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let _result = serve(listener, app).await;
+        });
+        Ok((format!("http://{address}"), server))
+    }
+
+    #[tokio::test]
+    async fn prime_prefix_cache_fans_out_to_each_discovered_rank_and_reports_partial_failure()
+    -> Result<()> {
+        let prefill_backend = PrimeBackend::default();
+        let decode_backend = PrimeBackend::default();
+        let (prefill, prefill_server) = spawn_prime_backend(prefill_backend.clone()).await?;
+        let (decode, decode_server) = spawn_prime_backend(decode_backend.clone()).await?;
+        let state = ProxyState::new(Config {
+            host: "127.0.0.1".to_owned(),
+            port: 8000,
+            prefill: vec![PrefillTarget {
+                url: prefill.clone(),
+                bootstrap_url: "http://127.0.0.1:8998".to_owned(),
+            }],
+            decode: vec![decode],
+        })?;
+        *state.inner.prefill[0].engine_ids.write().await =
+            vec!["prefill-r0".to_owned(), "prefill-r1".to_owned()];
+        state.set_ready();
+        let conditioning =
+            || Json(json!({"model": "m", "prompt": "canonical prefix", "max_tokens": 1}));
+
+        let response =
+            prime_prefix_cache(State(state.clone()), HeaderMap::new(), conditioning()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        let targets = body["targets"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("fan-out response has no targets"))?;
+        assert_eq!(targets.len(), 2);
+        for (rank, target) in targets.iter().enumerate() {
+            assert_eq!(target["url"].as_str(), Some(prefill.as_str()));
+            assert_eq!(target["rank"].as_u64(), Some(rank as u64));
+            assert_eq!(target["http_status"].as_u64(), Some(200));
+            assert!(target["error"].is_null());
+        }
+        let prefill_requests = prefill_backend.requests.lock().await;
+        assert_eq!(prefill_requests.len(), 2);
+        assert_eq!(prefill_requests[0].0.as_deref(), Some("0"));
+        assert_eq!(prefill_requests[1].0.as_deref(), Some("1"));
+        // Each flow rides the ordinary prefill/decode pairing.
+        assert_eq!(
+            prefill_requests[0]
+                .1
+                .pointer("/kv_transfer_params/do_remote_decode"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            prefill_requests[1]
+                .1
+                .pointer("/kv_transfer_params/do_remote_decode"),
+            Some(&Value::Bool(true))
+        );
+        let decode_requests = decode_backend.requests.lock().await;
+        assert_eq!(decode_requests.len(), 2);
+        assert_eq!(
+            decode_requests[0]
+                .1
+                .pointer("/kv_transfer_params/remote_engine_id")
+                .and_then(Value::as_str),
+            Some("prefill-r0")
+        );
+        assert_eq!(
+            decode_requests[1]
+                .1
+                .pointer("/kv_transfer_params/remote_engine_id")
+                .and_then(Value::as_str),
+            Some("prefill-r1")
+        );
+        drop(prefill_requests);
+        drop(decode_requests);
+
+        prefill_backend.set_fail_rank(Some("1".to_owned())).await;
+        let partial = prime_prefix_cache(State(state), HeaderMap::new(), conditioning()).await;
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(partial.into_body(), usize::MAX).await?)?;
+        let targets = body["targets"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("fan-out response has no targets"))?;
+        assert_eq!(targets.len(), 2);
+        assert!(targets[0]["error"].is_null());
+        assert_eq!(targets[1]["rank"].as_u64(), Some(1));
+        assert_eq!(targets[1]["http_status"].as_u64(), Some(500));
+        assert!(
+            targets[1]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("HTTP 500"))
+        );
+        prefill_server.abort();
+        decode_server.abort();
+        Ok(())
+    }
+
+    /// Readiness without any discovered data-parallel engine must not read
+    /// as a successful fan-out: with nothing to prime, the endpoint answers
+    /// 502 instead of a 200 over an empty target set.
+    #[tokio::test]
+    async fn prime_prefix_cache_rejects_an_empty_target_set() -> Result<()> {
+        let state = ProxyState::new(Config {
+            host: "127.0.0.1".to_owned(),
+            port: 8000,
+            prefill: vec![PrefillTarget {
+                url: "http://127.0.0.1:8010".to_owned(),
+                bootstrap_url: "http://127.0.0.1:8998".to_owned(),
+            }],
+            decode: vec!["http://127.0.0.1:8020".to_owned()],
+        })?;
+        state.set_ready();
+
+        let response = prime_prefix_cache(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"model": "m", "prompt": "canonical prefix", "max_tokens": 1})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("no targets")),
+            "got {body}"
+        );
+        Ok(())
+    }
+
+    type PrimeRequests = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+
+    #[derive(Clone, Default)]
+    struct PrimeBackend {
+        requests: PrimeRequests,
+        fail_rank: Arc<Mutex<Option<String>>>,
+    }
+
+    impl PrimeBackend {
+        async fn set_fail_rank(&self, rank: Option<String>) {
+            *self.fail_rank.lock().await = rank;
+        }
+    }
+
+    async fn mock_prime(
+        State(state): State<PrimeBackend>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Response<Body> {
+        let rank = headers
+            .get("x-data-parallel-rank")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let fail_rank = state.fail_rank.lock().await.clone();
+        state.requests.lock().await.push((rank.clone(), body));
+        if fail_rank.is_some() && fail_rank == rank {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Json(json!({"object": "text_completion", "choices": []})).into_response()
+    }
+
+    async fn spawn_prime_backend(state: PrimeBackend) -> Result<(String, JoinHandle<()>)> {
+        let app = Router::new()
+            .route("/v1/completions", post(mock_prime))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;

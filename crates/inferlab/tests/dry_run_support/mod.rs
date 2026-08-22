@@ -167,6 +167,7 @@ if os.environ.get("FIXTURE_ADAPTER_HANG"):
 request = json.load(sys.stdin)
 input = request["input"]
 operation = request["operation"]
+mechanism = input.get("profiling")
 if operation == "plan_serve":
     role = input["roles"][0]
     gateway_backend = input.get("gateway_backend")
@@ -236,6 +237,7 @@ if operation == "plan_serve":
             "worker_readiness": {"kind": "process_alive"},
             **({
                 "capture_target": {
+                    "mechanism": mechanism,
                     "window_control": {
                         "endpoint": (
                             "gateway"
@@ -249,7 +251,11 @@ if operation == "plan_serve":
                                 if settings.get("fixture_capture_invalid_path")
                                 else "/start_profile"
                             ),
-                            "body": {"activities": ["CUDA_PROFILER"]},
+                            "body": {
+                                "activities": [
+                                    "GPU" if mechanism == "engine_trace" else "CUDA_PROFILER"
+                                ]
+                            },
                         },
                         "stop": {
                             "method": "post",
@@ -257,7 +263,7 @@ if operation == "plan_serve":
                         },
                     }
                 }
-            } if input["profiling"] else {}),
+            } if mechanism else {}),
         }],
         "links": (
             [{"kind": "request_routing", "source": "gateway", "targets": [role["id"]]}]
@@ -373,7 +379,7 @@ else:
     raise ValueError(f"unexpected operation {operation}")
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "7",
+    "protocol_version": "8",
     "result": {
         "operation": operation,
         "output": output,
@@ -528,6 +534,7 @@ kv_cache_dtype = \"fp8\"
 gpu_memory_utilization = 0.95
 trust_remote_code = true
 compilation_config = { cudagraph_mode = \"FULL_AND_PIECEWISE\", custom_ops = [\"all\"] }
+extra_args = [\"--max-num-seqs\", \"64\", \"--language-model-only\"]
 
 [servers.dsv4-qualify.roles.serve.parallelism.attention]
 context_parallel_size = 1
@@ -537,6 +544,9 @@ block_size = 16
 
 [servers.dsv4-qualify.cases.tp2.parallelism.outer]
 tensor_parallel_size = 2
+
+[servers.dsv4-qualify.cases.tp4.settings]
+extra_args = [\"--max-num-seqs\", \"128\", \"--enable-prefix-caching\"]
 
 [servers.dsv4-qualify.cases.tp4.parallelism.outer]
 tensor_parallel_size = 4
@@ -750,7 +760,7 @@ elif operation == "render_serve":
 else:
     raise ValueError(operation)
 
-print(json.dumps({"status": "ok", "protocol_version": "7", "result": {"operation": operation, "output": output}}))
+print(json.dumps({"status": "ok", "protocol_version": "8", "result": {"operation": operation, "output": output}}))
 "#;
 
 pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> String {

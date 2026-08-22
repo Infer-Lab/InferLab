@@ -7,6 +7,203 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-22
+
+### Added
+
+- Verbatim-replaceable managed flag groups in `extra_args`: when a
+  post-`--` token names a flag from a group the integration documents as
+  verbatim-replaceable, the managed rendering of the whole group is
+  suppressed and the verbatim block owns the spelling (store-true flags
+  cannot be retracted by last-wins parsing). The SGLang integration applies
+  this to its prefill-CP group (`--attention-context-parallel-size`,
+  `--enable-prefill-cp`, `--cp-strategy`, and the DSA/NSA-family spellings),
+  so DeepSeek-family models can be served with declarative
+  `attention.context_parallel_size` plus a verbatim
+  `--enable-dsa-prefill-context-parallel` while the engine derives the
+  remaining CP facts.
+
+- Gateway-fronted `cache.start = "primed"` conditioning fan-out: the built-in
+  vLLM Mooncake, vLLM NIXL, and SGLang prefill/decode proxies now serve
+  `POST /prime_prefix_cache`, routing one conditioning request through the
+  ordinary pairing flow for every prefill replica and every attention
+  data-parallel rank of that replica (rank-pinned via
+  `X-Data-Parallel-Rank`; the NIXL and SGLang proxies learn each replica's
+  data-parallel size from a control-plane-issued `--prefill-dp` launch
+  argument, while the Mooncake proxy enumerates its discovered
+  data-parallel engines). The vLLM and SGLang integrations declare the
+  fan-out capability on their built-in frontend endpoint; a Gateway-fronted
+  primed start whose backend does not declare it (for example the
+  `vllm-router` and `sglang-router` pairs) is rejected at planning, and the
+  record preserves per-(replica, rank) status, timing, and failure evidence.
+
+- Engine-trace profiling capture over adapter protocol version 8: servers,
+  cases, and invocation overrides may select `profiler.mechanism =
+  "engine_trace"` (omission resolves to `managed_collection`). For local,
+  non-containerized vLLM and SGLang servers the control plane assigns each
+  engine-trace replica a persistent record-owned trace directory, the
+  integrations render it into the framework-native profiler launch
+  configuration (`--profiler-config` with the torch profiler directory for
+  vLLM, `SGLANG_TORCH_PROFILER_DIR` for SGLang), and capture coverage is
+  verified by the trace-storage delta over the capture: the dedicated
+  per-replica trace directory must gain at least one new trace artifact per
+  model-serving rank. The TensorRT-LLM, TokenSpeed, and
+  Specialized Engine integrations reject the mechanism with a typed error.
+
+- Serving integrations lower declared `attention.context_parallel_size` instead
+  of rejecting it. The SGLang integration activates prefill context
+  parallelism on `single` and `prefill` roles (`--enable-prefill-cp` with a
+  default `zigzag` strategy, overridable through the `--` verbatim passthrough)
+  and lowers `decode` roles to `--dcp-size`; the vLLM integration lowers
+  `single` and `decode` roles to `--decode-context-parallel-size` and
+  `prefill_decode` prefill roles to device-multiplying
+  `--prefill-context-parallel-size`. Context parallelism on `single` servers
+  never changes device counts; only a `prefill_decode` prefill role may grow
+  its device count. Model-, hardware-, and backend-dependent applicability
+  remains the framework's launch-time verdict.
+
+### Changed
+
+- Engine-trace capture window closing no longer draws the per-action
+  `capture_control_deadline_seconds` budget. The close request is dispatched
+  when the measured phase ends, and its response consumption, the artifact
+  flush wait, and coverage verification consume the one global
+  `capture_finalization_deadline_seconds` budget without restarting it
+  (RFC-0004 0.30.1, ADR-0039). A delivery failure of the close — connection
+  refusal, a dead engine process, or a prompt error status — remains
+  window-closing control failure evidence adjudicated by coverage, while a
+  slow or absent stop response is now neutral `flush_pending` evidence on the
+  closing action record rather than a deadline failure, and the capture
+  succeeds whenever coverage verifies. The flush-adjudication record renames
+  `flush_confirmed` to `close_confirmed` because the control response no
+  longer attests flush completion; workload record schema version is now 19.
+  The undeclared finalization default follows the resolved capture mechanism
+  (RFC-0003 0.14.1): 300 seconds for managed collection, 3600 seconds for
+  engine trace. Managed-collection captures keep the per-action control
+  budget and 300-second default unchanged.
+
+- The built-in SGLang prefill/decode proxy now shares the common decode
+  response stream used by the other paired-role proxies instead of a private
+  near-copy. The stream takes an explicit client-drop policy: the SGLang
+  proxy selects detach (a dropped client response leaves the prefill request
+  draining to completion in the background, so the bootstrap-room-paired
+  decode-side engine request is never stranded waiting for KV from a
+  cancelled prefill — the previous behavior, now documented and pinned by
+  tests), while the vLLM Mooncake proxy keeps the abort policy. Streaming
+  behavior is unchanged for both proxies.
+
+### Fixed
+
+- The TokenSpeed integration now rejects a non-positive role `replica_count`
+  at planning with a typed invalid-settings error naming the role, matching
+  the vLLM, SGLang, and TensorRT-LLM adapters; `replica_count = 0` previously
+  planned a role with zero replicas silently. Its `render_serve` also drops a
+  duplicated multi-node rejection that repeated the single-topology
+  allocation check.
+
+- The built-in vLLM NIXL prefill/decode proxy now gates on backend readiness
+  like its siblings: it polls every prefill and decode backend's
+  `GET /v1/models` until all answer, reports `ready: false` with HTTP 503 from
+  `/healthcheck` until then, and rejects `/v1/completions`,
+  `/v1/chat/completions`, `/v1/models`, `/prime_prefix_cache`, and
+  `/reset_prefix_cache` with 503 before readiness instead of forwarding to
+  backends that are not yet serving.
+
+- Profiler declarations can no longer silently drop: declaring
+  `profiler.mechanism` or nsys escape inputs on a server whose profiling
+  resolves off (no `profiling = true`, no requested capture) previously
+  produced a server with no capture preparation at all. Resolution now fails
+  with a typed error naming the declaration and the enable-profiling
+  remediation.
+
+- Built-in vLLM and SGLang prefill/decode frontend endpoints now declare
+  backend prompt cache-read usage when both serving roles enable the
+  reporting setting (`enable_prompt_tokens_details` / `enable_cache_report`).
+  The built-in proxies forward engine responses verbatim, so the capability
+  is real; without the declaration, primed and prefix-sharing Benches against
+  a Gateway-fronted P/D pair failed planning with a remediation (enable the
+  reporting setting and rebuild) that could never succeed for that topology.
+
+- A serving Bench with `cache.start = "primed"` or declared prefix geometry
+  (`prefix_sharing` / `shared_system_content`) against a server whose endpoint
+  exposes no prompt cache-read capability previously ran to completion and
+  then failed every request's normalization for missing backend cache-read
+  usage. Planning now rejects the combination with a typed error naming the
+  bench, the missing capability, and the remediation (enable the integration's
+  cache-read reporting setting and rebuild the server); the runtime
+  normalization and Bench client messages carry the same remediation as a
+  backstop.
+
+- A serving Bench with `cache.start = "primed"` under attention data
+  parallelism previously sent one conditioning request that the frontend
+  load balancer routed to a single data-parallel rank, leaving the remaining
+  ranks cold. Conditioning now issues one recorded request per attention
+  data-parallel rank of the public serving role, pinned through the
+  `X-Data-Parallel-Rank` request header (honored by current vLLM main and
+  SGLang), preserves per-rank status, token usage, and timing evidence, and
+  fails the case when any rank's conditioning fails.
+
+- The built-in vLLM Mooncake and NIXL prefill/decode proxies now serve
+  `POST /reset_prefix_cache` by fanning out to every prefill and decode engine
+  and reporting partial failures, so a serving Bench with a controlled cache
+  start passes planning on built-in vLLM P/D pairs instead of forcing an
+  uncontrolled (hot-prefix) start. The `vllm-router` pairing remains without
+  reset control.
+
+- Quality pass over the recent merge, proxy, and profiling changes. Tokens
+  after a bare `--` in `extra_args` again form one verbatim passthrough block
+  that an overriding layer replaces as a whole, server-common and role-level
+  `extra_args` compose by the same per-flag-group merge as every other layer,
+  and every declared `extra_args` array is validated at workspace load.
+  Proxy cache fan-out shares one aggregation and response implementation,
+  rejects an empty target set instead of recording a successful prime, and
+  the control plane reconciles the returned replica/rank coverage against the
+  planned shape. Engine-trace finalization only follows successful
+  window-control actions and propagates trace-directory snapshot errors
+  instead of exhausting the budget. Server and recipe records written before
+  adapter protocol version 8 fail through the friendly schema-version gate.
+
+- The `extra_args` passthrough sentinel no longer reaches the engine. The
+  bare `--` is an InferLab-side composition marker, but the adapters
+  previously spliced it into the rendered engine command, where
+  argparse-based engine launchers reject it (`unrecognized arguments`) and
+  the designed verbatim override never took effect. Rendered engine argv now
+  carries only the post-sentinel tokens, appended after the managed tail so
+  engine last-wins parsing applies the deliberate override.
+
+- Engine-trace capture coverage is now counted against the replica's model
+  device count instead of the process-rank count of the trace-directory
+  snapshot. vLLM and SGLang write one trace artifact per model-serving rank
+  (one per GPU) into the replica's shared trace directory, so a replica with
+  `tensor_parallel_size = 2` must gain at least two new artifacts before the
+  capture verifies; the previous per-process baseline verified as soon as the
+  frontend's own trace landed, minutes before the worker ranks flushed theirs.
+  The capture record carries the baseline as `expected_artifacts`.
+
+### Changed
+
+- The adapter protocol hard-cuts to version 8: `plan_serve` and
+  `render_serve` carry the effective capture mechanism instead of a profiling
+  flag, capture targets declare their mechanism, and engine-trace model-rank
+  allocations carry the control-plane-assigned trace directory. Protocol
+  version 7 input or output is rejected rather than partially interpreted;
+  update workspace adapter pins and relock. Adapter SDK 0.8.0; vLLM, SGLang,
+  TensorRT-LLM, and TokenSpeed integrations 0.7.0; Specialized Engine
+  integration 0.4.0.
+
+- `extra_args` now composes per flag group across the server base, the
+  selected case, and invocation overrides instead of being replaced wholesale
+  by each later layer. A later layer's group replaces a same-named earlier
+  group in place, new groups append, unmentioned groups are inherited, and the
+  `--` passthrough block is replaced as a whole. Cases are additive over the
+  base; there is no removal path — dropping a base flag means restructuring
+  the server definition.
+- The bundled authoring guidance splits `measurement-authoring.md` into
+  `eval-authoring.md` (Eval tasks, datasets, and inference requests) and
+  `bench-authoring.md` (serving-Bench load, sources, sessions, metrics, and
+  SLOs), and no longer cites specification documents that are not shipped
+  with the plugin.
+
 ## [0.11.0] - 2026-08-19
 
 ### Added

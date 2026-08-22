@@ -96,7 +96,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v7.schema.json"
+    "/../../protocol/schema/adapter-protocol-v8.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -112,7 +112,7 @@ fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
             "model": {"id": "model", "served_name": "model"},
             "topology": "single",
             "roles": [],
-            "profiling": false
+            "profiling": "managed_collection"
         }
     }"#;
 
@@ -206,7 +206,7 @@ fn failed_agentic_source_fixture_preserves_partial_evidence() -> Result<(), Box<
 }
 
 #[test]
-fn protocol_v7_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
+fn protocol_v8_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     let capture_target = response
         .pointer_mut("/result/output/replicas/0/capture_target")
@@ -219,14 +219,14 @@ fn protocol_v7_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box
     });
 
     let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
-        return Err("protocol v7 accepted the pre-binding capture-control shape".into());
+        return Err("protocol v8 accepted the pre-binding capture-control shape".into());
     };
     assert!(error.to_string().contains("unknown field `control`"));
     Ok(())
 }
 
 #[test]
-fn protocol_v7_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
+fn protocol_v8_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["replicas"][0]["capture_target"]["window_control"]["start"]["body"] =
         serde_json::json!({"activities": ["CUDA_PROFILER"]});
@@ -251,7 +251,7 @@ fn protocol_v7_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn protocol_v7_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>>
+fn protocol_v8_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>>
 {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["roles"][0]["public_endpoint"]["prefix_cache_reset"] = serde_json::json!({
@@ -261,7 +261,7 @@ fn protocol_v7_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Resul
     });
 
     let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
-        return Err("protocol v7 accepted a capture body on a prefix-cache action".into());
+        return Err("protocol v8 accepted a capture body on a prefix-cache action".into());
     };
     assert!(error.to_string().contains("unknown field `body`"));
     Ok(())
@@ -290,11 +290,22 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let launch_file_response: AdapterResponse = serde_json::from_str(VALID_LAUNCH_FILE_RESPONSE)?;
     let error_response: AdapterResponse = serde_json::from_str(VALID_ERROR_RESPONSE)?;
 
-    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V7);
-    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V7);
-    assert_eq!(render_request.protocol_version(), ProtocolVersion::V7);
-    assert_eq!(render_response.protocol_version(), ProtocolVersion::V7);
-    assert_eq!(error_response.protocol_version(), ProtocolVersion::V7);
+    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V8);
+    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V8);
+    assert_eq!(render_request.protocol_version(), ProtocolVersion::V8);
+    assert_eq!(render_response.protocol_version(), ProtocolVersion::V8);
+    assert_eq!(error_response.protocol_version(), ProtocolVersion::V8);
+
+    let AdapterRequest::PlanServe {
+        input: plan_input, ..
+    } = &plan_request
+    else {
+        return Err("plan fixture did not contain a plan request".into());
+    };
+    assert_eq!(
+        plan_input.profiling,
+        Some(inferlab_protocol::CaptureMechanism::ManagedCollection)
+    );
 
     let AdapterResponse::Ok { result, .. } = &plan_response else {
         return Err("plan fixture did not contain a successful response".into());
@@ -318,16 +329,34 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
         .ok_or("plan fixture did not contain P/D Router")?;
     assert_eq!(pd_router.backend, "vllm-router");
     assert_eq!(pd_router.policies.prefill, "round_robin");
+    let capture_target = output.replicas[0]
+        .capture_target
+        .as_ref()
+        .ok_or("plan fixture did not contain a capture target")?;
+    assert_eq!(
+        capture_target.mechanism,
+        inferlab_protocol::CaptureMechanism::ManagedCollection
+    );
 
     let AdapterRequest::RenderServe { input, .. } = &render_request else {
         return Err("render fixture did not contain a render request".into());
     };
+    assert_eq!(
+        input.profiling,
+        Some(inferlab_protocol::CaptureMechanism::EngineTrace)
+    );
     let render_json = serde_json::to_value(input)?;
     let allocation = render_json["allocations"][0]
         .as_object()
         .ok_or("render fixture did not contain an allocation object")?;
     assert!(allocation.contains_key("effective_settings"));
     assert!(allocation.contains_key("effective_parallelism"));
+    assert_eq!(
+        allocation.get("capture_storage"),
+        Some(&serde_json::json!(
+            "/workspace/.inferlab/runtime/engine-trace/serve-fixture/prefill"
+        ))
+    );
     let frontend = render_json["allocations"][2]
         .as_object()
         .ok_or("render fixture did not contain a frontend allocation")?;
@@ -477,7 +506,7 @@ fn eval_client_fixture_preserves_workspace_yaml_task_source() -> Result<(), Box<
         return Err("fixture did not contain a workspace YAML task source".into());
     };
 
-    assert_eq!(request.protocol_version, ProtocolVersion::V7);
+    assert_eq!(request.protocol_version, ProtocolVersion::V8);
     assert_eq!(request.endpoint.completions_path, "/v1/completions");
     assert_eq!(
         request.endpoint.chat_completions_path,
@@ -567,7 +596,7 @@ fn data_asset_preparation_fixtures_preserve_opaque_readiness() -> Result<(), Box
     let request = serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
         VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL,
     )?;
-    assert_eq!(request.protocol_version, ProtocolVersion::V7);
+    assert_eq!(request.protocol_version, ProtocolVersion::V8);
     let result = serde_json::from_str::<MeasurementDataAssetPreparationResult>(
         VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE,
     )?;

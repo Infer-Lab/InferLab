@@ -4,7 +4,10 @@ mod bench;
 mod eval;
 mod overrides;
 
-use super::plan::{ManualBenchPlan, ManualBenchTarget, MeasurementPlan, MeasurementResolveContext};
+use super::plan::{
+    ConditioningServingShape, ManualBenchPlan, ManualBenchTarget, MeasurementPlan,
+    MeasurementResolveContext,
+};
 use super::{
     MeasurementModel, WorkloadEndpoint, WorkloadEndpointProtocol, WorkloadHttpAction,
     WorkloadHttpMethod, WorkloadServerMetricsEndpoint,
@@ -88,6 +91,19 @@ pub(crate) fn resolve_manual_bench(
     } else {
         Vec::new()
     };
+    let conditioning_serving = ConditioningServingShape::resolve(
+        recorded.server.frontend.is_some(),
+        recorded.server.roles.iter().map(|role| {
+            (
+                role.public_endpoint.is_some(),
+                role.effective_parallelism
+                    .attention
+                    .as_ref()
+                    .and_then(|attention| attention.data_parallel_size)
+                    .unwrap_or(1),
+            )
+        }),
+    );
     let context =
         MeasurementResolveContext {
             workspace_root: root,
@@ -127,6 +143,18 @@ pub(crate) fn resolve_manual_bench(
                     path: action.path.clone(),
                 },
             ),
+            prefix_cache_conditioning: recorded
+                .server
+                .endpoint
+                .prefix_cache_conditioning
+                .as_ref()
+                .map(|action| WorkloadHttpAction {
+                    method: match action.method {
+                        inferlab_protocol::HttpMethod::Post => WorkloadHttpMethod::Post,
+                    },
+                    path: action.path.clone(),
+                }),
+            conditioning_serving,
             capture_ids: &capture_ids,
             command_env: &command_env,
             command_cwd: &root.join(".inferlab"),

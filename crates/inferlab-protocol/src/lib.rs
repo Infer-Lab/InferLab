@@ -31,26 +31,27 @@ pub use wire::{
     BenchSessionPhaseSummary, BenchSessionResultEvidence, BenchSessionSourceInput,
     BenchSessionTemplateInput, BenchSessionTurnResult, BenchSharedSystemContentInput,
     BenchSharedSystemContentSummary, BenchTokenCountSummary, BenchTokenDistributionKindInput,
-    BenchTokenSelectorInput, CaptureTargetRequirement, CaptureWindowControlEndpoint,
-    CaptureWindowControlRequirement, CaptureWindowHttpActionSpec, ClientEndpointInput,
-    ClientStatus, EndpointAssignment, EndpointProtocol, EndpointRequirement, EvalClientRequest,
-    EvalClientResult, EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGate,
-    EvalMetricGateConclusion, EvalNormalizedMetric, EvalPromptInput, EvalTaskSourceInput,
-    EvalTrialSummary, FrontendCoRendering, FrontendComponents, FrontendGatewayComponent,
-    FrontendHandoff, FrontendPdRouterComponent, FrontendProcessRole, GatewayFrontendBinding,
-    GatewayPdRouterFrontendBinding, GatewayPlan, GatewayTarget, HttpActionSpec, HttpMethod,
-    HttpTargetRegistryReadiness, IntegrationIdentity, KvTransferMechanism, LaunchFileDeclaration,
-    MeasurementModelInput, MeasurementProtocol, Parallelism, ParallelismAttention,
-    ParallelismExperts, ParallelismOuter, PdRouterPlan, PdRoutingPolicies, PlanServeInput,
-    PlanServeResult, ProcessSpec, PromptCacheReadZeroRepresentation, ProtocolVersion, RawArtifact,
-    ReadinessProbe, RenderInputDeclaration, RenderServeInput, RenderServeResult, RenderSource,
+    BenchTokenSelectorInput, CaptureMechanism, CaptureTargetRequirement,
+    CaptureWindowControlEndpoint, CaptureWindowControlRequirement, CaptureWindowHttpActionSpec,
+    ClientEndpointInput, ClientStatus, EndpointAssignment, EndpointProtocol, EndpointRequirement,
+    EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
+    EvalMetricComparison, EvalMetricGate, EvalMetricGateConclusion, EvalNormalizedMetric,
+    EvalPromptInput, EvalTaskSourceInput, EvalTrialSummary, FrontendCoRendering,
+    FrontendComponents, FrontendGatewayComponent, FrontendHandoff, FrontendPdRouterComponent,
+    FrontendProcessRole, GatewayFrontendBinding, GatewayPdRouterFrontendBinding, GatewayPlan,
+    GatewayTarget, HttpActionSpec, HttpMethod, HttpTargetRegistryReadiness, IntegrationIdentity,
+    KvTransferMechanism, LaunchFileDeclaration, MeasurementModelInput, MeasurementProtocol,
+    Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, PdRouterPlan,
+    PdRoutingPolicies, PlanServeInput, PlanServeResult, ProcessSpec,
+    PromptCacheReadZeroRepresentation, ProtocolVersion, RawArtifact, ReadinessProbe,
+    RenderInputDeclaration, RenderServeInput, RenderServeResult, RenderSource,
     RenderedServeProcess, ServeModelInput, ServeProcessAllocation, ServeReplicaRequirement,
     ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeRoleResult, ServeTopology,
     ServerMetricsEndpointInput, ServerMetricsEndpointRequirement, SettingValue,
     SuppliedRenderInput, TargetEndpointScheme,
 };
 
-pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v7";
+pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v8";
 pub const MEASUREMENT_SCHEMA_ID: &str = "https://inferlab.dev/schema/measurement-protocol/v1";
 pub const PROTOCOL_WIRE_SOURCE: &str = "crates/inferlab-protocol/src/wire.rs";
 pub const MEASUREMENT_WIRE_SOURCE: &str =

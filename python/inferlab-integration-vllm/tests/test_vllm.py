@@ -72,6 +72,7 @@ def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
     assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
     assert result.gateway.endpoint.server_metrics is None
     assert result.gateway.endpoint.prefix_cache_reset is None
+    assert result.gateway.endpoint.prefix_cache_conditioning is None
     assert result.gateway.backend == "vllm-router"
     assert result.pd_router is not None
     assert result.pd_router.backend == "vllm-router"
@@ -232,7 +233,8 @@ def test_render_passes_through_unrecognized_and_passthrough_extra_args() -> None
     assert [
         rank_zero[index + 1] for index, value in enumerate(rank_zero) if value == "--max-num-seqs"
     ] == ["16", "32"]
-    assert "--block-size" in rank_zero[rank_zero.index("--") :]
+    assert "--" not in rank_zero, "the composition sentinel never reaches the engine argv"
+    assert rank_zero[-2:] == ["--block-size", "32"]
 
 
 def test_render_enables_prompt_token_details_when_declared() -> None:
@@ -266,6 +268,56 @@ def test_render_serve_matches_the_shared_vllm_fixture() -> None:
         "gateway",
         "pd_router",
     )
+
+
+def test_render_engine_trace_injects_the_assigned_torch_profiler_dir() -> None:
+    request = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "render-serve-request.json")
+    )
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    argv = result.processes[0].root.command.argv
+    config = argv[argv.index("--profiler-config") + 1]
+    assert json.loads(config) == {
+        "profiler": "torch",
+        "torch_profiler_dir": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/prefill",
+    }
+
+
+def test_render_engine_trace_requires_the_assigned_trace_directory() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    for allocation in cast(list[dict[str, object]], input_payload["allocations"]):
+        allocation.pop("capture_storage", None)
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+
+    with pytest.raises(AdapterOperationError, match="trace directory"):
+        render_serve(request.root.input)
+
+
+def test_render_managed_collection_uses_the_cuda_profiler() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    cast(dict[str, object], payload["input"])["profiling"] = "managed_collection"
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    argv = result.processes[0].root.command.argv
+    assert argv[argv.index("--profiler-config") + 1] == '{"profiler":"cuda"}'
+
+
+def test_plan_engine_trace_echoes_the_requested_mechanism() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    cast(dict[str, object], payload["input"])["profiling"] = "engine_trace"
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    target = result.replicas[0].capture_target
+    assert target is not None
+    assert target.mechanism == "engine_trace"
 
 
 def test_render_serve_allows_an_explicit_cache_environment_override() -> None:
@@ -355,11 +407,12 @@ def test_plan_role_declares_the_whole_replica_accelerator_requirement() -> None:
     assert prefill[0].primary_ports == ["master"]
     assert prefill[0].capture_target is not None
     assert prefill[0].capture_target.model_dump(mode="json") == {
+        "mechanism": "managed_collection",
         "window_control": {
             "endpoint": "replica_entry",
             "start": {"method": "post", "path": "/start_profile", "body": None},
             "stop": {"method": "post", "path": "/stop_profile", "body": None},
-        }
+        },
     }
 
 
@@ -420,6 +473,63 @@ def test_plan_vllm_router_makes_the_external_router_public() -> None:
     assert result.gateway.render_source == "integration"
     assert result.pd_router is not None
     assert result.pd_router.render_source == "integration"
+
+
+def test_builtin_pd_frontends_declare_prefix_cache_reset() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["gateway_backend"] = "builtin"
+    input_payload["pd_router_backend"] = "builtin"
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    assert result.gateway is not None
+    assert result.gateway.endpoint.prefix_cache_reset is not None
+    assert result.gateway.endpoint.prefix_cache_reset.path == "/reset_prefix_cache"
+    assert result.gateway.endpoint.prefix_cache_conditioning is not None
+    assert result.gateway.endpoint.prefix_cache_conditioning.path == "/prime_prefix_cache"
+
+    input_payload["gateway_backend"] = "vllm-router"
+    input_payload["pd_router_backend"] = "vllm-router"
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    assert result.gateway is not None
+    assert result.gateway.endpoint.prefix_cache_reset is None
+    assert result.gateway.endpoint.prefix_cache_conditioning is None
+
+
+def test_builtin_pd_frontend_declares_cache_read_when_both_roles_report_details() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["gateway_backend"] = "builtin"
+    input_payload["pd_router_backend"] = "builtin"
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    for role in roles:
+        cast(dict[str, object], role["settings"])["enable_prompt_tokens_details"] = True
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    assert result.gateway is not None
+    assert (
+        result.gateway.endpoint.prompt_cache_read_zero_representation
+        is PromptCacheReadZeroRepresentation.explicit
+    )
+
+    # Only one role reporting is not enough: the gateway must not claim a
+    # capability a role's responses cannot carry.
+    cast(dict[str, object], roles[1]["settings"]).pop("enable_prompt_tokens_details")
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    assert result.gateway is not None
+    assert result.gateway.endpoint.prompt_cache_read_zero_representation is None
 
 
 def test_vllm_router_targets_replica_entrypoints_and_defers_startup_timeout() -> None:
@@ -515,3 +625,215 @@ def test_vllm_router_targets_replica_entrypoints_and_defers_startup_timeout() ->
         "http://node-d.example:8000",
     ]
     assert argv[argv.index("--worker-startup-timeout-secs") + 1] == "2147483647"
+
+
+def single_plan_payload(parallelism: dict[str, object]) -> dict[str, object]:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["topology"] = "single"
+    input_payload["gateway_backend"] = None
+    input_payload["pd_router_backend"] = None
+    input_payload["kv_transfer"] = None
+    input_payload["roles"] = [
+        {
+            "id": "serve",
+            "kind": "serve",
+            "replica_count": 1,
+            "parallelism": parallelism,
+            "settings": {},
+        }
+    ]
+    return payload
+
+
+def test_single_topology_lowers_context_parallelism_to_decode_cp() -> None:
+    payload = single_plan_payload(
+        {
+            "outer": {"tensor_parallel_size": 2},
+            "attention": {"context_parallel_size": 2},
+        }
+    )
+    request = AdapterRequest.model_validate(payload)
+
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    attention = result.roles[0].effective_parallelism.attention
+    assert attention is not None
+    assert attention.tensor_parallel_size == 2
+    assert attention.context_parallel_size == 2
+    assert result.replicas[0].device_count == 2
+
+    render_payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    render_input = cast(dict[str, object], render_payload["input"])
+    render_input["topology"] = "single"
+    render_input["gateway_backend"] = None
+    render_input["pd_router_backend"] = None
+    render_input["kv_transfer"] = None
+    serve_allocation = cast(dict[str, object], cast(list[object], render_input["allocations"])[0])
+    serve_allocation.update(
+        {"process": "serve", "role": "serve", "role_kind": "serve", "links": []}
+    )
+    serve_parallelism = cast(dict[str, object], serve_allocation["effective_parallelism"])
+    cast(dict[str, object], serve_parallelism["attention"])["context_parallel_size"] = 2
+    render_input["allocations"] = [serve_allocation]
+
+    render_request = AdapterRequest.model_validate(render_payload)
+    assert isinstance(render_request.root, AdapterRequestRenderServe)
+    argv = render_serve(render_request.root.input).processes[0].root.command.argv
+
+    assert argv[argv.index("--decode-context-parallel-size") + 1] == "2"
+    assert "--prefill-context-parallel-size" not in argv
+
+
+def test_decode_context_parallel_size_must_divide_tensor_parallel_size() -> None:
+    payload = single_plan_payload(
+        {
+            "outer": {"tensor_parallel_size": 2},
+            "attention": {"context_parallel_size": 3},
+        }
+    )
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+
+
+def test_prefill_role_lowers_context_parallelism_to_prefill_cp() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["parallelism"] = {
+        "outer": {"tensor_parallel_size": 2},
+        "attention": {"context_parallel_size": 2},
+    }
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    attention = result.roles[0].effective_parallelism.attention
+    assert attention is not None
+    assert attention.tensor_parallel_size == 2
+    assert attention.context_parallel_size == 2
+    device_counts = {replica.role_id: replica.device_count for replica in result.replicas}
+    assert device_counts == {"prefill": 4, "decode": 2}
+
+    render_payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    render_input = cast(dict[str, object], render_payload["input"])
+    allocations = cast(list[dict[str, object]], render_input["allocations"])
+    prefill_parallelism = cast(dict[str, object], allocations[0]["effective_parallelism"])
+    cast(dict[str, object], prefill_parallelism["attention"])["context_parallel_size"] = 2
+
+    render_request = AdapterRequest.model_validate(render_payload)
+    assert isinstance(render_request.root, AdapterRequestRenderServe)
+    rendered = render_serve(render_request.root.input)
+    prefill_argv = rendered.processes[0].root.command.argv
+    decode_argv = rendered.processes[1].root.command.argv
+
+    assert prefill_argv[prefill_argv.index("--prefill-context-parallel-size") + 1] == "2"
+    assert "--decode-context-parallel-size" not in prefill_argv
+    assert "--prefill-context-parallel-size" not in decode_argv
+    assert "--decode-context-parallel-size" not in decode_argv
+
+
+def test_prefill_context_parallelism_excludes_attention_data_parallelism() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["parallelism"] = {
+        "outer": {"tensor_parallel_size": 2},
+        "attention": {"context_parallel_size": 2, "data_parallel_size": 2},
+    }
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert "declared attention.context_parallel_size=2" in response.root.error.message
+    assert "attention.data_parallel_size=2" in response.root.error.message
+
+
+def test_rejects_a_declared_expert_tensor_parallel_size_that_misses_the_derived_value() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["parallelism"] = {
+        "outer": {"tensor_parallel_size": 2},
+        "experts": {"tensor_parallel_size": 3},
+    }
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert (
+        "outer.tensor_parallel_size * attention.context_parallel_size * "
+        "attention.data_parallel_size (2)" in response.root.error.message
+    )
+    assert "declared 3" in response.root.error.message
+
+
+def test_prefill_context_parallelism_enters_the_expert_world() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["parallelism"] = {
+        "outer": {"tensor_parallel_size": 2},
+        "attention": {"context_parallel_size": 2},
+        "experts": {"expert_parallel_size": 4},
+    }
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    experts = result.roles[0].effective_parallelism.experts
+    assert experts is not None
+    assert experts.expert_parallel_size == 4
+
+    roles[1]["parallelism"] = {
+        "outer": {"tensor_parallel_size": 2},
+        "attention": {"context_parallel_size": 2},
+        "experts": {"expert_parallel_size": 2},
+    }
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    decode_experts = result.roles[1].effective_parallelism.experts
+    assert decode_experts is not None
+    assert decode_experts.expert_parallel_size == 2
+
+
+def test_prefill_context_parallelism_rejects_an_expert_size_without_cp() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["parallelism"] = {
+        "outer": {"tensor_parallel_size": 2},
+        "attention": {"context_parallel_size": 2},
+        "experts": {"expert_parallel_size": 2},
+    }
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+
+
+def test_extra_args_rejects_inferlab_owned_context_parallel_options() -> None:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    cast(dict[str, object], roles[0]["settings"])["extra_args"] = [
+        "--decode-context-parallel-size",
+        "2",
+    ]
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert "--decode-context-parallel-size" in response.root.error.message

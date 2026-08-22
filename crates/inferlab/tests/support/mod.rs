@@ -248,6 +248,10 @@ pub(crate) struct EndpointProjection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct CaptureTargetProjection {
+    #[serde(default)]
+    pub mechanism: String,
+    #[serde(default)]
+    pub capture_storage: Option<String>,
     pub window_control_endpoint: String,
     pub control_process_id: String,
     pub start: HttpActionProjection,

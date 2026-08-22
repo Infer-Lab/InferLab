@@ -2,7 +2,9 @@ from typing import cast
 
 import pytest
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
     AdapterOperationError,
+    CaptureMechanism,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -57,7 +59,7 @@ def _plan_input(**overrides: object) -> PlanServeInput:
         "pd_router_backend": None,
         "kv_transfer": None,
         "roles": roles,
-        "profiling": False,
+        "profiling": None,
     }
     base.update(overrides)
     return PlanServeInput.model_validate(base)
@@ -79,6 +81,7 @@ def test_plan_single_topology() -> None:
     assert endpoint.server_metrics is None
     assert endpoint.prefix_cache_reset is not None
     assert endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert endpoint.prefix_cache_conditioning is None
     assert result.gateway is None
     assert result.pd_router is None
     outer = result.roles[0].effective_parallelism.outer
@@ -86,12 +89,13 @@ def test_plan_single_topology() -> None:
 
 
 def test_plan_single_declares_cuda_profiler_window_control() -> None:
-    result = plan_serve(_plan_input(profiling=True))
+    result = plan_serve(_plan_input(profiling=CaptureMechanism.managed_collection))
 
     assert len(result.replicas) == 1
     target = result.replicas[0].capture_target
     assert target is not None
     assert target.model_dump(mode="json") == {
+        "mechanism": "managed_collection",
         "window_control": {
             "endpoint": "replica_entry",
             "start": {
@@ -104,7 +108,7 @@ def test_plan_single_declares_cuda_profiler_window_control() -> None:
                 "path": "/stop_profile",
                 "body": None,
             },
-        }
+        },
     }
 
 
@@ -157,7 +161,7 @@ def _prefill_decode_plan_input(
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
     prefill_replicas: int = 2,
     decode_replicas: int = 3,
-    profiling: bool = False,
+    profiling: CaptureMechanism | None = None,
 ) -> PlanServeInput:
     return _plan_input(
         topology=ServeTopology.prefill_decode,
@@ -208,12 +212,14 @@ def test_plan_prefill_decode_uses_the_shared_bootstrap_shape(
     assert result.gateway.endpoint.server_metrics is None
     assert result.gateway.endpoint.prefix_cache_reset is not None
     assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
+    assert result.gateway.endpoint.prefix_cache_conditioning is not None
+    assert result.gateway.endpoint.prefix_cache_conditioning.path == "/prime_prefix_cache"
     assert result.pd_router is not None
     assert result.pd_router.backend == "builtin"
 
 
 def test_plan_prefill_decode_declares_every_replica_as_a_capture_target() -> None:
-    result = plan_serve(_prefill_decode_plan_input(profiling=True))
+    result = plan_serve(_prefill_decode_plan_input(profiling=CaptureMechanism.managed_collection))
 
     assert len(result.replicas) == 5
     for replica in result.replicas:
@@ -233,6 +239,44 @@ def test_plan_prefill_decode_declares_every_replica_as_a_capture_target() -> Non
         }
 
 
+def test_plan_builtin_prefill_decode_declares_cache_read_when_both_roles_report() -> None:
+    roles = _prefill_decode_roles(prefill_replicas=1, decode_replicas=1)
+    for role in roles:
+        role.settings = {"enable_cache_report": SettingValue(root=True)}
+
+    result = plan_serve(
+        _plan_input(
+            topology=ServeTopology.prefill_decode,
+            gateway_backend="builtin",
+            pd_router_backend="builtin",
+            kv_transfer=KvTransferMechanism.mooncake,
+            roles=roles,
+        )
+    )
+
+    assert result.gateway is not None
+    assert (
+        result.gateway.endpoint.prompt_cache_read_zero_representation
+        is PromptCacheReadZeroRepresentation.omitted
+    )
+
+    # Only one role reporting is not enough: the gateway must not claim a
+    # capability a role's responses cannot carry.
+    roles[1].settings = {}
+    result = plan_serve(
+        _plan_input(
+            topology=ServeTopology.prefill_decode,
+            gateway_backend="builtin",
+            pd_router_backend="builtin",
+            kv_transfer=KvTransferMechanism.mooncake,
+            roles=roles,
+        )
+    )
+
+    assert result.gateway is not None
+    assert result.gateway.endpoint.prompt_cache_read_zero_representation is None
+
+
 def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
     result = plan_serve(
         _prefill_decode_plan_input(
@@ -246,6 +290,7 @@ def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
     ]
     assert result.gateway is not None
     assert result.gateway.backend == "sglang-router"
+    assert result.gateway.endpoint.prefix_cache_conditioning is None
     assert result.pd_router is not None
     readiness = result.pd_router.readiness.root
     assert isinstance(readiness, ReadinessProbeHttpTargetRegistry)
@@ -353,6 +398,17 @@ def test_plan_accepts_the_moe_dp_boundary_shapes() -> None:
     )
     experts = exact.roles[0].effective_parallelism.experts
     assert experts is not None and experts.tensor_parallel_size == 1
+    # The serve role renders declared CP as prefill CP with its enable flags.
+    rendered = render_serve(
+        _render_input(
+            parallelism=exact.roles[0].effective_parallelism,
+            settings=exact.roles[0].effective_settings,
+        )
+    )
+    argv = rendered.processes[0].root.command.argv
+    assert argv[argv.index("--attention-context-parallel-size") + 1] == "2"
+    assert "--enable-prefill-cp" in argv
+    assert argv[argv.index("--cp-strategy") + 1] == "zigzag"
     # moe-dp == 1 keeps every previously qualified combination untouched.
     divides = _plan_with_parallelism(
         Parallelism(
@@ -362,6 +418,241 @@ def test_plan_accepts_the_moe_dp_boundary_shapes() -> None:
     )
     experts = divides.roles[0].effective_parallelism.experts
     assert experts is not None and experts.tensor_parallel_size == 4
+
+
+def test_render_single_role_context_parallelism_enables_prefill_cp() -> None:
+    plan = _plan_with_parallelism(
+        Parallelism(
+            outer=ParallelismOuter(tensor_parallel_size=2),
+            attention=ParallelismAttention(context_parallel_size=2),
+        )
+    )
+    attention = plan.roles[0].effective_parallelism.attention
+    assert attention is not None and attention.tensor_parallel_size == 1
+    assert plan.replicas[0].device_count == 2, "prefill CP does not grow the device count"
+
+    result = render_serve(
+        _render_input(
+            parallelism=plan.roles[0].effective_parallelism,
+            settings=plan.roles[0].effective_settings,
+        )
+    )
+    argv = result.processes[0].root.command.argv
+    assert argv[argv.index("--attention-context-parallel-size") + 1] == "2"
+    assert "--enable-prefill-cp" in argv
+    assert argv[argv.index("--cp-strategy") + 1] == "zigzag"
+    assert "--enable-dp-attention" in argv, "serve-role CP still subdivides the world"
+
+
+def _prefill_decode_with_decode_parallelism(parallelism: Parallelism) -> PlanServeInput:
+    return _plan_input(
+        topology=ServeTopology.prefill_decode,
+        gateway_backend="builtin",
+        pd_router_backend="builtin",
+        kv_transfer=KvTransferMechanism.mooncake,
+        roles=[
+            ServeRoleInput(
+                id="prefill",
+                kind=ServeRoleKind.prefill,
+                replica_count=1,
+                parallelism=Parallelism(outer=ParallelismOuter(tensor_parallel_size=2)),
+                settings={},
+            ),
+            ServeRoleInput(
+                id="decode",
+                kind=ServeRoleKind.decode,
+                replica_count=1,
+                parallelism=parallelism,
+                settings={},
+            ),
+        ],
+    )
+
+
+def _decode_render_input(
+    parallelism: Parallelism, settings: dict[str, SettingValue]
+) -> RenderServeInput:
+    return RenderServeInput.model_validate(
+        {
+            "model": ServeModelInput(id="example", served_name="example"),
+            "topology": ServeTopology.prefill_decode,
+            "gateway_backend": "builtin",
+            "pd_router_backend": "builtin",
+            "kv_transfer": KvTransferMechanism.mooncake,
+            "profiling": None,
+            "allocations": [
+                {
+                    "kind": "model_rank",
+                    "process": "decode-000",
+                    "role": "decode",
+                    "role_kind": "decode",
+                    "replica": 0,
+                    "rank": 0,
+                    "rank_count": 1,
+                    "machine": "local",
+                    "model_locator": "/models/example",
+                    "devices": [0, 1],
+                    "endpoint": {"host": "127.0.0.1", "port": 8000},
+                    "ports": {},
+                    "cache": "/cache/decode",
+                    "launch": {"kind": "local"},
+                    "effective_settings": settings,
+                    "effective_parallelism": parallelism,
+                    "links": [],
+                    "dependencies": [],
+                    "render_inputs": [],
+                }
+            ],
+        }
+    )
+
+
+def test_prefill_decode_decode_role_context_parallelism_lowers_to_dcp() -> None:
+    plan = plan_serve(
+        _prefill_decode_with_decode_parallelism(
+            Parallelism(
+                outer=ParallelismOuter(tensor_parallel_size=2),
+                attention=ParallelismAttention(context_parallel_size=2),
+            )
+        )
+    )
+    decode_role = plan.roles[1]
+    attention = decode_role.effective_parallelism.attention
+    assert attention is not None
+    assert attention.tensor_parallel_size == 2, "decode CP does not divide attention TP"
+    assert attention.context_parallel_size == 2, "the declared degree is preserved"
+    assert plan.replicas[1].device_count == 2, "decode CP does not grow the device count"
+
+    result = render_serve(
+        _decode_render_input(decode_role.effective_parallelism, decode_role.effective_settings)
+    )
+    argv = result.processes[0].root.command.argv
+    assert argv[argv.index("--dcp-size") + 1] == "2"
+    assert "--attention-context-parallel-size" not in argv
+    assert "--enable-dp-attention" not in argv, "decode CP alone does not need DP attention"
+    assert argv[argv.index("--disaggregation-mode") + 1] == "decode"
+
+
+def test_plan_rejects_decode_role_context_parallelism_that_does_not_divide_tp() -> None:
+    with pytest.raises(AdapterOperationError, match="context_parallel_size"):
+        plan_serve(
+            _prefill_decode_with_decode_parallelism(
+                Parallelism(
+                    outer=ParallelismOuter(tensor_parallel_size=3),
+                    attention=ParallelismAttention(context_parallel_size=2),
+                )
+            )
+        )
+
+
+def test_plan_rejects_decode_role_moe_dp_with_context_parallelism() -> None:
+    # The decode role lowers CP to --dcp-size, so its launch-time attention CP
+    # is 1 and can never equal a moe-dp above 1 as the engine requires.
+    with pytest.raises(AdapterOperationError, match=r"experts\.data_parallel_size") as caught:
+        plan_serve(
+            _prefill_decode_with_decode_parallelism(
+                Parallelism(
+                    outer=ParallelismOuter(tensor_parallel_size=4),
+                    attention=ParallelismAttention(context_parallel_size=2),
+                    experts=ParallelismExperts(data_parallel_size=2),
+                )
+            )
+        )
+    assert "declared attention.context_parallel_size=2" in caught.value.message
+    assert "moe-dp=2" in caught.value.message
+    assert "launch-time attention CP is 1" in caught.value.message
+
+
+def test_plan_rejects_inferlab_owned_cp_strategy_in_extra_args() -> None:
+    with pytest.raises(AdapterOperationError, match="--cp-strategy") as caught:
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(["--cp-strategy", "piecewise"]),
+                }
+            )
+        )
+    assert caught.value.code == AdapterErrorCode.invalid_settings
+
+
+def test_render_allows_verbatim_cp_strategy_override_after_the_sentinel() -> None:
+    parallelism = Parallelism(
+        outer=ParallelismOuter(tensor_parallel_size=2),
+        attention=ParallelismAttention(context_parallel_size=2),
+    )
+    plan = plan_serve(
+        _plan_input(
+            roles=[
+                ServeRoleInput(
+                    id="serve",
+                    kind=ServeRoleKind.serve,
+                    replica_count=1,
+                    parallelism=parallelism,
+                    settings={
+                        "extra_args": SettingValue.model_validate(
+                            ["--", "--cp-strategy", "piecewise"]
+                        ),
+                    },
+                )
+            ],
+        )
+    )
+    result = render_serve(
+        _render_input(
+            parallelism=plan.roles[0].effective_parallelism,
+            settings=plan.roles[0].effective_settings,
+        )
+    )
+    argv = result.processes[0].root.command.argv
+    assert "--" not in argv, "the composition sentinel never reaches the engine argv"
+    assert argv.count("--cp-strategy") == 1, "the verbatim mention suppresses the managed group"
+    assert argv[argv.index("--cp-strategy") + 1] == "piecewise"
+    assert "--enable-prefill-cp" not in argv, "the store-true managed flag is suppressed too"
+    assert "--attention-context-parallel-size" not in argv
+
+
+def test_render_verbatim_dsa_flag_owns_the_prefill_cp_group() -> None:
+    """DeepSeek-V4 needs the DSA spelling: the verbatim block replaces the
+    whole managed prefill-CP cluster while the declared CP size still drives
+    planning and records ([[RFC-0003:C-RESOLUTION]])."""
+    parallelism = Parallelism(
+        outer=ParallelismOuter(tensor_parallel_size=2),
+        attention=ParallelismAttention(context_parallel_size=2),
+    )
+    plan = plan_serve(
+        _plan_input(
+            roles=[
+                ServeRoleInput(
+                    id="serve",
+                    kind=ServeRoleKind.serve,
+                    replica_count=1,
+                    parallelism=parallelism,
+                    settings={
+                        "extra_args": SettingValue.model_validate(
+                            ["--", "--enable-dsa-prefill-context-parallel"]
+                        ),
+                    },
+                )
+            ],
+        )
+    )
+    # The declared CP size still validates and lands on the effective shape.
+    assert (
+        plan.roles[0].effective_parallelism.attention is not None
+        and plan.roles[0].effective_parallelism.attention.context_parallel_size == 2
+    )
+    result = render_serve(
+        _render_input(
+            parallelism=plan.roles[0].effective_parallelism,
+            settings=plan.roles[0].effective_settings,
+        )
+    )
+    argv = result.processes[0].root.command.argv
+    assert "--enable-prefill-cp" not in argv
+    assert "--cp-strategy" not in argv
+    assert "--attention-context-parallel-size" not in argv
+    assert argv[-1:] == ["--enable-dsa-prefill-context-parallel"]
+    assert "--enable-dp-attention" in argv, "the DP-attention world split still applies"
 
 
 def _dp_parallelism() -> Parallelism:
@@ -460,7 +751,8 @@ def test_render_lowers_pipeline_parallelism() -> None:
 
 
 def _render_input(**overrides: object) -> RenderServeInput:
-    profiling = cast(bool, overrides.pop("profiling", False))
+    profiling = cast(CaptureMechanism | None, overrides.pop("profiling", None))
+    capture_storage = cast(str | None, overrides.pop("capture_storage", None))
     plan = plan_serve(_plan_input(profiling=profiling))
     parallelism = cast(
         Parallelism,
@@ -493,6 +785,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
                     "endpoint": {"host": "127.0.0.1", "port": 8000},
                     "ports": {},
                     "cache": "/cache/server",
+                    **({"capture_storage": capture_storage} if capture_storage is not None else {}),
                     "launch": {"kind": "local"},
                     "effective_settings": settings,
                     "effective_parallelism": parallelism,
@@ -511,7 +804,7 @@ def _prefill_decode_render_input(
     *,
     frontend_backend: str = "builtin",
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
-    profiling: bool = False,
+    profiling: CaptureMechanism | None = None,
 ) -> RenderServeInput:
     plan = plan_serve(
         _prefill_decode_plan_input(
@@ -630,14 +923,56 @@ def test_metrics_capability_matches_the_effective_sglang_launch() -> None:
     assert "--enable-metrics" in result.processes[0].root.command.argv
 
 
+def test_plan_engine_trace_declares_torch_window_control() -> None:
+    result = plan_serve(_plan_input(profiling=CaptureMechanism.engine_trace))
+
+    target = result.replicas[0].capture_target
+    assert target is not None
+    assert target.model_dump(mode="json") == {
+        "mechanism": "engine_trace",
+        "window_control": {
+            "endpoint": "replica_entry",
+            "start": {
+                "method": "post",
+                "path": "/start_profile",
+                "body": {"activities": ["GPU"]},
+            },
+            "stop": {
+                "method": "post",
+                "path": "/stop_profile",
+                "body": None,
+            },
+        },
+    }
+
+
+def test_render_engine_trace_injects_the_torch_profiler_directory() -> None:
+    result = render_serve(
+        _render_input(
+            profiling=CaptureMechanism.engine_trace,
+            capture_storage="/records/serve/engine-trace/server",
+        )
+    )
+
+    env = result.processes[0].root.command.env
+    assert env["SGLANG_TORCH_PROFILER_DIR"] == "/records/serve/engine-trace/server"
+
+
+def test_render_engine_trace_requires_the_assigned_trace_directory() -> None:
+    with pytest.raises(AdapterOperationError, match="trace directory"):
+        render_serve(_render_input(profiling=CaptureMechanism.engine_trace))
+
+
 def test_render_profiling_keeps_model_server_commands_unchanged() -> None:
     ordinary = render_serve(_render_input())
-    profiled = render_serve(_render_input(profiling=True))
+    profiled = render_serve(_render_input(profiling=CaptureMechanism.managed_collection))
 
     assert profiled.processes == ordinary.processes
 
     ordinary_pd = render_serve(_prefill_decode_render_input())
-    profiled_pd = render_serve(_prefill_decode_render_input(profiling=True))
+    profiled_pd = render_serve(
+        _prefill_decode_render_input(profiling=CaptureMechanism.managed_collection)
+    )
     assert profiled_pd.processes == ordinary_pd.processes
 
 

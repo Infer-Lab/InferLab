@@ -4,8 +4,7 @@ use crate::record::{
     RECORD_FILE, RECORDS_DIR, RecordIdentity, now_unix_ms, record_id, validate_record_id,
 };
 use inferlab_profiler::cleanup::ProfilerCleanupRecord;
-use inferlab_profiler::plan::ProfilerTargetRecord;
-use inferlab_profiler::record::CaptureActionRecord;
+use inferlab_profiler::record::{CaptureActionRecord, ProfilerTargetRecord};
 use inferlab_runtime::server::{
     CleanupEvidence, ProcessHandle, ReadinessEvidence, ReadinessFailure,
 };
@@ -138,7 +137,11 @@ pub(crate) struct ServerRecord {
 }
 
 impl ServerRecord {
-    pub(crate) const SCHEMA_VERSION: u32 = 6;
+    /// Bumped on the protocol-v7 to v8 hard cut: version-6 records (products
+    /// 0.10 and 0.11) predate the separate frontend component evidence and
+    /// the engine-trace capture fields and must be stopped by the version
+    /// gate, not by a bare serde variant error.
+    pub(crate) const SCHEMA_VERSION: u32 = 7;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -368,21 +371,33 @@ pub(super) fn load_record(root: &Path, id: &str) -> Result<ServerRecord, Inferla
         path: path.clone(),
         source,
     })?;
-    let record: ServerRecord =
+    // The version gates before the strict record parse: a record written
+    // before a hard schema cut may no longer decode as the current shape at
+    // all, and it must still surface the version gate rather than a bare
+    // serde variant error.
+    let header: SchemaVersionHeader =
         serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode {
             path: path.clone(),
             source,
         })?;
-    if record.schema_version != ServerRecord::SCHEMA_VERSION {
+    if header.schema_version != ServerRecord::SCHEMA_VERSION {
         return Err(InferlabError::InvalidConfig {
             message: format!(
                 "server record {id:?} has unsupported schema version {}; expected {}",
-                record.schema_version,
+                header.schema_version,
                 ServerRecord::SCHEMA_VERSION
             ),
         });
     }
-    Ok(record)
+    serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode { path, source })
+}
+
+/// The lenient version header: only the version, no field policy, so an old
+/// record reaches the version gate even when its body predates the current
+/// record shape.
+#[derive(Deserialize)]
+struct SchemaVersionHeader {
+    schema_version: u32,
 }
 
 fn write_record(root: &Path, record: &ServerRecord) -> Result<(), InferlabError> {

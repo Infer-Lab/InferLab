@@ -25,7 +25,7 @@ pub(super) fn run_bench_client(
     runtime_environment: &[(&str, &str)],
 ) -> Result<AcceptedClient<BenchClientResult>, InferlabError> {
     let request = BenchClientRequest {
-        protocol_version: ProtocolVersion::V7,
+        protocol_version: ProtocolVersion::V8,
         endpoint: wire::endpoint_input(&plan.client.endpoint),
         model: wire::model_input(&plan.client.model),
         definition: wire::bench_definition_input(&plan.client.effective_definition)?,

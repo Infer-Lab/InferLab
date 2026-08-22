@@ -6,6 +6,7 @@ from typing import Annotated
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
+    CaptureMechanism,
     CaptureTargetRequirement,
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
@@ -232,6 +233,12 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
         )
     settings = validate_settings(EngineContractSettings, role.settings)
     parallelism, tensor_parallel_size = _pure_tp_parallelism(role.parallelism)
+    mechanism = input.profiling
+    if mechanism == CaptureMechanism.engine_trace:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the Specialized Engine integration does not support engine-trace capture",
+        )
     role_result = ServeRoleResult(
         id=role.id,
         kind=role.kind,
@@ -274,6 +281,7 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
                 worker_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
                 capture_target=(
                     CaptureTargetRequirement(
+                        mechanism=CaptureMechanism.managed_collection,
                         window_control=CaptureWindowControlRequirement(
                             endpoint=CaptureWindowControlEndpoint.gateway,
                             start=CaptureWindowHttpActionSpec(
@@ -282,9 +290,9 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
                             stop=CaptureWindowHttpActionSpec(
                                 method=HttpMethod(), path="/stop_profile"
                             ),
-                        )
+                        ),
                     )
-                    if input.profiling
+                    if mechanism is not None
                     else None
                 ),
             )

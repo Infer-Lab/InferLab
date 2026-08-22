@@ -37,7 +37,7 @@ from .support import resolved_prompt_input
 def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchClientRequest:
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "7",
+            "protocol_version": "8",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -151,7 +151,7 @@ def test_agentic_source_preparation_closes_the_release_qualified_file(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "7",
+            "protocol_version": "8",
             "phase": {
                 "kind": "acquire",
                 "resolved_revision": source.catalog.revision,
@@ -185,7 +185,7 @@ def test_agentic_source_resolution_uses_the_release_revision_not_mutable_main(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "7",
+            "protocol_version": "8",
             "phase": {"kind": "resolve"},
             "source": {"kind": "agentic", "source": source.model_dump()},
             "artifact_dir": str(tmp_path / "assets"),

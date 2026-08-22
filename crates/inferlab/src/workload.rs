@@ -25,8 +25,9 @@ pub(crate) use runtime::{run_bench, run_eval};
 
 pub(crate) use plan::{
     BenchCasePlan, BenchExecutionPlan, BenchPlan, BenchPrefixCacheConditioningPlan,
-    BenchPreparationStep, ClientCommandPlan, EvalExecutionPlan, EvalPlan, LoadShape,
-    MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan, WorkloadServerAccess,
+    BenchPreparationStep, ClientCommandPlan, ConditioningServingShape, EvalExecutionPlan, EvalPlan,
+    LoadShape, MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan,
+    WorkloadServerAccess,
 };
 pub(crate) use planning::{resolve_manual_bench, resolve_measurements, resolved_request_count};
 

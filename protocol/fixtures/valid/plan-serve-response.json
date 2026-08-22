@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "7",
+  "protocol_version": "8",
   "result": {
     "operation": "plan_serve",
     "output": {
@@ -21,9 +21,21 @@
             "trust_remote_code": true
           },
           "effective_parallelism": {
-            "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
-            "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
-            "experts": {"tensor_parallel_size": 2, "data_parallel_size": 1, "expert_parallel_size": 1, "dense_tensor_parallel_size": 1}
+            "outer": {
+              "tensor_parallel_size": 2,
+              "pipeline_parallel_size": 1
+            },
+            "attention": {
+              "tensor_parallel_size": 2,
+              "data_parallel_size": 1,
+              "context_parallel_size": 1
+            },
+            "experts": {
+              "tensor_parallel_size": 2,
+              "data_parallel_size": 1,
+              "expert_parallel_size": 1,
+              "dense_tensor_parallel_size": 1
+            }
           },
           "render_inputs": []
         },
@@ -37,9 +49,21 @@
             "trust_remote_code": true
           },
           "effective_parallelism": {
-            "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
-            "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
-            "experts": {"tensor_parallel_size": 2, "data_parallel_size": 1, "expert_parallel_size": 1, "dense_tensor_parallel_size": 1}
+            "outer": {
+              "tensor_parallel_size": 2,
+              "pipeline_parallel_size": 1
+            },
+            "attention": {
+              "tensor_parallel_size": 2,
+              "data_parallel_size": 1,
+              "context_parallel_size": 1
+            },
+            "experts": {
+              "tensor_parallel_size": 2,
+              "data_parallel_size": 1,
+              "expert_parallel_size": 1,
+              "dense_tensor_parallel_size": 1
+            }
           },
           "render_inputs": []
         }
@@ -50,15 +74,31 @@
           "role_id": "prefill",
           "replica_index": 0,
           "device_count": 2,
-          "ports": ["bootstrap"],
-          "primary_ports": ["master"],
-          "primary_readiness": {"kind": "http", "path": "/v1/models"},
-          "worker_readiness": {"kind": "process_alive"},
+          "ports": [
+            "bootstrap"
+          ],
+          "primary_ports": [
+            "master"
+          ],
+          "primary_readiness": {
+            "kind": "http",
+            "path": "/v1/models"
+          },
+          "worker_readiness": {
+            "kind": "process_alive"
+          },
           "capture_target": {
+            "mechanism": "managed_collection",
             "window_control": {
               "endpoint": "replica_entry",
-              "start": {"method": "post", "path": "/start_profile"},
-              "stop": {"method": "post", "path": "/stop_profile"}
+              "start": {
+                "method": "post",
+                "path": "/start_profile"
+              },
+              "stop": {
+                "method": "post",
+                "path": "/stop_profile"
+              }
             }
           }
         },
@@ -68,23 +108,60 @@
           "replica_index": 0,
           "device_count": 2,
           "ports": [],
-          "primary_ports": ["master"],
-          "primary_readiness": {"kind": "http", "path": "/v1/models"},
-          "worker_readiness": {"kind": "process_alive"},
+          "primary_ports": [
+            "master"
+          ],
+          "primary_readiness": {
+            "kind": "http",
+            "path": "/v1/models"
+          },
+          "worker_readiness": {
+            "kind": "process_alive"
+          },
           "capture_target": {
+            "mechanism": "managed_collection",
             "window_control": {
               "endpoint": "replica_entry",
-              "start": {"method": "post", "path": "/start_profile"},
-              "stop": {"method": "post", "path": "/stop_profile"}
+              "start": {
+                "method": "post",
+                "path": "/start_profile"
+              },
+              "stop": {
+                "method": "post",
+                "path": "/stop_profile"
+              }
             }
           }
         }
       ],
       "links": [
-        {"kind": "request_routing", "source": "gateway", "targets": ["pd_router"]},
-        {"kind": "request_routing", "source": "pd_router", "targets": ["prefill", "decode"]},
-        {"kind": "kv_transfer", "source": "prefill", "target": "decode", "mechanism": "mooncake"},
-        {"kind": "bootstrap", "source": "pd_router", "target": "prefill", "port": "bootstrap"}
+        {
+          "kind": "request_routing",
+          "source": "gateway",
+          "targets": [
+            "pd_router"
+          ]
+        },
+        {
+          "kind": "request_routing",
+          "source": "pd_router",
+          "targets": [
+            "prefill",
+            "decode"
+          ]
+        },
+        {
+          "kind": "kv_transfer",
+          "source": "prefill",
+          "target": "decode",
+          "mechanism": "mooncake"
+        },
+        {
+          "kind": "bootstrap",
+          "source": "pd_router",
+          "target": "prefill",
+          "port": "bootstrap"
+        }
       ],
       "gateway": {
         "backend": "vllm-router",
@@ -96,28 +173,45 @@
           "completions_path": "/v1/completions",
           "chat_completions_path": "/v1/chat/completions"
         },
-        "readiness": {"kind": "http", "path": "/v1/models"},
+        "readiness": {
+          "kind": "http",
+          "path": "/v1/models"
+        },
         "ports": [],
-        "targets": [{"kind": "pd_router"}],
+        "targets": [
+          {
+            "kind": "pd_router"
+          }
+        ],
         "render_inputs": [],
         "render_source": "integration",
-        "co_rendering": {"process_role": "gateway"}
+        "co_rendering": {
+          "process_role": "gateway"
+        }
       },
       "pd_router": {
         "backend": "vllm-router",
         "implementation": "vllm-router",
         "implementation_version": "fixture-frontend-version",
         "effective_settings": {},
-        "policies": {"prefill": "round_robin", "decode": "round_robin"},
+        "policies": {
+          "prefill": "round_robin",
+          "decode": "round_robin"
+        },
         "prefill_role": "prefill",
         "decode_role": "decode",
         "target_scheme": "http",
         "ports": [],
-        "readiness": {"kind": "http", "path": "/v1/models"},
+        "readiness": {
+          "kind": "http",
+          "path": "/v1/models"
+        },
         "handoff": "in_process",
         "render_inputs": [],
         "render_source": "integration",
-        "co_rendering": {"process_role": "gateway"}
+        "co_rendering": {
+          "process_role": "gateway"
+        }
       }
     }
   }

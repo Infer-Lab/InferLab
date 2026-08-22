@@ -193,7 +193,7 @@ pub(super) fn run_population_preparation(
     let (request_source, session_source) =
         wire::bench_population_source_inputs(&plan.client.effective_definition)?;
     let request = BenchPopulationPreparationRequest {
-        protocol_version: ProtocolVersion::V7,
+        protocol_version: ProtocolVersion::V8,
         model: wire::model_input(&plan.client.model),
         tokenizer_backend: plan.client.tokenizer_backend.clone(),
         transformers_version: plan.client.toolchain.transformers_version.clone(),

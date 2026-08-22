@@ -62,7 +62,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v7.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v8.schema.json"
 
 
 class FixtureSettings(BaseModel):

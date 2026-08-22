@@ -29,9 +29,14 @@ const fixedEntries = [
     description: 'Author profiling, runtime-image, and invocation-patch behavior.',
   },
   {
-    source: 'plugins/inferlab/skills/inferlab/references/measurement-authoring.md',
-    target: 'src/content/docs/docs/guides/workspace-authoring/measurement-authoring.md',
-    description: 'Author Eval, Bench, dataset, session, metric, and SLO behavior.',
+    source: 'plugins/inferlab/skills/inferlab/references/eval-authoring.md',
+    target: 'src/content/docs/docs/guides/workspace-authoring/eval-authoring.md',
+    description: 'Author Eval task, dataset, and inference-request behavior.',
+  },
+  {
+    source: 'plugins/inferlab/skills/inferlab/references/bench-authoring.md',
+    target: 'src/content/docs/docs/guides/workspace-authoring/bench-authoring.md',
+    description: 'Author serving-Bench load, source, session, metric, and SLO behavior.',
   },
   {
     source: 'docs/tui.md',

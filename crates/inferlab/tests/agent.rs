@@ -643,7 +643,8 @@ fn a_gate_failure_on_one_runtime_skips_the_other() -> Result<(), Box<dyn Error>>
         "plugins/inferlab/skills/inferlab/references/workspace-authoring.md",
         "plugins/inferlab/skills/inferlab/references/workspace-definition.md",
         "plugins/inferlab/skills/inferlab/references/execution-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/measurement-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/eval-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/bench-authoring.md",
     ] {
         let target = partial.path().join(relative);
         fs::create_dir_all(target.parent().ok_or("parent")?)?;
@@ -687,7 +688,8 @@ fn a_corrupt_authoring_reference_fails_before_native_cli() -> Result<(), Box<dyn
         "plugins/inferlab/skills/inferlab/references/workspace-authoring.md",
         "plugins/inferlab/skills/inferlab/references/workspace-definition.md",
         "plugins/inferlab/skills/inferlab/references/execution-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/measurement-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/eval-authoring.md",
+        "plugins/inferlab/skills/inferlab/references/bench-authoring.md",
     ] {
         let target = partial.path().join(relative);
         fs::create_dir_all(target.parent().ok_or("parent")?)?;
@@ -696,7 +698,7 @@ fn a_corrupt_authoring_reference_fails_before_native_cli() -> Result<(), Box<dyn
     fs::write(
         partial
             .path()
-            .join("plugins/inferlab/skills/inferlab/references/measurement-authoring.md"),
+            .join("plugins/inferlab/skills/inferlab/references/eval-authoring.md"),
         [0xff],
     )?;
 
@@ -715,7 +717,7 @@ fn a_corrupt_authoring_reference_fails_before_native_cli() -> Result<(), Box<dyn
         report["rows"][0]["message"]
             .as_str()
             .ok_or("message")?
-            .contains("measurement-authoring.md is corrupted"),
+            .contains("eval-authoring.md is corrupted"),
         "{report}"
     );
     assert_eq!(harness.logged()?, "");

@@ -3,7 +3,9 @@ from typing import cast
 
 import pytest
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
     AdapterOperationError,
+    CaptureMechanism,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -70,7 +72,7 @@ def _plan_input(**overrides: object) -> PlanServeInput:
         "pd_router_backend": None,
         "kv_transfer": None,
         "roles": roles,
-        "profiling": False,
+        "profiling": None,
     }
     base.update(overrides)
     return PlanServeInput.model_validate(base)
@@ -251,7 +253,9 @@ def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
     with pytest.raises(AdapterOperationError):
         plan_serve(_prefill_decode_plan_input(frontend_backend="builtin"))
     with pytest.raises(AdapterOperationError):
-        plan_serve(_plan_input(profiling=True))
+        plan_serve(_plan_input(profiling=CaptureMechanism.managed_collection))
+    with pytest.raises(AdapterOperationError):
+        plan_serve(_plan_input(profiling=CaptureMechanism.engine_trace))
 
     unsupported = [
         Parallelism(outer=ParallelismOuter(tensor_parallel_size=4, pipeline_parallel_size=2)),
@@ -288,6 +292,31 @@ def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
         plan_serve(_plan_input(settings={"unknown": SettingValue(root=1)}))
 
 
+def test_plan_rejects_a_zero_replica_count() -> None:
+    with pytest.raises(
+        AdapterOperationError, match="supports exactly one serve replica"
+    ) as single_error:
+        plan_serve(
+            _plan_input(
+                roles=[
+                    ServeRoleInput(
+                        id="serve",
+                        kind=ServeRoleKind.serve,
+                        replica_count=0,
+                        parallelism=_dsv4_parallelism(),
+                        settings=_dsv4_settings(),
+                    )
+                ]
+            )
+        )
+    assert single_error.value.code is AdapterErrorCode.invalid_settings
+
+    with pytest.raises(AdapterOperationError, match="replica count must be positive") as pd_error:
+        plan_serve(_prefill_decode_plan_input(decode_replicas=0))
+    assert pd_error.value.code is AdapterErrorCode.invalid_settings
+    assert "'decode'" in pd_error.value.message
+
+
 def _render_input(**overrides: object) -> RenderServeInput:
     plan = plan_serve(_plan_input())
     parallelism = cast(
@@ -304,7 +333,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
-        "profiling": False,
+        "profiling": None,
         "allocations": [
             ServeProcessAllocation.model_validate(
                 {
@@ -413,7 +442,7 @@ def _prefill_decode_render_input() -> RenderServeInput:
         gateway_backend=plan_input.gateway_backend,
         pd_router_backend=plan_input.pd_router_backend,
         kv_transfer=plan_input.kv_transfer,
-        profiling=False,
+        profiling=None,
         allocations=allocations,
     )
 

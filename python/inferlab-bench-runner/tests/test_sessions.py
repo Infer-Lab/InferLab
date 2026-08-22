@@ -41,7 +41,7 @@ def session_request(tmp_path: Path, artifact_level: str = "diagnostic") -> Bench
     )
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "7",
+            "protocol_version": "8",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -115,7 +115,7 @@ def session_preparation_request(
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "7",
+            "protocol_version": "8",
             "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

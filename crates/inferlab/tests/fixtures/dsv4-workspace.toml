@@ -24,6 +24,7 @@ kv_cache_dtype = "fp8"
 gpu_memory_utilization = 0.95
 trust_remote_code = true
 compilation_config = { cudagraph_mode = "FULL_AND_PIECEWISE", custom_ops = ["all"] }
+extra_args = ["--max-num-seqs", "64", "--language-model-only"]
 
 [servers.dsv4-qualify.roles.serve.parallelism.attention]
 context_parallel_size = 1
@@ -33,6 +34,9 @@ block_size = 16
 
 [servers.dsv4-qualify.cases.tp2.parallelism.outer]
 tensor_parallel_size = 2
+
+[servers.dsv4-qualify.cases.tp4.settings]
+extra_args = ["--max-num-seqs", "128", "--enable-prefix-caching"]
 
 [servers.dsv4-qualify.cases.tp4.parallelism.outer]
 tensor_parallel_size = 4

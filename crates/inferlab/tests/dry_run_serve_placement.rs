@@ -302,6 +302,67 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn case_extra_args_merge_per_flag_group_with_the_server_base() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+
+    let tp2 = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    assert_eq!(
+        tp2["server"]["roles"][0]["effective_settings"]["extra_args"],
+        serde_json::json!(["--max-num-seqs", "64", "--language-model-only"]),
+        "the default case inherits the base extra_args unchanged"
+    );
+
+    let tp4 = workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--case",
+        "tp4",
+        "--dry-run",
+    ])?;
+    assert_eq!(
+        tp4["server"]["roles"][0]["effective_settings"]["extra_args"],
+        serde_json::json!([
+            "--max-num-seqs",
+            "128",
+            "--language-model-only",
+            "--enable-prefix-caching"
+        ]),
+        "the case group replaces --max-num-seqs in place, inherits --language-model-only, and appends its own flag"
+    );
+    assert!(!workspace.root.path().join(".inferlab/records").exists());
+    Ok(())
+}
+
+#[test]
+fn invocation_set_extra_args_merges_after_the_case_layer() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--case",
+        "tp4",
+        "--set",
+        "server.settings.extra_args=[\"--max-num-seqs\", \"32\", \"--enable-chunked-prefill\"]",
+        "--dry-run",
+    ])?;
+    assert_eq!(
+        plan["server"]["roles"][0]["effective_settings"]["extra_args"],
+        serde_json::json!([
+            "--max-num-seqs",
+            "32",
+            "--language-model-only",
+            "--enable-prefix-caching",
+            "--enable-chunked-prefill"
+        ]),
+        "the invocation layer applies the same group merge after the case layer"
+    );
+    assert!(!workspace.root.path().join(".inferlab/records").exists());
+    Ok(())
+}
+
+#[test]
 fn gateway_single_uses_one_process_only_frontend_without_model_coordinates()
 -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
@@ -368,6 +429,8 @@ fn gateway_single_uses_one_process_only_frontend_without_model_coordinates()
             .as_ref()
             .ok_or("missing capture target")?,
         &support::CaptureTargetProjection {
+            mechanism: "managed_collection".to_owned(),
+            capture_storage: None,
             window_control_endpoint: "gateway".to_owned(),
             control_process_id: "gateway".to_owned(),
             start: support::HttpActionProjection {
@@ -1731,5 +1794,333 @@ fn profiler_deadlines_must_be_positive() -> Result<(), Box<dyn Error>> {
             String::from_utf8_lossy(&output.stderr).contains(&format!("{field} must be nonzero"))
         );
     }
+    Ok(())
+}
+
+/// The effective engine-trace mechanism rides each capture target into the
+/// dry-run plan together with the control-plane-assigned persistent trace
+/// directory ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_dry_run_preserves_mechanism_and_assigned_trace_storage()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+    ])?;
+
+    let engines = resolved_ranks(&plan["server"])?;
+    let target = engines[0]
+        .rank
+        .capture_target
+        .as_ref()
+        .ok_or("missing capture target")?;
+    assert_eq!(target.mechanism, "engine_trace");
+    assert_eq!(
+        target
+            .start
+            .body
+            .as_ref()
+            .and_then(|body| body.get("activities")),
+        Some(&serde_json::json!(["GPU"]))
+    );
+    let expected = workspace
+        .root
+        .path()
+        .join(".inferlab/runtime/engine-trace/dsv4-qualify/server");
+    assert_eq!(
+        target.capture_storage.as_deref(),
+        expected.to_str(),
+        "the assigned trace directory lives under the record-owned runtime root"
+    );
+    assert_eq!(
+        plan["server"]["profiler_escapes"]["mechanism"],
+        "engine_trace"
+    );
+
+    // The invocation layer resolves to the same effective mechanism.
+    let invocation = TestWorkspace::new()?;
+    let plan = invocation.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+        "--set",
+        "server.profiler.mechanism=\"engine_trace\"",
+    ])?;
+    let engines = resolved_ranks(&plan["server"])?;
+    assert_eq!(
+        engines[0]
+            .rank
+            .capture_target
+            .as_ref()
+            .ok_or("missing capture target")?
+            .mechanism,
+        "engine_trace"
+    );
+    Ok(())
+}
+
+/// The undeclared finalization budget default follows the resolved capture
+/// mechanism ([[RFC-0003:C-RESOLUTION]]): 3600 s for engine trace, whose
+/// close dispatch, response consumption, and flush wait share the one
+/// budget, against 300 s for managed collection; an explicit declaration
+/// still wins. The managed default is pinned by
+/// `serve_and_recipe_dry_run_share_the_default_case`.
+#[test]
+fn engine_trace_finalization_default_is_mechanism_aware() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+    ])?;
+    assert_eq!(
+        plan["server"]["capture_finalization_deadline_seconds"],
+        3600
+    );
+
+    let overridden = workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+        "--set",
+        "server.capture_finalization_deadline_seconds=90",
+    ])?;
+    assert_eq!(
+        overridden["server"]["capture_finalization_deadline_seconds"],
+        90
+    );
+    Ok(())
+}
+
+/// Case and role declarations of the mechanism resolve with scalar-replace
+/// precedence onto the same single effective mechanism
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_mechanism_resolves_from_case_and_role_scopes() -> Result<(), Box<dyn Error>> {
+    let case_workspace = TestWorkspace::new()?;
+    let manifest = case_workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.cases.tp2.profiler]\nmechanism = \"engine_trace\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let plan = case_workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+    ])?;
+    let engines = resolved_ranks(&plan["server"])?;
+    assert_eq!(
+        engines[0]
+            .rank
+            .capture_target
+            .as_ref()
+            .ok_or("missing capture target")?
+            .mechanism,
+        "engine_trace"
+    );
+
+    let role_workspace = TestWorkspace::new()?;
+    let manifest = role_workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.roles.serve.profiler]\nmechanism = \"engine_trace\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let plan = role_workspace.run_json(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+    ])?;
+    let engines = resolved_ranks(&plan["server"])?;
+    assert_eq!(
+        engines[0]
+            .rank
+            .capture_target
+            .as_ref()
+            .ok_or("missing capture target")?
+            .mechanism,
+        "engine_trace"
+    );
+    Ok(())
+}
+
+/// Engine-trace targets declare no profiler escape inputs
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): a same-scope conflict fails at
+/// workspace load, and a cross-layer conflict fails at resolution.
+#[test]
+fn engine_trace_rejects_nsys_escape_inputs() -> Result<(), Box<dyn Error>> {
+    let loaded = TestWorkspace::new()?;
+    let manifest = loaded.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n\n[servers.dsv4-qualify.profiler.nsys]\nsampling = \"cpu\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let output = loaded.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("engine-trace targets declare no profiler escape inputs")
+    );
+
+    // The server layer alone is a valid managed-collection declaration; a
+    // case that replaces the mechanism composes into the conflict.
+    let composed = TestWorkspace::new()?;
+    let manifest = composed.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.profiler.nsys]\nsampling = \"cpu\"\n\n[servers.dsv4-qualify.cases.tp2.profiler]\nmechanism = \"engine_trace\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let output = composed.run(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+    ])?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("engine-trace targets declare no profiler escape inputs")
+    );
+    Ok(())
+}
+
+/// Profiler declarations must not silently drop when profiling resolves off
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): resolution rejects them with the
+/// enable-profiling remediation.
+#[test]
+fn profiler_declarations_require_profiling_enabled() -> Result<(), Box<dyn Error>> {
+    // Invocation-declared mechanism without profiling = true.
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiler.mechanism=\"engine_trace\"",
+    ])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("profiler.mechanism") && stderr.contains("profiling = true"),
+        "the rejection names the declaration and the remediation: {stderr}"
+    );
+
+    // Manifest-declared nsys escapes without profiling = true.
+    let nsys_workspace = TestWorkspace::new()?;
+    let manifest = nsys_workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[servers.dsv4-qualify.profiler.nsys]\nsampling = \"cpu\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+    let output = nsys_workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("profiler.nsys") && stderr.contains("profiling = true"),
+        "the rejection names the declaration and the remediation: {stderr}"
+    );
+
+    // The same declarations resolve once profiling is enabled.
+    let output = nsys_workspace.run(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--set",
+        "server.profiling=true",
+    ])?;
+    assert!(
+        output.status.success(),
+        "profiling = true accepts the nsys declaration: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Engine-trace capture requires an entirely local placement: InferLab
+/// defines no remote trace retrieval ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_rejects_a_non_local_placement() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    fs::write(
+        &bindings_path,
+        format!(
+            "{}\n[machines.remote]\nhost = \"192.0.2.10\"\nworkspace = \"/remote/workspace\"\nports = [8000]\ndevices = [0, 1, 2, 3]\nlaunch = {{ kind = \"ssh\", target = \"remote.example\" }}\n\n[placements.remote]\nmachines = [\"remote\"]\n",
+            fs::read_to_string(&bindings_path)?,
+        ),
+    )?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "dsv4-qualify",
+        "--dry-run",
+        "--placement",
+        "remote",
+        "--set",
+        "server.profiling=true",
+        "--set",
+        "server.profiler.mechanism=\"engine_trace\"",
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("engine-trace") && stderr.contains("entirely local placement"),
+        "the rejection names the local-placement boundary: {stderr}"
+    );
     Ok(())
 }

@@ -11,6 +11,8 @@ pub enum ProfilerError {
     },
     #[error("managed server has no prepared profiling targets")]
     NoTargets,
+    #[error("engine-trace profiling target {process_id:?} has no assigned trace directory")]
+    EngineTraceMissingStorage { process_id: String },
     #[error("profiling target does not support framework-range control")]
     UnsupportedWindowControl,
     #[error("range-backed profiling requires static workload windows")]

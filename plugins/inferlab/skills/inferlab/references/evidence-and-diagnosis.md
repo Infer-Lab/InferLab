@@ -73,7 +73,6 @@ families include configuration/environment/toolchain (`E1xxx`),
 integration/protocol (`E2xxx`), placement (`E3xxx`), lifecycle/profiling/image
 (`E4xxx`), record/operation observation (`E5xxx`), scratchpad (`E6xxx`), agent
 plugin (`E7xxx`), ad-hoc execution (`E8xxx`), and command output (`E9xxx`).
-Consult the release's `docs/rfc/RFC-0001.md` registry for exact meanings.
 
 A failed launch or closed-loop run still finalizes its record and attempts
 cleanup. Inspect the record before retrying. For a suspected manual server leak:

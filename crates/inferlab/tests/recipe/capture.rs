@@ -746,6 +746,295 @@ fn capture_armed_readiness_fails_immediately_on_process_exit() -> Result<(), Box
     Ok(())
 }
 
+/// Engine-trace capture: the profiled Bench opens and closes the window
+/// through the same HTTP actions, the unwrapped fixture engine lands one new
+/// trace artifact per window in the record-owned trace directory, and the
+/// storage-delta coverage verification confirms every device
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_capture_collects_rank_trace_artifacts() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.append_manifest(
+        "\n[servers.dsv4-qualify.profiler]\n\
+         mechanism = \"engine_trace\"\n",
+    )?;
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("captured Bench has no record id")?,
+    )?;
+    assert_eq!(bench["capture"]["status"], "succeeded");
+    assert_eq!(
+        bench["capture"]["plan"]["deadlines"],
+        serde_json::json!({
+            "capture_arm_deadline_seconds": 60,
+            "capture_control_deadline_seconds": 60,
+            "capture_finalization_deadline_seconds": 3600,
+        }),
+        "the undeclared finalization default follows the engine-trace mechanism"
+    );
+    assert_eq!(
+        bench["capture"]["windows"][0]["start"][0]["body"],
+        serde_json::json!({"activities": ["GPU"]})
+    );
+    assert!(
+        bench["capture"]["reports"]
+            .as_array()
+            .is_some_and(|reports| reports.is_empty()),
+        "an engine-trace capture has no managed reports"
+    );
+    let coverage = &bench["capture"]["engine_trace"][0];
+    assert_eq!(coverage["verified"], true);
+    assert_eq!(coverage["expected_artifacts"], 2);
+    let trace_dir = coverage["trace_dir"]
+        .as_str()
+        .ok_or("engine-trace coverage has no trace directory")?
+        .to_owned();
+    assert!(
+        trace_dir.ends_with(".inferlab/runtime/engine-trace/dsv4-qualify/server"),
+        "the trace directory lives under the record-owned runtime root: {trace_dir}"
+    );
+    assert_eq!(
+        coverage["new_files"].as_array().map(Vec::len),
+        Some(4),
+        "one new artifact per window: {coverage}"
+    );
+    let landed = fs::read_dir(&trace_dir)?.count();
+    assert_eq!(landed, 4, "the trace artifacts persist in {trace_dir}");
+    let finalization = &bench["capture"]["finalization"][0];
+    assert_eq!(finalization["kind"], "engine_trace_flush");
+    assert_eq!(finalization["close_confirmed"], true);
+    assert_eq!(finalization["succeeded"], true);
+
+    let server = workspace.load_record(
+        recipe["server"]["id"]
+            .as_str()
+            .ok_or("recipe has no server record id")?,
+    )?;
+    assert_eq!(
+        server["resolved"]["server"]["capture_finalization_deadline_seconds"], 3600,
+        "the resolved server preserves the engine-trace finalization default"
+    );
+    let profiler = &process_evidence(&server, "server")?["profiler"];
+    assert_eq!(profiler["mechanism"], "engine_trace");
+    assert_eq!(profiler["trace_storage"], Value::from(trace_dir.clone()));
+    assert_eq!(
+        profiler["launch_prefix"],
+        serde_json::json!([]),
+        "an engine-trace target is not wrapped"
+    );
+    assert!(
+        process_evidence(&server, "server")?["profiler_cleanup"].is_null(),
+        "an engine-trace target has no managed collection agent to clean up"
+    );
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+/// A missing worker trace artifact fails the capture with coverage evidence,
+/// even though the window-closing control response arrived successfully —
+/// coverage is the sole flush verdict ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_capture_fails_when_a_rank_artifact_is_missing() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_capture_finalization_deadline(1)?;
+    workspace.append_manifest(
+        "\n[servers.dsv4-qualify.profiler]\n\
+         mechanism = \"engine_trace\"\n",
+    )?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_STOP_PROFILE_SKIP_REPORT", "1")
+        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("captured Bench has no record id")?,
+    )?;
+    assert_eq!(bench["capture"]["status"], "failed");
+    let coverage = &bench["capture"]["engine_trace"][0];
+    assert_eq!(coverage["verified"], false);
+    assert_eq!(coverage["new_files"], serde_json::json!([]));
+    let error = bench["capture"]["error"]
+        .as_str()
+        .ok_or("failed capture has no error")?;
+    assert!(
+        error.contains("every device must produce one"),
+        "the coverage failure must surface: {error}"
+    );
+    Ok(())
+}
+
+/// The failed window-closing control is adjudicated by coverage: the trace
+/// artifacts landed, so the engine-trace capture succeeds and carries the
+/// failed stop actions as evidence ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_failed_window_stop_is_adjudicated_by_coverage() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.append_manifest(
+        "\n[servers.dsv4-qualify.profiler]\n\
+         mechanism = \"engine_trace\"\n",
+    )?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_STOP_PROFILE_FAIL", "1")
+        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "verified rank artifacts must adjudicate a failed stop: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("captured Bench has no record id")?,
+    )?;
+    assert_eq!(bench["capture"]["status"], "succeeded");
+    assert_eq!(
+        bench["capture"]["windows"][0]["stop"][0]["succeeded"],
+        false
+    );
+    assert_eq!(bench["capture"]["engine_trace"][0]["verified"], true);
+    assert_eq!(
+        bench["capture"]["finalization"][0]["close_confirmed"], false,
+        "the failed stop leaves the close unconfirmed"
+    );
+    Ok(())
+}
+
+/// An engine-trace close whose response never arrives inside the
+/// finalization budget is neutral flush-pending evidence — not an error, not
+/// a deadline failure kind — and the capture still succeeds because coverage
+/// verifies the landed artifacts ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn engine_trace_slow_window_stop_records_flush_pending_and_succeeds_via_coverage()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_capture_finalization_deadline(2)?;
+    workspace.append_manifest(
+        "\n[servers.dsv4-qualify.profiler]\n\
+         mechanism = \"engine_trace\"\n",
+    )?;
+    let output = workspace
+        .command()
+        // Two artifacts per stop cover the TP2 replica's device count from
+        // the first window alone; the stop response outlasts the budget.
+        .env("FIXTURE_STOP_PROFILE_ARTIFACTS", "2")
+        .env("FIXTURE_STOP_PROFILE_DELAY_SECONDS", "5")
+        .args([
+            "recipe",
+            "run",
+            "dsv4-qualify",
+            "--capture",
+            "c8k1k",
+            "--set",
+            "benches.c8k1k.concurrency=[1]",
+        ])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "a flush-pending close must not fail a capture whose coverage verifies: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("captured Bench has no record id")?,
+    )?;
+    assert_eq!(bench["capture"]["status"], "succeeded");
+    let stop = &bench["capture"]["windows"][0]["stop"][0];
+    assert_eq!(stop["succeeded"], true);
+    assert_eq!(stop["flush_pending"], true);
+    assert_eq!(stop["status"], Value::Null);
+    assert_eq!(stop["error"], Value::Null);
+    assert!(
+        stop.get("failure_kind").is_none(),
+        "flush-pending evidence carries no failure kind: {stop}"
+    );
+    assert_eq!(stop["timing"]["terminal_cause"], "timed_out");
+    assert_eq!(bench["capture"]["engine_trace"][0]["verified"], true);
+    assert_eq!(
+        bench["capture"]["engine_trace"][0]["new_files"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        bench["capture"]["finalization"][0]["close_confirmed"], false,
+        "no close response arrived to confirm receipt"
+    );
+    Ok(())
+}
+
+/// A slow stop on a managed collection keeps the per-action control budget:
+/// its expiry is window-closing deadline failure evidence, adjudicated by
+/// the verified reports ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+#[test]
+fn managed_window_stop_keeps_the_per_action_control_deadline() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_capture_deadline(1)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_STOP_PROFILE_DELAY_SECONDS", "2")
+        .args([
+            "recipe",
+            "run",
+            "dsv4-qualify",
+            "--capture",
+            "c8k1k",
+            "--set",
+            "benches.c8k1k.concurrency=[1]",
+        ])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "verified reports must adjudicate the timed-out managed stop: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("captured Bench has no record id")?,
+    )?;
+    assert_eq!(bench["capture"]["status"], "succeeded");
+    let stop = &bench["capture"]["windows"][0]["stop"][0];
+    assert_eq!(stop["succeeded"], false);
+    assert_eq!(stop["failure_kind"], "deadline");
+    assert_eq!(
+        stop.get("flush_pending"),
+        None,
+        "managed stops never record flush-pending evidence"
+    );
+    assert!(
+        bench["capture"]["reports"]
+            .as_array()
+            .is_some_and(|reports| reports.iter().all(|report| report["verified"] == true))
+    );
+    Ok(())
+}
+
 /// Window-opening control keeps a deadline — the server fact
 /// `capture_control_deadline_seconds` — because a lost start silently shifts
 /// range identities ([[RFC-0004:C-WORKLOAD-PROFILING]]).

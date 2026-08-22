@@ -112,3 +112,92 @@ pub(crate) fn validate_eval_task_source(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flat_eval_rejects_a_server_owned_chat_template_control()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+
+[request_body.chat_template_kwargs]
+enable_thinking = true
+"#,
+        )?;
+        let Err(error) = validate_eval("gsm8k", &definition) else {
+            return Err(std::io::Error::other(
+                "a flat Eval must reject a server-owned template control",
+            )
+            .into());
+        };
+        assert!(
+            error.to_string().contains("chat_template_kwargs"),
+            "{error}"
+        );
+
+        let server_chat: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+prompt = { kind = "server_chat" }
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+
+[request_body.chat_template_kwargs]
+enable_thinking = true
+"#,
+        )?;
+        validate_eval("gsm8k", &server_chat)?;
+        Ok(())
+    }
+
+    #[test]
+    fn inference_request_body_rejects_owned_members_and_toml_dates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let reserved: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+request_body = { messages = [] }
+"#,
+        )?;
+        let Err(error) = validate_eval("gsm8k", &reserved) else {
+            return Err(std::io::Error::other(
+                "messages should be owned by the measurement runtime",
+            )
+            .into());
+        };
+        let error = error.to_string();
+        assert!(error.contains("request_body.messages"), "{error}");
+
+        let Err(date) = toml::from_str::<EvalDefinition>(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+request_body = { vendor_date = 2026-07-15 }
+"#,
+        ) else {
+            return Err(
+                std::io::Error::other("TOML dates should have no exact JSON projection").into(),
+            );
+        };
+        let date = date.to_string();
+        assert!(date.contains("JSON-compatible value"), "{date}");
+        Ok(())
+    }
+}

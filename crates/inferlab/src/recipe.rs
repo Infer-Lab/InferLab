@@ -70,7 +70,10 @@ pub(crate) struct RecipeRecord {
 }
 
 impl RecipeRecord {
-    const SCHEMA_VERSION: u32 = 3;
+    /// Bumped with `ServerRecord::SCHEMA_VERSION` on the protocol-v7 to v8
+    /// hard cut: version-3 records (products 0.10 and 0.11) embed a
+    /// pre-cut resolved execution and record references.
+    const SCHEMA_VERSION: u32 = 4;
 }
 
 pub(crate) fn run(

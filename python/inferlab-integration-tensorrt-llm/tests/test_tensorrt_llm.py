@@ -6,6 +6,7 @@ import pytest
 import yaml  # type: ignore[import-untyped]
 from inferlab_adapter_sdk import (
     AdapterOperationError,
+    CaptureMechanism,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -58,7 +59,7 @@ def _plan_input(**overrides: object) -> PlanServeInput:
         "pd_router_backend": None,
         "kv_transfer": None,
         "roles": roles,
-        "profiling": False,
+        "profiling": None,
     }
     base.update(overrides)
     return PlanServeInput.model_validate(base)
@@ -97,7 +98,9 @@ def test_plan_single_topology() -> None:
 
 def test_plan_rejects_unsupported_shapes() -> None:
     with pytest.raises(AdapterOperationError):
-        plan_serve(_plan_input(profiling=True))
+        plan_serve(_plan_input(profiling=CaptureMechanism.managed_collection))
+    with pytest.raises(AdapterOperationError):
+        plan_serve(_plan_input(profiling=CaptureMechanism.engine_trace))
     with pytest.raises(AdapterOperationError):
         plan_serve(_plan_input(settings={"unknown_setting": SettingValue(root=1)}))
     with pytest.raises(AdapterOperationError):
@@ -334,7 +337,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
-        "profiling": False,
+        "profiling": None,
         "allocations": [
             ServeProcessAllocation.model_validate(
                 {
@@ -450,7 +453,7 @@ def _prefill_decode_render_input(
         gateway_backend=frontend_backend,
         pd_router_backend=frontend_backend,
         kv_transfer=KvTransferMechanism.nixl,
-        profiling=False,
+        profiling=None,
         allocations=allocations,
     )
 

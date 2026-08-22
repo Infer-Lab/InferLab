@@ -3,7 +3,7 @@
 
 use crate::bench_metric::BenchMetric;
 use inferlab_profiler::plan::NsysEscapes;
-use inferlab_protocol::{KvTransferMechanism, Parallelism, ServeTopology};
+use inferlab_protocol::{CaptureMechanism, KvTransferMechanism, Parallelism, ServeTopology};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -152,6 +152,11 @@ pub(crate) const DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS: u64 = 60;
 pub(crate) const DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS: u64 = 60;
 pub(crate) const DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS: u64 = 300;
+/// The engine-trace finalization default ([[RFC-0003:C-RESOLUTION]]): the
+/// close dispatch, its response consumption, and the artifact flush wait
+/// share this one budget, and real flushes have run tens of minutes
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+pub(crate) const DEFAULT_ENGINE_TRACE_CAPTURE_FINALIZATION_DEADLINE_SECONDS: u64 = 3600;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -168,19 +173,35 @@ pub(crate) struct ServeRoleDefinition {
     pub settings: BTreeMap<String, JsonValue>,
 }
 
-/// Operator escape inputs onto the managed Nsight Systems commands
-/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): option lists splice ahead of the
-/// managed argv tails so managed values win on collision, and dedicated
-/// fields replace their managed defaults.
+/// Operator escape inputs onto the managed Nsight Systems commands plus the
+/// capture-mechanism selection ([[RFC-0004:C-WORKLOAD-PROFILING]]): option
+/// lists splice ahead of the managed argv tails so managed values win on
+/// collision, dedicated fields replace their managed defaults, and the
+/// mechanism is a scalar that replaces under composition.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ProfilerEscapes {
+    /// The requested capture mechanism; omission resolves to
+    /// `managed_collection` at resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<CaptureMechanism>,
     pub nsys: NsysEscapes,
 }
 
 impl ProfilerEscapes {
     pub(crate) fn is_empty(&self) -> bool {
-        self.nsys.is_empty()
+        self.mechanism.is_none() && self.nsys.is_empty()
+    }
+
+    /// Role declarations merge into the server's common inputs: the nsys
+    /// escapes follow [`NsysEscapes::merged_with`] and the mechanism is a
+    /// scalar the role replaces ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[must_use]
+    pub(crate) fn merged_with(&self, role: &Self) -> Self {
+        Self {
+            mechanism: role.mechanism.or(self.mechanism),
+            nsys: self.nsys.merged_with(&role.nsys),
+        }
     }
 }
 
@@ -991,7 +1012,309 @@ pub(crate) struct ServerCaseDefinition {
     pub pd_router_backend: Option<String>,
     pub kv_transfer: Option<KvTransferMechanism>,
     pub profiling: Option<bool>,
+    /// Case-scoped capture-mechanism declaration; the mechanism is the only
+    /// profiler field a case may carry ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[serde(skip_serializing_if = "ProfilerEscapes::is_empty")]
+    pub profiler: ProfilerEscapes,
     pub parallelism: Parallelism,
     pub settings: BTreeMap<String, JsonValue>,
     pub roles: BTreeMap<String, ServeRoleOverride>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicitly_declared_aggregate_slos_must_be_nonempty()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = toml::from_str::<WorkspaceConfig>(
+            r#"
+schema_version = 2
+[benches.invalid]
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
+aggregate_slos = []
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        );
+        let Err(error) = result else {
+            return Err(std::io::Error::other(
+                "an explicitly empty aggregate_slos declaration must be rejected",
+            )
+            .into());
+        };
+
+        assert!(error.to_string().contains("non-empty"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_serving_authoring_resolves_to_the_explicit_canonical_definition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let explicit = toml::from_str::<WorkspaceConfig>(
+            r#"
+schema_version = 2
+[benches.ordinary]
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 64, max = 128 }, output_tokens = 32 }
+concurrency = [1, 8]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+"#,
+        )?;
+        let ordinary = toml::from_str::<WorkspaceConfig>(
+            r#"
+schema_version = 2
+[benches.ordinary]
+request_source = { kind = "random", input_tokens = { min = 64, max = 128 }, output_tokens = 32 }
+concurrency = [1, 8]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+"#,
+        )?;
+
+        assert_eq!(
+            serde_json::to_value(&ordinary.benches["ordinary"])?,
+            serde_json::to_value(&explicit.benches["ordinary"])?,
+            "authoring defaults must disappear into one canonical definition"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn openai_smoke_omission_resolves_to_stable_effective_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<EvalDefinition>(r#"kind = "openai-smoke""#)?;
+        let value = serde_json::to_value(&definition)?;
+
+        assert_eq!(value["kind"], "openai-smoke");
+        assert_eq!(value["prompt"], "Hello");
+        assert_eq!(value["max_tokens"], 16);
+        assert_eq!(value["timeout_seconds"], 60);
+        Ok(())
+    }
+
+    #[test]
+    fn serving_bench_rejects_a_public_chat_template_field() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Err(error) = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
+chat_template = "templates/qwen.jinja"
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        ) else {
+            return Err(std::io::Error::other("chat_template must not be a Bench field").into());
+        };
+        assert!(error.to_string().contains("unknown field `chat_template`"));
+        Ok(())
+    }
+
+    #[test]
+    fn weighted_random_mixture_prompt_omission_resolves_to_flat()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 8192, output_tokens = 1024, weight = 3 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::RandomMixture {
+                prompt,
+                ..
+            }) if prompt.declared().is_none() && prompt.effective() == &BenchPrompt::Flat
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_flat_token_shape_is_not_a_second_bench_authority() {
+        let result = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+input_tokens = 128
+output_tokens = 32
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        );
+
+        assert!(result.is_err_and(|error| error.to_string().contains("input_tokens")));
+    }
+
+    #[test]
+    fn aggregate_slo_metric_deserializes_directly_into_the_closed_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let constraint: AggregateSlo = toml::from_str("metric = \"p95_ttft_ms\"\nat_most = 800.0")?;
+        let unknown =
+            toml::from_str::<AggregateSlo>("metric = \"aiperf_private_latency\"\nat_most = 800.0");
+
+        assert_eq!(constraint.metric.name(), "p95_ttft_ms");
+        assert!(unknown.is_err_and(|error| error.to_string().contains("unknown Bench metric")));
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_eval_task_uses_the_named_release_catalog_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = { bundled = "estonia" }
+metric = "estonia_pass"
+metric_filter = "strict-terminal-answer"
+threshold = 0.5
+timeout_seconds = 3600
+"#,
+        )?;
+
+        let EvalDefinition::LmEval { task, .. } = definition else {
+            return Err(std::io::Error::other("fixture should be lm-eval").into());
+        };
+        assert!(matches!(
+            task,
+            EvalTaskSource::Bundled { bundled } if bundled == "estonia"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_omitted_eval_prompt_resolves_to_flat_without_claiming_a_declaration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let omitted: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+"#,
+        )?;
+        let EvalDefinition::LmEval { prompt, .. } = omitted else {
+            return Err(std::io::Error::other("fixture should be lm-eval").into());
+        };
+        assert!(prompt.declared().is_none());
+        assert_eq!(prompt.effective(), &EvalPrompt::Flat);
+
+        let declared: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+prompt = { kind = "server_chat" }
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+"#,
+        )?;
+        let EvalDefinition::LmEval { prompt, .. } = declared else {
+            return Err(std::io::Error::other("fixture should be lm-eval").into());
+        };
+        assert_eq!(prompt.declared(), Some(&EvalPrompt::ServerChat));
+        assert_eq!(prompt.effective(), &EvalPrompt::ServerChat);
+        Ok(())
+    }
+
+    #[test]
+    fn inference_request_body_preserves_nested_toml_json_types()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+timeout_seconds = 300
+
+[request_body]
+temperature = 1.0
+logprobs = true
+stop_token_ids = [1, 2]
+
+[request_body.chat_template_kwargs]
+enable_thinking = false
+"#,
+        )?;
+
+        let EvalDefinition::LmEval { request_body, .. } = definition else {
+            return Err(std::io::Error::other("fixture should be lm-eval").into());
+        };
+        assert!(matches!(
+            request_body.get("temperature"),
+            Some(JsonValue::Float(value)) if *value == 1.0
+        ));
+        assert!(matches!(
+            request_body.get("logprobs"),
+            Some(JsonValue::Bool(true))
+        ));
+        assert!(matches!(
+            request_body.get("stop_token_ids"),
+            Some(JsonValue::Array(values)) if values.len() == 2
+        ));
+        assert!(matches!(
+            request_body.get("chat_template_kwargs"),
+            Some(JsonValue::Object(values))
+                if values.get("enable_thinking") == Some(&JsonValue::Bool(false))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn role_escapes_merge_into_common_server_escapes() {
+        let common = NsysEscapes {
+            executable: Some("nsys".to_owned()),
+            launch_options: vec!["--cuda-graph-trace=node".to_owned()],
+            start_options: vec!["--nic-metrics=true".to_owned()],
+            trace: vec!["cuda".to_owned()],
+            sampling: Some("cpu".to_owned()),
+            context_switch: None,
+            env: BTreeMap::from([
+                ("NSYS_SHARED".to_owned(), "common".to_owned()),
+                ("NSYS_COMMON_ONLY".to_owned(), "1".to_owned()),
+            ]),
+        };
+        let role = NsysEscapes {
+            executable: None,
+            launch_options: vec!["--nvtx-domain-include=prefill".to_owned()],
+            start_options: Vec::new(),
+            trace: vec!["cuda".to_owned(), "nvtx".to_owned()],
+            sampling: Some("process-tree".to_owned()),
+            context_switch: Some("system-wide".to_owned()),
+            env: BTreeMap::from([("NSYS_SHARED".to_owned(), "role".to_owned())]),
+        };
+        let merged = common.merged_with(&role);
+        assert_eq!(merged.executable.as_deref(), Some("nsys"));
+        assert_eq!(
+            merged.launch_options,
+            ["--cuda-graph-trace=node", "--nvtx-domain-include=prefill"]
+        );
+        assert_eq!(merged.start_options, ["--nic-metrics=true"]);
+        assert_eq!(merged.trace, ["cuda", "nvtx"]);
+        assert_eq!(merged.sampling.as_deref(), Some("process-tree"));
+        assert_eq!(merged.context_switch.as_deref(), Some("system-wide"));
+        assert_eq!(
+            merged.env,
+            BTreeMap::from([
+                ("NSYS_COMMON_ONLY".to_owned(), "1".to_owned()),
+                ("NSYS_SHARED".to_owned(), "role".to_owned()),
+            ])
+        );
+    }
 }

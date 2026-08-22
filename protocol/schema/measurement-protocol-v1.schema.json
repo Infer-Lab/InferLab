@@ -3836,12 +3836,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `7` (serialized as the\nstring `\"7\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `8` (serialized as the\nstring `\"8\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 7.",
+          "description": "Protocol version 8.",
           "type": "string",
-          "const": "7"
+          "const": "8"
         }
       ]
     },

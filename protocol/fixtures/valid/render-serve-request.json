@@ -1,13 +1,16 @@
 {
   "operation": "render_serve",
-  "protocol_version": "7",
+  "protocol_version": "8",
   "input": {
-    "model": {"id": "dsv4", "served_name": "dsv4"},
+    "model": {
+      "id": "dsv4",
+      "served_name": "dsv4"
+    },
     "topology": "prefill_decode",
     "gateway_backend": "vllm-router",
     "pd_router_backend": "vllm-router",
     "kv_transfer": "mooncake",
-    "profiling": true,
+    "profiling": "engine_trace",
     "allocations": [
       {
         "kind": "model_rank",
@@ -20,19 +23,57 @@
         "machine": "node-a",
         "model_locator": "/models/dsv4",
         "cache": "/cache/runtime/node-a/prefill",
-        "devices": [0, 1],
-        "endpoint": {"host": "node-a.example", "port": 8000},
-        "ports": {"bootstrap": {"host": "node-a.example", "port": 29501}},
-        "launch": {"kind": "local"},
-        "effective_settings": {"trust_remote_code": true},
+        "capture_storage": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/prefill",
+        "devices": [
+          0,
+          1
+        ],
+        "endpoint": {
+          "host": "node-a.example",
+          "port": 8000
+        },
+        "ports": {
+          "bootstrap": {
+            "host": "node-a.example",
+            "port": 29501
+          }
+        },
+        "launch": {
+          "kind": "local"
+        },
+        "effective_settings": {
+          "trust_remote_code": true
+        },
         "effective_parallelism": {
-          "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
-          "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
-          "experts": {"tensor_parallel_size": 2, "data_parallel_size": 1, "expert_parallel_size": 1, "dense_tensor_parallel_size": 1}
+          "outer": {
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 1
+          },
+          "attention": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "context_parallel_size": 1
+          },
+          "experts": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "expert_parallel_size": 1,
+            "dense_tensor_parallel_size": 1
+          }
         },
         "links": [
-          {"kind": "kv_transfer", "source": "prefill", "target": "decode", "mechanism": "mooncake"},
-          {"kind": "bootstrap", "source": "pd_router", "target": "prefill", "port": "bootstrap"}
+          {
+            "kind": "kv_transfer",
+            "source": "prefill",
+            "target": "decode",
+            "mechanism": "mooncake"
+          },
+          {
+            "kind": "bootstrap",
+            "source": "pd_router",
+            "target": "prefill",
+            "port": "bootstrap"
+          }
         ],
         "dependencies": [],
         "render_inputs": []
@@ -48,18 +89,47 @@
         "machine": "node-b",
         "model_locator": "/models/dsv4",
         "cache": "/cache/runtime/node-b/decode",
-        "devices": [0, 1],
-        "endpoint": {"host": "node-b.example", "port": 8000},
+        "capture_storage": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/decode",
+        "devices": [
+          0,
+          1
+        ],
+        "endpoint": {
+          "host": "node-b.example",
+          "port": 8000
+        },
         "ports": {},
-        "launch": {"kind": "ssh", "target": "operator@node-b"},
-        "effective_settings": {"trust_remote_code": true},
+        "launch": {
+          "kind": "ssh",
+          "target": "operator@node-b"
+        },
+        "effective_settings": {
+          "trust_remote_code": true
+        },
         "effective_parallelism": {
-          "outer": {"tensor_parallel_size": 2, "pipeline_parallel_size": 1},
-          "attention": {"tensor_parallel_size": 2, "data_parallel_size": 1, "context_parallel_size": 1},
-          "experts": {"tensor_parallel_size": 2, "data_parallel_size": 1, "expert_parallel_size": 1, "dense_tensor_parallel_size": 1}
+          "outer": {
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 1
+          },
+          "attention": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "context_parallel_size": 1
+          },
+          "experts": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "expert_parallel_size": 1,
+            "dense_tensor_parallel_size": 1
+          }
         },
         "links": [
-          {"kind": "kv_transfer", "source": "prefill", "target": "decode", "mechanism": "mooncake"}
+          {
+            "kind": "kv_transfer",
+            "source": "prefill",
+            "target": "decode",
+            "mechanism": "mooncake"
+          }
         ],
         "dependencies": [],
         "render_inputs": []
@@ -68,13 +138,21 @@
         "kind": "frontend",
         "process": "gateway",
         "process_role": "gateway",
-        "components": ["gateway", "pd_router"],
+        "components": [
+          "gateway",
+          "pd_router"
+        ],
         "machine": "node-a",
         "devices": [],
-        "endpoint": {"host": "node-a.example", "port": 9000},
+        "endpoint": {
+          "host": "node-a.example",
+          "port": 9000
+        },
         "ports": {},
         "cache": "/cache/runtime/node-a/gateway",
-        "launch": {"kind": "local"},
+        "launch": {
+          "kind": "local"
+        },
         "gateway": {
           "backend": "vllm-router",
           "implementation": "vllm-router",
@@ -85,35 +163,73 @@
             "completions_path": "/v1/completions",
             "chat_completions_path": "/v1/chat/completions"
           },
-          "readiness": {"kind": "http", "path": "/v1/models"},
+          "readiness": {
+            "kind": "http",
+            "path": "/v1/models"
+          },
           "ports": [],
-          "targets": [{"kind": "pd_router"}],
+          "targets": [
+            {
+              "kind": "pd_router"
+            }
+          ],
           "render_inputs": [],
           "render_source": "integration",
-          "co_rendering": {"process_role": "gateway"}
+          "co_rendering": {
+            "process_role": "gateway"
+          }
         },
         "pd_router": {
           "backend": "vllm-router",
           "implementation": "vllm-router",
           "implementation_version": "fixture-frontend-version",
           "effective_settings": {},
-          "policies": {"prefill": "round_robin", "decode": "round_robin"},
+          "policies": {
+            "prefill": "round_robin",
+            "decode": "round_robin"
+          },
           "prefill_role": "prefill",
           "decode_role": "decode",
           "target_scheme": "http",
           "ports": [],
-          "readiness": {"kind": "http", "path": "/v1/models"},
+          "readiness": {
+            "kind": "http",
+            "path": "/v1/models"
+          },
           "handoff": "in_process",
           "render_inputs": [],
           "render_source": "integration",
-          "co_rendering": {"process_role": "gateway"}
+          "co_rendering": {
+            "process_role": "gateway"
+          }
         },
         "links": [
-          {"kind": "request_routing", "source": "gateway", "targets": ["pd_router"]},
-          {"kind": "request_routing", "source": "pd_router", "targets": ["prefill", "decode"]},
-          {"kind": "bootstrap", "source": "pd_router", "target": "prefill", "port": "bootstrap"}
+          {
+            "kind": "request_routing",
+            "source": "gateway",
+            "targets": [
+              "pd_router"
+            ]
+          },
+          {
+            "kind": "request_routing",
+            "source": "pd_router",
+            "targets": [
+              "prefill",
+              "decode"
+            ]
+          },
+          {
+            "kind": "bootstrap",
+            "source": "pd_router",
+            "target": "prefill",
+            "port": "bootstrap"
+          }
         ],
-        "dependencies": ["prefill", "decode"],
+        "dependencies": [
+          "prefill",
+          "decode"
+        ],
         "render_inputs": []
       }
     ]

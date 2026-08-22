@@ -957,7 +957,7 @@ mod tests {
         std::fs::write(
             &current,
             format!(
-                r#"{{"schema_version":15,"id":"current","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"data-asset-1"}},"cases":[]}}"#,
+                r#"{{"schema_version":19,"id":"current","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"data-asset-1"}},"cases":[]}}"#,
             ),
         )?;
         std::fs::write(
@@ -969,7 +969,7 @@ mod tests {
         std::fs::write(
             &future,
             format!(
-                r#"{{"schema_version":16,"id":"future","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"must-not-be-read"}},"cases":[]}}"#,
+                r#"{{"schema_version":20,"id":"future","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"must-not-be-read"}},"cases":[]}}"#,
             ),
         )?;
 
@@ -1145,7 +1145,7 @@ mod tests {
         std::fs::create_dir_all(&rate_dir)?;
         let request = |load_shape: &str, artifact_dir: &std::path::Path| {
             format!(
-                r#"{{"protocol_version":"7","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null,"shared_system_content":null}},"prompt":{{"kind":"server_chat","request_representation":"structured_messages","route":"chat_completions","rendering_authority":"server"}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"cache_start":"uncontrolled"}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{}}}"#,
+                r#"{{"protocol_version":"8","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null,"shared_system_content":null}},"prompt":{{"kind":"server_chat","request_representation":"structured_messages","route":"chat_completions","rendering_authority":"server"}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"cache_start":"uncontrolled"}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{}}}"#,
                 serde_json::to_string(artifact_dir).unwrap_or_else(|_| "\"artifacts\"".to_owned())
             )
         };

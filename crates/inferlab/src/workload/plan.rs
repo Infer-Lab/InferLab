@@ -192,6 +192,47 @@ pub(crate) struct BenchPrefixCacheConditioningPlan {
     pub maximum_shared_prefix_tokens: u32,
     pub output_tokens: u32,
     pub consumes_population_entry: bool,
+    /// Effective attention data-parallel size of the public serving role:
+    /// conditioning issues one rank-pinned request per rank when greater
+    /// than one ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub attention_data_parallel_size: u32,
+    /// The route belongs to a Gateway frontend conditioning fan-out
+    /// capability: the control plane issues one request and the frontend
+    /// covers every prefill replica and data-parallel rank.
+    pub frontend_fanout: bool,
+}
+
+/// The public-serving shape prefix-cache conditioning plans against: whether
+/// the public workload endpoint belongs to a Gateway, and the effective
+/// attention data-parallel size the conditioning loop must cover
+/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConditioningServingShape {
+    pub gateway_frontend: bool,
+    pub attention_data_parallel_size: u32,
+}
+
+impl ConditioningServingShape {
+    /// `roles` yields `(serves_public_endpoint, effective attention
+    /// data-parallel size)` per model-serving role. A Gateway frontend makes
+    /// every role relevant because any role's data-parallel size forces the
+    /// Gateway rejection; a direct endpoint conditions the role that serves
+    /// it.
+    pub(crate) fn resolve(
+        gateway_frontend: bool,
+        roles: impl IntoIterator<Item = (bool, u32)>,
+    ) -> Self {
+        let attention_data_parallel_size = roles
+            .into_iter()
+            .filter(|(serves_public, _)| gateway_frontend || *serves_public)
+            .map(|(_, size)| size)
+            .max()
+            .unwrap_or(1);
+        Self {
+            gateway_frontend,
+            attention_data_parallel_size,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -284,6 +325,10 @@ pub(crate) struct MeasurementResolveContext<'a> {
     pub endpoint: WorkloadEndpoint,
     pub model: MeasurementModel,
     pub prefix_cache_reset: Option<WorkloadHttpAction>,
+    /// The Gateway frontend's conditioning fan-out action, when the selected
+    /// frontend backend declares one ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub prefix_cache_conditioning: Option<WorkloadHttpAction>,
+    pub conditioning_serving: ConditioningServingShape,
     pub capture_ids: &'a [String],
     pub command_env: &'a BTreeMap<String, String>,
     pub command_cwd: &'a Path,

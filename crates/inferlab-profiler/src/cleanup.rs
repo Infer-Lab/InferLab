@@ -1,14 +1,16 @@
-use crate::plan::{ProfilerLaunch, ProfilerTargetRecord};
+use crate::plan::ProfilerLaunch;
+use crate::poll::{Poll, poll_until};
+use crate::record::ProfilerTargetRecord;
 use crate::transport::{CommandActionMode, TargetCommandError, target_output};
-use inferlab_runtime::operation_bound::{OperationBound, Remaining, duration_millis};
+use inferlab_runtime::operation_bound::{OperationBound, duration_millis};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::thread;
 use std::time::{Duration, Instant};
 
 const PROFILER_AGENT_DISCOVERY_DEADLINE: Duration = Duration::from_secs(10);
 const PROFILER_AGENT_TERM_GRACE: Duration = Duration::from_secs(2);
 const PROFILER_AGENT_KILL_GRACE: Duration = Duration::from_secs(5);
+const PROFILER_AGENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -275,25 +277,25 @@ fn wait_for_pids(
     pids: &[u32],
     bound: &OperationBound,
 ) -> Result<bool, ProfilerCleanupCommandError> {
-    loop {
-        let mut any_alive = false;
-        for pid in pids {
-            any_alive |= target_pid_alive(target, *pid, bound)?;
-        }
-        if !any_alive {
-            return Ok(true);
-        }
-        if bound.is_expired() {
-            return Ok(false);
-        }
-        match bound.remaining() {
-            Remaining::Finite(remaining) => {
-                thread::sleep(Duration::from_millis(100).min(remaining));
+    poll_until(
+        bound,
+        PROFILER_AGENT_POLL_INTERVAL,
+        PROFILER_AGENT_POLL_INTERVAL,
+        || {
+            let mut any_alive = false;
+            for pid in pids {
+                match target_pid_alive(target, *pid, bound) {
+                    Ok(alive) => any_alive |= alive,
+                    Err(error) => return Poll::Done(Err(error)),
+                }
             }
-            Remaining::Expired => return Ok(false),
-            Remaining::Unbounded => thread::sleep(Duration::from_millis(100)),
-        }
-    }
+            if any_alive {
+                Poll::Pending(Ok(false))
+            } else {
+                Poll::Done(Ok(true))
+            }
+        },
+    )
 }
 
 fn target_pid_alive(

@@ -1,17 +1,6 @@
-# Eval, Bench, datasets, sessions, metrics, and SLOs
+# Serving Bench load, sources, sessions, metrics, and SLOs
 
-## Ordinary measurement path
-
-Start with the smallest definition that expresses the workload. The built-in
-OpenAI smoke defaults to prompt `Hello`, 16 maximum output tokens, and a
-60-second timeout:
-
-```toml
-[evals.smoke]
-kind = "openai-smoke"
-```
-
-A static synthetic Bench defaults to `serving`. A `random` or
+Start with the smallest definition that expresses the workload. A static synthetic Bench defaults to `serving`. A `random` or
 `random_mixture` source defaults to an exact flat completion prompt, so fixed
 ISL and OSL need no prompt table:
 
@@ -35,118 +24,11 @@ timeout_seconds = 900
 
 These are authoring defaults, not hidden execution state. The
 `inferlab workspace show --json` command renders them explicitly as `serving`,
-`flat`, tagged `inclusive_uniform`, and the effective smoke values. Existing
+`flat`, and tagged `inclusive_uniform`. Existing
 explicit forms remain valid. Add the advanced controls below only when the
 workload needs their distinct semantics.
 
-## lm-eval tasks and inference requests
-
-An lm-eval definition selects exactly one task. Use a pinned lm-eval task name,
-a release-bundled InferLab task, or a workspace-owned task YAML:
-
-```toml
-[evals.builtin]
-kind = "lm-eval"
-task = "gsm8k"
-metric = "exact_match"
-metric_filter = "strict-match"
-threshold = 0.90
-timeout_seconds = 900
-
-[evals.bundled]
-kind = "lm-eval"
-task = { bundled = "estonia" }
-metric = "estonia_pass"
-metric_filter = "strict-terminal-answer"
-threshold = 0.50
-timeout_seconds = 3600
-
-[evals.workspace-task]
-kind = "lm-eval"
-task = { yaml = "evals/long-context.yaml" }
-metric = "exact_match"
-threshold = 0.80
-timeout_seconds = 3600
-```
-
-The task, not a second InferLab dataset layer, owns `dataset_path`,
-`dataset_name`, split selection, prompting, output type, filters, and scoring.
-Workspace YAML paths must be workspace-relative tracked `.yaml` or `.yml`
-files. InferLab resolves their YAML include closure, records the effective task
-configuration and dataset selection, and includes that closure in source
-identity. Release-bundled tasks are addressed only by their catalog name and
-carry a release-owned closure digest.
-
-`openai-smoke` is the smallest completion-path correctness Eval. An lm-eval
-definition controls its request fragment, sample limit, few-shot count, seed,
-trials, output bound, concurrency, selected metric and optional filter,
-threshold, and timeout while the task retains dataset and scoring authority.
-
-InferLab uses the resolved model-weight locator as the Hugging Face tokenizer
-locator. This follows the normal model-directory convention and avoids a
-second tokenizer setting; the locator must contain a usable tokenizer.
-A `generate_until` task may declare a prompt rendering authority, and omitting
-it resolves to `flat`:
-
-```toml
-[evals.gsm8k]
-kind = "lm-eval"
-task = "gsm8k"
-prompt = { kind = "flat" }      # omit for the same result
-metric = "exact_match"
-metric_filter = "strict-match"
-threshold = 0.90
-timeout_seconds = 900
-```
-
-`flat` sends the task's own few-shot context as ordinary text on the completions
-path, so the task keeps the continuation format its scoring filters expect. Use
-it unless the model chat template is itself part of what you are measuring.
-`server_chat` sends structured messages on the chat-completions path and lets
-the model server apply its own template; choose it when the evaluated behavior
-depends on that template or on server-side controls such as
-`chat_template_kwargs`. The two are different measurements of the same task, so
-records carry the resolved authority and whether it was declared or defaulted;
-do not compare scores across them.
-
-Server-side template controls such as `chat_template` and `chat_template_kwargs`
-are accepted in `request_body` only under `server_chat`; a `flat` definition that
-declares one fails resolution and names the conflicting member.
-
-Tasks whose resolved output type is `loglikelihood`, `loglikelihood_rolling`, or
-`multiple_choice` must not declare `prompt`. They use completions and first run a
-prompt-logprob/tokenizer alignment probe, because the pinned lm-eval chat client
-does not implement loglikelihood scoring. Dynamic Python tasks are treated the
-same way. A probe failure makes support inconclusive rather than silently
-removing the task.
-
-Use `request_body` for task-specific inference parameters such as sampling,
-reasoning effort, logprobs, or chat-template arguments:
-
-```toml
-[evals.reasoning]
-kind = "lm-eval"
-task = { yaml = "evals/reasoning.yaml" }
-metric = "exact_match"
-threshold = 0.80
-timeout_seconds = 1800
-
-[evals.reasoning.request_body]
-temperature = 1.0
-reasoning_effort = "high"
-logprobs = true
-
-[evals.reasoning.request_body.chat_template_kwargs]
-enable_thinking = true
-```
-
-The same nested values may be patched for one run, for example
-`--set evals.reasoning.request_body.temperature=0.6`. `request_body` is a JSON
-request fragment, not a replacement request: InferLab retains ownership of the
-model, prompt or messages, streaming mode, one-completion policy, output bound,
-and stop conditions. Eval also owns the repeated-trial seed schedule. Conflicts
-with those fields fail during validation and the complete effective fragment is
-preserved in dry-run and record evidence.
+Eval definitions are covered by [eval-authoring.md](eval-authoring.md).
 
 ## Static and adaptive serving load
 
@@ -177,47 +59,75 @@ request_body = { temperature = 1.0 }
 timeout_seconds = 900
 ```
 
-For concurrency `c`, the resolved warmup count is
-`c * warmup_prompts_per_concurrency`. Warmup uses the same route, request
-source, request body, and concurrency as profiling, but consumes a disjoint
-prefix of the frozen request population. It is excluded from normalized
-metrics and profiling request counts. Cache start defaults to uncontrolled;
-declare a cold or primed start only when the experiment requires it:
+- For concurrency `c`, the resolved warmup count is
+  `c * warmup_prompts_per_concurrency`, drawn from a disjoint prefix of the
+  frozen request population.
+- Warmup shares the profiled route, request source, request body, and
+  concurrency, and is excluded from normalized metrics and profiling request
+  counts.
+- Cache start defaults to uncontrolled; declare a cold or primed start only
+  when the experiment requires it:
 
 ```toml
 cache = { start = "cold" }   # warmup drains, then reset, then profiling
 ```
 
-`cold` requires the selected integration/topology to expose a prefix-cache
-reset. `primed` additionally requires an exact flat or rendered-chat
-`prefix_sharing` source; after reset, InferLab sends the maximum canonical
-shared prefix once with one output token, then releases profiling. A rendered
-prefix that cannot tokenize exactly as an independent conditioning prompt
-fails preparation. Reset and conditioning occur after warmup, are excluded
-from profiling metrics, and do not consume population entries. The one case
-timeout covers warmup, reset, conditioning, profiling, and result handling;
-cleanup retains its separate grace. A default capture window opens after cache
-preparation and before profiling release. Any warmup or cache-preparation
-failure leaves the window unopened.
+- `cold` requires the selected integration/topology to expose a prefix-cache
+  reset. `primed` additionally requires an exact flat or rendered-chat
+  `prefix_sharing` source; after reset, InferLab sends the maximum canonical
+  shared prefix once with one output token, then releases profiling. A rendered
+  prefix that cannot tokenize exactly as an independent conditioning prompt
+  fails preparation.
+- Under attention data parallelism, conditioning fans out one recorded request
+  per prefill replica and per attention data-parallel rank of that replica,
+  pinned through the `X-Data-Parallel-Rank` request header, so no rank stays
+  cold. The built-in vLLM Mooncake, vLLM NIXL, and SGLang prefill/decode
+  proxies serve `POST /prime_prefix_cache` and route that fan-out through the
+  ordinary pairing flow. The record preserves per-(replica, rank) status,
+  token usage, and timing evidence, and any rank's conditioning failure fails
+  the case. The `vllm-router` and `sglang-router` pairs declare no primed
+  capability and reject a primed start at planning.
+- The built-in vLLM Mooncake and NIXL pairs also serve
+  `POST /reset_prefix_cache`, fanning out to every prefill and decode engine,
+  so a cold start passes planning on those pairs. The `vllm-router` pairing
+  remains without reset control.
+- Reset and conditioning occur after warmup, are excluded from profiling
+  metrics, and do not consume population entries.
+- The one case timeout covers warmup, reset, conditioning, profiling, and
+  result handling; cleanup retains its separate grace. A default capture
+  window opens after cache preparation and before profiling release. Any
+  warmup or cache-preparation failure leaves the window unopened.
 
 Every successful Bench reports `request_throughput`, `output_throughput`, and
-`total_token_throughput`. For each of `request_latency_ms`, `ttft_ms`, and
-`tpot_ms`, InferLab reports `mean`, `min`, `max`, `stddev`, `p50`, `p90`,
-`p95`, and `p99` using names such as `p95_tpot_ms`. TPOT is not applicable to
-an `output_tokens = 1` prefill-dominant workload and its TPOT metrics are then
-omitted. A Bench with `prefix_sharing`, `shared_system_content`, or a primed
-start requires backend prompt-token and cache-read-token usage on every
-completed profiling request. It reports `prompt_cache_read_tokens` and
-`uncached_prompt_tokens` with the same distribution statistics, plus
-`prompt_cache_read_ratio = sum(cache_read_tokens) / sum(prompt_tokens)`.
+`total_token_throughput`, plus `mean`, `min`, `max`, `stddev`, `p50`, `p90`,
+`p95`, and `p99` for each of `request_latency_ms`, `ttft_ms`, and `tpot_ms`
+(names such as `p95_tpot_ms`). TPOT is not applicable to an
+`output_tokens = 1` prefill-dominant workload and its TPOT metrics are then
+omitted.
+
+A Bench with `prefix_sharing`, `shared_system_content`, or a primed start
+requires backend prompt-token and cache-read-token usage on every completed
+profiling request, and reports:
+
+- `prompt_cache_read_tokens` and `uncached_prompt_tokens` with the same
+  distribution statistics;
+- `prompt_cache_read_ratio = sum(cache_read_tokens) / sum(prompt_tokens)`.
+
 For direct vLLM, enable `enable_prompt_tokens_details = true` in the server
 settings. For direct SGLang, enable `enable_cache_report = true`; SGLang's
 OpenAI protocol omits the cache detail when the reported read is exactly zero,
 so its integration records that endpoint representation and InferLab preserves
 the request observation as zero. An undeclared missing value still fails
-normalization. Other cases preserve AIPerf's optional aggregate cache ratio
-when available. `good_request_ratio` and `goodput` are derived only when a
-request SLO is configured.
+normalization. Built-in vLLM and SGLang prefill/decode frontend endpoints
+declare the backend cache-read capability only when both roles enable the
+reporting setting, because the built-in proxies forward engine responses
+verbatim. A primed or prefix-geometry Bench against an endpoint without the
+declared capability fails at planning with a typed error naming the bench, the
+missing capability, and the remediation — enable the reporting setting on both
+roles and rebuild the server — instead of running to completion and failing
+every request's normalization. Other cases preserve AIPerf's optional aggregate
+cache ratio when available. `good_request_ratio` and `goodput` are derived only
+when a request SLO is configured.
 
 Set `server_metrics = true` to ask AIPerf to collect the server's declared JSON
 metrics export. This is accepted only when the selected integration/topology

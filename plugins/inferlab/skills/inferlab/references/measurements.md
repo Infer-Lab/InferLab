@@ -1,7 +1,8 @@
 # Eval And Bench Operations
 
 For Eval, Bench, dataset, session, prompt, metric, and SLO definition syntax,
-read [Eval and Bench authoring](measurement-authoring.md). This reference covers
+read [Eval authoring](eval-authoring.md) or [Bench authoring](bench-authoring.md).
+This reference covers
 toolchain preparation, execution, runtime phases, and evidence inspection.
 
 ## Prepare The Measurement Runtime
@@ -47,10 +48,17 @@ traffic, preserving the same seeded population basis across cases.
 
 Cache start defaults to uncontrolled. For a cold or primed start, native
 warmup drains first, then InferLab resets the cache; primed additionally sends
-the frozen maximum canonical prefix before profiling release. Population
-preparation, warmup, reset, and conditioning remain outside normalized
-profiling counts and metrics. A default captured Bench opens the framework
-window only after these preparation actions succeed.
+the frozen maximum canonical prefix before profiling release. Under attention
+data parallelism the conditioning fans out one `X-Data-Parallel-Rank`-pinned
+request per prefill replica and rank — through `POST /prime_prefix_cache` on
+the built-in vLLM Mooncake, vLLM NIXL, and SGLang prefill/decode proxies — and
+preserves per-(replica, rank) evidence; any rank's failure fails the case. A
+primed or prefix-geometry Bench against an endpoint without declared backend
+cache-read capability fails at planning with the enable-reporting remediation,
+and router-fronted pairs without primed capability reject a primed start at
+planning. Population preparation, warmup, reset, and conditioning remain
+outside normalized profiling counts and metrics. A default captured Bench opens
+the framework window only after these preparation actions succeed.
 
 Independent request populations and dependent linear sessions use separate
 native phase identities. A session keeps each conversation live across its

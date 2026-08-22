@@ -45,6 +45,11 @@ if os.environ.get("FIXTURE_EXIT_BEFORE_READY"):
 host, port, *extra = sys.argv[1:]
 port = int(port)
 
+# Fake per-data-parallel-rank prefix-cache state: reset clears every rank, a
+# conditioning request primes only the rank its X-Data-Parallel-Rank header
+# pins (absent header means the unrouted rank-zero path).
+primed_ranks = set()
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -57,7 +62,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/query":
-            body = json.dumps({"0": {"engine_id": f"fixture-{port}"}}).encode()
+            ranks = int(os.environ.get("FIXTURE_DP_RANKS", "1"))
+            engines = {
+                str(rank): {"engine_id": f"fixture-{port}-rank{rank}"} for rank in range(ranks)
+            }
+            body = json.dumps(engines).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -77,10 +86,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(length))
             if request.get("prompt") == "canonical prefix":
+                rank = self.headers.get("X-Data-Parallel-Rank")
                 conditioning_request = os.environ.get("FIXTURE_CONDITIONING_REQUEST")
                 if conditioning_request:
                     with open(conditioning_request, "w") as handle:
                         json.dump(request, handle)
+                conditioning_log = os.environ.get("FIXTURE_CONDITIONING_LOG")
+                if conditioning_log:
+                    with open(conditioning_log, "a") as handle:
+                        handle.write(
+                            json.dumps({"port": port, "rank": rank, "request": request}) + "\n"
+                        )
+                if rank is not None and os.environ.get("FIXTURE_CONDITIONING_FAIL_RANK") == rank:
+                    self.send_response(500)
+                    self.end_headers()
+                    return
                 if os.environ.get("FIXTURE_RECORD_CACHE_PREPARATION") == "1":
                     record_capture_event("cache_conditioning")
             marker = os.environ.get("FIXTURE_SMOKE_MARKER")
@@ -96,11 +116,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "choices": [{"index": 0, "text": " San Francisco", "finish_reason": "stop"}],
             }
             if request.get("prompt") == "canonical prefix":
+                rank = self.headers.get("X-Data-Parallel-Rank") or "0"
+                cached = 8 if rank in primed_ranks else 0
+                primed_ranks.add(rank)
                 response["usage"] = {
                     "prompt_tokens": 8,
                     "completion_tokens": 1,
                     "total_tokens": 9,
-                    "prompt_tokens_details": {"cached_tokens": 0},
+                    "prompt_tokens_details": {"cached_tokens": cached},
                 }
             if "kv_transfer_params" in request:
                 response["kv_transfer_params"] = request["kv_transfer_params"]
@@ -114,9 +137,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/start_profile":
             length = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(length)) if length else None
-            if self.headers.get("Content-Type") != "application/json" or request != {
-                "activities": ["CUDA_PROFILER"]
-            }:
+            if self.headers.get("Content-Type") != "application/json" or request not in (
+                {"activities": ["CUDA_PROFILER"]},
+                {"activities": ["GPU"]},
+            ):
                 self.send_response(400)
                 self.end_headers()
                 return
@@ -131,7 +155,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             record_capture_event("capture_close")
-            if not os.environ.get("FIXTURE_STOP_PROFILE_SKIP_REPORT"):
+            # Engine-trace fixture: the engine's internal profiler lands new
+            # trace artifacts per window in the assigned trace directory. The
+            # artifact count knob stands in for a whole-replica device count
+            # and the delay knob for a slow engine flush response.
+            capture_storage = os.environ.get("FIXTURE_CAPTURE_STORAGE")
+            if capture_storage:
+                if not os.environ.get("FIXTURE_STOP_PROFILE_SKIP_REPORT"):
+                    os.makedirs(capture_storage, exist_ok=True)
+                    artifacts = int(os.environ.get("FIXTURE_STOP_PROFILE_ARTIFACTS", "1"))
+                    for rank in range(artifacts):
+                        with open(
+                            os.path.join(
+                                capture_storage, f"rank{rank}-{time.time_ns()}.trace.json"
+                            ),
+                            "w",
+                        ) as trace:
+                            trace.write("fixture\n")
+            elif not os.environ.get("FIXTURE_STOP_PROFILE_SKIP_REPORT") and os.environ.get(
+                "FIXTURE_NSYS_STATE"
+            ):
                 state_path = os.environ["FIXTURE_NSYS_STATE"]
                 with open(state_path) as state_file:
                     output, count, index, session = state_file.read().split("\t")
@@ -140,6 +183,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     report.write("fixture\n")
                 with open(state_path, "w") as state_file:
                     state_file.write(f"{output}\t{count}\t{index}\t{session}")
+            time.sleep(float(os.environ.get("FIXTURE_STOP_PROFILE_DELAY_SECONDS", "0")))
             if os.environ.get("FIXTURE_STOP_PROFILE_FAIL"):
                 self.send_response(500)
                 self.end_headers()
@@ -149,6 +193,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         )
         if self.path == "/reset_prefix_cache":
             status = int(os.environ.get("FIXTURE_RESET_STATUS", "200"))
+            if 200 <= status < 300 and status != 206:
+                primed_ranks.clear()
             if os.environ.get("FIXTURE_RECORD_CACHE_PREPARATION") == "1":
                 record_capture_event("cache_reset")
         self.send_response(status)

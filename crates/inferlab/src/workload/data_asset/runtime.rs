@@ -257,7 +257,7 @@ fn eval_request(
     artifact_dir: PathBuf,
 ) -> Result<MeasurementDataAssetPreparationRequest, InferlabError> {
     Ok(MeasurementDataAssetPreparationRequest {
-        protocol_version: ProtocolVersion::V7,
+        protocol_version: ProtocolVersion::V8,
         phase,
         source: MeasurementDataAssetSourceInput::Eval {
             workspace_root: workspace_root.to_path_buf(),
@@ -274,7 +274,7 @@ fn agentic_request(
     artifact_dir: PathBuf,
 ) -> MeasurementDataAssetPreparationRequest {
     MeasurementDataAssetPreparationRequest {
-        protocol_version: ProtocolVersion::V7,
+        protocol_version: ProtocolVersion::V8,
         phase,
         source: MeasurementDataAssetSourceInput::Agentic {
             source: Box::new(wire::bench_agentic_source_input(source)),

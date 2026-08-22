@@ -89,6 +89,23 @@ pub(crate) struct PrefixCacheResetEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct PrefixCacheConditioningRankEvidence {
+    /// The fanned-out replica a Gateway frontend targeted; absent for a
+    /// direct Engine endpoint ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub rank: u32,
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_cache_read_tokens: Option<u64>,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PrefixCacheConditioningEvidence {
     pub url: String,
     pub model: String,
@@ -100,12 +117,11 @@ pub(crate) struct PrefixCacheConditioningEvidence {
     pub maximum_shared_prefix_tokens: u32,
     pub output_tokens: u32,
     pub consumes_population_entry: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_prompt_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_cache_read_tokens: Option<u64>,
+    /// Effective attention data-parallel size the conditioning loop primed:
+    /// one recorded request per rank ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub attention_data_parallel_size: u32,
+    pub ranks: Vec<PrefixCacheConditioningRankEvidence>,
     pub succeeded: bool,
-    pub http_status: Option<u16>,
     pub elapsed_ms: u64,
     pub error: Option<String>,
 }

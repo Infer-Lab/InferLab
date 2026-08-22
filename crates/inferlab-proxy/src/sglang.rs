@@ -2,31 +2,31 @@
 //! [[RFC-0003:C-SGLANG-PREFILL-DECODE]].
 
 use crate::core::{
-    self, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response, join_path,
-    outbound_authorization,
+    self, OnClientDrop, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response,
+    join_path, outbound_authorization,
 };
 use crate::error::ProxyError;
 use async_stream::stream;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Response, StatusCode, header};
+use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
-use axum::{Router, serve};
+use axum::routing::{Router, get, post};
 use bytes::Bytes;
-use futures_util::{Stream, StreamExt, future::join_all};
-use serde::Serialize;
+use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::net::TcpListener;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
 pub const ID: &str = "inferlab-sglang-proxy";
 pub const VERSION: u32 = 2;
+
+/// Display name used in lifecycle/validation error messages.
+const PROXY_NAME: &str = "SGLang proxy";
 
 pub fn meta() -> ProxyMeta {
     ProxyMeta {
@@ -48,6 +48,10 @@ pub struct PrefillTarget {
     pub url: String,
     pub bootstrap_host: String,
     pub bootstrap_port: u16,
+    /// Effective attention data-parallel size of this prefill replica, issued
+    /// by the control plane at launch: the conditioning fan-out primes each
+    /// rank ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub data_parallel_size: u32,
 }
 
 pub fn run(config: Config) -> Result<(), ProxyError> {
@@ -59,16 +63,7 @@ pub async fn run_async(config: Config) -> Result<(), ProxyError> {
     let port = config.port;
     let state = ProxyState::new(config)?;
     tokio::spawn(await_backends(state.clone()));
-    let listener = TcpListener::bind((host.as_str(), port))
-        .await
-        .map_err(|error| ProxyError::Io {
-            message: format!("failed to bind SGLang proxy on {host}:{port}: {error}"),
-        })?;
-    serve(listener, router(state))
-        .await
-        .map_err(|error| ProxyError::Io {
-            message: format!("SGLang proxy server failed: {error}"),
-        })
+    core::serve_router(PROXY_NAME, &host, port, router(state)).await
 }
 
 fn router(state: ProxyState) -> Router {
@@ -77,6 +72,7 @@ fn router(state: ProxyState) -> Router {
         .route("/v1/completions", post(completions))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/flush_cache", post(flush_cache))
+        .route("/prime_prefix_cache", post(prime_prefix_cache))
         .with_state(state)
 }
 
@@ -98,22 +94,14 @@ struct ProxyStateInner {
 
 impl ProxyState {
     fn new(config: Config) -> Result<Self, ProxyError> {
-        if config.prefill.is_empty() {
-            return Err(ProxyError::Invalid {
-                message: "SGLang proxy requires at least one prefill endpoint".to_owned(),
-            });
-        }
-        if config.decode.is_empty() {
-            return Err(ProxyError::Invalid {
-                message: "SGLang proxy requires at least one decode endpoint".to_owned(),
-            });
-        }
-        let client = core::build_pooled_client().map_err(|error| ProxyError::Io {
-            message: format!("failed to create SGLang proxy HTTP client: {error}"),
-        })?;
+        core::require_endpoints(
+            PROXY_NAME,
+            config.prefill.is_empty(),
+            config.decode.is_empty(),
+        )?;
         Ok(Self {
             inner: Arc::new(ProxyStateInner {
-                client,
+                client: core::pooled_client(PROXY_NAME)?,
                 prefill: config.prefill,
                 decode: config.decode,
                 ready: AtomicBool::new(false),
@@ -151,6 +139,15 @@ impl ProxyState {
         let counter = self.inner.room_counter.fetch_add(1, Ordering::SeqCst);
         self.inner.room_seed.wrapping_add(counter) & ((1_u64 << 63) - 1)
     }
+
+    /// The readiness-wait and reset/flush sweep targets: every prefill
+    /// replica URL followed by every decode URL.
+    fn fanout_target_urls(&self) -> Vec<String> {
+        core::fanout_target_urls(
+            self.inner.prefill.iter().map(|target| target.url.as_str()),
+            self.inner.decode.iter().map(String::as_str),
+        )
+    }
 }
 
 fn room_seed() -> u64 {
@@ -161,47 +158,18 @@ fn room_seed() -> u64 {
 }
 
 async fn await_backends(state: ProxyState) {
-    let urls = state
-        .inner
-        .prefill
-        .iter()
-        .map(|target| target.url.clone())
-        .chain(state.inner.decode.iter().cloned());
-    let waits = urls.map(|url| await_backend(state.client(), url));
-    join_all(waits).await;
+    let urls = state.fanout_target_urls();
+    core::await_backends(state.client(), urls, "/v1/models").await;
     state.set_ready();
-}
-
-async fn await_backend(client: reqwest::Client, url: String) {
-    loop {
-        if client
-            .get(join_path(&url, "/v1/models"))
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success())
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
 }
 
 async fn healthcheck(
     State(state): State<ProxyState>,
 ) -> (StatusCode, Json<ProxyHealthcheckResponse>) {
-    let ready = state.ready();
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (
-        status,
-        Json(ProxyHealthcheckResponse {
-            ready,
-            prefill_instances: state.inner.prefill.len(),
-            decode_instances: state.inner.decode.len(),
-        }),
+    core::healthcheck_response(
+        state.ready(),
+        state.inner.prefill.len(),
+        state.inner.decode.len(),
     )
 }
 
@@ -210,7 +178,7 @@ async fn completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    completion_route(state, headers, body).await
+    request_route(state, headers, body, "/v1/completions").await
 }
 
 async fn chat_completions(
@@ -219,14 +187,6 @@ async fn chat_completions(
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
     request_route(state, headers, body, "/v1/chat/completions").await
-}
-
-async fn completion_route(
-    state: ProxyState,
-    headers: HeaderMap,
-    body: Value,
-) -> Result<Response<Body>, ProxyHttpError> {
-    request_route(state, headers, body, "/v1/completions").await
 }
 
 async fn request_route(
@@ -294,7 +254,12 @@ async fn request_route(
         } else if is_text_event_stream(&decode_response) {
             stream_sse_decode_response(decode_response, prefill_task)
         } else {
-            stream_detached_decode_response(decode_response, prefill_task)
+            // Detach policy: the SGLang prefill/decode pair is coordinated over
+            // a bootstrap room, so aborting the prefill HTTP request mid-flight
+            // (on client disconnect) risks leaving the decode-side engine
+            // request waiting for KV that never arrives. Draining the detached
+            // prefill to completion lets both engine requests conclude cleanly.
+            core::stream_decode_response(decode_response, prefill_task, OnClientDrop::Detach)
         }
     } else {
         let (prefill_result, decode_result) = tokio::join!(
@@ -319,87 +284,9 @@ fn stream_sse_decode_response(
     response: reqwest::Response,
     prefill_task: JoinHandle<Result<(), ProxyHttpError>>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    let status = core::status_code(response.status())?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let builder = core::upstream_response_builder(&response)?;
     let stream = sse_decode_response_stream(response.bytes_stream(), prefill_task);
-    let mut builder = Response::builder().status(status);
-    if let Some(content_type) = content_type {
-        builder = builder.header(header::CONTENT_TYPE, content_type);
-    }
-    builder.body(Body::from_stream(stream)).map_err(|error| {
-        ProxyHttpError::internal(format!("failed to build proxy response: {error}"))
-    })
-}
-
-fn stream_detached_decode_response(
-    response: reqwest::Response,
-    prefill_task: JoinHandle<Result<(), ProxyHttpError>>,
-) -> Result<Response<Body>, ProxyHttpError> {
-    let status = core::status_code(response.status())?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let stream = detached_decode_response_stream(response.bytes_stream(), prefill_task);
-    let mut builder = Response::builder().status(status);
-    if let Some(content_type) = content_type {
-        builder = builder.header(header::CONTENT_TYPE, content_type);
-    }
-    builder.body(Body::from_stream(stream)).map_err(|error| {
-        ProxyHttpError::internal(format!("failed to build proxy response: {error}"))
-    })
-}
-
-fn detached_decode_response_stream<S, E>(
-    decode_stream: S,
-    prefill_task: JoinHandle<Result<(), ProxyHttpError>>,
-) -> impl Stream<Item = Result<Bytes, std::io::Error>>
-where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: fmt::Display,
-{
-    stream! {
-        let mut decode_stream = decode_stream;
-        let mut prefill_task = prefill_task;
-        let mut prefill_done = false;
-        loop {
-            if !prefill_done && prefill_task.is_finished() {
-                prefill_done = true;
-                if let Err(error) = prefill_stream_outcome((&mut prefill_task).await) {
-                    yield Err(error);
-                    return;
-                }
-            }
-
-            tokio::select! {
-                prefill = &mut prefill_task, if !prefill_done => {
-                    prefill_done = true;
-                    if let Err(error) = prefill_stream_outcome(prefill) {
-                        yield Err(error);
-                        return;
-                    }
-                }
-                item = decode_stream.next() => match item {
-                    Some(Ok(chunk)) => yield Ok(chunk),
-                    Some(Err(error)) => {
-                        yield Err(std::io::Error::other(format!("decode stream failed: {error}")));
-                        return;
-                    }
-                    None => break,
-                }
-            }
-        }
-        if !prefill_done
-            && let Err(error) = prefill_stream_outcome(prefill_task.await)
-        {
-            yield Err(error);
-        }
-    }
+    core::response_body(builder, Body::from_stream(stream))
 }
 
 fn sse_decode_response_stream<S, E>(
@@ -676,71 +563,93 @@ async fn await_prefill(task: JoinHandle<Result<(), ProxyHttpError>>) -> Result<(
         .map_err(|error| ProxyHttpError::internal(format!("prefill task failed: {error}")))?
 }
 
-#[derive(Serialize)]
-struct FlushCacheResponse {
-    successful: Vec<String>,
-    failed: Vec<FlushCacheFailure>,
+// Prefill replicas carry a config-issued static data-parallel size, so the
+// conditioning fan-out enumerates (replica, rank) targets over it.
+impl core::PrimeReplica for PrefillTarget {
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn data_parallel_size(&self) -> u32 {
+        self.data_parallel_size
+    }
 }
 
-#[derive(Serialize)]
-struct FlushCacheFailure {
-    url: String,
-    error: String,
+/// One prefill/decode conditioning flow through the ordinary bootstrap
+/// pairing with the prefill request pinned to `rank`; the decode side rides
+/// the ordinary round-robin selection and is incidental coverage
+/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+async fn prime_flow(
+    state: &ProxyState,
+    prefill: &PrefillTarget,
+    rank: u32,
+    authorization: Option<String>,
+    body: &Value,
+) -> Result<u16, core::PrimeFlowFailure> {
+    use core::PrimeFlowFailure;
+    let request_body = bootstrap_body(body, prefill, state.next_room(), "/v1/completions")
+        .map_err(PrimeFlowFailure::transport)?;
+    let decode = state.next_decode();
+    let client = state.client();
+    let prefill_response = core::send_json_post_status(
+        client.clone(),
+        join_path(&prefill.url, "/v1/completions"),
+        &request_body,
+        None,
+        authorization.as_deref(),
+        &[("X-data-parallel-rank", rank.to_string())],
+        "prefill conditioning request",
+    )
+    .await
+    .map_err(PrimeFlowFailure::transport)?;
+    let (prefill_status, _prefill_text) =
+        core::expect_2xx("prefill conditioning", prefill_response).await?;
+    let decode_response = core::send_json_post_status(
+        client,
+        join_path(&decode, "/v1/completions"),
+        &request_body,
+        None,
+        authorization.as_deref(),
+        &[],
+        "decode conditioning request",
+    )
+    .await
+    .map_err(PrimeFlowFailure::transport)?;
+    core::expect_2xx("decode conditioning", decode_response).await?;
+    Ok(prefill_status)
+}
+
+async fn prime_prefix_cache(
+    State(state): State<ProxyState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    if !state.ready() {
+        return ProxyHttpError::status(StatusCode::SERVICE_UNAVAILABLE, "proxy is not ready")
+            .into_response();
+    }
+    let authorization = outbound_authorization(&headers);
+    let targets = core::ranked_prime_targets(&state.inner.prefill);
+    core::run_prime_fanout("prefix cache conditioning", targets, |target| {
+        let state = state.clone();
+        let authorization = authorization.clone();
+        let body = body.clone();
+        async move { prime_flow(&state, &target.replica, target.rank, authorization, &body).await }
+    })
+    .await
 }
 
 async fn flush_cache(State(state): State<ProxyState>, headers: HeaderMap) -> Response<Body> {
     let authorization = outbound_authorization(&headers);
-    let targets = state
-        .inner
-        .prefill
-        .iter()
-        .map(|target| target.url.clone())
-        .chain(state.inner.decode.iter().cloned());
-    let attempts = targets.map(|url| flush_target(state.client(), url, authorization.clone()));
-
-    let mut successful = Vec::new();
-    let mut failed = Vec::new();
-    for result in join_all(attempts).await {
-        match result {
-            Ok(url) => successful.push(url),
-            Err(failure) => failed.push(failure),
-        }
-    }
-    let status = if failed.is_empty() {
-        StatusCode::OK
-    } else {
-        StatusCode::PARTIAL_CONTENT
-    };
-    (status, Json(FlushCacheResponse { successful, failed })).into_response()
-}
-
-async fn flush_target(
-    client: reqwest::Client,
-    url: String,
-    authorization: Option<String>,
-) -> Result<String, FlushCacheFailure> {
-    let endpoint = join_path(&url, "/flush_cache");
-    let mut request = client.post(endpoint);
-    if let Some(authorization) = authorization {
-        request = request.header(reqwest::header::AUTHORIZATION, authorization);
-    }
-    let response = request.send().await.map_err(|error| FlushCacheFailure {
-        url: url.clone(),
-        error: format!("cache flush request failed: {error}"),
-    })?;
-    if response.status().is_success() && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        Ok(url)
-    } else {
-        let status = response.status();
-        let detail = response
-            .text()
-            .await
-            .unwrap_or_else(|error| format!("failed to read response body: {error}"));
-        Err(FlushCacheFailure {
-            url,
-            error: format!("HTTP {status}: {detail}"),
-        })
-    }
+    let targets = state.fanout_target_urls();
+    core::run_sweep_fanout(
+        state.client(),
+        "cache flush",
+        "/flush_cache",
+        targets,
+        authorization,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -758,6 +667,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+    use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
@@ -878,6 +788,7 @@ mod tests {
                 url: prefill_url,
                 bootstrap_host: "10.0.0.7".to_owned(),
                 bootstrap_port: 8998,
+                data_parallel_size: 1,
             }],
             decode: vec![decode_url],
         })
@@ -908,10 +819,11 @@ mod tests {
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            completion_route(
+            request_route(
                 state,
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello"}),
+                "/v1/completions",
             ),
         )
         .await
@@ -1006,10 +918,11 @@ mod tests {
         let state = proxy_state(prefill_url, decode_url)?;
         state.set_ready();
 
-        let result = completion_route(
+        let result = request_route(
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": ["one", "two"]}),
+            "/v1/completions",
         )
         .await;
         let error = match result {
@@ -1049,10 +962,11 @@ mod tests {
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            completion_route(
+            request_route(
                 state,
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello", "stream": true}),
+                "/v1/completions",
             ),
         )
         .await
@@ -1108,10 +1022,11 @@ mod tests {
         let state = proxy_state(prefill_url, decode_url)?;
         state.set_ready();
 
-        let response = completion_route(
+        let response = request_route(
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
+            "/v1/completions",
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1171,10 +1086,11 @@ mod tests {
         let state = proxy_state(prefill_url, decode_url)?;
         state.set_ready();
 
-        let request = tokio::spawn(completion_route(
+        let request = tokio::spawn(request_route(
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
+            "/v1/completions",
         ));
         wait_until(&prefill_backend.body_polled).await?;
         tokio::task::yield_now().await;
@@ -1202,10 +1118,11 @@ mod tests {
         let state = proxy_state(prefill_url, decode_url)?;
         state.set_ready();
 
-        let request = tokio::spawn(completion_route(
+        let request = tokio::spawn(request_route(
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
+            "/v1/completions",
         ));
         wait_until(&prefill_backend.body_polled).await?;
         tokio::task::yield_now().await;
@@ -1239,10 +1156,11 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            completion_route(
+            request_route(
                 state,
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello", "stream": true}),
+                "/v1/completions",
             ),
         )
         .await
@@ -1302,10 +1220,11 @@ mod tests {
         let state = proxy_state(prefill_url, decode_url)?;
         state.set_ready();
 
-        let response = completion_route(
+        let response = request_route(
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
+            "/v1/completions",
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1417,5 +1336,122 @@ mod tests {
         prefill_server.abort();
         decode_server.abort();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn prime_prefix_cache_fans_out_to_each_prefill_rank_and_reports_partial_failure()
+    -> Result<()> {
+        let prefill_backend = PrimeBackend::default();
+        let decode_backend = PrimeBackend::default();
+        let (prefill_url, prefill_server) = spawn_prime_backend(prefill_backend.clone()).await?;
+        let (decode_url, decode_server) = spawn_prime_backend(decode_backend.clone()).await?;
+        let state = ProxyState::new(Config {
+            host: "127.0.0.1".to_owned(),
+            port: 8000,
+            prefill: vec![PrefillTarget {
+                url: prefill_url.clone(),
+                bootstrap_host: "10.0.0.7".to_owned(),
+                bootstrap_port: 8998,
+                data_parallel_size: 2,
+            }],
+            decode: vec![decode_url],
+        })?;
+        state.set_ready();
+        let conditioning =
+            || Json(json!({"model": "m", "prompt": "canonical prefix", "max_tokens": 1}));
+
+        let response =
+            prime_prefix_cache(State(state.clone()), HeaderMap::new(), conditioning()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        let targets = body["targets"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("fan-out response has no targets"))?;
+        assert_eq!(targets.len(), 2);
+        for (rank, target) in targets.iter().enumerate() {
+            assert_eq!(target["url"].as_str(), Some(prefill_url.as_str()));
+            assert_eq!(target["rank"].as_u64(), Some(rank as u64));
+            assert_eq!(target["http_status"].as_u64(), Some(200));
+            assert!(target["error"].is_null());
+        }
+        let prefill_requests = prefill_backend.requests.lock().await;
+        assert_eq!(prefill_requests.len(), 2);
+        assert_eq!(prefill_requests[0].0.as_deref(), Some("0"));
+        assert_eq!(prefill_requests[1].0.as_deref(), Some("1"));
+        // Each flow rides the ordinary bootstrap pairing.
+        assert_eq!(
+            prefill_requests[0].1["bootstrap_host"].as_str(),
+            Some("10.0.0.7")
+        );
+        let decode_requests = decode_backend.requests.lock().await;
+        assert_eq!(decode_requests.len(), 2);
+        assert!(decode_requests.iter().all(|(rank, _)| rank.is_none()));
+        drop(prefill_requests);
+        drop(decode_requests);
+
+        prefill_backend.set_fail_rank(Some("1".to_owned())).await;
+        let partial = prime_prefix_cache(State(state), HeaderMap::new(), conditioning()).await;
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(partial.into_body(), usize::MAX).await?)?;
+        let targets = body["targets"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("fan-out response has no targets"))?;
+        assert_eq!(targets.len(), 2);
+        assert!(targets[0]["error"].is_null());
+        assert_eq!(targets[1]["rank"].as_u64(), Some(1));
+        assert_eq!(targets[1]["http_status"].as_u64(), Some(500));
+        assert!(
+            targets[1]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("HTTP 500"))
+        );
+        prefill_server.abort();
+        decode_server.abort();
+        Ok(())
+    }
+
+    type PrimeRequests = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+
+    #[derive(Clone, Default)]
+    struct PrimeBackend {
+        requests: PrimeRequests,
+        fail_rank: Arc<Mutex<Option<String>>>,
+    }
+
+    impl PrimeBackend {
+        async fn set_fail_rank(&self, rank: Option<String>) {
+            *self.fail_rank.lock().await = rank;
+        }
+    }
+
+    async fn mock_prime(
+        State(state): State<PrimeBackend>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Response<Body> {
+        let rank = headers
+            .get("x-data-parallel-rank")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let fail_rank = state.fail_rank.lock().await.clone();
+        state.requests.lock().await.push((rank.clone(), body));
+        if fail_rank.is_some() && fail_rank == rank {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Json(json!({"object": "text_completion", "choices": []})).into_response()
+    }
+
+    async fn spawn_prime_backend(state: PrimeBackend) -> Result<(String, JoinHandle<()>)> {
+        let app = Router::new()
+            .route("/v1/completions", post(mock_prime))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let _result = serve(listener, app).await;
+        });
+        Ok((format!("http://{address}"), server))
     }
 }

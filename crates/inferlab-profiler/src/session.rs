@@ -1,13 +1,16 @@
 use crate::error::ProfilerError;
 use crate::finalization;
-use crate::plan::{CapturePlanRecord, CaptureSelection, ProfilerTargetRecord, compile_plan};
+use crate::plan::{CaptureSelection, ProfilerFinalization, compile_plan};
 use crate::record::{
-    CaptureActionRecord, CaptureRangeEndRecord, CaptureRecord, CaptureReportRecord, CaptureStatus,
-    CaptureWindowRecord,
+    CaptureActionRecord, CapturePlanRecord, CaptureRangeEndRecord, CaptureRecord,
+    CaptureReportRecord, CaptureStatus, CaptureWindowRecord, MEASUREMENT_FINALIZATION_START,
+    ProfilerTargetRecord,
 };
 use crate::transport;
+use inferlab_protocol::CaptureMechanism;
 use inferlab_runtime::operation_bound::OperationBound;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub struct CaptureSession {
@@ -15,6 +18,14 @@ pub struct CaptureSession {
     plan: CapturePlanRecord,
     record: CaptureRecord,
     stop_failure: Option<String>,
+    /// Trace-directory file snapshots taken when the engine-trace targets
+    /// were armed, before any window opened; keyed by replica identity.
+    engine_trace_baselines: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The one global finalization budget
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]): started by the first engine-trace
+    /// window-close dispatch, or by finalization itself when no engine-trace
+    /// target ever dispatched a close.
+    finalization: Option<OperationBound>,
 }
 
 impl CaptureSession {
@@ -41,54 +52,106 @@ impl CaptureSession {
                 windows: Vec::new(),
                 finalization: Vec::new(),
                 reports: Vec::new(),
+                engine_trace: Vec::new(),
                 error: None,
             },
             plan,
             stop_failure: None,
+            engine_trace_baselines: BTreeMap::new(),
+            finalization: None,
         };
         let arm_bound = OperationBound::finite(Duration::from_secs(
             session.plan.deadlines.capture_arm_deadline_seconds,
         ));
-        if let Err(message) = session.arm_range_collection(&arm_bound) {
+        if let Err(message) = session.arm_targets(&arm_bound) {
             session.fail(message);
-            let finalization_bound = session.finalization_bound();
+            let finalization_bound = session.finalization_budget();
             session.finalize_collections(&finalization_bound);
             return Err(Box::new(session.record));
         }
         Ok(session)
     }
 
-    fn arm_range_collection(&mut self, bound: &OperationBound) -> Result<(), String> {
-        for (target, plan) in self.targets.iter().zip(&self.plan.targets) {
-            let parent = plan
-                .output_base
-                .parent()
-                .ok_or_else(|| format!("capture output {:?} has no parent", plan.output_base))?;
-            let mkdir = transport::prepare_output(target, parent, bound);
-            let mkdir_ok = mkdir.succeeded();
-            let mkdir_error = mkdir.error();
-            self.record.arm.push(mkdir);
-            if !mkdir_ok {
-                return Err(mkdir_error.unwrap_or_else(|| {
-                    format!("failed to prepare profiler target {:?}", target.process_id)
-                }));
+    fn arm_targets(&mut self, bound: &OperationBound) -> Result<(), String> {
+        let mut armed_engine_trace_replicas = BTreeSet::new();
+        for index in 0..self.targets.len() {
+            // The per-target helpers mutate the record, so the shared target
+            // and plan facts are cloned out of the borrow first.
+            let target = self.targets[index].clone();
+            let plan = self.plan.targets[index].clone();
+            if plan.mechanism == CaptureMechanism::EngineTrace {
+                if armed_engine_trace_replicas.insert(plan.replica_id.clone()) {
+                    self.arm_engine_trace_replica(&target, &plan, bound)?;
+                }
+                continue;
             }
-            let count = plan.expected_range_count.ok_or_else(|| {
-                format!(
-                    "profiler target {:?} has no static range count",
-                    target.process_id
-                )
-            })?;
-            let start = transport::arm_range_collection(target, &plan.output_base, count, bound);
-            let start_ok = start.succeeded();
-            let start_error = start.error();
-            self.record.arm.push(start);
-            if !start_ok {
-                return Err(start_error.unwrap_or_else(|| {
-                    format!("failed to arm profiler target {:?}", target.process_id)
-                }));
-            }
+            self.arm_managed_target(&target, &plan, bound)?;
         }
+        Ok(())
+    }
+
+    fn arm_managed_target(
+        &mut self,
+        target: &ProfilerTargetRecord,
+        plan: &crate::record::CaptureTargetPlan,
+        bound: &OperationBound,
+    ) -> Result<(), String> {
+        let parent = plan
+            .output_base
+            .parent()
+            .ok_or_else(|| format!("capture output {:?} has no parent", plan.output_base))?;
+        let mkdir = transport::prepare_output(target, parent, bound);
+        let mkdir_ok = mkdir.succeeded();
+        let mkdir_error = mkdir.error();
+        self.record.arm.push(mkdir);
+        if !mkdir_ok {
+            return Err(mkdir_error.unwrap_or_else(|| {
+                format!("failed to prepare profiler target {:?}", target.process_id)
+            }));
+        }
+        let count = plan.expected_range_count.ok_or_else(|| {
+            format!(
+                "profiler target {:?} has no static range count",
+                target.process_id
+            )
+        })?;
+        let start = transport::arm_range_collection(target, &plan.output_base, count, bound);
+        let start_ok = start.succeeded();
+        let start_error = start.error();
+        self.record.arm.push(start);
+        if !start_ok {
+            return Err(start_error.unwrap_or_else(|| {
+                format!("failed to arm profiler target {:?}", target.process_id)
+            }));
+        }
+        Ok(())
+    }
+
+    /// Arming an engine-trace replica is creating its record-owned trace
+    /// directory and snapshotting its contents as the window baseline; the
+    /// engine's internal profiler needs no managed collection start
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    fn arm_engine_trace_replica(
+        &mut self,
+        target: &ProfilerTargetRecord,
+        plan: &crate::record::CaptureTargetPlan,
+        bound: &OperationBound,
+    ) -> Result<(), String> {
+        let mkdir = transport::prepare_output(target, &plan.output_base, bound);
+        let mkdir_ok = mkdir.succeeded();
+        let mkdir_error = mkdir.error();
+        self.record.arm.push(mkdir);
+        if !mkdir_ok {
+            return Err(mkdir_error.unwrap_or_else(|| {
+                format!(
+                    "failed to prepare engine-trace storage for replica {:?}",
+                    plan.replica_id
+                )
+            }));
+        }
+        let baseline = finalization::snapshot_trace_files(&plan.output_base)?;
+        self.engine_trace_baselines
+            .insert(plan.replica_id.clone(), baseline);
         Ok(())
     }
 
@@ -184,36 +247,85 @@ impl CaptureSession {
 
     fn start_window(&self) -> Vec<CaptureActionRecord> {
         transport::start_windows(
-            &self.targets,
+            &self.targets.iter().collect::<Vec<_>>(),
             self.plan.deadlines.capture_control_deadline_seconds,
         )
     }
 
-    fn stop_window(&self, start: &[CaptureActionRecord]) -> Vec<CaptureActionRecord> {
+    /// Window closing splits by mechanism
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]): managed-collection targets keep
+    /// the per-action control budget, while engine-trace targets dispatch the
+    /// close into the one global finalization budget, where a delivery
+    /// failure is window-closing control failure evidence and a slow or
+    /// absent response is neutral flush-pending evidence.
+    fn stop_window(&mut self, start: &[CaptureActionRecord]) -> Vec<CaptureActionRecord> {
         let started = start
             .iter()
             .filter(|action| action.succeeded())
             .filter_map(|action| match action {
                 CaptureActionRecord::Http { process_id, .. } => Some(process_id.as_str()),
                 CaptureActionRecord::Command { .. }
-                | CaptureActionRecord::CollectionFinalization { .. } => None,
+                | CaptureActionRecord::CollectionFinalization { .. }
+                | CaptureActionRecord::EngineTraceFlush { .. } => None,
             })
             .collect::<BTreeSet<_>>();
-        transport::stop_windows(
-            &self.targets,
-            &started,
-            self.plan.deadlines.capture_control_deadline_seconds,
-        )
+        let mut actions = {
+            let managed = self
+                .targets
+                .iter()
+                .filter(|target| target.mechanism == CaptureMechanism::ManagedCollection)
+                .collect::<Vec<_>>();
+            transport::stop_windows(
+                &managed,
+                &started,
+                self.plan.deadlines.capture_control_deadline_seconds,
+            )
+        };
+        // Cloned out of the session borrow so the finalization budget can
+        // start under a mutable borrow.
+        let engine_trace = self
+            .targets
+            .iter()
+            .filter(|target| target.mechanism == CaptureMechanism::EngineTrace)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !engine_trace.is_empty() {
+            let bound = self.start_finalization_budget();
+            actions.extend(transport::close_engine_trace_windows(
+                &engine_trace.iter().collect::<Vec<_>>(),
+                &started,
+                bound,
+            ));
+        }
+        actions
+    }
+
+    /// Start the one global finalization budget at the first engine-trace
+    /// window-close dispatch ([[RFC-0004:C-WORKLOAD-PROFILING]]); later
+    /// dispatches, response consumption, flush waiting, and coverage
+    /// verification draw the same budget without restarting it.
+    fn start_finalization_budget(&mut self) -> &OperationBound {
+        self.finalization.get_or_insert_with(|| {
+            OperationBound::finite(Duration::from_secs(
+                self.plan.deadlines.capture_finalization_deadline_seconds,
+            ))
+        })
     }
 
     #[must_use]
     pub fn finish(mut self) -> CaptureRecord {
-        let finalization_bound = self.finalization_bound();
+        let finalization_bound = self.finalization_budget();
         self.finalize_collections(&finalization_bound);
         self.verify_reports(&finalization_bound);
+        self.verify_engine_trace_coverage(&finalization_bound);
         if self.record.error.is_none()
             && self.record.windows.iter().all(|window| window.succeeded)
             && self.record.reports.iter().all(|report| report.verified)
+            && self
+                .record
+                .engine_trace
+                .iter()
+                .all(|coverage| coverage.verified)
         {
             self.record.status = CaptureStatus::Succeeded;
         } else {
@@ -222,10 +334,16 @@ impl CaptureSession {
         self.record
     }
 
-    fn finalization_bound(&self) -> OperationBound {
-        OperationBound::finite(Duration::from_secs(
-            self.plan.deadlines.capture_finalization_deadline_seconds,
-        ))
+    /// Take the one global finalization budget, starting it now when no
+    /// engine-trace window-close dispatch already started it: stop-response
+    /// consumption, flush waiting, and coverage verification draw the same
+    /// budget without restarting it ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    fn finalization_budget(&mut self) -> OperationBound {
+        self.finalization.take().unwrap_or_else(|| {
+            OperationBound::finite(Duration::from_secs(
+                self.plan.deadlines.capture_finalization_deadline_seconds,
+            ))
+        })
     }
 
     fn finalize_collections(&mut self, bound: &OperationBound) {
@@ -234,8 +352,9 @@ impl CaptureSession {
             let action = finalization::finalize_target(
                 target,
                 self.range_end_for(target),
+                self.engine_trace_close_confirmed(target),
                 bound,
-                finalization::MEASUREMENT_FINALIZATION_START,
+                MEASUREMENT_FINALIZATION_START,
             );
             if !action.succeeded() && failure.is_none() {
                 failure = Some(action.error().unwrap_or_else(|| {
@@ -247,6 +366,44 @@ impl CaptureSession {
         if let Some(message) = failure {
             self.fail(message);
         }
+    }
+
+    /// The window-closing control receipt for an engine-trace target:
+    /// confirmed when every window this target's control process opened also
+    /// recorded a successful closing response for it. Receipt acknowledges
+    /// the close only; artifact flush completion is judged by coverage
+    /// verification alone, and a flush-pending close is neutral evidence
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    fn engine_trace_close_confirmed(&self, target: &ProfilerTargetRecord) -> bool {
+        if target.finalization != ProfilerFinalization::EngineTraceFlush {
+            return false;
+        }
+        let crate::plan::ProfilerControl::Http { process_id, .. } = &target.control;
+        self.record
+            .windows
+            .iter()
+            .filter(|window| {
+                window.start.iter().any(|action| {
+                    matches!(
+                        action,
+                        CaptureActionRecord::Http { process_id: pid, .. }
+                            if pid == process_id && action.succeeded()
+                    )
+                })
+            })
+            .all(|window| {
+                window.stop.iter().any(|action| {
+                    matches!(
+                        action,
+                        CaptureActionRecord::Http {
+                            process_id: pid,
+                            succeeded: true,
+                            flush_pending: false,
+                            ..
+                        } if pid == process_id
+                    )
+                })
+            })
     }
 
     fn range_end_for(&self, target: &ProfilerTargetRecord) -> Option<CaptureRangeEndRecord> {
@@ -275,7 +432,7 @@ impl CaptureSession {
                 matches!(
                     action,
                     CaptureActionRecord::Http { process_id, .. }
-                        if process_id == control_process_id
+                        if process_id == control_process_id && action.succeeded()
                 )
             })
             .then(|| CaptureRangeEndRecord {
@@ -302,17 +459,15 @@ impl CaptureSession {
                             matches!(
                                 action,
                                 CaptureActionRecord::Http { process_id, .. }
-                                    if process_id == control_process_id
+                                    if process_id == control_process_id && action.succeeded()
                             )
                         })
                     });
-                let verification = finalization::verify_report(
-                    target,
-                    path,
-                    bound,
-                    finalization::MEASUREMENT_FINALIZATION_START,
-                    wait_for_completion,
-                );
+                let verification = if wait_for_completion {
+                    transport::verify_report(target, path, bound, MEASUREMENT_FINALIZATION_START)
+                } else {
+                    transport::check_report(target, path, bound, MEASUREMENT_FINALIZATION_START)
+                };
                 let verified = verification.succeeded();
                 if !verified && failure.is_none() {
                     let mut message = format!(
@@ -344,6 +499,53 @@ impl CaptureSession {
         }
     }
 
+    fn verify_engine_trace_coverage(&mut self, bound: &OperationBound) {
+        let mut verified_replicas = BTreeSet::new();
+        let mut failure = None;
+        for plan in &self.plan.targets {
+            if plan.mechanism != CaptureMechanism::EngineTrace
+                || !verified_replicas.insert(plan.replica_id.clone())
+            {
+                continue;
+            }
+            let baseline = self
+                .engine_trace_baselines
+                .get(&plan.replica_id)
+                .cloned()
+                .unwrap_or_default();
+            let coverage = finalization::verify_engine_trace_coverage(
+                &plan.replica_id,
+                &plan.output_base,
+                plan.device_count,
+                &baseline,
+                bound,
+            );
+            if !coverage.verified && failure.is_none() {
+                let mut message = format!(
+                    "engine-trace replica {:?} produced {} new trace artifacts in {:?} for a \
+                     {}-device replica; every device must produce one",
+                    plan.replica_id,
+                    coverage.new_files.len(),
+                    plan.output_base,
+                    plan.device_count,
+                );
+                if let Some(error) = &coverage.error {
+                    message.push_str(&format!("; trace-directory snapshot failed: {error}"));
+                }
+                if let Some(stop_failure) = &self.stop_failure {
+                    message.push_str(&format!(
+                        "; a window-closing control action had failed: {stop_failure}"
+                    ));
+                }
+                failure = Some(message);
+            }
+            self.record.engine_trace.push(coverage);
+        }
+        if let Some(message) = failure {
+            self.fail(message);
+        }
+    }
+
     fn fail(&mut self, message: String) {
         self.record.status = CaptureStatus::Failed;
         if self.record.error.is_none() {
@@ -356,14 +558,18 @@ impl CaptureSession {
 mod tests {
     use super::CaptureSession;
     use crate::plan::{
-        CaptureDeadlines, CaptureWindowActionPlan, CaptureWindowControlEndpointPlan,
-        CaptureWindowHttpMethodPlan, NsysEscapes, ProfilerControl, ProfilerFinalization,
-        ProfilerLaunch, ProfilerTargetRecord, WindowControlKind, compile_plan,
+        CaptureDeadlines, CaptureSelection, CaptureWindowActionPlan,
+        CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan, NsysEscapes,
+        ProfilerControl, ProfilerFinalization, ProfilerLaunch, WindowControlKind, compile_plan,
     };
-    use crate::record::{CaptureRecord, CaptureStatus};
-    use inferlab_protocol::EndpointAssignment;
-    use inferlab_runtime::operation_bound::OperationBound;
+    use crate::record::{CaptureActionRecord, CaptureRecord, CaptureStatus, ProfilerTargetRecord};
+    use inferlab_protocol::{CaptureMechanism, EndpointAssignment};
+    use inferlab_runtime::operation_bound::{
+        OperationBound, OperationBudgetEvidence, OperationTerminalCause,
+    };
     use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::time::Duration;
 
     #[test]
@@ -375,6 +581,10 @@ mod tests {
             replica_id: "serve".to_owned(),
             replica_index: 0,
             rank: 0,
+            rank_count: 1,
+            device_count: 1,
+            mechanism: inferlab_protocol::CaptureMechanism::ManagedCollection,
+            trace_storage: None,
             session: "inferlab-fixture".to_owned(),
             executable: "true".to_owned(),
             launch: ProfilerLaunch::Local,
@@ -425,10 +635,13 @@ mod tests {
                 windows: Vec::new(),
                 finalization: Vec::new(),
                 reports: Vec::new(),
+                engine_trace: Vec::new(),
                 error: None,
             },
             plan,
             stop_failure: None,
+            engine_trace_baselines: std::collections::BTreeMap::new(),
+            finalization: None,
         };
 
         let bound = OperationBound::finite(Duration::from_millis(50));
@@ -443,6 +656,126 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("missing"))
         );
+        Ok(())
+    }
+
+    /// An engine-trace window close dispatches when the measured phase ends
+    /// and draws the one global finalization budget, not the per-action
+    /// control budget; a response that outlasts the budget is neutral
+    /// flush-pending evidence, so the capture fails only through coverage
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[test]
+    fn engine_trace_close_dispatch_consumes_the_finalization_budget() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            // start_profile answers promptly; stop_profile hangs past the
+            // one-second finalization budget.
+            for hang in [false, true] {
+                let (mut stream, _) = listener.accept()?;
+                let mut request = [0_u8; 1_024];
+                let _ = stream.read(&mut request)?;
+                if hang {
+                    std::thread::sleep(Duration::from_millis(1_500));
+                }
+                // The close client is gone by then; a broken pipe is fine.
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+            Ok(())
+        });
+        let action = |path: &str| CaptureWindowActionPlan {
+            method: CaptureWindowHttpMethodPlan::Post,
+            path: path.to_owned(),
+            body: None,
+            effective_url: format!("http://{address}{path}"),
+        };
+        let target = ProfilerTargetRecord {
+            process_id: "serve".to_owned(),
+            role_id: "serve".to_owned(),
+            replica_id: "serve".to_owned(),
+            replica_index: 0,
+            rank: 0,
+            rank_count: 1,
+            device_count: 1,
+            mechanism: CaptureMechanism::EngineTrace,
+            trace_storage: Some(temp.path().join("trace")),
+            session: String::new(),
+            executable: String::new(),
+            launch: ProfilerLaunch::Local,
+            finalization: ProfilerFinalization::EngineTraceFlush,
+            control: ProfilerControl::Http {
+                window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
+                process_id: "serve".to_owned(),
+                endpoint: EndpointAssignment {
+                    host: "127.0.0.1".to_owned(),
+                    port: address.port(),
+                },
+                start: action("/start_profile"),
+                stop: action("/stop_profile"),
+            },
+            supported_window_controls: vec![WindowControlKind::FrameworkRange],
+            command_cwd: temp.path().to_path_buf(),
+            runtime_root: temp.path().join("profiles"),
+            launch_prefix: Vec::new(),
+            escapes: NsysEscapes::default(),
+        };
+        let mut capture = CaptureSession::open(
+            "serve",
+            "bench",
+            &["w1".to_owned()],
+            CaptureSelection {
+                targets: vec![target],
+                deadlines: CaptureDeadlines {
+                    capture_arm_deadline_seconds: 60,
+                    capture_control_deadline_seconds: 60,
+                    capture_finalization_deadline_seconds: 1,
+                },
+            },
+        )
+        .map_err(|record| format!("capture arming failed: {record:?}"))?;
+
+        capture.run_window("w1", || Ok::<(), crate::error::ProfilerError>(()))?;
+        let record = capture.finish();
+
+        let stop = record.windows[0]
+            .stop
+            .first()
+            .ok_or("window close recorded no action")?;
+        let CaptureActionRecord::Http {
+            succeeded,
+            flush_pending,
+            failure_kind,
+            timing,
+            ..
+        } = stop
+        else {
+            return Err("window close recorded non-HTTP evidence".into());
+        };
+        assert!(succeeded);
+        assert!(flush_pending);
+        assert_eq!(failure_kind, &None);
+        assert_eq!(
+            timing.budget,
+            OperationBudgetEvidence::Finite {
+                configured_ms: 1_000
+            },
+            "the close drew the finalization budget, not the 60 s control budget"
+        );
+        assert_eq!(timing.terminal_cause, OperationTerminalCause::TimedOut);
+        assert_eq!(record.status, CaptureStatus::Failed);
+        assert!(!record.engine_trace[0].verified);
+        let error = record.error.as_deref().ok_or("missing capture error")?;
+        assert!(
+            error.contains("every device must produce one"),
+            "coverage is the failing verdict: {error}"
+        );
+        assert!(
+            !error.contains("window-closing control action had failed"),
+            "flush-pending evidence must not read as a control failure: {error}"
+        );
+        server.join().map_err(|_| "fixture server panicked")??;
         Ok(())
     }
 }

@@ -14,7 +14,7 @@ use crate::workload::record::{
     SloEvaluationOutcome,
 };
 use crate::workload::{BenchCasePlan, BenchPlan};
-use crate::workspace::{BenchArtifactLevel, BenchCacheStart, RequestSlo};
+use crate::workspace::{BenchArtifactLevel, RequestSlo};
 use inferlab_protocol::{BenchClientResult, ClientStatus};
 
 /// Raw-artifact-derived agentic evidence dimensions recorded as unavailable at
@@ -57,7 +57,10 @@ impl<'a> BenchResultExpectations<'a> {
             artifact_level: plan.client.effective_definition.artifact_level,
             request_count: case.request_count,
             request_slo: plan.client.slo.request.as_ref(),
-            prompt_cache_evidence: requires_prompt_cache_evidence(plan),
+            prompt_cache_evidence: plan
+                .client
+                .effective_definition
+                .requires_prompt_cache_evidence(),
         }
     }
 }
@@ -301,27 +304,6 @@ pub(super) fn bench_result_error(
     None
 }
 
-fn requires_prompt_cache_evidence(plan: &BenchPlan) -> bool {
-    if plan.client.effective_definition.cache_start == BenchCacheStart::Primed {
-        return true;
-    }
-    matches!(
-        plan.client.effective_definition.source.request_source(),
-        Some(
-            ResolvedBenchRequestSource::Random {
-                prefix_sharing: Some(_),
-                ..
-            } | ResolvedBenchRequestSource::Random {
-                shared_system_content: Some(_),
-                ..
-            } | ResolvedBenchRequestSource::RandomMixture {
-                prefix_sharing: Some(_),
-                ..
-            }
-        )
-    )
-}
-
 fn prompt_cache_result_error(result: &BenchClientResult, required: bool) -> Option<String> {
     if !required {
         return (!result.prompt_cache_observations.is_empty()).then(|| {
@@ -331,7 +313,7 @@ fn prompt_cache_result_error(result: &BenchClientResult, required: bool) -> Opti
     }
     if result.prompt_cache_observations.len() != result.completed_requests as usize {
         return Some(format!(
-            "Bench client returned {} prompt-cache observations for {} completed requests",
+            "Bench client returned {} prompt-cache observations for {} completed requests; the server may not expose backend prompt cache-read usage — enable the serving integration's cache-read reporting setting and rebuild the server",
             result.prompt_cache_observations.len(),
             result.completed_requests
         ));

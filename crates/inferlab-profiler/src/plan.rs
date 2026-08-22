@@ -1,5 +1,6 @@
 use crate::error::ProfilerError;
-use inferlab_protocol::{EndpointAssignment, SettingValue};
+use crate::record::{CapturePlanRecord, CaptureTargetPlan, ProfilerTargetRecord};
+use inferlab_protocol::{CaptureMechanism, EndpointAssignment, SettingValue};
 use inferlab_runtime::plan::{CommandPlan, LaunchPlan, ProcessEndpointPlan};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -61,8 +62,24 @@ impl NsysEscapes {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProcessCapturePlan {
+    /// The capture mechanism the integration declared for this target,
+    /// validated against the effective request mechanism; server records
+    /// written before schema version 7 predate the field and are managed
+    /// collection.
+    #[serde(default)]
+    pub mechanism: CaptureMechanism,
+    /// The control-plane-assigned persistent trace directory for an
+    /// engine-trace target ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_storage: Option<PathBuf>,
     pub window_control_endpoint: CaptureWindowControlEndpointPlan,
     pub control_process_id: String,
+    /// The target replica's declared whole-replica device count: engine-trace
+    /// coverage verification expects one new trace artifact per device
+    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Older records predate the field
+    /// and default to 1.
+    #[serde(default = "default_one")]
+    pub device_count: u32,
     pub start: CaptureWindowActionPlan,
     pub stop: CaptureWindowActionPlan,
     /// The merged escape inputs for this target's role
@@ -101,37 +118,25 @@ pub struct ProcessPreparation<'a> {
     pub replica_index: u32,
     pub process_id: &'a str,
     pub rank: Option<u32>,
+    pub rank_count: Option<u32>,
     pub command: &'a CommandPlan,
     pub launch: &'a LaunchPlan,
     pub capture: Option<&'a ProcessCapturePlan>,
     pub control_endpoint: Option<&'a ProcessEndpointPlan>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfilerTargetRecord {
-    pub process_id: String,
-    pub role_id: String,
-    pub replica_id: String,
-    pub replica_index: u32,
-    pub rank: u32,
-    pub session: String,
-    pub executable: String,
-    pub launch: ProfilerLaunch,
-    pub finalization: ProfilerFinalization,
-    pub control: ProfilerControl,
-    pub supported_window_controls: Vec<WindowControlKind>,
-    pub command_cwd: PathBuf,
-    pub runtime_root: PathBuf,
-    pub launch_prefix: Vec<String>,
-    #[serde(default, skip_serializing_if = "NsysEscapes::is_empty")]
-    pub escapes: NsysEscapes,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProfilerFinalization {
     NsysStop,
+    /// The window close is dispatched into the global finalization budget;
+    /// coverage verification of the trace-storage delta is the sole flush
+    /// completion verdict.
+    EngineTraceFlush,
+}
+
+pub(crate) fn default_one() -> u32 {
+    1
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -176,6 +181,64 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
         .ok_or_else(|| ProfilerError::TargetIsNotModelRank {
             process_id: input.process_id.to_owned(),
         })?;
+    let control_endpoint =
+        input
+            .control_endpoint
+            .ok_or_else(|| ProfilerError::UnknownControlProcess {
+                process_id: input.process_id.to_owned(),
+                control_process_id: requirement.control_process_id.clone(),
+            })?;
+    let control = ProfilerControl::Http {
+        window_control_endpoint: requirement.window_control_endpoint,
+        process_id: requirement.control_process_id.clone(),
+        endpoint: EndpointAssignment {
+            host: control_endpoint.host.clone(),
+            port: control_endpoint.port,
+        },
+        start: requirement.start.clone(),
+        stop: requirement.stop.clone(),
+    };
+    let launch = match input.launch {
+        LaunchPlan::Local => ProfilerLaunch::Local,
+        LaunchPlan::Ssh { target } => ProfilerLaunch::Ssh {
+            target: target.clone(),
+        },
+    };
+    if requirement.mechanism == CaptureMechanism::EngineTrace {
+        // Engine-trace ranks run unwrapped: the framework's internal profiler
+        // writes into the control-plane-assigned trace directory directly, and
+        // the window is opened and closed through the HTTP control actions
+        // ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+        let trace_storage = requirement.capture_storage.clone().ok_or_else(|| {
+            ProfilerError::EngineTraceMissingStorage {
+                process_id: input.process_id.to_owned(),
+            }
+        })?;
+        return Ok(PreparedProcess {
+            command: input.command.clone(),
+            target: Some(ProfilerTargetRecord {
+                process_id: input.process_id.to_owned(),
+                role_id: input.role_id.to_owned(),
+                replica_id: input.replica_id.to_owned(),
+                replica_index: input.replica_index,
+                rank,
+                rank_count: input.rank_count.unwrap_or(1),
+                device_count: requirement.device_count,
+                mechanism: CaptureMechanism::EngineTrace,
+                runtime_root: trace_storage.clone(),
+                trace_storage: Some(trace_storage),
+                session: String::new(),
+                executable: String::new(),
+                launch,
+                finalization: ProfilerFinalization::EngineTraceFlush,
+                control,
+                supported_window_controls: vec![WindowControlKind::FrameworkRange],
+                command_cwd: input.command.cwd.clone(),
+                launch_prefix: Vec::new(),
+                escapes: NsysEscapes::default(),
+            }),
+        });
+    }
     let session = session_name(input.record_id, input.process_id);
     let escapes = requirement.escapes.clone();
     let executable = escapes
@@ -199,23 +262,6 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
     ]);
     let mut argv = launch_prefix.clone();
     argv.extend(input.command.argv.iter().cloned());
-    let control_endpoint =
-        input
-            .control_endpoint
-            .ok_or_else(|| ProfilerError::UnknownControlProcess {
-                process_id: input.process_id.to_owned(),
-                control_process_id: requirement.control_process_id.clone(),
-            })?;
-    let control = ProfilerControl::Http {
-        window_control_endpoint: requirement.window_control_endpoint,
-        process_id: requirement.control_process_id.clone(),
-        endpoint: EndpointAssignment {
-            host: control_endpoint.host.clone(),
-            port: control_endpoint.port,
-        },
-        start: requirement.start.clone(),
-        stop: requirement.stop.clone(),
-    };
     Ok(PreparedProcess {
         command: CommandPlan {
             argv,
@@ -230,14 +276,13 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
             replica_id: input.replica_id.to_owned(),
             replica_index: input.replica_index,
             rank,
+            rank_count: input.rank_count.unwrap_or(1),
+            device_count: requirement.device_count,
+            mechanism: CaptureMechanism::ManagedCollection,
+            trace_storage: None,
             session,
             executable,
-            launch: match input.launch {
-                LaunchPlan::Local => ProfilerLaunch::Local,
-                LaunchPlan::Ssh { target } => ProfilerLaunch::Ssh {
-                    target: target.clone(),
-                },
-            },
+            launch,
             finalization: ProfilerFinalization::NsysStop,
             control,
             supported_window_controls: vec![WindowControlKind::FrameworkRange],
@@ -285,17 +330,6 @@ fn sanitize_segment(value: &str) -> String {
         .collect()
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CapturePlanRecord {
-    pub server_record_id: String,
-    pub workload_id: String,
-    pub deadlines: CaptureDeadlines,
-    pub control: WindowControlKind,
-    pub windows: Vec<CaptureWindowPlan>,
-    pub targets: Vec<CaptureTargetPlan>,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureDeadlines {
@@ -314,20 +348,6 @@ pub struct CaptureSelection {
 pub struct CaptureWindowPlan {
     pub id: String,
     pub range_index: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CaptureTargetPlan {
-    pub process_id: String,
-    pub role_id: String,
-    pub replica_id: String,
-    pub replica_index: u32,
-    pub rank: u32,
-    pub session: String,
-    pub expected_range_count: Option<usize>,
-    pub output_base: PathBuf,
-    pub reports: Vec<PathBuf>,
 }
 
 pub(crate) fn compile_plan(
@@ -351,38 +371,59 @@ pub(crate) fn compile_plan(
         return Err(ProfilerError::NoStaticWindows);
     }
     let control = WindowControlKind::FrameworkRange;
+    // Range indexes are a managed-collection concept; engine-trace windows
+    // keep only their semantic identity.
+    let range_backed = targets
+        .iter()
+        .any(|target| target.mechanism == CaptureMechanism::ManagedCollection);
     let windows = window_ids
         .iter()
         .enumerate()
         .map(|(index, id)| CaptureWindowPlan {
             id: id.clone(),
-            range_index: Some(index + 1),
+            range_index: range_backed.then_some(index + 1),
         })
         .collect::<Vec<_>>();
     let targets = targets
         .iter()
         .map(|target| {
-            let output_base = target
-                .runtime_root
-                .join(sanitize_segment(workload_id))
-                .join("trace");
-            let reports = windows
-                .iter()
-                .map(|window| report_path(&output_base, window.range_index))
-                .collect();
-            CaptureTargetPlan {
+            let (output_base, reports, expected_range_count) = match target.mechanism {
+                CaptureMechanism::ManagedCollection => {
+                    let output_base = target
+                        .runtime_root
+                        .join(sanitize_segment(workload_id))
+                        .join("trace");
+                    let reports = windows
+                        .iter()
+                        .map(|window| report_path(&output_base, window.range_index))
+                        .collect();
+                    (output_base, reports, Some(windows.len()))
+                }
+                CaptureMechanism::EngineTrace => {
+                    let trace_dir = target.trace_storage.clone().ok_or_else(|| {
+                        ProfilerError::EngineTraceMissingStorage {
+                            process_id: target.process_id.clone(),
+                        }
+                    })?;
+                    (trace_dir, Vec::new(), None)
+                }
+            };
+            Ok(CaptureTargetPlan {
                 process_id: target.process_id.clone(),
                 role_id: target.role_id.clone(),
                 replica_id: target.replica_id.clone(),
                 replica_index: target.replica_index,
                 rank: target.rank,
+                rank_count: target.rank_count,
+                device_count: target.device_count,
+                mechanism: target.mechanism,
                 session: target.session.clone(),
-                expected_range_count: Some(windows.len()),
+                expected_range_count,
                 output_base,
                 reports,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ProfilerError>>()?;
     Ok(CapturePlanRecord {
         server_record_id: server_record_id.to_owned(),
         workload_id: workload_id.to_owned(),

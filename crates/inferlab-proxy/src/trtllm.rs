@@ -7,20 +7,21 @@ use crate::core::{
 };
 use crate::error::ProxyError;
 use axum::Json;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::routing::{get, post};
-use axum::{Router, serve};
-use futures_util::future::join_all;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::net::TcpListener;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const ID: &str = "inferlab-trtllm-proxy";
 pub const VERSION: u32 = 2;
+
+/// Display name used in lifecycle/validation error messages.
+const PROXY_NAME: &str = "TensorRT-LLM proxy";
 
 const MIN_REQUEST_ID: u64 = 1_u64 << 42;
 const CONTEXT_FIRST_SCHEDULE_STYLE: u64 = 0;
@@ -50,16 +51,7 @@ pub async fn run_async(config: Config) -> Result<(), ProxyError> {
     let port = config.port;
     let state = ProxyState::new(config)?;
     tokio::spawn(await_backends(state.clone()));
-    let listener = TcpListener::bind((host.as_str(), port))
-        .await
-        .map_err(|error| ProxyError::Io {
-            message: format!("failed to bind TensorRT-LLM proxy on {host}:{port}: {error}"),
-        })?;
-    serve(listener, router(state))
-        .await
-        .map_err(|error| ProxyError::Io {
-            message: format!("TensorRT-LLM proxy server failed: {error}"),
-        })
+    core::serve_router(PROXY_NAME, &host, port, router(state)).await
 }
 
 fn router(state: ProxyState) -> Router {
@@ -102,22 +94,14 @@ struct ProxyStateInner {
 
 impl ProxyState {
     fn new(config: Config) -> Result<Self, ProxyError> {
-        if config.prefill.is_empty() {
-            return Err(ProxyError::Invalid {
-                message: "TensorRT-LLM proxy requires at least one prefill endpoint".to_owned(),
-            });
-        }
-        if config.decode.is_empty() {
-            return Err(ProxyError::Invalid {
-                message: "TensorRT-LLM proxy requires at least one decode endpoint".to_owned(),
-            });
-        }
-        let client = core::build_pooled_client().map_err(|error| ProxyError::Io {
-            message: format!("failed to create TensorRT-LLM proxy HTTP client: {error}"),
-        })?;
+        core::require_endpoints(
+            PROXY_NAME,
+            config.prefill.is_empty(),
+            config.decode.is_empty(),
+        )?;
         Ok(Self {
             inner: Arc::new(ProxyStateInner {
-                client,
+                client: core::pooled_client(PROXY_NAME)?,
                 prefill: config.prefill,
                 decode: config.decode,
                 ready: AtomicBool::new(false),
@@ -165,46 +149,21 @@ fn request_id_seed() -> u64 {
 }
 
 async fn await_backends(state: ProxyState) {
-    let urls = state
-        .inner
-        .prefill
-        .iter()
-        .chain(&state.inner.decode)
-        .cloned();
-    join_all(urls.map(|url| await_backend(state.client(), url))).await;
+    let urls = core::fanout_target_urls(
+        state.inner.prefill.iter().map(String::as_str),
+        state.inner.decode.iter().map(String::as_str),
+    );
+    core::await_backends(state.client(), urls, "/health").await;
     state.set_ready();
-}
-
-async fn await_backend(client: reqwest::Client, url: String) {
-    loop {
-        if client
-            .get(join_path(&url, "/health"))
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success())
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
 }
 
 async fn healthcheck(
     State(state): State<ProxyState>,
 ) -> (StatusCode, Json<ProxyHealthcheckResponse>) {
-    let ready = state.ready();
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (
-        status,
-        Json(ProxyHealthcheckResponse {
-            ready,
-            prefill_instances: state.inner.prefill.len(),
-            decode_instances: state.inner.decode.len(),
-        }),
+    core::healthcheck_response(
+        state.ready(),
+        state.inner.prefill.len(),
+        state.inner.decode.len(),
     )
 }
 
@@ -213,7 +172,7 @@ async fn completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    completion_route(state, headers, body).await
+    request_route(state, headers, body, RequestFamily::Completions).await
 }
 
 async fn chat_completions(
@@ -222,14 +181,6 @@ async fn chat_completions(
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
     request_route(state, headers, body, RequestFamily::ChatCompletions).await
-}
-
-async fn completion_route(
-    state: ProxyState,
-    headers: HeaderMap,
-    body: Value,
-) -> Result<Response<Body>, ProxyHttpError> {
-    request_route(state, headers, body, RequestFamily::Completions).await
 }
 
 async fn request_route(
@@ -656,10 +607,13 @@ mod tests {
     use axum::http::{HeaderValue, header};
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
+    use axum::serve;
     use bytes::Bytes;
     use futures_util::StreamExt;
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
     use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
 
@@ -872,7 +826,14 @@ mod tests {
             json!({"model": "m", "prompt": ["hello"]}),
             json!({"model": "m", "prompt": "hello", "n": 2}),
         ] {
-            let error = match completion_route(state.clone(), HeaderMap::new(), request).await {
+            let error = match request_route(
+                state.clone(),
+                HeaderMap::new(),
+                request,
+                RequestFamily::Completions,
+            )
+            .await
+            {
                 Ok(_) => bail!("invalid public request was dispatched"),
                 Err(error) => error,
             };
@@ -894,10 +855,11 @@ mod tests {
         let state = proxy_state(vec![prefill], vec![decode])?;
         state.set_ready();
 
-        let response = completion_route(
+        let response = request_route(
             state.clone(),
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "mode": "complete"}),
+            RequestFamily::Completions,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -907,7 +869,7 @@ mod tests {
         assert_eq!(returned["opaque"], "kept");
         assert!(returned["choices"][0].get("disaggregated_params").is_none());
 
-        let response = completion_route(
+        let response = request_route(
             state,
             HeaderMap::new(),
             json!({
@@ -916,6 +878,7 @@ mod tests {
                 "mode": "complete",
                 "stream": true
             }),
+            RequestFamily::Completions,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -949,10 +912,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer inbound".parse()?);
 
-        let response = completion_route(
+        let response = request_route(
             state.clone(),
             headers.clone(),
             json!({"model": "m", "prompt": "hello", "mode": "generate"}),
+            RequestFamily::Completions,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -966,7 +930,7 @@ mod tests {
             Bytes::from_static(b"decode-complete")
         );
 
-        let response = completion_route(
+        let response = request_route(
             state,
             headers,
             json!({
@@ -975,6 +939,7 @@ mod tests {
                 "mode": "generate",
                 "stream": true
             }),
+            RequestFamily::Completions,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1117,10 +1082,11 @@ mod tests {
         state.set_ready();
 
         for mode in ["context-fail", "decode-fail"] {
-            let result = completion_route(
+            let result = request_route(
                 state.clone(),
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello", "mode": mode}),
+                RequestFamily::Completions,
             )
             .await;
             let error = match result {
@@ -1130,7 +1096,7 @@ mod tests {
             assert_eq!(error.into_response().status(), StatusCode::BAD_GATEWAY);
         }
 
-        let response = completion_route(
+        let response = request_route(
             state,
             HeaderMap::new(),
             json!({
@@ -1139,6 +1105,7 @@ mod tests {
                 "mode": "stream-error",
                 "stream": true
             }),
+            RequestFamily::Completions,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

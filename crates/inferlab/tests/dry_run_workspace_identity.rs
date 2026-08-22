@@ -1184,10 +1184,10 @@ import sys
 json.load(sys.stdin)
 print(json.dumps({
     "status": "error",
-    "protocol_version": "7",
+    "protocol_version": "8",
     "error": {
         "code": "unsupported_protocol_version",
-        "message": "received protocol version 7; this integration supports protocol version 6",
+        "message": "received protocol version 8; this integration supports protocol version 6",
     },
 }))
 "#;
@@ -1209,7 +1209,7 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 2") && stderr.contains("protocol version 7"),
+        stderr.contains("protocol version 2") && stderr.contains("protocol version 8"),
         "the mismatch names both versions: {stderr}"
     );
     assert!(
@@ -1231,7 +1231,7 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 7") && stderr.contains("protocol version 6"),
+        stderr.contains("protocol version 8") && stderr.contains("protocol version 6"),
         "the structured rejection names both versions: {stderr}"
     );
     assert!(

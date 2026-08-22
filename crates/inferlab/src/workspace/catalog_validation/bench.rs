@@ -704,3 +704,589 @@ fn validate_bench_token_selector(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::definitions::BenchRandomShape;
+
+    #[test]
+    fn dataset_request_source_is_one_valid_serving_bench_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "dataset", dataset = "sharegpt", max_input_tokens = 8192 }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("sharegpt", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            &request_source,
+            Some(BenchRequestSource::Dataset {
+                dataset,
+                profile: None,
+                max_input_tokens: 8192,
+                output_tokens: None,
+            }) if dataset == "sharegpt"
+        ));
+        let Some(request_source) = request_source else {
+            return Err(std::io::Error::other("expected a request source").into());
+        };
+        assert_eq!(
+            request_source.tpot_applicability(),
+            BenchTpotApplicability::Applicable
+        );
+        assert_eq!(
+            BenchRequestSource::Dataset {
+                dataset: "sharegpt".to_owned(),
+                profile: None,
+                max_input_tokens: 8192,
+                output_tokens: Some(1),
+            }
+            .tpot_applicability(),
+            BenchTpotApplicability::Inapplicable
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dataset_profile_is_a_release_catalog_identifier() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "dataset", dataset = "speed_bench", profile = "qualitative_coding", max_input_tokens = 8192, output_tokens = 4096 }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("speed", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        let Some(BenchRequestSource::Dataset {
+            dataset, profile, ..
+        }) = request_source
+        else {
+            return Err(std::io::Error::other("expected a dataset request source").into());
+        };
+        assert_eq!(dataset, "speed_bench");
+        assert_eq!(profile.as_deref(), Some("qualitative_coding"));
+        Ok(())
+    }
+
+    #[test]
+    fn dataset_profile_must_resolve_through_the_release_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "dataset", dataset = "speed_bench", profile = "made_up", max_input_tokens = 8192, output_tokens = 4096 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        let Err(error) = validate_bench("speed", &definition) else {
+            return Err(std::io::Error::other("unknown catalog profile must fail").into());
+        };
+        assert!(error.to_string().contains("made_up"), "{error}");
+        assert!(error.to_string().contains("catalog"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn random_request_source_accepts_bounded_uniform_token_selectors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = { kind = "inclusive_uniform", min = 900, max = 1100 } }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("uniform", &definition)?;
+        Ok(())
+    }
+
+    #[test]
+    fn uniform_random_rejects_mixed_tpot_and_accepts_distributed_prefix_input()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mixed = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = { kind = "inclusive_uniform", min = 1, max = 2 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let shared = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 64, max = 128 }, output_tokens = 32, prefix_sharing = { shared_prefix_ratio = 0.5 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        let Err(mixed_error) = validate_bench("mixed-tpot", &mixed) else {
+            return Err(std::io::Error::other("uniform OSL spanning one must fail").into());
+        };
+        validate_bench("uniform-prefix", &shared)?;
+        assert!(mixed_error.to_string().contains("TPOT"), "{mixed_error}");
+        Ok(())
+    }
+
+    #[test]
+    fn serving_bench_preserves_a_server_side_chat_template_request_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+
+[request_body]
+chat_template = "{% for message in messages %}{{ message.content }}{% endfor %}"
+"#,
+        )?;
+
+        validate_bench("server-template", &definition)?;
+        let BenchDefinition::Serving { request_body, .. } = definition else {
+            return Err(std::io::Error::other("fixture should be a serving Bench").into());
+        };
+        assert!(matches!(
+            request_body.get("chat_template"),
+            Some(JsonValue::String(value)) if value.contains("message.content")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn server_metrics_accepts_a_positive_native_warmup() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
+server_metrics = true
+concurrency = [1]
+prompts_per_concurrency = 1
+warmup_prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("metrics-warmup", &definition)?;
+        Ok(())
+    }
+
+    #[test]
+    fn serving_bench_accepts_closed_cache_starts_and_rejects_the_old_boolean()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for start in ["uncontrolled", "cold", "primed"] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", prompt = {{ kind = "flat" }}, input_tokens = 128, output_tokens = 32, prefix_sharing = {{ shared_prefix_tokens = 64 }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+cache = {{ start = "{start}" }}
+timeout_seconds = 60
+"#
+            ))?;
+            validate_bench("cache", &definition)?;
+        }
+
+        let error = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 128, output_tokens = 32 }
+concurrency = [1]
+prompts_per_concurrency = 1
+reset_prefix_cache = true
+timeout_seconds = 60
+"#,
+        )
+        .err()
+        .ok_or("the removed reset_prefix_cache field was accepted")?;
+        assert!(error.to_string().contains("reset_prefix_cache"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn primed_cache_requires_positive_exact_prefix_geometry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 128, output_tokens = 32, prefix_sharing = { shared_prefix_tokens = 0 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+cache = { start = "primed" }
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("primed", &definition)
+            .err()
+            .ok_or("primed cache accepted a zero shared prefix")?;
+        assert!(
+            error.to_string().contains("positive prefix_sharing"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn acceptance_slos_belong_only_to_speed_bench_server_metrics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let valid = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "dataset", dataset = "speed_bench", profile = "qualitative_coding", max_input_tokens = 8192, output_tokens = 128 }
+server_metrics = true
+aggregate_slos = [{ metric = "acceptance_rate", at_least = 0.5 }]
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("speed", &valid)?;
+
+        let invalid = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
+server_metrics = true
+aggregate_slos = [{ metric = "acceptance_rate", at_least = 0.5 }]
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("random", &invalid)
+            .err()
+            .ok_or("random acceptance-rate SLO was accepted")?;
+        assert!(error.to_string().contains("speed_bench"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn random_request_source_accepts_one_shared_prefix_ratio()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8000, output_tokens = 1000, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("shared-prefix", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::Random {
+                prompt,
+                input_tokens: BenchTokenSelector::Fixed(8000),
+                output_tokens: BenchTokenSelector::Fixed(1000),
+                prefix_sharing: Some(BenchPrefixSharing::Ratio {
+                    shared_prefix_ratio: 0.75,
+                }),
+                shared_system_content: None,
+            }) if prompt.effective() == &BenchPrompt::Flat
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn random_request_source_accepts_a_ratio_that_resolves_to_zero_shared_tokens()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 1, output_tokens = 1, prefix_sharing = { shared_prefix_ratio = 0.5 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("empty-prefix", &definition)?;
+        Ok(())
+    }
+
+    #[test]
+    fn synthetic_prompt_authority_and_prefix_geometry_validate_as_one_source_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rendered = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", prompt = { kind = "rendered_chat", chat_template = "{{ messages }}", chat_template_kwargs = { enable_thinking = false } }, shapes = [
+  { input_tokens = 8, output_tokens = 2, weight = 1 },
+  { input_tokens = 12, output_tokens = 2, weight = 1 },
+], prefix_sharing = { shared_prefix_tokens = 8 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("rendered", &rendered)?;
+
+        let server_chat = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = { kind = "inclusive_uniform", min = 8, max = 12 }, output_tokens = 2, shared_system_content = { ratio = 0.5 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("server-chat", &server_chat)?;
+
+        let local_template_conflict = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8, output_tokens = 2 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+[request_body]
+chat_template = "{{ messages }}"
+"#,
+        )?;
+        let error = validate_bench("local-conflict", &local_template_conflict)
+            .err()
+            .ok_or("local prompt accepted a request-body chat template")?;
+        assert!(
+            error.to_string().contains("local rendering authority"),
+            "{error}"
+        );
+
+        let default_prompt = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        );
+        let default_prompt = default_prompt?;
+        let BenchDefinition::Serving { request_source, .. } = default_prompt else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::Random {
+                prompt,
+                ..
+            }) if prompt.declared().is_none() && prompt.effective() == &BenchPrompt::Flat
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn weighted_random_mixture_owns_exact_shapes_and_one_tpot_class()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", prompt = { kind = "server_chat" }, shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 8192, output_tokens = 1024, weight = 3 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("mixture", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        let Some(request_source) = request_source else {
+            return Err(std::io::Error::other("expected a request source").into());
+        };
+        assert_eq!(
+            request_source.tpot_applicability(),
+            BenchTpotApplicability::Applicable
+        );
+        assert!(matches!(
+            request_source,
+            BenchRequestSource::RandomMixture { shapes, .. }
+                if shapes
+                    == vec![
+                        BenchRandomShape {
+                            input_tokens: 1024,
+                            output_tokens: 128,
+                            weight: 7,
+                        },
+                        BenchRandomShape {
+                            input_tokens: 8192,
+                            output_tokens: 1024,
+                            weight: 3,
+                        },
+                    ]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_is_the_only_required_public_source_input()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [2]
+timeout_seconds = 3600
+"#,
+        )?;
+
+        validate_bench("agentx", &definition)?;
+        let serialized = toml::to_string(&definition)?;
+        assert!(serialized.contains("agentic_source"));
+        assert!(serialized.contains("semianalysis_agentx_062126_256k"));
+        assert!(serialized.contains("profile = \"inferencex\""));
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_rejects_independent_request_controls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 3600
+"#,
+        )?;
+
+        let error = validate_bench("agentx", &definition)
+            .err()
+            .ok_or("agentic source unexpectedly accepted prompts_per_concurrency")?;
+        assert!(
+            error.to_string().contains("prompts_per_concurrency"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_rejects_duration_below_the_release_profile_minimum()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126", profile = "inferencex" }
+concurrency = [1]
+duration_seconds = 899
+timeout_seconds = 3600
+"#,
+        )?;
+
+        let error = validate_bench("agentx", &definition)
+            .err()
+            .ok_or("agentic source unexpectedly accepted a short duration")?;
+        assert!(error.to_string().contains("at least 900"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn weighted_random_mixture_rejects_duplicate_shapes_and_mixed_tpot_classes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let duplicate = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", prompt = { kind = "server_chat" }, shapes = [
+  { input_tokens = 1024, output_tokens = 128, weight = 7 },
+  { input_tokens = 1024, output_tokens = 128, weight = 3 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+        let mixed_tpot = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random_mixture", prompt = { kind = "server_chat" }, shapes = [
+  { input_tokens = 1024, output_tokens = 1, weight = 1 },
+  { input_tokens = 8192, output_tokens = 2, weight = 1 },
+] }
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        let Err(duplicate_error) = validate_bench("duplicate-mixture", &duplicate) else {
+            return Err(std::io::Error::other("duplicate exact shapes must be rejected").into());
+        };
+        let Err(tpot_error) = validate_bench("mixed-tpot", &mixed_tpot) else {
+            return Err(std::io::Error::other(
+                "one mixture cannot span TPOT applicability classes",
+            )
+            .into());
+        };
+
+        assert!(
+            duplicate_error.to_string().contains("duplicate shape"),
+            "unexpected error: {duplicate_error}"
+        );
+        assert!(
+            tpot_error.to_string().contains("TPOT"),
+            "unexpected error: {tpot_error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_slo_rejects_an_invalid_good_request_ratio() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let result = validate_bench_slos(
+            "latency",
+            BenchTpotApplicability::Applicable,
+            false,
+            false,
+            &[],
+            &Some(RequestSlo {
+                request_latency_ms: None,
+                ttft_ms: Some(800.0),
+                tpot_ms: None,
+                minimum_good_request_ratio: 0.0,
+            }),
+            false,
+        );
+        let Err(error) = result else {
+            return Err(
+                std::io::Error::other("zero cannot be a minimum good-request ratio").into(),
+            );
+        };
+        let error = error.to_string();
+
+        assert!(error.contains("minimum_good_request_ratio"), "{error}");
+        Ok(())
+    }
+}

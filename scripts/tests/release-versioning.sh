@@ -130,7 +130,7 @@ grep -Fq '[Workspace authoring](references/workspace-authoring.md)' \
   "${fixture}/${skill}" \
   || fail "${skill} does not use the bundled workspace-authoring guide"
 authoring_index="${fixture}/plugins/inferlab/skills/inferlab/references/workspace-authoring.md"
-for reference in workspace-definition.md execution-authoring.md measurement-authoring.md; do
+for reference in workspace-definition.md execution-authoring.md eval-authoring.md bench-authoring.md; do
   test -f "${fixture}/plugins/inferlab/skills/inferlab/references/${reference}" \
     || fail "the bundled workspace-authoring guide is missing ${reference}"
   grep -Fq "(${reference})" "${authoring_index}" \

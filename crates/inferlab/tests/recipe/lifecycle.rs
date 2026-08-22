@@ -51,7 +51,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
         String::from_utf8_lossy(&output.stderr)
     );
     let record: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(record["schema_version"], 3);
+    assert_eq!(record["schema_version"], 4);
     let id = record["id"].as_str().ok_or("missing recipe record id")?;
     assert_datetime_record_id(id, "recipe-dsv4-qualify-tp2")?;
     let server_id = record["server"]["id"]
@@ -92,7 +92,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("missing matrix bench record id")?;
     let matrix = workspace.load_record(matrix_id)?;
-    assert_eq!(matrix["schema_version"], 15);
+    assert_eq!(matrix["schema_version"], 19);
     assert_eq!(matrix["kind"], "bench");
     assert_eq!(matrix["passed"], true);
     assert!(

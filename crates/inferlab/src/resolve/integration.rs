@@ -1,5 +1,5 @@
 use super::ResolveRequest;
-use super::allocation::allocate_processes;
+use super::allocation::{allocate_processes, gate_engine_trace_placement};
 use super::selection::{EffectiveServerInput, WorkflowSelection, validate_effective_parallelism};
 use super::topology::{
     endpoint_url, expand_replica_requirements, links_for_node, uses_explicit_replica_placement,
@@ -70,6 +70,7 @@ fn render_builtin_frontend(
     pd_router: &PdRouterPlan,
     framework: &str,
     transport: Option<KvTransferMechanism>,
+    prefill_data_parallel_size: u32,
     allocations: &[ResolvedProcessAllocation],
 ) -> Result<RenderedServeProcess, InferlabError> {
     if gateway.render_source != RenderSource::ControlPlane
@@ -180,6 +181,20 @@ fn render_builtin_frontend(
                 }
                 BuiltinProxyKind::VllmNixl | BuiltinProxyKind::Trtllm => {}
             }
+        }
+        // The NIXL and SGLang proxies have no rank discovery: the control
+        // plane issues each prefill replica's effective attention
+        // data-parallel size so the conditioning fan-out can pin every rank
+        // ([[RFC-0004:C-BENCH-CACHE-STATE]]). The Mooncake proxy discovers
+        // its ranks and engine ids from the bootstrap query instead.
+        if matches!(
+            proxy_kind,
+            BuiltinProxyKind::VllmNixl | BuiltinProxyKind::Sglang
+        ) {
+            argv.extend([
+                "--prefill-dp".to_owned(),
+                prefill_data_parallel_size.to_string(),
+            ]);
         }
     }
     for replica in decode {
@@ -580,6 +595,7 @@ pub(super) fn render_integration<C: AdapterClient>(
         .is_some_and(|gateway| gateway.render_source == RenderSource::ControlPlane);
     let allocations = allocate_processes(
         workspace,
+        &selection.server_id,
         &selection.placement_id,
         selection.placement,
         selection.weight,
@@ -590,6 +606,12 @@ pub(super) fn render_integration<C: AdapterClient>(
             .or_else(|| request.external.map(|external| external.digest.as_str())),
         planned_stage.requirements(),
         control_plane_frontend.then_some(planned_stage.public_process()),
+    )?;
+    gate_engine_trace_placement(
+        workspace,
+        request,
+        planned_stage.requirements(),
+        &allocations,
     )?;
     let render_allocations = allocations
         .iter()
@@ -665,11 +687,19 @@ pub(super) fn render_integration<C: AdapterClient>(
             .ok_or_else(|| InferlabError::InvalidConfig {
                 message: "control-plane frontend requires a P/D Router plan".to_owned(),
             })?;
+        let prefill_data_parallel_size = planned
+            .roles
+            .iter()
+            .find(|role| role.id == pd_router.prefill_role)
+            .and_then(|role| role.effective_parallelism.attention.as_ref())
+            .and_then(|attention| attention.data_parallel_size)
+            .unwrap_or(1);
         let process = render_builtin_frontend(
             gateway,
             pd_router,
             &planned.integration.framework,
             effective.kv_transfer,
+            prefill_data_parallel_size,
             &allocations,
         )?;
         let id = rendered_process_id(&process).to_owned();
@@ -703,4 +733,215 @@ pub(super) fn render_integration<C: AdapterClient>(
         allocations,
         rendered_processes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launch_file(text: &str, name: &str) -> LaunchFileDeclaration {
+        let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        LaunchFileDeclaration {
+            relative_path: format!("launch-files/{sha256}/{name}"),
+            text: text.to_owned(),
+            sha256,
+        }
+    }
+
+    fn launch_process(argv: Vec<String>, env: BTreeMap<String, String>) -> ProcessSpec {
+        ProcessSpec { argv, env }
+    }
+
+    #[test]
+    fn render_inputs_preserve_original_paths_exact_text_and_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let relative_path = "configs/operator.yaml";
+        let relative_text = "batch_scheduler:\n  enable_chunked_context: true\n";
+        std::fs::create_dir_all(workspace.path().join("configs"))?;
+        std::fs::write(workspace.path().join(relative_path), relative_text)?;
+
+        let absolute = workspace.path().join("absolute.yaml");
+        let absolute_text = "kv_cache_config:\n  enable_block_reuse: false\n";
+        std::fs::write(&absolute, absolute_text)?;
+        let absolute_path = absolute.to_string_lossy().into_owned();
+        let declarations = vec![
+            RenderInputDeclaration {
+                source_path: relative_path.to_owned(),
+            },
+            RenderInputDeclaration {
+                source_path: absolute_path.clone(),
+            },
+        ];
+
+        let supplied = load_render_inputs(workspace.path(), "tensorrt-llm", &declarations)?;
+
+        assert_eq!(supplied[0].source_path, relative_path);
+        assert_eq!(supplied[0].text, relative_text);
+        assert_eq!(
+            supplied[0].sha256,
+            format!("{:x}", Sha256::digest(relative_text.as_bytes()))
+        );
+        assert_eq!(supplied[1].source_path, absolute_path);
+        assert_eq!(supplied[1].text, absolute_text);
+        assert_eq!(
+            supplied[1].sha256,
+            format!("{:x}", Sha256::digest(absolute_text.as_bytes()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_render_input_is_a_typed_resolution_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let missing = RenderInputDeclaration {
+            source_path: "configs/missing.yaml".to_owned(),
+        };
+
+        let result = load_render_inputs(workspace.path(), "tensorrt-llm", &[missing]);
+
+        assert!(matches!(result, Err(InferlabError::RenderInputRead { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn non_utf8_render_input_is_a_typed_resolution_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("operator.yaml"), [0xff, 0xfe])?;
+        let declaration = RenderInputDeclaration {
+            source_path: "operator.yaml".to_owned(),
+        };
+
+        let result = load_render_inputs(workspace.path(), "tensorrt-llm", &[declaration]);
+
+        assert!(matches!(result, Err(InferlabError::RenderInputUtf8 { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn launch_files_preserve_valid_argv_and_env_references() -> Result<(), InferlabError> {
+        let cache_root = Path::new("/does/not/need/to/exist/cache/worker");
+        let argv_file = launch_file("worker: argv\n", "worker.yaml");
+        let env_file = launch_file("worker: 零\n", "environment.yaml");
+        let argv_path = cache_root.join(&argv_file.relative_path);
+        let env_path = cache_root.join(&env_file.relative_path);
+        let process = launch_process(
+            vec![
+                "server".to_owned(),
+                "--config".to_owned(),
+                argv_path.to_string_lossy().into_owned(),
+            ],
+            BTreeMap::from([(
+                "SERVER_CONFIG".to_owned(),
+                env_path.to_string_lossy().into_owned(),
+            )]),
+        );
+
+        let plans = validate_launch_file_declarations(
+            "tensorrt-llm",
+            "worker",
+            cache_root,
+            &process,
+            &[argv_file.clone(), env_file.clone()],
+        )?;
+
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].relative_path, argv_file.relative_path);
+        assert_eq!(plans[0].resolved_path, argv_path);
+        assert_eq!(plans[0].text, argv_file.text);
+        assert_eq!(plans[0].sha256, argv_file.sha256);
+        assert_eq!(plans[1].resolved_path, env_path);
+        Ok(())
+    }
+
+    #[test]
+    fn launch_file_path_must_be_canonical() {
+        let cache_root = Path::new("/cache/worker");
+        let mut declaration = launch_file("worker: invalid-path\n", "worker.yaml");
+        declaration.relative_path =
+            format!("launch-files/{}/nested/worker.yaml", declaration.sha256);
+        let resolved = cache_root.join(&declaration.relative_path);
+        let process = launch_process(
+            vec![resolved.to_string_lossy().into_owned()],
+            BTreeMap::new(),
+        );
+
+        let result = validate_launch_file_declarations(
+            "tensorrt-llm",
+            "worker",
+            cache_root,
+            &process,
+            &[declaration],
+        );
+
+        assert!(result.is_err_and(|error| error.to_string().contains("canonical path")));
+    }
+
+    #[test]
+    fn launch_file_digest_must_match_utf8_text() {
+        let cache_root = Path::new("/cache/worker");
+        let mut declaration = launch_file("worker: original\n", "worker.yaml");
+        declaration.text = "worker: changed\n".to_owned();
+        let resolved = cache_root.join(&declaration.relative_path);
+        let process = launch_process(
+            vec![resolved.to_string_lossy().into_owned()],
+            BTreeMap::new(),
+        );
+
+        let result = validate_launch_file_declarations(
+            "tensorrt-llm",
+            "worker",
+            cache_root,
+            &process,
+            &[declaration],
+        );
+
+        assert!(result.is_err_and(|error| error.to_string().contains("content digest")));
+    }
+
+    #[test]
+    fn launch_file_digest_must_be_complete_lowercase_hex() {
+        let cache_root = Path::new("/cache/worker");
+        let mut declaration = launch_file("worker: uppercase-digest\n", "worker.yaml");
+        declaration.sha256.make_ascii_uppercase();
+        declaration.relative_path = format!("launch-files/{}/worker.yaml", declaration.sha256);
+        let resolved = cache_root.join(&declaration.relative_path);
+        let process = launch_process(
+            vec![resolved.to_string_lossy().into_owned()],
+            BTreeMap::new(),
+        );
+
+        let result = validate_launch_file_declarations(
+            "tensorrt-llm",
+            "worker",
+            cache_root,
+            &process,
+            &[declaration],
+        );
+
+        assert!(result.is_err_and(|error| error.to_string().contains("64-lowercase-sha256")));
+    }
+
+    #[test]
+    fn launch_file_requires_an_exact_invocation_reference() {
+        let cache_root = Path::new("/cache/worker");
+        let declaration = launch_file("worker: unreferenced\n", "worker.yaml");
+        let resolved = cache_root.join(&declaration.relative_path);
+        let process = launch_process(
+            vec![format!("--config={}", resolved.to_string_lossy())],
+            BTreeMap::new(),
+        );
+
+        let result = validate_launch_file_declarations(
+            "tensorrt-llm",
+            "worker",
+            cache_root,
+            &process,
+            &[declaration],
+        );
+
+        assert!(result.is_err_and(|error| error.to_string().contains("exact argv or environment")));
+    }
 }

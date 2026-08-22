@@ -52,9 +52,36 @@ fn resolve_capture_target(
                         "profiling window-control process {control_process_id:?} has no resolved endpoint"
                     ),
                 })?;
+            let capture_storage = match target.mechanism() {
+                inferlab_protocol::CaptureMechanism::ManagedCollection => None,
+                inferlab_protocol::CaptureMechanism::EngineTrace => {
+                    // The control plane assigned the persistent trace
+                    // directory at allocation time
+                    // ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+                    let storage = allocations
+                        .iter()
+                        .find(|allocation| allocation.process() == requirement.id())
+                        .and_then(|allocation| match allocation.wire() {
+                            ServeProcessAllocation::ModelRank {
+                                capture_storage, ..
+                            } => capture_storage.clone(),
+                            ServeProcessAllocation::Frontend { .. } => None,
+                        })
+                        .ok_or_else(|| InferlabError::InvalidConfig {
+                            message: format!(
+                                "engine-trace capture target {:?} lost its assigned trace directory",
+                                requirement.id()
+                            ),
+                        })?;
+                    Some(std::path::PathBuf::from(storage))
+                }
+            };
             Ok(ProcessCapturePlan {
+                mechanism: target.mechanism(),
+                capture_storage,
                 window_control_endpoint: target.window_control_endpoint(),
                 control_process_id,
+                device_count: target.device_count(),
                 start: resolve_capture_window_action(target.start(), control_endpoint),
                 stop: resolve_capture_window_action(target.stop(), control_endpoint),
                 escapes: target.escapes().clone(),
@@ -305,6 +332,7 @@ pub(super) fn realize_runtime(
                 chat_completions_path: endpoint_requirement.chat_completions_path.clone(),
                 server_metrics,
                 prefix_cache_reset: endpoint_requirement.prefix_cache_reset.clone(),
+                prefix_cache_conditioning: endpoint_requirement.prefix_cache_conditioning.clone(),
                 prompt_cache_read_zero_representation: endpoint_requirement
                     .prompt_cache_read_zero_representation,
             });
@@ -345,7 +373,7 @@ pub(super) fn realize_runtime(
                 requirement.readiness(),
                 effective.readiness_timeout_seconds,
                 effective.readiness_attempt_timeout_seconds,
-                effective.profiling,
+                effective.profiling.is_some(),
                 allocations,
             )?,
             endpoint,

@@ -2,10 +2,11 @@
 
 use super::client::{accept_client_result, run_client, wait_for_interrupt};
 use super::{
-    BenchAgenticSourceEvidence, BenchDatasetRequestSourceEvidence, BenchExecutionPlan, BenchPlan,
-    BenchPopulation, BenchPopulationPreparationEvidence, BenchRequestSourceEvidence,
-    BenchSessionSourceEvidence, BenchSessionTemplate, DataAssetMaterializationEvidence,
-    DatasetAcquisitionEvidence, DatasetAcquisitionOutcome, ResolvedBenchRequestSource,
+    BenchAgenticSourceEvidence, BenchCorpusSourceEvidence, BenchDatasetRequestSourceEvidence,
+    BenchExecutionPlan, BenchPlan, BenchPopulation, BenchPopulationPreparationEvidence,
+    BenchRequestSourceEvidence, BenchSessionSourceEvidence, BenchSessionTemplate,
+    CORPUS_MATERIALIZATION_IDENTITY, DataAssetMaterializationEvidence, DatasetAcquisitionEvidence,
+    DatasetAcquisitionOutcome, REPLAY_MATERIALIZATION_IDENTITY, ResolvedBenchRequestSource,
     ResolvedBenchSource, SYNTHETIC_MATERIALIZATION_IDENTITY, WorkloadRecordSession,
 };
 use crate::InferlabError;
@@ -38,18 +39,48 @@ pub(super) fn prepare_bench_request_source(
                 output_tokens,
                 prefix_sharing,
                 shared_system_content,
+                corpus,
             } => {
-                let preparation = run_population_preparation(plan, session, progress, None)?;
+                // A declared corpus is content-addressed like the replay
+                // population file: the bytes are read locally and a declared
+                // digest mismatch fails preparation before any transport
+                // request.
+                let mut corpus_evidence = None;
+                let mut source_path = None;
+                if let Some(corpus) = &corpus {
+                    let (_, observed_sha256) = hash_dataset_file(&corpus.resolved_path)?;
+                    if let Some(expected) = &corpus.expected_sha256
+                        && observed_sha256 != *expected
+                    {
+                        return Err(InferlabError::DatasetDigest {
+                            path: corpus.resolved_path.clone(),
+                            expected: expected.clone(),
+                            observed: observed_sha256,
+                        });
+                    }
+                    corpus_evidence = Some(BenchCorpusSourceEvidence {
+                        path: corpus.path.clone(),
+                        expected_sha256: corpus.expected_sha256.clone(),
+                        observed_sha256: Some(observed_sha256),
+                    });
+                    source_path = Some(corpus.resolved_path.clone());
+                }
+                let preparation = run_population_preparation(plan, session, progress, source_path)?;
                 session.set_bench_request_source(BenchRequestSourceEvidence::Random {
                     input_tokens,
                     output_tokens,
                     prefix_sharing,
                     shared_system_content,
+                    corpus: corpus_evidence,
                     preparation: Some(preparation.0.clone()),
                 })?;
                 finish_population_preparation(
                     plan,
-                    SYNTHETIC_MATERIALIZATION_IDENTITY,
+                    if corpus.is_some() {
+                        CORPUS_MATERIALIZATION_IDENTITY
+                    } else {
+                        SYNTHETIC_MATERIALIZATION_IDENTITY
+                    },
                     &preparation.0,
                     preparation.1,
                 )?;
@@ -103,6 +134,53 @@ pub(super) fn prepare_bench_request_source(
                     decode_error,
                 )?;
                 record_population_materialization(plan, session, preparation_attempt_id)
+            }
+            ResolvedBenchRequestSource::Replay {
+                path,
+                expected_sha256,
+                prefix_sharing,
+                resolved_path,
+                ..
+            } => {
+                // The replayed file is read locally; a missing file or a
+                // declared-digest mismatch fails preparation before any
+                // transport request.
+                let (_, observed_sha256) = hash_dataset_file(&resolved_path)?;
+                if let Some(expected) = &expected_sha256
+                    && observed_sha256 != *expected
+                {
+                    return Err(InferlabError::DatasetDigest {
+                        path: resolved_path.clone(),
+                        expected: expected.clone(),
+                        observed: observed_sha256,
+                    });
+                }
+                let (preparation, decode_error) = run_population_preparation(
+                    plan,
+                    session,
+                    progress,
+                    Some(resolved_path.clone()),
+                )?;
+                let entries = preparation
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.population.as_ref())
+                    .map(|population| population.entries);
+                session.set_bench_request_source(BenchRequestSourceEvidence::Replay {
+                    path,
+                    expected_sha256,
+                    observed_sha256: Some(observed_sha256),
+                    entries,
+                    prefix_sharing,
+                    preparation: Some(preparation.clone()),
+                })?;
+                finish_population_preparation(
+                    plan,
+                    REPLAY_MATERIALIZATION_IDENTITY,
+                    &preparation,
+                    decode_error,
+                )?;
+                Ok(())
             }
         },
         ResolvedBenchSource::Sessions { session_source } => {
@@ -257,6 +335,16 @@ pub(super) fn finish_population_preparation(
             message: "population preparation returned no result".to_owned(),
         })?;
     validate_population_preparation(plan, expected_materialization_identity, result)?;
+    // A replay ratio declaration resolves its conditioning geometry from the
+    // prepared population; synthetic sources already planned a concrete value.
+    if let Some(conditioning) = plan.client.prefix_cache_conditioning.as_mut()
+        && conditioning.maximum_shared_prefix_tokens.is_none()
+    {
+        conditioning.maximum_shared_prefix_tokens = result
+            .prefix_geometry
+            .as_ref()
+            .map(|geometry| geometry.maximum_shared_prefix_tokens);
+    }
     let evidence_path =
         result
             .evidence_path
@@ -600,7 +688,24 @@ pub(super) fn validate_population_preparation(
             .ok_or_else(|| InferlabError::DatasetPreparation {
                 message: "successful population preparation omitted its population".to_owned(),
             })?;
-    if population.entries != plan.client.required_population_count {
+    let replay_source = match &plan.client.effective_definition.source {
+        ResolvedBenchSource::Requests {
+            request_source: replay @ ResolvedBenchRequestSource::Replay { .. },
+        } => Some(replay),
+        _ => None,
+    };
+    if replay_source.is_some() {
+        // A replayed population is the whole file; cases consume its prefix,
+        // so the file must cover the required count without repeating entries.
+        if population.entries < plan.client.required_population_count {
+            return Err(InferlabError::DatasetPreparation {
+                message: format!(
+                    "replay population has {} entries, bench requires {}",
+                    population.entries, plan.client.required_population_count
+                ),
+            });
+        }
+    } else if population.entries != plan.client.required_population_count {
         return Err(InferlabError::DatasetPreparation {
             message: format!(
                 "request population has {} entries, expected {}",
@@ -625,6 +730,9 @@ pub(super) fn validate_population_preparation(
             ResolvedBenchSource::Requests {
                 request_source: ResolvedBenchRequestSource::RandomMixture { prefix_sharing, .. },
             } => (true, prefix_sharing.is_some(), false),
+            ResolvedBenchSource::Requests {
+                request_source: ResolvedBenchRequestSource::Replay { prefix_sharing, .. },
+            } => (false, prefix_sharing.is_some(), false),
             _ => (false, false, false),
         };
     let synthetic_prompt = synthetic.then_some(&plan.client.effective_definition.prompt.definition);
@@ -800,6 +908,18 @@ pub(super) fn validate_population_preparation(
             expected: population.sha256.clone(),
             observed: observed_sha256,
         });
+    }
+    if let Some(ResolvedBenchRequestSource::Replay { resolved_path, .. }) = replay_source {
+        // The prepared artifact must reproduce the replayed file byte for
+        // byte: the file is the sole population authority.
+        let (_, source_sha256) = hash_dataset_file(resolved_path)?;
+        if population.sha256 != source_sha256 {
+            return Err(InferlabError::DatasetDigest {
+                path: resolved_path.clone(),
+                expected: source_sha256,
+                observed: population.sha256.clone(),
+            });
+        }
     }
     let expected_tpot = plan.client.tpot_applicability.is_applicable();
     if population.tpot_applicable != expected_tpot {

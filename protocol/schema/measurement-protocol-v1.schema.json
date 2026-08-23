@@ -856,6 +856,27 @@
         "raw_artifacts"
       ]
     },
+    "BenchCorpusInput": {
+      "description": "One operator-supplied text corpus binding for the random request source;\nentry content is drawn as exact token-length slices of the corpus token\nstream ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).",
+      "type": "object",
+      "properties": {
+        "expected_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "path": {
+          "description": "Workspace-relative corpus path as declared. The preparation request's\n`source_path` carries its absolute resolution.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
     "BenchDatasetCacheState": {
       "description": "Read-only cache state observed while resolving the Bench plan.",
       "type": "string",
@@ -1935,6 +1956,17 @@
           "description": "AIPerf generates exact token-shape prompts from the release-pinned\nsynthetic generator.",
           "type": "object",
           "properties": {
+            "corpus": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BenchCorpusInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "input_tokens": {
               "$ref": "#/$defs/BenchTokenSelectorInput"
             },
@@ -2054,6 +2086,43 @@
             "dataset",
             "max_input_tokens",
             "catalog"
+          ]
+        },
+        {
+          "description": "Inferlab replays one workspace-local frozen population file unchanged;\nthe file bytes are the sole population authority\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).",
+          "type": "object",
+          "properties": {
+            "expected_sha256": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "replay"
+            },
+            "path": {
+              "description": "Workspace-relative population path as declared. The preparation\nrequest's `source_path` carries its absolute resolution.",
+              "type": "string"
+            },
+            "prefix_sharing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BenchPrefixSharingInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "path"
           ]
         }
       ]

@@ -12,8 +12,10 @@ from inferlab_measurement_sdk import (
     BenchRequestSourceInputDataset,
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
+    BenchRequestSourceInputReplay,
 )
 
+from inferlab_bench_runner.population_replay import prepare_replay_population
 from inferlab_bench_runner.population_sharegpt import (
     prepare_sharegpt_population,
     prepare_sharegpt_session_population,
@@ -59,6 +61,8 @@ def prepare_population(
         if source.dataset == "speed_bench":
             return prepare_speed_bench_population(request, tokenizer, source, _iter_parquet_rows)
         raise ValueError(f"unsupported catalog dataset {source.dataset!r}")
+    if isinstance(source, BenchRequestSourceInputReplay):
+        return prepare_replay_population(request, tokenizer, source)
     raise TypeError(f"unsupported Bench request source {type(source).__name__}")
 
 

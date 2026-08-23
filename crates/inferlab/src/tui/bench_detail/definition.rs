@@ -239,6 +239,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
             output_tokens,
             prefix_sharing,
             shared_system_content,
+            corpus,
         } => (
             "requests · random".to_owned(),
             FactSection {
@@ -252,6 +253,12 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
                     fact(
                         "Shared system content",
                         shared_system_summary(shared_system_content.as_ref()),
+                    ),
+                    fact(
+                        "Corpus",
+                        corpus
+                            .as_ref()
+                            .map_or_else(|| "synthetic".to_owned(), |corpus| corpus.path.clone()),
                     ),
                 ],
             },
@@ -307,6 +314,27 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
                 },
             )
         }
+        BenchRequestSource::Replay {
+            path,
+            expected_sha256,
+            prompt,
+            prefix_sharing,
+        } => (
+            format!("requests · replay {path}"),
+            FactSection {
+                title: "SOURCE · REQUESTS",
+                rows: vec![
+                    fact("Generator", "replay"),
+                    fact("Path", path.clone()),
+                    fact(
+                        "Expected SHA-256",
+                        optional_text(expected_sha256.as_deref()),
+                    ),
+                    fact("Prompt", prompt_summary(prompt)),
+                    fact("Prefix sharing", prefix_summary(prefix_sharing.as_ref())),
+                ],
+            },
+        ),
     }
 }
 

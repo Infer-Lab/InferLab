@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-23
+
+### Added
+
+- The `random` serving-Bench request source accepts an optional `corpus`
+  declaration — a workspace-relative `path` to an operator-supplied text
+  corpus with an optional `expected_sha256` — so content-sensitive
+  measurements such as speculative-decoding acceptance rates run on
+  natural-language prompts instead of synthetic hash words. Each entry is cut
+  as one exact token-length slice of the corpus token stream at an offset
+  determined by the Bench seed and the entry's population index alone,
+  preserving seed determinism and the invariant that a larger generated
+  population keeps the same first entries. Declared digests are verified
+  before preparation completes, a corpus shorter than the largest selected
+  input target fails preparation, and `prefix_sharing` keeps its controlled
+  semantics with one fixed corpus slice as the shared prefix. Independently
+  drawn slices may overlap; that incidental sharing is natural reuse and is
+  not measured or presented as controlled prefix geometry. Corpus slicing
+  requires the default `flat` prompt kind, and invocation overrides cannot
+  change the corpus `path` or `expected_sha256`.
+
+- Serving Benches accept a `replay` request source that replays one
+  workspace-local frozen population file (for example a previous record's
+  `cases/request-source/artifacts/population.jsonl`) byte for byte. The
+  source declares a workspace-relative `path`, an explicit `prompt` kind
+  (`flat`/`rendered_chat` entries carry `text_input`, `server_chat` entries
+  carry structured `messages`), an optional `expected_sha256` verified during
+  preparation, and optional `prefix_sharing` whose geometry is resolved from
+  the file entries. The file is the sole population authority — no selection,
+  filtering, or transformation — and entry output targets stay entry-owned:
+  files mixing output-one and larger outputs are rejected, and an
+  insufficient population fails preparation instead of repeating entries.
+  Dry-run reports the declared path, declared and observed digests, prompt
+  kind, and entry count without fabricating unobserved facts, and invocation
+  overrides cannot change the replay `path` or `expected_sha256`.
+
 ## [0.12.1] - 2026-08-22
 
 ### Added

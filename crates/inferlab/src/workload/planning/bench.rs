@@ -11,7 +11,7 @@ use crate::toolchain::InstalledBenchToolchain;
 use crate::workload::domain::{
     AggregateSloBound, BenchAgenticCatalog, BenchDatasetCatalog, BenchDatasetFilter,
     BenchSessionDatasetCatalog, DatasetCacheState, ResolvedAggregateSlo,
-    ResolvedBenchAgenticSource, ResolvedBenchDefinition, ResolvedBenchPrompt,
+    ResolvedBenchAgenticSource, ResolvedBenchCorpus, ResolvedBenchDefinition, ResolvedBenchPrompt,
     ResolvedBenchRandomShape, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
     ResolvedBenchSloPolicy, ResolvedBenchSource, WorkloadHttpAction,
 };
@@ -24,8 +24,9 @@ use crate::workspace::{
     BenchPrompt, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
     BenchTpotApplicability, validate_bench,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) fn resolve_bench(
     id: &str,
@@ -86,7 +87,21 @@ pub(super) fn build_bench_plan(
             request_source.tpot_applicability()
         }
     };
-    let resolved_definition = resolve_bench_definition(&declared_definition, &definition)?;
+    let resolved_definition =
+        resolve_bench_definition(&declared_definition, &definition, context.workspace_root)?;
+    // A replay source's TPOT applicability is a file fact: refine the
+    // optimistic definition-level answer from the observed population.
+    let observed_replay_tpot = match &resolved_definition.source {
+        ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Replay {
+                    observed_tpot_applicability,
+                    ..
+                },
+        } => *observed_tpot_applicability,
+        _ => None,
+    };
+    let tpot_applicability = observed_replay_tpot.unwrap_or(tpot_applicability);
     if resolved_definition.server_metrics && context.endpoint.server_metrics.is_none() {
         return Err(InferlabError::InvalidConfig {
             message: format!(
@@ -107,6 +122,23 @@ pub(super) fn build_bench_plan(
         });
     }
     let slo = resolve_bench_slo_policy(&definition)?;
+    if observed_replay_tpot == Some(BenchTpotApplicability::Inapplicable) {
+        let tpot_constrained = slo
+            .aggregate
+            .iter()
+            .any(|constraint| constraint.metric.depends_on_tpot())
+            || slo
+                .request
+                .as_ref()
+                .is_some_and(|request| request.tpot_ms.is_some());
+        if tpot_constrained {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "bench {id:?} cannot constrain TPOT when the replayed population makes TPOT inapplicable"
+                ),
+            });
+        }
+    }
     let prefix_cache_reset = if matches!(
         resolved_definition.cache_start,
         BenchCacheStart::Cold | BenchCacheStart::Primed
@@ -188,12 +220,15 @@ fn prefix_cache_conditioning_plan(
     let Some(request_source) = definition.source.request_source() else {
         return Ok(None);
     };
-    let (maximum_input_tokens, sharing) = match request_source {
+    let maximum_shared_prefix_tokens = match request_source {
         ResolvedBenchRequestSource::Random {
             input_tokens,
             prefix_sharing: Some(sharing),
             ..
-        } => (token_selector_maximum(input_tokens), sharing),
+        } => Some(maximum_shared_prefix(
+            token_selector_maximum(input_tokens),
+            sharing,
+        )),
         ResolvedBenchRequestSource::RandomMixture {
             shapes,
             prefix_sharing: Some(sharing),
@@ -202,19 +237,24 @@ fn prefix_cache_conditioning_plan(
             let Some(maximum) = shapes.iter().map(|shape| shape.input_tokens).max() else {
                 return Ok(None);
             };
-            (maximum, sharing)
+            Some(maximum_shared_prefix(maximum, sharing))
         }
+        // Replay geometry is resolved from the file entries during
+        // preparation; an exact token declaration is already concrete, while
+        // a ratio stays unresolved until the population is prepared.
+        ResolvedBenchRequestSource::Replay {
+            prefix_sharing: Some(sharing),
+            ..
+        } => match sharing {
+            BenchPrefixSharing::Tokens {
+                shared_prefix_tokens,
+            } => Some(*shared_prefix_tokens),
+            BenchPrefixSharing::Ratio { .. } => None,
+        },
         ResolvedBenchRequestSource::Random { .. }
         | ResolvedBenchRequestSource::RandomMixture { .. }
-        | ResolvedBenchRequestSource::Dataset { .. } => return Ok(None),
-    };
-    let maximum_shared_prefix_tokens = match sharing {
-        BenchPrefixSharing::Tokens {
-            shared_prefix_tokens,
-        } => *shared_prefix_tokens,
-        BenchPrefixSharing::Ratio {
-            shared_prefix_ratio,
-        } => (f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32,
+        | ResolvedBenchRequestSource::Dataset { .. }
+        | ResolvedBenchRequestSource::Replay { .. } => return Ok(None),
     };
     let (route, frontend_fanout) = if serving.gateway_frontend && serving.conditioning_targets > 1 {
         let Some(action) = frontend_conditioning else {
@@ -241,6 +281,17 @@ fn prefix_cache_conditioning_plan(
     }))
 }
 
+fn maximum_shared_prefix(maximum_input_tokens: u32, sharing: &BenchPrefixSharing) -> u32 {
+    match sharing {
+        BenchPrefixSharing::Tokens {
+            shared_prefix_tokens,
+        } => *shared_prefix_tokens,
+        BenchPrefixSharing::Ratio {
+            shared_prefix_ratio,
+        } => (f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32,
+    }
+}
+
 fn token_selector_maximum(selector: &BenchTokenSelector) -> u32 {
     match selector {
         BenchTokenSelector::Fixed(value) => *value,
@@ -264,6 +315,32 @@ pub(super) fn apply_bench_overrides(
         &definition,
         BenchDefinition::Serving {
             agentic_source: Some(_),
+            ..
+        }
+    );
+    let replay_backed = matches!(
+        &definition,
+        BenchDefinition::Serving {
+            request_source: Some(BenchRequestSource::Replay { .. }),
+            ..
+        } | BenchDefinition::AdaptiveServing {
+            request_source: BenchRequestSource::Replay { .. },
+            ..
+        }
+    );
+    let corpus_backed = matches!(
+        &definition,
+        BenchDefinition::Serving {
+            request_source: Some(BenchRequestSource::Random {
+                corpus: Some(_),
+                ..
+            }),
+            ..
+        } | BenchDefinition::AdaptiveServing {
+            request_source: BenchRequestSource::Random {
+                corpus: Some(_),
+                ..
+            },
             ..
         }
     );
@@ -323,6 +400,28 @@ pub(super) fn apply_bench_overrides(
                 message: "Bench request_source.kind cannot be overridden".to_owned(),
             });
         }
+        if replay_backed
+            && matches!(
+                item.path(),
+                "request_source.path" | "request_source.expected_sha256"
+            )
+        {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
+                message: "replay Bench overrides cannot change request_source.path or request_source.expected_sha256"
+                    .to_owned(),
+            });
+        }
+        if corpus_backed
+            && (item.path() == "request_source.corpus"
+                || item.path().starts_with("request_source.corpus."))
+        {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
+                message: "random Bench corpus overrides cannot change request_source.corpus.path or request_source.corpus.expected_sha256"
+                    .to_owned(),
+            });
+        }
         apply_definition_override(&mut value, item)?;
     }
     let definition = value
@@ -342,6 +441,7 @@ pub(super) fn apply_bench_overrides(
 fn resolve_bench_definition(
     declared_definition: &BenchDefinition,
     definition: &BenchDefinition,
+    workspace_root: &Path,
 ) -> Result<ResolvedBenchDefinition, InferlabError> {
     match definition {
         BenchDefinition::Serving {
@@ -360,7 +460,10 @@ fn resolve_bench_definition(
             let (source, prompt) = match (request_source, session_source, agentic_source) {
                 (Some(request_source), None, None) => (
                     ResolvedBenchSource::Requests {
-                        request_source: resolve_bench_request_source(request_source)?,
+                        request_source: resolve_bench_request_source(
+                            request_source,
+                            workspace_root,
+                        )?,
                     },
                     resolved_request_source_prompt(
                         declared_request_source(declared_definition),
@@ -411,7 +514,7 @@ fn resolve_bench_definition(
             ..
         } => Ok(ResolvedBenchDefinition {
             source: ResolvedBenchSource::Requests {
-                request_source: resolve_bench_request_source(request_source)?,
+                request_source: resolve_bench_request_source(request_source, workspace_root)?,
             },
             prompt: resolved_request_source_prompt(
                 declared_request_source(declared_definition),
@@ -496,12 +599,14 @@ fn resolved_request_source_prompt(
 ) -> ResolvedBenchPrompt {
     let declared_prompt = match declared_source {
         Some(BenchRequestSource::Random { prompt, .. })
-        | Some(BenchRequestSource::RandomMixture { prompt, .. }) => Some(prompt),
+        | Some(BenchRequestSource::RandomMixture { prompt, .. })
+        | Some(BenchRequestSource::Replay { prompt, .. }) => Some(prompt),
         Some(BenchRequestSource::Dataset { .. }) | None => None,
     };
     match source {
         BenchRequestSource::Random { prompt, .. }
-        | BenchRequestSource::RandomMixture { prompt, .. } => {
+        | BenchRequestSource::RandomMixture { prompt, .. }
+        | BenchRequestSource::Replay { prompt, .. } => {
             ResolvedBenchPrompt::from_declared_and_effective(declared_prompt, prompt)
         }
         BenchRequestSource::Dataset { .. } => {
@@ -555,6 +660,7 @@ fn resolve_bench_session_source(
 
 fn resolve_bench_request_source(
     source: &BenchRequestSource,
+    workspace_root: &Path,
 ) -> Result<ResolvedBenchRequestSource, InferlabError> {
     match source {
         BenchRequestSource::Random {
@@ -563,11 +669,27 @@ fn resolve_bench_request_source(
             output_tokens,
             prefix_sharing,
             shared_system_content,
+            corpus,
         } => Ok(ResolvedBenchRequestSource::Random {
             input_tokens: input_tokens.clone(),
             output_tokens: output_tokens.clone(),
             prefix_sharing: prefix_sharing.clone(),
             shared_system_content: shared_system_content.clone(),
+            corpus: corpus.as_ref().map(|corpus| {
+                let resolved_path = workspace_root.join(&corpus.path);
+                // The corpus token length is tokenizer-owned and stays
+                // unresolved at plan time; only the byte digest is observed
+                // locally, absent when the file is unreadable.
+                let observed_sha256 = std::fs::read(&resolved_path)
+                    .ok()
+                    .map(|bytes| format!("{:x}", Sha256::digest(&bytes)));
+                ResolvedBenchCorpus {
+                    path: corpus.path.clone(),
+                    expected_sha256: corpus.expected_sha256.clone(),
+                    resolved_path,
+                    observed_sha256,
+                }
+            }),
         }),
         BenchRequestSource::RandomMixture {
             prompt: _,
@@ -639,7 +761,102 @@ fn resolve_bench_request_source(
                 }),
             })
         }
+        BenchRequestSource::Replay {
+            path,
+            expected_sha256,
+            prompt: _,
+            prefix_sharing,
+        } => {
+            let resolved_path = workspace_root.join(path);
+            let observation = observe_replay_population(&resolved_path)?;
+            Ok(ResolvedBenchRequestSource::Replay {
+                path: path.clone(),
+                expected_sha256: expected_sha256.clone(),
+                prefix_sharing: prefix_sharing.clone(),
+                resolved_path,
+                observed_sha256: observation.sha256,
+                observed_entries: observation.entries,
+                observed_tpot_applicability: observation.tpot_applicability,
+            })
+        }
     }
+}
+
+/// File facts observed while resolving a replay source. An unreadable or
+/// malformed file yields absent observations rather than fabricated facts;
+/// preparation owns the typed failure ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+struct ReplayObservation {
+    sha256: Option<String>,
+    entries: Option<u32>,
+    tpot_applicability: Option<BenchTpotApplicability>,
+}
+
+fn observe_replay_population(resolved_path: &Path) -> Result<ReplayObservation, InferlabError> {
+    let unavailable = ReplayObservation {
+        sha256: None,
+        entries: None,
+        tpot_applicability: None,
+    };
+    let Ok(bytes) = std::fs::read(resolved_path) else {
+        return Ok(unavailable);
+    };
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let mut entries = 0_u32;
+    let mut saw_output_one = false;
+    let mut saw_output_many = false;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "replay population {} exceeds the supported entry count",
+                    resolved_path.display()
+                ),
+            })?;
+        let Ok(entry) = serde_json::from_slice::<serde_json::Value>(line) else {
+            // A malformed entry fails preparation with the runner's typed
+            // error; resolution only records the byte digest.
+            return Ok(ReplayObservation {
+                sha256: Some(sha256),
+                entries: None,
+                tpot_applicability: None,
+            });
+        };
+        match entry
+            .get("output_length")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(1) => saw_output_one = true,
+            Some(output) if output >= 2 => saw_output_many = true,
+            _ => {
+                return Ok(ReplayObservation {
+                    sha256: Some(sha256),
+                    entries: None,
+                    tpot_applicability: None,
+                });
+            }
+        }
+    }
+    if saw_output_one && saw_output_many {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "replay population {} must not mix TPOT-inapplicable (output one) and TPOT-applicable (output at least two) entries",
+                resolved_path.display()
+            ),
+        });
+    }
+    Ok(ReplayObservation {
+        sha256: Some(sha256),
+        entries: Some(entries),
+        tpot_applicability: Some(if saw_output_many {
+            BenchTpotApplicability::Applicable
+        } else {
+            BenchTpotApplicability::Inapplicable
+        }),
+    })
 }
 
 fn resolve_bench_slo_policy(
@@ -706,41 +923,51 @@ mod tests {
     };
     use crate::toml_override::InvocationOverride;
     use crate::workload::domain::{
-        BenchPromptRoute, BenchRenderingAuthority, BenchRequestRepresentation,
+        BenchPromptRoute, BenchRenderingAuthority, BenchRequestRepresentation, ResolvedBenchCorpus,
+        ResolvedBenchSource,
     };
     use crate::workspace::{
         BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRandomShape,
-        BenchRequestSource, BenchTokenSelector, validate_bench,
+        BenchRequestSource, BenchTokenSelector, BenchTpotApplicability, validate_bench,
     };
+    use sha2::Digest;
+    use std::path::Path;
 
     #[test]
     fn synthetic_request_sources_resolve_effective_prefix_and_total_weight()
     -> Result<(), Box<dyn std::error::Error>> {
-        let prefix = resolve_bench_request_source(&BenchRequestSource::Random {
-            prompt: BenchPromptSelection::explicit(BenchPrompt::Flat),
-            input_tokens: BenchTokenSelector::Fixed(8000),
-            output_tokens: BenchTokenSelector::Fixed(1000),
-            prefix_sharing: Some(BenchPrefixSharing::Ratio {
-                shared_prefix_ratio: 0.75,
-            }),
-            shared_system_content: None,
-        })?;
-        let mixture = resolve_bench_request_source(&BenchRequestSource::RandomMixture {
-            prompt: BenchPromptSelection::explicit(BenchPrompt::ServerChat),
-            shapes: vec![
-                BenchRandomShape {
-                    input_tokens: 1024,
-                    output_tokens: 128,
-                    weight: 7,
-                },
-                BenchRandomShape {
-                    input_tokens: 8192,
-                    output_tokens: 1024,
-                    weight: 3,
-                },
-            ],
-            prefix_sharing: None,
-        })?;
+        let prefix = resolve_bench_request_source(
+            &BenchRequestSource::Random {
+                prompt: BenchPromptSelection::explicit(BenchPrompt::Flat),
+                input_tokens: BenchTokenSelector::Fixed(8000),
+                output_tokens: BenchTokenSelector::Fixed(1000),
+                prefix_sharing: Some(BenchPrefixSharing::Ratio {
+                    shared_prefix_ratio: 0.75,
+                }),
+                shared_system_content: None,
+                corpus: None,
+            },
+            Path::new("/workspace"),
+        )?;
+        let mixture = resolve_bench_request_source(
+            &BenchRequestSource::RandomMixture {
+                prompt: BenchPromptSelection::explicit(BenchPrompt::ServerChat),
+                shapes: vec![
+                    BenchRandomShape {
+                        input_tokens: 1024,
+                        output_tokens: 128,
+                        weight: 7,
+                    },
+                    BenchRandomShape {
+                        input_tokens: 8192,
+                        output_tokens: 1024,
+                        weight: 3,
+                    },
+                ],
+                prefix_sharing: None,
+            },
+            Path::new("/workspace"),
+        )?;
         let prompt = ResolvedBenchPrompt::from_definition(&BenchPrompt::Flat);
 
         assert!(matches!(
@@ -787,7 +1014,11 @@ timeout_seconds = 60
         )?;
 
         validate_bench("agentic", &definition)?;
-        let resolved = serde_json::to_value(resolve_bench_definition(&definition, &definition)?)?;
+        let resolved = serde_json::to_value(resolve_bench_definition(
+            &definition,
+            &definition,
+            Path::new("/workspace"),
+        )?)?;
         assert_eq!(resolved["session_source"]["dataset"], "sharegpt");
         assert_eq!(resolved["session_source"]["inter_turn_delay_scale"], 0.25);
         assert_eq!(
@@ -818,7 +1049,11 @@ timeout_seconds = 3600
         )?;
 
         validate_bench("agentx", &definition)?;
-        let resolved = serde_json::to_value(resolve_bench_definition(&definition, &definition)?)?;
+        let resolved = serde_json::to_value(resolve_bench_definition(
+            &definition,
+            &definition,
+            Path::new("/workspace"),
+        )?)?;
         assert_eq!(
             resolved["agentic_source"]["catalog"]["revision"],
             "8fecd2fc56694469f758f0afbbb6335ad3043740"
@@ -880,6 +1115,273 @@ timeout_seconds = 60
     }
 
     #[test]
+    fn replay_source_resolves_observed_file_facts() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let population = workspace.path().join("populations/x.jsonl");
+        std::fs::create_dir_all(population.parent().ok_or("population has no parent")?)?;
+        std::fs::write(
+            &population,
+            concat!(
+                "{\"session_id\":\"inferlab-00000000\",\"text_input\":\"a b\",\"output_length\":8}\n",
+                "{\"session_id\":\"inferlab-00000001\",\"text_input\":\"c d\",\"output_length\":16}\n",
+            ),
+        )?;
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", prompt = { kind = "flat" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("replay", &definition)?;
+        let resolved = resolve_bench_definition(&definition, &definition, workspace.path())?;
+        let ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Replay {
+                    path,
+                    resolved_path,
+                    observed_sha256: Some(observed_sha256),
+                    observed_entries: Some(2),
+                    observed_tpot_applicability: Some(BenchTpotApplicability::Applicable),
+                    ..
+                },
+        } = &resolved.source
+        else {
+            return Err(std::io::Error::other("replay source did not resolve").into());
+        };
+        assert_eq!(path, "populations/x.jsonl");
+        assert_eq!(resolved_path, &population);
+        let expected = format!("{:x}", sha2::Sha256::digest(std::fs::read(&population)?));
+        assert_eq!(observed_sha256, &expected);
+        assert_eq!(resolved.prompt.definition, BenchPrompt::Flat);
+        Ok(())
+    }
+
+    #[test]
+    fn replay_resolution_reports_absent_facts_for_a_missing_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/missing.jsonl", prompt = { kind = "flat" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        let resolved = resolve_bench_definition(&definition, &definition, workspace.path())?;
+        let ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Replay {
+                    observed_sha256: None,
+                    observed_entries: None,
+                    observed_tpot_applicability: None,
+                    ..
+                },
+        } = &resolved.source
+        else {
+            return Err(std::io::Error::other("missing replay file fabricated facts").into());
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn replay_resolution_rejects_mixed_tpot_classes() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(
+            workspace.path().join("mixed.jsonl"),
+            concat!(
+                "{\"session_id\":\"inferlab-00000000\",\"text_input\":\"a b\",\"output_length\":1}\n",
+                "{\"session_id\":\"inferlab-00000001\",\"text_input\":\"c d\",\"output_length\":2}\n",
+            ),
+        )?;
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "mixed.jsonl", prompt = { kind = "flat" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("replay", &definition)?;
+        let error = resolve_bench_definition(&definition, &definition, workspace.path())
+            .err()
+            .ok_or("mixed replay population was accepted")?;
+        assert!(error.to_string().contains("TPOT"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn replay_overrides_cannot_change_path_or_expected_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", prompt = { kind = "flat" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        for override_text in [
+            "request_source.path=\"populations/y.jsonl\"",
+            "request_source.expected_sha256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        ] {
+            let overrides = InvocationOverride::parse_all(&[override_text.to_owned()])?;
+            let error = apply_bench_overrides("replay", definition.clone(), &overrides)
+                .err()
+                .ok_or("replay source identity override unexpectedly succeeded")?;
+            assert!(
+                error.to_string().contains(
+                    "cannot change request_source.path or request_source.expected_sha256"
+                ),
+                "{error}"
+            );
+        }
+        // Other replay fields remain ordinary override targets.
+        let overrides = InvocationOverride::parse_all(&[
+            "request_source.prefix_sharing={ shared_prefix_tokens = 4 }".to_owned(),
+        ])?;
+        let (effective, _) = apply_bench_overrides("replay", definition, &overrides)?;
+        let BenchDefinition::Serving {
+            request_source:
+                Some(BenchRequestSource::Replay {
+                    prefix_sharing:
+                        Some(BenchPrefixSharing::Tokens {
+                            shared_prefix_tokens: 4,
+                        }),
+                    ..
+                }),
+            ..
+        } = effective
+        else {
+            return Err(std::io::Error::other("replay prefix override did not apply").into());
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn random_corpus_resolves_observed_digest_and_observes_absent_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let corpus = workspace.path().join("corpus/shakespeare.txt");
+        std::fs::create_dir_all(corpus.parent().ok_or("corpus has no parent")?)?;
+        std::fs::write(&corpus, "to be or not to be\n")?;
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, corpus = { path = "corpus/shakespeare.txt" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("corpus", &definition)?;
+        let resolved = resolve_bench_definition(&definition, &definition, workspace.path())?;
+        let ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Random {
+                    corpus:
+                        Some(ResolvedBenchCorpus {
+                            path,
+                            resolved_path,
+                            observed_sha256: Some(observed_sha256),
+                            ..
+                        }),
+                    ..
+                },
+        } = &resolved.source
+        else {
+            return Err(std::io::Error::other("random corpus did not resolve").into());
+        };
+        assert_eq!(path, "corpus/shakespeare.txt");
+        assert_eq!(resolved_path, &corpus);
+        let expected = format!("{:x}", sha2::Sha256::digest(std::fs::read(&corpus)?));
+        assert_eq!(observed_sha256, &expected);
+
+        let missing = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, corpus = { path = "corpus/missing.txt" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("corpus-missing", &missing)?;
+        let resolved = resolve_bench_definition(&missing, &missing, workspace.path())?;
+        let ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Random {
+                    corpus:
+                        Some(ResolvedBenchCorpus {
+                            observed_sha256: None,
+                            ..
+                        }),
+                    ..
+                },
+        } = &resolved.source
+        else {
+            return Err(std::io::Error::other("missing corpus file fabricated facts").into());
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn corpus_overrides_cannot_change_path_or_expected_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, corpus = { path = "corpus/x.txt" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        for override_text in [
+            "request_source.corpus.path=\"corpus/y.txt\"",
+            "request_source.corpus.expected_sha256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "request_source.corpus={ path = \"corpus/y.txt\" }",
+        ] {
+            let overrides = InvocationOverride::parse_all(&[override_text.to_owned()])?;
+            let error = apply_bench_overrides("corpus", definition.clone(), &overrides)
+                .err()
+                .ok_or("corpus identity override unexpectedly succeeded")?;
+            assert!(
+                error.to_string().contains(
+                    "cannot change request_source.corpus.path or request_source.corpus.expected_sha256"
+                ),
+                "{error}"
+            );
+        }
+        // Other random fields remain ordinary override targets.
+        let overrides =
+            InvocationOverride::parse_all(&["request_source.input_tokens=16".to_owned()])?;
+        let (effective, _) = apply_bench_overrides("corpus", definition, &overrides)?;
+        let BenchDefinition::Serving {
+            request_source:
+                Some(BenchRequestSource::Random {
+                    input_tokens: BenchTokenSelector::Fixed(16),
+                    ..
+                }),
+            ..
+        } = effective
+        else {
+            return Err(std::io::Error::other("corpus input override did not apply").into());
+        };
+        Ok(())
+    }
+
+    #[test]
     fn artifact_level_defaults_to_diagnostic_and_preserves_an_explicit_level()
     -> Result<(), Box<dyn std::error::Error>> {
         let defaulted = toml::from_str::<BenchDefinition>(
@@ -904,8 +1406,16 @@ timeout_seconds = 60
 
         validate_bench("defaulted", &defaulted)?;
         validate_bench("explicit", &explicit)?;
-        let defaulted = serde_json::to_value(resolve_bench_definition(&defaulted, &defaulted)?)?;
-        let explicit = serde_json::to_value(resolve_bench_definition(&explicit, &explicit)?)?;
+        let defaulted = serde_json::to_value(resolve_bench_definition(
+            &defaulted,
+            &defaulted,
+            Path::new("/workspace"),
+        )?)?;
+        let explicit = serde_json::to_value(resolve_bench_definition(
+            &explicit,
+            &explicit,
+            Path::new("/workspace"),
+        )?)?;
         assert_eq!(defaulted["artifact_level"], "diagnostic");
         assert_eq!(explicit["artifact_level"], "performance");
         Ok(())
@@ -937,11 +1447,19 @@ timeout_seconds = 3600
         validate_bench("session", &session)?;
         validate_bench("agentic", &agentic)?;
         assert_eq!(
-            serde_json::to_value(resolve_bench_definition(&session, &session)?)?["artifact_level"],
+            serde_json::to_value(resolve_bench_definition(
+                &session,
+                &session,
+                Path::new("/workspace")
+            )?)?["artifact_level"],
             "performance"
         );
         assert_eq!(
-            serde_json::to_value(resolve_bench_definition(&agentic, &agentic)?)?["artifact_level"],
+            serde_json::to_value(resolve_bench_definition(
+                &agentic,
+                &agentic,
+                Path::new("/workspace")
+            )?)?["artifact_level"],
             "performance"
         );
         Ok(())

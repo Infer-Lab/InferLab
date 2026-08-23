@@ -98,6 +98,299 @@ if args.prepare:
     required_entries = request["required_entries"]
     request_source = request.get("request_source")
     session_source = request.get("session_source")
+    if request_source is not None and request_source["kind"] == "replay":
+        # Mirror the real runner's replay contract: the file is copied byte
+        # for byte, entry output classes must not mix TPOT applicability, and
+        # an insufficient population fails without repeating entries.
+        payload = Path(request["source_path"]).read_bytes()
+        replay_entries = [json.loads(line) for line in payload.split(b"\n") if line.strip()]
+        replay_failure = None
+        replay_flat = request["prompt"]["kind"] in ("flat", "rendered_chat")
+        for line_number, entry in enumerate(replay_entries, start=1):
+            output_length = entry.get("output_length")
+            if not isinstance(output_length, int) or output_length < 1:
+                replay_failure = (
+                    f"replay population line {line_number}: entry output_length "
+                    "must be a positive integer"
+                )
+                break
+            if replay_flat and not isinstance(entry.get("text_input"), str):
+                replay_failure = (
+                    f"replay population line {line_number}: flat prompt entries "
+                    "require a non-empty text_input string"
+                )
+                break
+            if not replay_flat and not isinstance(entry.get("messages"), list):
+                replay_failure = (
+                    f"replay population line {line_number}: server_chat prompt entries "
+                    "require a non-empty messages list"
+                )
+                break
+        replay_outputs = [entry.get("output_length", 1) for entry in replay_entries]
+        if replay_failure is None and len(replay_entries) < required_entries:
+            replay_failure = (
+                f"replay population has {len(replay_entries)} entries, "
+                f"requires {required_entries}; entries are never repeated"
+            )
+        elif (
+            replay_failure is None
+            and any(output == 1 for output in replay_outputs)
+            and any(output >= 2 for output in replay_outputs)
+        ):
+            replay_failure = "replay population must not mix TPOT applicability classes"
+        if replay_failure is not None:
+            result = {
+                "schema_version": 1,
+                "status": "failed",
+                "materialization_identity": "inferlab-replay-population-v1",
+                "requested_entries": required_entries,
+                "candidate_entries": len(replay_entries),
+                "admitted_entries": len(replay_entries),
+                "ineligible_entries": 0,
+                "ineligible_reasons": {},
+                "population": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "evidence_path": None,
+                "error": replay_failure,
+            }
+            with open(args.output, "w") as handle:
+                json.dump(result, handle)
+            raise SystemExit(0)
+        population_path = artifact_dir / "population.jsonl"
+        population_path.write_bytes(payload)
+        evidence_path = artifact_dir / "population-evidence.jsonl"
+        evidence_path.write_text("{}\n", encoding="utf-8")
+        prefix_geometry = None
+        prefix_conditioning = None
+        sharing = request_source.get("prefix_sharing")
+        if sharing is not None:
+            first_words = replay_entries[0]["text_input"].split()
+            if "shared_prefix_tokens" in sharing:
+                shared = sharing["shared_prefix_tokens"]
+            else:
+                shared = int(len(first_words) * sharing["shared_prefix_ratio"])
+            canonical = " ".join(first_words[:shared])
+            canonical_sha256 = hashlib.sha256(canonical.encode()).hexdigest()
+            prefix_geometry = {
+                "shared_prefix_tokens": {
+                    "minimum": shared,
+                    "maximum": shared,
+                    "mean": float(shared),
+                },
+                "unique_suffix_tokens": {
+                    "minimum": 0,
+                    "maximum": len(first_words) - shared,
+                    "mean": float(len(first_words) - shared),
+                },
+                "maximum_shared_prefix_tokens": shared,
+                "canonical_prefix_sha256": canonical_sha256,
+                "full_prompt_entries": 0,
+            }
+            if request["cache_start"] == "primed":
+                canonical_prefix_path = artifact_dir / "canonical-prefix.txt"
+                canonical_prefix_path.write_text(canonical, encoding="utf-8")
+                prefix_conditioning = {
+                    "path": str(canonical_prefix_path),
+                    "sha256": canonical_sha256,
+                    "prompt_tokens": shared,
+                }
+        result = {
+            "schema_version": 1,
+            "status": "succeeded",
+            "materialization_identity": "inferlab-replay-population-v1",
+            "requested_entries": required_entries,
+            "candidate_entries": len(replay_entries),
+            "admitted_entries": len(replay_entries),
+            "ineligible_entries": 0,
+            "ineligible_reasons": {},
+            "population": {
+                "path": str(population_path),
+                "evidence_path": str(evidence_path),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "entries": len(replay_entries),
+                "tpot_applicable": all(output >= 2 for output in replay_outputs),
+                "session_templates": [],
+            },
+            "input_tokens": {"minimum": 4, "maximum": 4, "mean": 4.0},
+            "output_tokens": {
+                "minimum": min(replay_outputs),
+                "maximum": max(replay_outputs),
+                "mean": sum(replay_outputs) / len(replay_outputs),
+            },
+            "prompt_token_targeting": None,
+            "prefix_geometry": prefix_geometry,
+            "prefix_conditioning": prefix_conditioning,
+            "evidence_path": str(evidence_path),
+            "error": None,
+        }
+        with open(args.output, "w") as handle:
+            json.dump(result, handle)
+        raise SystemExit(0)
+    corpus = request_source.get("corpus") if request_source is not None else None
+    if request_source is not None and request_source["kind"] == "random" and corpus is not None:
+        # Mirror the real runner's corpus contract: exact-length slices of the
+        # corpus token stream (whitespace words stand in for tokens here), one
+        # fixed corpus slice as the shared prefix, and a typed failure when
+        # the corpus cannot serve the largest selected input target.
+        corpus_words = Path(request["source_path"]).read_text(encoding="utf-8").split()
+        input_target = request_source["input_tokens"]
+        if not isinstance(input_target, int):
+            input_target = input_target["max"]
+        output_target = request_source["output_tokens"]
+        if not isinstance(output_target, int):
+            output_target = output_target["max"]
+        if len(corpus_words) < input_target:
+            result = {
+                "schema_version": 1,
+                "status": "failed",
+                "materialization_identity": "inferlab-corpus-slice-v1",
+                "requested_entries": required_entries,
+                "candidate_entries": required_entries,
+                "admitted_entries": 0,
+                "ineligible_entries": 0,
+                "ineligible_reasons": {},
+                "population": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "evidence_path": None,
+                "error": (
+                    f"corpus token stream has {len(corpus_words)} tokens, shorter than "
+                    f"the largest selected input-token target {input_target}"
+                ),
+            }
+            with open(args.output, "w") as handle:
+                json.dump(result, handle)
+            raise SystemExit(0)
+        sharing = request_source.get("prefix_sharing")
+        shared = 0
+        if sharing is not None:
+            if "shared_prefix_tokens" in sharing:
+                shared = sharing["shared_prefix_tokens"]
+            else:
+                shared = int(input_target * sharing["shared_prefix_ratio"])
+        seed = request["seed"]
+        population_path = artifact_dir / "population.jsonl"
+        evidence_path = artifact_dir / "population-evidence.jsonl"
+        population_digest = hashlib.sha256()
+        with population_path.open("wb") as population_file:
+            evidence_lines = []
+            for index in range(required_entries):
+                if shared > 0:
+                    suffix_length = input_target - shared
+                    suffix_offset = (seed + index) % (len(corpus_words) - suffix_length + 1)
+                    text = " ".join(
+                        corpus_words[:shared]
+                        + corpus_words[suffix_offset : suffix_offset + suffix_length]
+                    )
+                    slice_offset, slice_length = suffix_offset, suffix_length
+                else:
+                    slice_offset = (seed + index) % (len(corpus_words) - input_target + 1)
+                    slice_length = input_target
+                    text = " ".join(corpus_words[slice_offset : slice_offset + input_target])
+                row = {
+                    "session_id": f"inferlab-{index:08}",
+                    "text_input": text,
+                    "output_length": output_target,
+                    "extra": {"ignore_eos": True, "min_tokens": output_target},
+                }
+                encoded = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                population_file.write(encoded)
+                population_digest.update(encoded)
+                evidence_lines.append(
+                    json.dumps(
+                        {
+                            "population_index": index,
+                            "selected_prompt_tokens": input_target,
+                            "selected_output_tokens": output_target,
+                            "corpus_slice_offset": slice_offset,
+                            "corpus_slice_length": slice_length,
+                            "corpus_shared_slice_offset": 0 if shared > 0 else None,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+        evidence_path.write_text("\n".join(evidence_lines) + "\n", encoding="utf-8")
+        prefix_geometry = None
+        prefix_conditioning = None
+        if shared > 0:
+            canonical = " ".join(corpus_words[:shared])
+            canonical_sha256 = hashlib.sha256(canonical.encode()).hexdigest()
+            prefix_geometry = {
+                "shared_prefix_tokens": {
+                    "minimum": shared,
+                    "maximum": shared,
+                    "mean": float(shared),
+                },
+                "unique_suffix_tokens": {
+                    "minimum": input_target - shared,
+                    "maximum": input_target - shared,
+                    "mean": float(input_target - shared),
+                },
+                "maximum_shared_prefix_tokens": shared,
+                "canonical_prefix_sha256": canonical_sha256,
+                "full_prompt_entries": required_entries if shared == input_target else 0,
+            }
+            if request["cache_start"] == "primed":
+                canonical_prefix_path = artifact_dir / "canonical-prefix.txt"
+                canonical_prefix_path.write_text(canonical, encoding="utf-8")
+                prefix_conditioning = {
+                    "path": str(canonical_prefix_path),
+                    "sha256": canonical_sha256,
+                    "prompt_tokens": shared,
+                }
+        result = {
+            "schema_version": 1,
+            "status": "succeeded",
+            "materialization_identity": "inferlab-corpus-slice-v1",
+            "requested_entries": required_entries,
+            "candidate_entries": required_entries,
+            "admitted_entries": required_entries,
+            "ineligible_entries": 0,
+            "ineligible_reasons": {},
+            "population": {
+                "path": str(population_path),
+                "evidence_path": str(evidence_path),
+                "sha256": population_digest.hexdigest(),
+                "entries": required_entries,
+                "tpot_applicable": output_target >= 2,
+                "session_templates": [],
+            },
+            "input_tokens": {
+                "minimum": input_target,
+                "maximum": input_target,
+                "mean": float(input_target),
+            },
+            "output_tokens": {
+                "minimum": output_target,
+                "maximum": output_target,
+                "mean": float(output_target),
+            },
+            "prompt_token_targeting": {
+                "selected_prompt_tokens": {
+                    "minimum": input_target,
+                    "maximum": input_target,
+                    "mean": float(input_target),
+                },
+                "pre_template_content_tokens": {
+                    "minimum": input_target,
+                    "maximum": input_target,
+                    "mean": float(input_target),
+                },
+                "projection_template": None,
+                "exact_entries": required_entries,
+                "fallback_entries": 0,
+                "fallback_reasons": {},
+            },
+            "prefix_geometry": prefix_geometry,
+            "prefix_conditioning": prefix_conditioning,
+            "evidence_path": str(evidence_path),
+            "error": None,
+        }
+        with open(args.output, "w") as handle:
+            json.dump(result, handle)
+        raise SystemExit(0)
     population_path = artifact_dir / "population.jsonl"
     population_digest = hashlib.sha256()
     session_templates = []

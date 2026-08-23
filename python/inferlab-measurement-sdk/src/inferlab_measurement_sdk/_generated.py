@@ -95,6 +95,19 @@ class BenchCacheStartInput(StrEnum):
     primed = 'primed'
 
 
+class BenchCorpusInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    expected_sha256: str | None = None
+    path: Annotated[
+        str,
+        Field(
+            description="Workspace-relative corpus path as declared. The preparation request's\n`source_path` carries its absolute resolution."
+        ),
+    ]
+
+
 class BenchDatasetCacheState(StrEnum):
     missing = 'missing'
     present = 'present'
@@ -275,6 +288,21 @@ class BenchRequestSourceInputRandomMixture(BaseModel):
     prefix_sharing: BenchPrefixSharingInput | None = None
     shapes: list[BenchRandomShapeInput]
     total_weight: Annotated[int, Field(ge=0)]
+
+
+class BenchRequestSourceInputReplay(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    expected_sha256: str | None = None
+    kind: Literal['replay'] = 'replay'
+    path: Annotated[
+        str,
+        Field(
+            description="Workspace-relative population path as declared. The preparation\nrequest's `source_path` carries its absolute resolution."
+        ),
+    ]
+    prefix_sharing: BenchPrefixSharingInput | None = None
 
 
 class BenchSessionDatasetCatalogInput(BaseModel):
@@ -1259,6 +1287,7 @@ class BenchRequestSourceInputRandom(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    corpus: BenchCorpusInput | None = None
     input_tokens: BenchTokenSelectorInput
     kind: Literal['random'] = 'random'
     output_tokens: BenchTokenSelectorInput
@@ -1271,12 +1300,14 @@ class BenchRequestSourceInput(
         BenchRequestSourceInputRandom
         | BenchRequestSourceInputRandomMixture
         | BenchRequestSourceInputDataset
+        | BenchRequestSourceInputReplay
     ]
 ):
     root: Annotated[
         BenchRequestSourceInputRandom
         | BenchRequestSourceInputRandomMixture
-        | BenchRequestSourceInputDataset,
+        | BenchRequestSourceInputDataset
+        | BenchRequestSourceInputReplay,
         Field(
             description='One closed request origin lowered by Inferlab for the Bench runtime.'
         ),

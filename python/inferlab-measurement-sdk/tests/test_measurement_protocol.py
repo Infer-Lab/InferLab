@@ -6,8 +6,12 @@ import inferlab_measurement_sdk
 import pytest
 from inferlab_measurement_sdk import (
     BenchArtifactLevelInput,
+    BenchCacheStartInput,
     BenchClientRequest,
+    BenchPrefixSharingInput2,
+    BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
+    BenchRequestSourceInputReplay,
     CaseBudgetExpired,
     CaseDeadline,
     EvalClientRequest,
@@ -126,6 +130,43 @@ def test_weighted_random_mixture_fixture_round_trips() -> None:
     assert BenchClientRequest.model_validate(request.model_dump()) == request
 
 
+def test_replay_fixture_round_trips() -> None:
+    request = BenchClientRequest.model_validate(
+        load_json(FIXTURES / "valid" / "bench-client-request-replay.json")
+    )
+    assert request.definition.request_source is not None
+    source = request.definition.request_source.root
+
+    assert isinstance(source, BenchRequestSourceInputReplay)
+    assert source.path == "populations/replay.jsonl"
+    assert source.expected_sha256 == "a" * 64
+    assert source.prefix_sharing is not None
+    sharing = source.prefix_sharing.root
+    assert isinstance(sharing, BenchPrefixSharingInput2)
+    assert sharing.shared_prefix_ratio == 1.0
+    assert request.definition.cache_start is BenchCacheStartInput.primed
+    assert BenchClientRequest.model_validate(request.model_dump()) == request
+
+
+def test_random_corpus_fixture_round_trips() -> None:
+    request = BenchClientRequest.model_validate(
+        load_json(FIXTURES / "valid" / "bench-client-request-random-corpus.json")
+    )
+    assert request.definition.request_source is not None
+    source = request.definition.request_source.root
+
+    assert isinstance(source, BenchRequestSourceInputRandom)
+    assert source.corpus is not None
+    assert source.corpus.path == "corpus/shakespeare.txt"
+    assert source.corpus.expected_sha256 == "b" * 64
+    assert source.prefix_sharing is not None
+    sharing = source.prefix_sharing.root
+    assert isinstance(sharing, BenchPrefixSharingInput2)
+    assert sharing.shared_prefix_ratio == 0.8
+    assert request.definition.cache_start is BenchCacheStartInput.primed
+    assert BenchClientRequest.model_validate(request.model_dump()) == request
+
+
 def test_agentic_bench_fixtures_round_trip() -> None:
     request = BenchClientRequest.model_validate(
         load_json(FIXTURES / "valid" / "bench-client-request-agentic.json")
@@ -166,7 +207,11 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
     data_asset_result = load_json(FIXTURES / "valid" / "data-asset-preparation-result-opaque.json")
     validator = Draft202012Validator(load_json(SCHEMA))
 
+    replay_request = load_json(FIXTURES / "valid" / "bench-client-request-replay.json")
+    corpus_request = load_json(FIXTURES / "valid" / "bench-client-request-random-corpus.json")
     validator.validate({"bench_client_request": bench_request})
+    validator.validate({"bench_client_request": replay_request})
+    validator.validate({"bench_client_request": corpus_request})
     validator.validate({"bench_client_request": agentic_request})
     validator.validate({"bench_client_result": agentic_result})
     validator.validate({"bench_client_result": agentic_source_failure})

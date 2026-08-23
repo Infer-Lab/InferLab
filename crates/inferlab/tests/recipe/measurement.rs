@@ -1,5 +1,6 @@
 use crate::harness::{TestWorkspace, WORKSPACE};
 use serde_json::Value;
+use sha2::Digest;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -134,6 +135,126 @@ impl TestWorkspace {
                 "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
                 "benches = [\"c8k1k\"]",
             );
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    // One workspace-local frozen population in the materialized flat format;
+    // returns the file's content digest.
+    fn write_replay_population(
+        &self,
+        path: &str,
+        entries: u32,
+        shared_prefix: bool,
+    ) -> Result<String, Box<dyn Error>> {
+        let file = self.root().join(path);
+        fs::create_dir_all(file.parent().ok_or("replay path has no parent")?)?;
+        let mut content = String::new();
+        for index in 0..entries {
+            let text = if shared_prefix {
+                // The fixture server recognizes the canonical conditioning
+                // prompt by its first two words.
+                format!("canonical prefix replay-unique-{index} tail")
+            } else {
+                format!("replay prompt number {index} tokens")
+            };
+            content.push_str(&format!(
+                "{{\"extra\":{{\"ignore_eos\":true,\"min_tokens\":128}},\"output_length\":128,\"session_id\":\"inferlab-{index:08}\",\"text_input\":\"{text}\"}}\n"
+            ));
+        }
+        fs::write(&file, &content)?;
+        Ok(format!("{:x}", sha2::Sha256::digest(content.as_bytes())))
+    }
+
+    fn configure_replay_bench(
+        &self,
+        path: &str,
+        expected_sha256: Option<&str>,
+        shared_prefix: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let mut source = format!(
+            "request_source = {{ kind = \"replay\", path = \"{path}\", prompt = {{ kind = \"flat\" }}"
+        );
+        if let Some(digest) = expected_sha256 {
+            source.push_str(&format!(", expected_sha256 = \"{digest}\""));
+        }
+        if shared_prefix {
+            source.push_str(", prefix_sharing = { shared_prefix_tokens = 2 }");
+        }
+        source.push_str(" }");
+        let mut text = fs::read_to_string(&manifest)?
+            .replacen(
+                "request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }",
+                &source,
+                1,
+            )
+            .replace(
+                "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "benches = [\"c8k1k\"]",
+            );
+        if shared_prefix {
+            text = text.replacen(
+                "cache = { start = \"cold\" }",
+                "cache = { start = \"primed\" }\nrequest_body = { temperature = 0.0 }",
+                1,
+            );
+        }
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    // One workspace-local text corpus whose first two words let the fixture
+    // server recognize the canonical conditioning prompt; returns the file's
+    // content digest.
+    fn write_corpus(&self, path: &str, words: u32) -> Result<String, Box<dyn Error>> {
+        let file = self.root().join(path);
+        fs::create_dir_all(file.parent().ok_or("corpus path has no parent")?)?;
+        let mut content = String::from("canonical prefix");
+        for index in 2..words {
+            content.push_str(&format!(" corpus-word-{index}"));
+        }
+        content.push('\n');
+        fs::write(&file, &content)?;
+        Ok(format!("{:x}", sha2::Sha256::digest(content.as_bytes())))
+    }
+
+    fn configure_corpus_bench(
+        &self,
+        path: &str,
+        expected_sha256: Option<&str>,
+        shared_prefix: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let mut corpus = format!("corpus = {{ path = \"{path}\"");
+        if let Some(digest) = expected_sha256 {
+            corpus.push_str(&format!(", expected_sha256 = \"{digest}\""));
+        }
+        corpus.push_str(" }");
+        let mut source = format!(
+            "request_source = {{ kind = \"random\", prompt = {{ kind = \"flat\" }}, input_tokens = 8, output_tokens = 1024, {corpus}"
+        );
+        if shared_prefix {
+            source.push_str(", prefix_sharing = { shared_prefix_tokens = 2 }");
+        }
+        source.push_str(" }");
+        let mut text = fs::read_to_string(&manifest)?
+            .replacen(
+                "request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }",
+                &source,
+                1,
+            )
+            .replace(
+                "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "benches = [\"c8k1k\"]",
+            );
+        if shared_prefix {
+            text = text.replacen(
+                "cache = { start = \"cold\" }",
+                "cache = { start = \"primed\" }\nrequest_body = { temperature = 0.0 }",
+                1,
+            );
+        }
         fs::write(manifest, text)?;
         Ok(())
     }
@@ -356,6 +477,411 @@ fn release_dataset_preparation_is_cold_then_a_verified_cache_hit() -> Result<(),
                 && case.get("data_asset_materialization").is_none()
         })
     }));
+    Ok(())
+}
+
+#[test]
+fn replay_bench_replays_the_workspace_file_and_records_provenance() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let digest = workspace.write_replay_population("populations/replay.jsonl", 40, false)?;
+    workspace.configure_replay_bench("populations/replay.jsonl", Some(&digest), false)?;
+
+    let output = workspace.run()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its replay Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(
+        bench["status"], "succeeded",
+        "bench error: {}",
+        bench["error"]
+    );
+
+    let source = &bench["request_source"];
+    assert_eq!(source["kind"], "replay");
+    assert_eq!(source["path"], "populations/replay.jsonl");
+    assert_eq!(source["expected_sha256"], digest.as_str());
+    assert_eq!(source["observed_sha256"], digest.as_str());
+    assert_eq!(source["entries"], 40);
+    let population = &source["preparation"]["result"]["population"];
+    assert_eq!(population["sha256"], digest.as_str());
+    assert_eq!(population["entries"], 40);
+    assert_eq!(population["tpot_applicable"], true);
+    // The artifact directory holds the file byte for byte.
+    let artifact = workspace.root().join(format!(
+        ".inferlab/records/{bench_id}/cases/request-source/artifacts/population.jsonl"
+    ));
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(fs::read(&artifact)?)),
+        digest
+    );
+    let cases = bench["cases"]
+        .as_array()
+        .ok_or("replay bench has no cases")?;
+    assert!(cases.iter().all(|case| {
+        case["data_asset_materialization_identity"] == format!("sha256:{digest}")
+            && case["population_slice"]["population_sha256"] == digest.as_str()
+    }));
+    Ok(())
+}
+
+#[test]
+fn replay_dry_run_reports_observed_facts_without_fabrication() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let digest = workspace.write_replay_population("populations/replay.jsonl", 40, false)?;
+    workspace.configure_replay_bench("populations/replay.jsonl", Some(&digest), false)?;
+
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let source =
+        &recipe["measurements"]["benches"][0]["client"]["effective_definition"]["request_source"];
+    assert_eq!(source["kind"], "replay");
+    assert_eq!(source["path"], "populations/replay.jsonl");
+    assert_eq!(source["expected_sha256"], digest.as_str());
+    assert_eq!(source["observed_sha256"], digest.as_str());
+    assert_eq!(source["observed_entries"], 40);
+    assert_eq!(source["observed_tpot_applicability"], "applicable");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "dry-run must not run the Bench client"
+    );
+    Ok(())
+}
+
+#[test]
+fn replay_digest_mismatch_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_replay_population("populations/replay.jsonl", 40, false)?;
+    workspace.configure_replay_bench("populations/replay.jsonl", Some(&"0".repeat(64)), false)?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its replay Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    let error = bench["error"].as_str().ok_or("replay bench has no error")?;
+    assert!(error.contains("SHA-256"), "{error}");
+    assert!(error.contains(&"0".repeat(64)), "{error}");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "a digest mismatch must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
+fn replay_missing_file_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_replay_bench("populations/missing.jsonl", None, false)?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its replay Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "a missing replay file must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
+fn replay_prompt_shape_mismatch_fails_preparation() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    // Structured-message entries against a declared flat prompt.
+    let populations = workspace.root().join("populations");
+    fs::create_dir_all(&populations)?;
+    let mut content = String::new();
+    for index in 0..40 {
+        content.push_str(&format!(
+            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"hello {index}\"}}],\"output_length\":128,\"session_id\":\"inferlab-{index:08}\"}}\n"
+        ));
+    }
+    fs::write(populations.join("replay.jsonl"), content)?;
+    workspace.configure_replay_bench("populations/replay.jsonl", None, false)?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its replay Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    let error = bench["error"].as_str().ok_or("replay bench has no error")?;
+    assert!(error.contains("text_input"), "{error}");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "a prompt-shape mismatch must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
+fn primed_replay_conditions_the_cache_from_the_file_prefix() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_replay_population("populations/replay.jsonl", 40, true)?;
+    workspace.configure_replay_bench("populations/replay.jsonl", None, true)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its replay Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; stderr: {}",
+        bench["error"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let case = &bench["cases"][0];
+    let conditioning = &case["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["prompt_tokens"], 2);
+    assert_eq!(conditioning["maximum_shared_prefix_tokens"], 2);
+    let request: Value = serde_json::from_slice(&fs::read(workspace.conditioning_request())?)?;
+    assert_eq!(request["prompt"], "canonical prefix");
+    assert_eq!(request["max_tokens"], 1);
+    let source = &bench["request_source"];
+    assert_eq!(source["kind"], "replay");
+    assert_eq!(
+        source["prefix_sharing"],
+        serde_json::json!({ "shared_prefix_tokens": 2 })
+    );
+    Ok(())
+}
+
+#[test]
+fn primed_replay_dry_run_keeps_declared_geometry() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_replay_population("populations/replay.jsonl", 40, true)?;
+    workspace.configure_replay_bench("populations/replay.jsonl", None, true)?;
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = &recipe["measurements"]["benches"][0];
+    assert_eq!(bench["client"]["tpot_applicability"], "applicable");
+    assert_eq!(
+        bench["client"]["prefix_cache_conditioning"]["maximum_shared_prefix_tokens"],
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn corpus_bench_draws_entry_content_from_the_corpus_and_records_provenance()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let digest = workspace.write_corpus("corpus/shakespeare.txt", 64)?;
+    workspace.configure_corpus_bench("corpus/shakespeare.txt", Some(&digest), false)?;
+
+    let output = workspace.run()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its corpus Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(
+        bench["status"], "succeeded",
+        "bench error: {}",
+        bench["error"]
+    );
+
+    let source = &bench["request_source"];
+    assert_eq!(source["kind"], "random");
+    assert_eq!(source["corpus"]["path"], "corpus/shakespeare.txt");
+    assert_eq!(source["corpus"]["expected_sha256"], digest.as_str());
+    assert_eq!(source["corpus"]["observed_sha256"], digest.as_str());
+    let preparation = &source["preparation"]["result"];
+    assert_eq!(
+        preparation["materialization_identity"],
+        "inferlab-corpus-slice-v1"
+    );
+    // Every entry is one recorded corpus slice drawn from the corpus words.
+    let artifact_dir = workspace.root().join(format!(
+        ".inferlab/records/{bench_id}/cases/request-source/artifacts"
+    ));
+    let population: Vec<Value> = fs::read_to_string(artifact_dir.join("population.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let evidence: Vec<Value> = fs::read_to_string(artifact_dir.join("population-evidence.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(population.len(), evidence.len());
+    assert!(!population.is_empty());
+    for (entry, evidence) in population.iter().zip(&evidence) {
+        let text = entry["text_input"]
+            .as_str()
+            .ok_or("corpus population entry has no text_input")?;
+        assert_eq!(text.split_whitespace().count(), 8);
+        assert!(evidence["corpus_slice_offset"].is_number());
+        assert_eq!(evidence["corpus_slice_length"], 8);
+        assert_eq!(evidence["selected_prompt_tokens"], 8);
+        assert_eq!(evidence["selected_output_tokens"], 1024);
+    }
+    Ok(())
+}
+
+#[test]
+fn corpus_dry_run_reports_observed_facts_without_fabrication() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let digest = workspace.write_corpus("corpus/shakespeare.txt", 64)?;
+    workspace.configure_corpus_bench("corpus/shakespeare.txt", Some(&digest), false)?;
+
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let source =
+        &recipe["measurements"]["benches"][0]["client"]["effective_definition"]["request_source"];
+    assert_eq!(source["kind"], "random");
+    assert_eq!(source["corpus"]["path"], "corpus/shakespeare.txt");
+    assert_eq!(source["corpus"]["expected_sha256"], digest.as_str());
+    assert_eq!(source["corpus"]["observed_sha256"], digest.as_str());
+    assert!(
+        source["corpus"].get("observed_tokens").is_none(),
+        "dry-run must not fabricate the tokenizer-owned corpus token length"
+    );
+    assert!(
+        !workspace.bench_marker().exists(),
+        "dry-run must not run the Bench client"
+    );
+    Ok(())
+}
+
+#[test]
+fn corpus_digest_mismatch_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_corpus("corpus/shakespeare.txt", 64)?;
+    workspace.configure_corpus_bench("corpus/shakespeare.txt", Some(&"0".repeat(64)), false)?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its corpus Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    let error = bench["error"].as_str().ok_or("corpus bench has no error")?;
+    assert!(error.contains("SHA-256"), "{error}");
+    assert!(error.contains(&"0".repeat(64)), "{error}");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "a corpus digest mismatch must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
+fn corpus_shorter_than_the_selected_target_fails_preparation() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_corpus("corpus/tiny.txt", 4)?;
+    workspace.configure_corpus_bench("corpus/tiny.txt", None, false)?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its corpus Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    let error = bench["error"].as_str().ok_or("corpus bench has no error")?;
+    assert!(
+        error.contains("shorter than the largest selected"),
+        "{error}"
+    );
+    assert!(
+        !workspace.bench_marker().exists(),
+        "a short corpus must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
+fn primed_corpus_conditions_the_cache_from_the_fixed_slice() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_corpus("corpus/shakespeare.txt", 64)?;
+    workspace.configure_corpus_bench("corpus/shakespeare.txt", None, true)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its corpus Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; stderr: {}",
+        bench["error"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let case = &bench["cases"][0];
+    let conditioning = &case["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["prompt_tokens"], 2);
+    assert_eq!(conditioning["maximum_shared_prefix_tokens"], 2);
+    let request: Value = serde_json::from_slice(&fs::read(workspace.conditioning_request())?)?;
+    // The fixture corpus starts with the words the fixture server recognizes.
+    assert_eq!(request["prompt"], "canonical prefix");
+    assert_eq!(request["max_tokens"], 1);
+    let source = &bench["request_source"];
+    assert_eq!(source["kind"], "random");
+    assert_eq!(source["corpus"]["path"], "corpus/shakespeare.txt");
+    assert_eq!(
+        source["prefix_sharing"],
+        serde_json::json!({ "shared_prefix_tokens": 2 })
+    );
     Ok(())
 }
 

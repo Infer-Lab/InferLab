@@ -18,7 +18,7 @@ pub use wire::{
     AdapterResult, AllocationLaunch, BenchAgenticAcquisitionOutcome, BenchAgenticBranchStats,
     BenchAgenticCatalogInput, BenchAgenticResultEvidence, BenchAgenticRunEvidence,
     BenchAgenticSourceInput, BenchAgenticSourceVerification, BenchArtifactLevelInput,
-    BenchCacheStartInput, BenchCaseInput, BenchClientRequest, BenchClientResult,
+    BenchCacheStartInput, BenchCaseInput, BenchClientRequest, BenchClientResult, BenchCorpusInput,
     BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
     BenchDefinitionInput, BenchInclusiveUniformInput, BenchLoadInput, BenchNativeInvocation,
     BenchPopulationInput, BenchPopulationPreparationRequest, BenchPopulationPreparationResult,

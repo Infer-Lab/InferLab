@@ -1,0 +1,45 @@
+{
+  "protocol_version": "8",
+  "endpoint": {
+    "protocol": "http",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "completions_path": "/v1/completions",
+    "chat_completions_path": "/v1/chat/completions",
+    "server_metrics": null
+  },
+  "model": {
+    "locator": "/models/example",
+    "served_name": "example"
+  },
+  "definition": {
+    "request_source": {
+      "kind": "replay",
+      "path": "populations/replay.jsonl",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "prefix_sharing": {
+        "shared_prefix_ratio": 1.0
+      }
+    },
+    "prompt": {
+      "kind": "flat",
+      "request_representation": "flat_prompt",
+      "route": "completions",
+      "rendering_authority": "local_flat"
+    },
+    "server_metrics": false,
+    "seed": 7,
+    "cache_start": "primed",
+    "timeout_seconds": 120
+  },
+  "case": {
+    "load_shape": {
+      "kind": "concurrency_limited",
+      "concurrency": 4
+    },
+    "request_count": 16,
+    "warmup_request_count": 4
+  },
+  "case_budget_seconds": 120.0,
+  "artifact_dir": "artifacts"
+}

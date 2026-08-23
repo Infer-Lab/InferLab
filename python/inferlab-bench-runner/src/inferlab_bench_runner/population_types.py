@@ -41,6 +41,31 @@ def json_line(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def token_stream_digest(token_ids: list[int]) -> str:
+    encoded = json.dumps(token_ids, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def decode_exact(tokenizer: ChatTokenizer, token_ids: list[int], label: str) -> str:
+    if not token_ids:
+        return ""
+    text = tokenizer.decode(
+        token_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    if tokenizer.encode(text, add_special_tokens=False) != token_ids:
+        raise ValueError(f"tokenizer could not round-trip the {label} token stream")
+    return text
+
+
+def common_prefix_length(left: list[int], right: list[int]) -> int:
+    for index, (left_token, right_token) in enumerate(zip(left, right, strict=False)):
+        if left_token != right_token:
+            return index
+    return min(len(left), len(right))
+
+
 def unbiased_index(seed: int, population_index: int, label: str, size: int) -> int:
     """Select an index without modulo bias from a stable population identity."""
     if size <= 0:

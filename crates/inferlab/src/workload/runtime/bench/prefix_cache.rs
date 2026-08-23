@@ -183,10 +183,12 @@ fn condition_prefix_cache(
             )
         })
         .and_then(|item| {
-            if item.prompt_tokens != plan.maximum_shared_prefix_tokens {
+            if let Some(maximum) = plan.maximum_shared_prefix_tokens
+                && item.prompt_tokens != maximum
+            {
                 return Err(CachePreparationError::Conditioning(format!(
                     "canonical prefix contains {} tokens, expected {}",
-                    item.prompt_tokens, plan.maximum_shared_prefix_tokens
+                    item.prompt_tokens, maximum
                 )));
             }
             std::fs::read_to_string(&item.path).map_err(|error| {
@@ -683,7 +685,7 @@ mod tests {
                 model: "m".to_owned(),
                 prompt: ResolvedBenchPrompt::from_definition(&BenchPrompt::Flat),
                 request_body: BTreeMap::new(),
-                maximum_shared_prefix_tokens: 8,
+                maximum_shared_prefix_tokens: Some(8),
                 output_tokens: 1,
                 consumes_population_entry: false,
                 attention_data_parallel_size: data_parallel_size,

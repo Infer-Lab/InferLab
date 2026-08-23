@@ -1279,6 +1279,8 @@ pub enum BenchRequestSourceInput {
         prefix_sharing: Option<BenchPrefixSharingInput>,
         #[serde(default)]
         shared_system_content: Option<BenchSharedSystemContentInput>,
+        #[serde(default)]
+        corpus: Option<BenchCorpusInput>,
     },
     /// AIPerf samples exact token-shape pairs from one seeded categorical
     /// distribution.
@@ -1297,6 +1299,18 @@ pub enum BenchRequestSourceInput {
         max_input_tokens: u32,
         output_tokens: Option<u32>,
         catalog: Box<BenchDatasetCatalogInput>,
+    },
+    /// Inferlab replays one workspace-local frozen population file unchanged;
+    /// the file bytes are the sole population authority
+    /// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+    Replay {
+        /// Workspace-relative population path as declared. The preparation
+        /// request's `source_path` carries its absolute resolution.
+        path: String,
+        #[serde(default)]
+        expected_sha256: Option<String>,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharingInput>,
     },
 }
 
@@ -1338,6 +1352,19 @@ pub enum BenchPrefixSharingInput {
 pub enum BenchSharedSystemContentInput {
     Tokens { tokens: u32 },
     Ratio { ratio: f64 },
+}
+
+/// One operator-supplied text corpus binding for the random request source;
+/// entry content is drawn as exact token-length slices of the corpus token
+/// stream ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchCorpusInput {
+    /// Workspace-relative corpus path as declared. The preparation request's
+    /// `source_path` carries its absolute resolution.
+    pub path: String,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 /// One exact ISL/OSL pair and its relative categorical sampling weight.

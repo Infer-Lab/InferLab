@@ -1,7 +1,7 @@
 use crate::bench_metric::BenchMetric;
 use crate::workspace::{
     BenchArtifactLevel, BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
-    BenchSharedSystemContent, BenchTokenSelector, JsonValue, RequestSlo,
+    BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability, JsonValue, RequestSlo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -237,6 +237,8 @@ pub(crate) enum ResolvedBenchRequestSource {
         prefix_sharing: Option<BenchPrefixSharing>,
         #[serde(default)]
         shared_system_content: Option<BenchSharedSystemContent>,
+        #[serde(default)]
+        corpus: Option<ResolvedBenchCorpus>,
     },
     RandomMixture {
         shapes: Vec<ResolvedBenchRandomShape>,
@@ -251,6 +253,34 @@ pub(crate) enum ResolvedBenchRequestSource {
         output_tokens: Option<u32>,
         catalog: Box<BenchDatasetCatalog>,
     },
+    Replay {
+        /// Workspace-relative population path as declared.
+        path: String,
+        expected_sha256: Option<String>,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharing>,
+        /// Absolute resolution of `path` against the workspace root.
+        resolved_path: PathBuf,
+        /// File facts observed while resolving the plan; absent when the file
+        /// was unreadable or malformed, never fabricated.
+        observed_sha256: Option<String>,
+        observed_entries: Option<u32>,
+        observed_tpot_applicability: Option<BenchTpotApplicability>,
+    },
+}
+
+/// One resolved corpus binding on a random request source.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ResolvedBenchCorpus {
+    /// Workspace-relative corpus path as declared.
+    pub path: String,
+    pub expected_sha256: Option<String>,
+    /// Absolute resolution of `path` against the workspace root.
+    pub resolved_path: PathBuf,
+    /// Content digest observed while resolving the plan; absent when the file
+    /// was unreadable, never fabricated. The corpus token length stays
+    /// unresolved here because tokenization is runner-owned.
+    pub observed_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -328,6 +358,9 @@ impl ResolvedBenchDefinition {
                     shared_system_content: Some(_),
                     ..
                 } | ResolvedBenchRequestSource::RandomMixture {
+                    prefix_sharing: Some(_),
+                    ..
+                } | ResolvedBenchRequestSource::Replay {
                     prefix_sharing: Some(_),
                     ..
                 }

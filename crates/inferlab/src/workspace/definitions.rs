@@ -670,6 +670,8 @@ pub(crate) enum BenchRequestSource {
         prefix_sharing: Option<BenchPrefixSharing>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shared_system_content: Option<BenchSharedSystemContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corpus: Option<BenchCorpusDeclaration>,
     },
     RandomMixture {
         #[serde(default)]
@@ -685,6 +687,15 @@ pub(crate) enum BenchRequestSource {
         max_input_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u32>,
+    },
+    Replay {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+        #[serde(default)]
+        prompt: BenchPromptSelection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_sharing: Option<BenchPrefixSharing>,
     },
 }
 
@@ -850,6 +861,16 @@ pub(crate) enum BenchSharedSystemContent {
     Ratio { ratio: f64 },
 }
 
+/// One operator-supplied text corpus binding on the random request source
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchCorpusDeclaration {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchRandomShape {
@@ -871,6 +892,10 @@ impl BenchRequestSource {
                 BenchTpotApplicability::Applicable,
                 BenchTpotApplicability::from_output_tokens,
             ),
+            // Replay entry output targets live in the population file, so the
+            // definition-level answer is optimistic; planning refines it from
+            // the observed file entries.
+            Self::Replay { .. } => BenchTpotApplicability::Applicable,
         }
     }
 }

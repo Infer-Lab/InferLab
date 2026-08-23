@@ -1,11 +1,12 @@
 use inferlab_protocol::{
     AdapterRequest, AdapterResponse, AdapterResult, BenchArtifactLevelInput, BenchClientRequest,
-    BenchClientResult, BenchRequestSourceInput, EvalClientRequest, EvalClientResult,
-    EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion,
-    EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
-    MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
-    ProtocolVersion, ReadinessProbe, RenderInputDeclaration, SettingValue, SuppliedRenderInput,
-    TargetEndpointScheme, measurement_schema, protocol_schema,
+    BenchClientResult, BenchPrefixSharingInput, BenchRequestSourceInput, BenchTokenSelectorInput,
+    EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
+    EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID,
+    MeasurementDataAssetPreparationRequest, MeasurementDataAssetPreparationResult,
+    MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe,
+    RenderInputDeclaration, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
+    measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -73,6 +74,14 @@ const VALID_EVAL_CLIENT_RESULT_NORMALIZED_METRIC: &str = include_str!(concat!(
 const VALID_BENCH_CLIENT_REQUEST_RANDOM_MIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/bench-client-request-random-mixture.json"
+));
+const VALID_BENCH_CLIENT_REQUEST_REPLAY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-request-replay.json"
+));
+const VALID_BENCH_CLIENT_REQUEST_RANDOM_CORPUS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-request-random-corpus.json"
 ));
 const VALID_BENCH_CLIENT_REQUEST_AGENTIC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -143,6 +152,78 @@ fn weighted_random_mixture_fixture_round_trips() -> Result<(), Box<dyn Error>> {
         request.definition.artifact_level,
         BenchArtifactLevelInput::Diagnostic
     );
+    assert_eq!(
+        serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
+        request
+    );
+    Ok(())
+}
+
+#[test]
+fn replay_fixture_round_trips() -> Result<(), Box<dyn Error>> {
+    let request: BenchClientRequest = serde_json::from_str(VALID_BENCH_CLIENT_REQUEST_REPLAY)?;
+    let BenchRequestSourceInput::Replay {
+        path,
+        expected_sha256,
+        prefix_sharing,
+    } = request
+        .definition
+        .request_source
+        .as_ref()
+        .ok_or("Bench fixture omitted its request source")?
+    else {
+        return Err("Bench fixture did not contain a replay source".into());
+    };
+
+    assert_eq!(path, "populations/replay.jsonl");
+    assert_eq!(
+        expected_sha256.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    assert!(matches!(
+        prefix_sharing,
+        Some(BenchPrefixSharingInput::Ratio {
+            shared_prefix_ratio: 1.0
+        })
+    ));
+    assert_eq!(
+        serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
+        request
+    );
+    Ok(())
+}
+
+#[test]
+fn random_corpus_fixture_round_trips() -> Result<(), Box<dyn Error>> {
+    let request: BenchClientRequest =
+        serde_json::from_str(VALID_BENCH_CLIENT_REQUEST_RANDOM_CORPUS)?;
+    let BenchRequestSourceInput::Random {
+        input_tokens,
+        corpus,
+        prefix_sharing,
+        ..
+    } = request
+        .definition
+        .request_source
+        .as_ref()
+        .ok_or("Bench fixture omitted its request source")?
+    else {
+        return Err("Bench fixture did not contain a random source".into());
+    };
+
+    assert!(matches!(input_tokens, BenchTokenSelectorInput::Fixed(8192)));
+    let corpus = corpus.as_ref().ok_or("random fixture omitted its corpus")?;
+    assert_eq!(corpus.path, "corpus/shakespeare.txt");
+    assert_eq!(
+        corpus.expected_sha256.as_deref(),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+    assert!(matches!(
+        prefix_sharing,
+        Some(BenchPrefixSharingInput::Ratio {
+            shared_prefix_ratio: 0.8
+        })
+    ));
     assert_eq!(
         serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
         request

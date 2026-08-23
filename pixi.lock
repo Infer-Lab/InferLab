@@ -1647,12 +1647,12 @@ packages:
   name: inferlab-bench-runner
   requires_dist:
   - huggingface-hub>=0.25,<2
-  - inferlab-measurement-sdk==0.12.1
+  - inferlab-measurement-sdk==0.13.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-eval-runner
   name: inferlab-eval-runner
   requires_dist:
-  - inferlab-measurement-sdk==0.12.1
+  - inferlab-measurement-sdk==0.13.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-sglang
   name: inferlab-integration-sglang

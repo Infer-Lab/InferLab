@@ -335,6 +335,75 @@ replacement, and freezes only each row's first user turn as an independent
 request. Later turns are recorded as omitted rather than silently becoming
 sessions.
 
+## Replaying a recorded population
+
+Any earlier Bench record freezes its request population at
+`.inferlab/records/<record-id>/cases/request-source/artifacts/population.jsonl`.
+Copy that file into the workspace and pin its digest to replay the exact same
+requests against another server or configuration:
+
+```toml
+[benches.replay-c8k1k]
+kind = "serving"
+request_source = { kind = "replay", path = "populations/c8k1k.jsonl", expected_sha256 = "<64-hex digest of the file>", prompt = { kind = "flat" } }
+concurrency = [1, 4]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+```
+
+`path` is workspace-relative (absolute paths and `..` escapes are rejected),
+and `prompt` must be declared explicitly: `flat` (or `rendered_chat`) entries
+carry a `text_input` string, `server_chat` entries carry structured
+`messages`. `expected_sha256` is optional; when declared, preparation verifies
+the file bytes before any request runs. The file is the sole population
+authority: InferLab offers no selection, filtering, or transformation — edit,
+subset, or reorder the file itself instead. Each entry keeps its own recorded
+`output_length`; mixing `1` and larger values in one file is rejected, and a
+file with fewer entries than the largest case requires fails preparation
+rather than repeating entries. `prefix_sharing` follows the generated-source
+semantics with the shared geometry resolved from the file entries. Dry-run
+reports the path, declared and observed digests, and entry count without
+running anything, and command-line overrides cannot change the replay `path`
+or `expected_sha256`.
+
+## Drawing random content from a text corpus
+
+A `random` source can replace its synthetic hash-word prompts with slices of
+an operator-supplied text corpus, for content-sensitive measurements such as
+speculative-decoding acceptance rates:
+
+```toml
+[benches.corpus-c8k1k]
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024, corpus = { path = "corpus/shakespeare.txt", expected_sha256 = "<64-hex digest of the file>" } }
+concurrency = [1, 4]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+```
+
+`corpus.path` is workspace-relative (absolute paths and `..` escapes are
+rejected, exactly like a replay population file), and `expected_sha256` is
+optional; when declared, preparation verifies the corpus bytes before any
+request runs. Pin the digest whenever the corpus identity matters — an edited
+corpus silently changes the workload otherwise. Corpus content cannot be
+inlined or fetched remotely, and command-line overrides cannot change the
+corpus `path` or `expected_sha256`. Corpus slicing requires
+`prompt = { kind = "flat" }` (the default), because entry content must be one
+exact token-length slice of the corpus stream.
+
+InferLab tokenizes the corpus once with the resolved model tokenizer and cuts
+each entry as one slice of exactly its selected `input_tokens` length at an
+offset determined by the Bench seed and the entry's population index, so the
+same seed reproduces the same prompts and generating a larger population keeps
+the same first entries. A corpus whose token stream is shorter than the
+largest selected input target fails preparation. `prefix_sharing` keeps its
+controlled semantics: the shared prefix is one fixed corpus slice and each
+entry's unique suffix is drawn independently, with primed-cache conditioning
+unchanged. Slices are drawn independently and may overlap; such incidental
+sharing is natural reuse — it is not measured, promised, or presented as
+controlled prefix geometry. The record preserves the corpus path, declared
+and observed digests, and each entry's slice offset and length.
+
 ## Source preparation and cold-to-warm verification
 
 Non-synthetic measurement sources are prepared before a recipe launches its

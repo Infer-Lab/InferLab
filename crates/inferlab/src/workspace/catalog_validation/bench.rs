@@ -295,15 +295,78 @@ fn validate_cache_policy(
                 } => (f64::from(minimum_input) * shared_prefix_ratio).floor() >= 1.0,
             }
         }
+        // Replay input lengths live in the population file, so a declared
+        // positive ratio is accepted here and preparation resolves the
+        // geometry from the file entries.
+        Some(BenchRequestSource::Replay {
+            prompt,
+            prefix_sharing: Some(sharing),
+            ..
+        }) if matches!(
+            prompt.effective(),
+            BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
+        ) =>
+        {
+            match sharing {
+                BenchPrefixSharing::Tokens {
+                    shared_prefix_tokens,
+                } => *shared_prefix_tokens > 0,
+                BenchPrefixSharing::Ratio {
+                    shared_prefix_ratio,
+                } => *shared_prefix_ratio > 0.0,
+            }
+        }
         _ => false,
     };
     if has_positive_prefix {
         Ok(())
     } else {
         invalid(format!(
-            "bench {id:?} cache.start = \"primed\" requires flat or rendered_chat synthetic prompt authority with positive prefix_sharing"
+            "bench {id:?} cache.start = \"primed\" requires flat or rendered_chat prompt authority with positive prefix_sharing"
         ))
     }
+}
+
+fn validate_replay_path(id: &str, path: &str) -> Result<(), InferlabError> {
+    validate_workspace_relative_source_path(id, "replay request_source.path", path)
+}
+
+// One shared locator rule for operator-supplied workspace files: the replay
+// population file and the random source's corpus
+// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+fn validate_workspace_relative_source_path(
+    id: &str,
+    field: &str,
+    path: &str,
+) -> Result<(), InferlabError> {
+    let candidate = std::path::Path::new(path);
+    if path.is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::ParentDir
+            )
+        })
+    {
+        return invalid(format!(
+            "bench {id:?} {field} must be a workspace-relative path without parent traversal"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_expected_digest(id: &str, field: &str, digest: &str) -> Result<(), InferlabError> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return invalid(format!(
+            "bench {id:?} {field} must be 64 lowercase hexadecimal characters"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_request_rates(id: &str, rates: &[RequestRate]) -> Result<(), InferlabError> {
@@ -449,6 +512,7 @@ fn validate_bench_common(
                 output_tokens,
                 prefix_sharing,
                 shared_system_content,
+                corpus,
             } => {
                 validate_bench_token_selector(id, "request_source.input_tokens", input_tokens)?;
                 validate_bench_token_selector(id, "request_source.output_tokens", output_tokens)?;
@@ -457,6 +521,28 @@ fn validate_bench_common(
                     return invalid(format!(
                         "bench {id:?} request_source.output_tokens must not span TPOT-inapplicable and TPOT-applicable values"
                     ));
+                }
+                if let Some(corpus) = corpus {
+                    validate_workspace_relative_source_path(
+                        id,
+                        "random request_source.corpus.path",
+                        &corpus.path,
+                    )?;
+                    if let Some(digest) = &corpus.expected_sha256 {
+                        validate_expected_digest(
+                            id,
+                            "request_source.corpus.expected_sha256",
+                            digest,
+                        )?;
+                    }
+                    // Corpus slices are exact final-prompt token streams; a
+                    // chat template would insert tokens between them, so the
+                    // corpus supply exists only for flat prompts.
+                    if !matches!(prompt.effective(), BenchPrompt::Flat) {
+                        return invalid(format!(
+                            "bench {id:?} random request_source.corpus requires prompt.kind = \"flat\""
+                        ));
+                    }
                 }
                 validate_synthetic_prompt(
                     id,
@@ -555,6 +641,52 @@ fn validate_bench_common(
                         "bench {id:?} dataset {dataset:?} profile {:?} requires fixed output_tokens because its release catalog entry provides no held-out targets",
                         profile.as_deref()
                     ));
+                }
+            }
+            BenchRequestSource::Replay {
+                path,
+                expected_sha256,
+                prompt,
+                prefix_sharing,
+            } => {
+                validate_replay_path(id, path)?;
+                if let Some(digest) = expected_sha256 {
+                    validate_expected_digest(id, "request_source.expected_sha256", digest)?;
+                }
+                if prompt.declared().is_none() {
+                    return invalid(format!(
+                        "bench {id:?} replay request_source requires an explicit prompt kind"
+                    ));
+                }
+                if let Some(sharing) = prefix_sharing {
+                    if !matches!(
+                        prompt.effective(),
+                        BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
+                    ) {
+                        return invalid(format!(
+                            "bench {id:?} replay request_source.prefix_sharing requires prompt.kind = \"flat\" or \"rendered_chat\""
+                        ));
+                    }
+                    match sharing {
+                        BenchPrefixSharing::Tokens {
+                            shared_prefix_tokens,
+                        } if *shared_prefix_tokens == 0 => {
+                            return invalid(format!(
+                                "bench {id:?} request_source.prefix_sharing.shared_prefix_tokens must be positive"
+                            ));
+                        }
+                        BenchPrefixSharing::Ratio {
+                            shared_prefix_ratio,
+                        } if !shared_prefix_ratio.is_finite()
+                            || *shared_prefix_ratio < 0.0
+                            || *shared_prefix_ratio > 1.0 =>
+                        {
+                            return invalid(format!(
+                                "bench {id:?} request_source.prefix_sharing.shared_prefix_ratio must be finite and in [0, 1]"
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
             }
         },
@@ -1012,6 +1144,7 @@ timeout_seconds = 60
                     shared_prefix_ratio: 0.75,
                 }),
                 shared_system_content: None,
+                corpus: None,
             }) if prompt.effective() == &BenchPrompt::Flat
         ));
         Ok(())
@@ -1259,6 +1392,233 @@ timeout_seconds = 60
             tpot_error.to_string().contains("TPOT"),
             "unexpected error: {tpot_error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_source_validates_its_declaration_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", expected_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", prompt = { kind = "flat" }, prefix_sharing = { shared_prefix_ratio = 1.0 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+cache = { start = "primed" }
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("replay", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::Replay {
+                ref path,
+                prompt,
+                prefix_sharing: Some(BenchPrefixSharing::Ratio {
+                    shared_prefix_ratio: 1.0,
+                }),
+                ..
+            }) if path == "populations/x.jsonl" && prompt.declared() == Some(&BenchPrompt::Flat)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn replay_source_requires_an_explicit_prompt_kind() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl" }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        let error = validate_bench("replay", &definition)
+            .err()
+            .ok_or("replay source accepted the defaulted prompt kind")?;
+        assert!(
+            error.to_string().contains("explicit prompt kind"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_source_rejects_unsafe_paths_and_digests() -> Result<(), Box<dyn std::error::Error>> {
+        for (label, path) in [
+            ("absolute", "/tmp/population.jsonl"),
+            ("parent-escape", "../outside.jsonl"),
+            ("empty", ""),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "replay", path = {path:?}, prompt = {{ kind = "flat" }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#
+            ))?;
+            let error = validate_bench("replay", &definition)
+                .err()
+                .ok_or_else(|| format!("replay source accepted a {label} path"))?;
+            assert!(
+                error.to_string().contains("workspace-relative"),
+                "{label}: {error}"
+            );
+        }
+        let bad_digest = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", expected_sha256 = "ABCDEF", prompt = { kind = "flat" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("replay", &bad_digest)
+            .err()
+            .ok_or("replay source accepted a malformed expected digest")?;
+        assert!(
+            error.to_string().contains("64 lowercase hexadecimal"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_source_gates_prefix_sharing_on_the_prompt_kind()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server_chat = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", prompt = { kind = "server_chat" }, prefix_sharing = { shared_prefix_tokens = 8 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("replay", &server_chat)
+            .err()
+            .ok_or("server-chat replay accepted prefix_sharing")?;
+        assert!(
+            error.to_string().contains("flat\" or \"rendered_chat"),
+            "{error}"
+        );
+
+        let zero_tokens = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", prompt = { kind = "flat" }, prefix_sharing = { shared_prefix_tokens = 0 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("replay", &zero_tokens)
+            .err()
+            .ok_or("replay accepted a zero shared prefix")?;
+        assert!(error.to_string().contains("must be positive"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn random_corpus_validates_its_declaration_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, corpus = { path = "corpus/shakespeare.txt", expected_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, prefix_sharing = { shared_prefix_ratio = 0.8 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("corpus", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::Random {
+                corpus: Some(_),
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn random_corpus_rejects_unsafe_paths_and_digests() -> Result<(), Box<dyn std::error::Error>> {
+        for (label, path) in [
+            ("empty", ""),
+            ("absolute", "/tmp/corpus.txt"),
+            ("escaping", "../corpus.txt"),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", input_tokens = 8, output_tokens = 2, corpus = {{ path = {path:?} }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            let error = validate_bench("corpus", &definition)
+                .err()
+                .ok_or_else(|| format!("corpus accepted a {label} path"))?;
+            assert!(
+                error.to_string().contains("workspace-relative path"),
+                "{label}: {error}"
+            );
+        }
+        let bad_digest = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, corpus = { path = "corpus/x.txt", expected_sha256 = "ABCDEF" } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("corpus", &bad_digest)
+            .err()
+            .ok_or("corpus accepted a malformed expected digest")?;
+        assert!(
+            error.to_string().contains("64 lowercase hexadecimal"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn random_corpus_requires_a_flat_prompt() -> Result<(), Box<dyn std::error::Error>> {
+        for (label, prompt) in [
+            ("server chat", "{ kind = \"server_chat\" }"),
+            ("rendered chat", "{ kind = \"rendered_chat\" }"),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", prompt = {prompt}, input_tokens = 8, output_tokens = 2, corpus = {{ path = "corpus/x.txt" }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            let error = validate_bench("corpus", &definition)
+                .err()
+                .ok_or_else(|| format!("{label} prompt accepted a corpus"))?;
+            assert!(
+                error.to_string().contains("prompt.kind = \"flat\""),
+                "{label}: {error}"
+            );
+        }
         Ok(())
     }
 

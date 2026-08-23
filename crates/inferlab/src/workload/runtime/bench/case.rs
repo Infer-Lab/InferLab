@@ -615,7 +615,9 @@ fn agentic_data_asset_materialization(
 fn population_materialization_identity(plan: &BenchPlan) -> Option<String> {
     match &plan.client.effective_definition.source {
         ResolvedBenchSource::Requests {
-            request_source: crate::workload::domain::ResolvedBenchRequestSource::Dataset { .. },
+            request_source:
+                crate::workload::domain::ResolvedBenchRequestSource::Dataset { .. }
+                | crate::workload::domain::ResolvedBenchRequestSource::Replay { .. },
         } => {}
         ResolvedBenchSource::Sessions { .. } => {}
         ResolvedBenchSource::Agentic { .. } | ResolvedBenchSource::Requests { .. } => return None,

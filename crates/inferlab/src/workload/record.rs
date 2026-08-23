@@ -114,7 +114,7 @@ pub(crate) struct PrefixCacheConditioningEvidence {
     pub prompt_tokens: u32,
     pub prompt: ResolvedBenchPrompt,
     pub request_body: BTreeMap<String, JsonValue>,
-    pub maximum_shared_prefix_tokens: u32,
+    pub maximum_shared_prefix_tokens: Option<u32>,
     pub output_tokens: u32,
     pub consumes_population_entry: bool,
     /// Effective attention data-parallel size the conditioning loop primed:
@@ -190,6 +190,8 @@ pub(crate) enum BenchRequestSourceEvidence {
         #[serde(default)]
         shared_system_content: Option<BenchSharedSystemContent>,
         #[serde(default)]
+        corpus: Option<BenchCorpusSourceEvidence>,
+        #[serde(default)]
         preparation: Option<BenchPopulationPreparationEvidence>,
     },
     RandomMixture {
@@ -201,6 +203,39 @@ pub(crate) enum BenchRequestSourceEvidence {
         preparation: Option<BenchPopulationPreparationEvidence>,
     },
     Dataset(Box<BenchDatasetRequestSourceEvidence>),
+    Replay {
+        /// Workspace-relative population path as declared.
+        path: String,
+        /// Declared expected content digest when present.
+        #[serde(default)]
+        expected_sha256: Option<String>,
+        /// Observed content digest of the replayed file at preparation.
+        #[serde(default)]
+        observed_sha256: Option<String>,
+        /// Observed entry count of the replayed file at preparation.
+        #[serde(default)]
+        entries: Option<u32>,
+        #[serde(default)]
+        prefix_sharing: Option<BenchPrefixSharing>,
+        #[serde(default)]
+        preparation: Option<BenchPopulationPreparationEvidence>,
+    },
+}
+
+/// Corpus provenance for a corpus-backed random source: the declared path,
+/// the declared and observed content digests
+/// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchCorpusSourceEvidence {
+    /// Workspace-relative corpus path as declared.
+    pub path: String,
+    /// Declared expected content digest when present.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
+    /// Observed content digest of the corpus at preparation.
+    #[serde(default)]
+    pub observed_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

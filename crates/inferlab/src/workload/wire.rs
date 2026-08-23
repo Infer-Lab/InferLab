@@ -14,7 +14,7 @@ use crate::workspace::{
 };
 use inferlab_protocol::{
     BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchArtifactLevelInput,
-    BenchCacheStartInput, BenchDatasetCacheState, BenchDatasetCatalogInput,
+    BenchCacheStartInput, BenchCorpusInput, BenchDatasetCacheState, BenchDatasetCatalogInput,
     BenchDatasetFilterInput, BenchDefinitionInput, BenchInclusiveUniformInput,
     BenchPopulationInput, BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput,
     BenchRandomShapeInput, BenchRenderingAuthorityInput, BenchRequestRepresentationInput,
@@ -239,6 +239,7 @@ pub(super) fn bench_request_source_input(
             output_tokens,
             prefix_sharing,
             shared_system_content,
+            corpus,
         } => BenchRequestSourceInput::Random {
             input_tokens: token_selector_input(input_tokens),
             output_tokens: token_selector_input(output_tokens),
@@ -246,6 +247,10 @@ pub(super) fn bench_request_source_input(
             shared_system_content: shared_system_content
                 .as_ref()
                 .map(shared_system_content_input),
+            corpus: corpus.as_ref().map(|corpus| BenchCorpusInput {
+                path: corpus.path.clone(),
+                expected_sha256: corpus.expected_sha256.clone(),
+            }),
         },
         ResolvedBenchRequestSource::RandomMixture {
             shapes,
@@ -275,6 +280,16 @@ pub(super) fn bench_request_source_input(
             max_input_tokens: *max_input_tokens,
             output_tokens: *output_tokens,
             catalog: Box::new(catalog_input(catalog)),
+        },
+        ResolvedBenchRequestSource::Replay {
+            path,
+            expected_sha256,
+            prefix_sharing,
+            ..
+        } => BenchRequestSourceInput::Replay {
+            path: path.clone(),
+            expected_sha256: expected_sha256.clone(),
+            prefix_sharing: prefix_sharing.as_ref().map(prefix_sharing_input),
         },
     })
 }

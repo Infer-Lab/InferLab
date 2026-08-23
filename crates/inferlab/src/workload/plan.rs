@@ -189,7 +189,10 @@ pub(crate) struct BenchPrefixCacheConditioningPlan {
     pub model: String,
     pub prompt: ResolvedBenchPrompt,
     pub request_body: BTreeMap<String, JsonValue>,
-    pub maximum_shared_prefix_tokens: u32,
+    /// Resolved maximum shared-prefix token count. Synthetic sources compute
+    /// it at plan time; a replay ratio declaration resolves it from the
+    /// replayed population during preparation.
+    pub maximum_shared_prefix_tokens: Option<u32>,
     pub output_tokens: u32,
     pub consumes_population_entry: bool,
     /// Effective attention data-parallel size of the public serving role:

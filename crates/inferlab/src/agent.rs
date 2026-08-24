@@ -187,7 +187,7 @@ fn run_marketplace_command(
         .collect::<Vec<_>>();
     let command = render_agent_command(&argv);
     let bound = inferlab_runtime::operation_bound::OperationBound::finite(DEFAULT_COMMAND_TIMEOUT);
-    let outcome = inferlab_runtime::container::run_with_bound(&argv, None, None, &bound, None);
+    let outcome = inferlab_runtime::container::run_with_bound(&argv, &[], None, None, &bound, None);
     match outcome {
         Ok(inferlab_runtime::container::BoundedWait::Exited { status, stdout, .. })
             if status.success() =>

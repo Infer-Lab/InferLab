@@ -10,7 +10,7 @@ use super::{
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::plan::{CommandPlan, LaunchFilePlan, LaunchPlan};
 use crate::shell::{shell_quote, shell_quote_path};
-use crate::ssh::{ssh_argv, ssh_output, ssh_output_with_input};
+use crate::ssh::{SSH_ENV_REMOVE, ssh_argv, ssh_output, ssh_output_with_input};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::fs::File;
@@ -459,8 +459,13 @@ fn cleanup_incomplete_ssh_launch(target: &str, remote_handle: &Path) -> Result<(
         term_limit = TERM_POLL_LIMIT,
         kill_limit = KILL_POLL_LIMIT,
     );
-    let output = run_cleanup_command(&ssh_argv(target, &script), &bound, "SSH launch cleanup")
-        .map_err(|error| error.to_string())?;
+    let output = run_cleanup_command(
+        &ssh_argv(target, &script),
+        SSH_ENV_REMOVE,
+        &bound,
+        "SSH launch cleanup",
+    )
+    .map_err(|error| error.to_string())?;
     if output.status.success() {
         Ok(())
     } else {

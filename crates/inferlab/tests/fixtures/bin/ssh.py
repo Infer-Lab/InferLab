@@ -21,6 +21,16 @@ while index < len(args) and args[index] == "-o":
 if index < len(args) and args[index] == "--":
     index += 1
 target = args[index]
+env_log = os.environ.get("FIXTURE_SSH_ENV_LOG")
+if env_log:
+    with open(env_log, "a") as handle:
+        handle.write(
+            "{} ld_library_path={} ld_preload={}\n".format(
+                target,
+                "set" if "LD_LIBRARY_PATH" in os.environ else "",
+                "set" if "LD_PRELOAD" in os.environ else "",
+            )
+        )
 command = " ".join(args[index + 1 :]).replace("bash -lic", "bash -c", 1)
 env = dict(os.environ, FIXTURE_SSH_TARGET=target)
 if fault.get("ssh_hang_rm") and "docker rm -f" in command:

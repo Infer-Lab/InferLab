@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "agent-plugin-installer",
  "clap",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-fake-engine"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "clap",
  "futures-util",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-profiler"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "inferlab-protocol",
  "inferlab-runtime",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-protocol"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-proxy"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1457,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-runtime"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "ctrlc",
  "reqwest",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-serve-domain"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "inferlab-profiler",
  "inferlab-protocol",

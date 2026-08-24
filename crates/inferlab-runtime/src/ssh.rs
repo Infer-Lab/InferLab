@@ -11,6 +11,12 @@ use thiserror::Error;
 
 const SSH_OPTIONS: &[&str] = &["-o", "BatchMode=yes", "--"];
 
+/// Dynamic-linker overrides stripped from the SSH client environment: the
+/// client is a host tool, not a serving-stack member, and a workspace Pixi
+/// or stack activation must not leak its library search path into it
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+pub const SSH_ENV_REMOVE: &[&str] = &["LD_LIBRARY_PATH", "LD_PRELOAD"];
+
 /// The full SSH argv for bounded execution through an owning operation or
 /// cleanup deadline.
 pub fn ssh_argv(target: &str, script: &str) -> Vec<String> {
@@ -97,7 +103,14 @@ pub fn ssh_output_with_input(target: &str, script: &str, input: &[u8]) -> Result
 
 fn run_ssh(target: &str, script: &str, input: Option<&[u8]>) -> Result<Output, SshError> {
     let argv = ssh_argv(target, script);
-    match run_with_bound(&argv, None, input, &OperationBound::unbounded(), None) {
+    match run_with_bound(
+        &argv,
+        SSH_ENV_REMOVE,
+        None,
+        input,
+        &OperationBound::unbounded(),
+        None,
+    ) {
         Ok(BoundedWait::Exited {
             status,
             stdout,

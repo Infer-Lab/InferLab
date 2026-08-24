@@ -5,7 +5,7 @@ use super::{
 };
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::process_group::{LocalProcessGroup, SignalEvidence, TerminationSignal, VerifiedStatus};
-use crate::ssh::ssh_argv;
+use crate::ssh::{SSH_ENV_REMOVE, ssh_argv};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
@@ -253,6 +253,7 @@ pub(super) fn terminate_ssh_under(
     );
     match run_cleanup_command(
         &ssh_argv(&handle.target, &script),
+        SSH_ENV_REMOVE,
         bound,
         "SSH process cleanup",
     ) {

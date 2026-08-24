@@ -2384,12 +2384,19 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
     let workspace = TestWorkspace::new()?;
     enable_pair_placement(&workspace)?;
     let docker_log = workspace.root.path().join("docker-log");
+    // Outside the workspace: a fresh file inside it would race the remote
+    // preflight's dirty check.
+    let control = tempfile::tempdir()?;
+    let env_log = control.path().join("ssh-env-log");
     let run = workspace
         .command_with(&Scenario {
             docker_log: Some(docker_log.clone()),
             ssh_swallow_handle: true,
             ..Scenario::default()
         })
+        .env("FIXTURE_SSH_ENV_LOG", &env_log)
+        .env("LD_LIBRARY_PATH", "/fixture/pixi/envs/vllm/lib")
+        .env("LD_PRELOAD", "/fixture/pixi/envs/vllm/lib/libfixture.so")
         .args([
             "recipe",
             "run",
@@ -2434,6 +2441,20 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
         removal["confirmed"], true,
         "the record confirms the actual container's removal: {removal:?}"
     );
+    // Docker-over-SSH removal is an SSH child too: the host client never
+    // inherits the workspace's dynamic-linker overrides
+    // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    let env_log = fs::read_to_string(&env_log)?;
+    assert!(!env_log.is_empty(), "the lifecycle spawned no SSH children");
+    for line in env_log.lines() {
+        let mut fields = line.split_whitespace();
+        let target = fields.next().unwrap_or_default();
+        assert_eq!(
+            fields.collect::<Vec<_>>(),
+            ["ld_library_path=", "ld_preload="],
+            "SSH child for {target} inherited a dynamic-linker override: {line}"
+        );
+    }
     Ok(())
 }
 

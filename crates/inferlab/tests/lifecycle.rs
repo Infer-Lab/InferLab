@@ -881,6 +881,65 @@ fn ordered_two_node_ssh_lifecycle_preserves_logs_and_reverse_cleanup() -> Result
 }
 
 #[test]
+fn ssh_children_do_not_inherit_dynamic_linker_overrides() -> Result<(), Box<dyn Error>> {
+    // The SSH client is a host tool, not a serving-stack member: a Pixi or
+    // stack activation in the operator environment must not leak its
+    // dynamic-linker overrides into the client
+    // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_ssh_pair()?;
+    // The log lives outside the workspace: a fresh file inside it would race
+    // the remote preflight's dirty check (see `.inferlab/ssh-events.log`).
+    let control = tempfile::tempdir()?;
+    let env_log = control.path().join("ssh-env.log");
+    let spawn = |args: &[&str]| {
+        let mut command = workspace.command(args);
+        command
+            .env("FAKE_SSH_ENV_LOG", &env_log)
+            .env("LD_LIBRARY_PATH", "/fixture/pixi/envs/vllm/lib")
+            .env("LD_PRELOAD", "/fixture/pixi/envs/vllm/lib/libfixture.so");
+        command.output()
+    };
+
+    let output = spawn(&["serve", "start", "dsv4-qualify"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let started: Value = serde_json::from_slice(&output.stdout)?;
+    let id = started["id"]
+        .as_str()
+        .ok_or("missing record id")?
+        .to_owned();
+    for args in [
+        ["serve", "status", id.as_str()],
+        ["serve", "logs", id.as_str()],
+        ["serve", "stop", id.as_str()],
+    ] {
+        let output = spawn(&args)?;
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let log = fs::read_to_string(&env_log)?;
+    assert!(!log.is_empty(), "the SSH lifecycle spawned no SSH children");
+    for line in log.lines() {
+        let mut fields = line.split_whitespace();
+        let target = fields.next().unwrap_or_default();
+        assert_eq!(
+            fields.collect::<Vec<_>>(),
+            ["ld_library_path=", "ld_preload="],
+            "SSH child for {target} inherited a dynamic-linker override: {line}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn hardware_probe_failure_fails_the_launch_before_any_process() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let mut command = workspace.command(&["serve", "start", "dsv4-qualify"]);
@@ -1083,6 +1142,9 @@ while [ "$1" != -- ]; do shift; done
 shift
 target="$1"
 shift
+if [ -n "${FAKE_SSH_ENV_LOG:-}" ]; then
+  printf '%s ld_library_path=%s ld_preload=%s\n' "$target" "${LD_LIBRARY_PATH:+set}" "${LD_PRELOAD:+set}" >> "$FAKE_SSH_ENV_LOG"
+fi
 if [ "$1" = cat ]; then
   printf '%s logs\n' "$target" >> "$FAKE_SSH_EVENTS"
   eval "exec cat -- $3"

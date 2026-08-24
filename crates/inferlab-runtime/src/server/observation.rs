@@ -5,7 +5,7 @@ use super::{
 use crate::operation_bound::OperationBound;
 use crate::process_group::process_start_time;
 use crate::shell::shell_quote_path;
-use crate::ssh::{ssh_argv, ssh_output};
+use crate::ssh::{SSH_ENV_REMOVE, ssh_argv, ssh_output};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -92,7 +92,9 @@ pub(super) fn verified_ssh_status_under(
         remote_group_alive_script(&handle.process_group.to_string()),
     );
     let output = match bound {
-        Some(bound) => run_status_command(&ssh_argv(&handle.target, &script), bound),
+        Some(bound) => {
+            run_status_command(&ssh_argv(&handle.target, &script), SSH_ENV_REMOVE, bound)
+        }
         None => ssh_output(&handle.target, &script).map_err(|source| ProcessCommandError::Ssh {
             operation: "process status command".to_owned(),
             source,
@@ -155,9 +157,9 @@ pub(super) fn fetch_remote_file(
 ) -> Result<(), LogSyncError> {
     let argv = ssh_argv(target, &format!("cat -- {}", shell_quote_path(remote)));
     let output = if cleanup {
-        run_cleanup_command(&argv, bound, "remote log synchronization")
+        run_cleanup_command(&argv, SSH_ENV_REMOVE, bound, "remote log synchronization")
     } else {
-        run_status_command(&argv, bound)
+        run_status_command(&argv, SSH_ENV_REMOVE, bound)
     }
     .map_err(|source| LogSyncError::ReadRemote {
         path: remote.to_path_buf(),
@@ -183,8 +185,8 @@ fn process_group_has_live_members_under(
 ) -> Result<bool, ProcessCommandError> {
     let argv = ["ps", "-eo", "pid=,pgid=,stat="];
     let output = match bound {
-        Some(bound) if cleanup => run_cleanup_command(&argv, bound, "process cleanup status"),
-        Some(bound) => run_status_command(&argv, bound),
+        Some(bound) if cleanup => run_cleanup_command(&argv, &[], bound, "process cleanup status"),
+        Some(bound) => run_status_command(&argv, &[], bound),
         None => Command::new(argv[0])
             .args(&argv[1..])
             .output()
@@ -215,10 +217,11 @@ fn process_group_has_live_members_under(
 
 pub(super) fn run_status_command<S: AsRef<std::ffi::OsStr>>(
     argv: &[S],
+    env_remove: &[&str],
     bound: &OperationBound,
 ) -> Result<Output, ProcessCommandError> {
     let operation = "process status command";
-    match crate::container::run_with_bound(argv, None, None, bound, None) {
+    match crate::container::run_with_bound(argv, env_remove, None, None, bound, None) {
         Ok(crate::container::BoundedWait::Exited {
             status,
             stdout,
@@ -276,10 +279,11 @@ pub(super) fn run_status_command<S: AsRef<std::ffi::OsStr>>(
 
 pub(super) fn run_cleanup_command<S: AsRef<std::ffi::OsStr>>(
     argv: &[S],
+    env_remove: &[&str],
     bound: &OperationBound,
     operation: &str,
 ) -> Result<Output, ProcessCommandError> {
-    match crate::container::run_cleanup_with_bound(argv, None, None, bound, None) {
+    match crate::container::run_cleanup_with_bound(argv, env_remove, None, None, bound, None) {
         Ok(crate::container::BoundedWait::Exited {
             status,
             stdout,

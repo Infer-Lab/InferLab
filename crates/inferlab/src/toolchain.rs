@@ -281,6 +281,7 @@ fn pixi_host_info() -> Result<PixiHostInfo, InferlabError> {
     let bound = OperationBound::unbounded();
     let output = inferlab_runtime::container::run_with_bound(
         &argv,
+        &[],
         Some(Path::new("/")),
         None,
         &bound,
@@ -483,7 +484,7 @@ fn install_locked(path: &Path) -> Result<(), InferlabError> {
     ];
     let bound = OperationBound::unbounded();
     let (status, stdout, stderr) =
-        match inferlab_runtime::container::run_with_bound(&argv, None, None, &bound, None) {
+        match inferlab_runtime::container::run_with_bound(&argv, &[], None, None, &bound, None) {
             Ok(inferlab_runtime::container::BoundedWait::Exited {
                 status,
                 stdout,

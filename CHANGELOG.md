@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-23
+
+### Fixed
+
+- SSH subprocesses spawned by the control plane and the profiler transport no
+  longer inherit the serving stack's dynamic-linker environment: when InferLab
+  is invoked through a workspace Pixi activation, `LD_LIBRARY_PATH` and
+  `LD_PRELOAD` are stripped at every SSH spawn boundary (launch, status, log
+  sync, cleanup, and container-over-SSH), so the host SSH client cannot be
+  corrupted by stack libraries. Operators who deployed a PATH wrapper to work
+  around the leak can remove it.
+
 ## [0.13.0] - 2026-08-23
 
 ### Added

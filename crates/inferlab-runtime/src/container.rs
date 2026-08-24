@@ -93,8 +93,11 @@ pub enum BoundedError {
 /// stdout and stderr concurrently: a child whose
 /// output exceeds the pipe capacity would otherwise block writing and
 /// never exit, turning a large response or traceback into a timeout.
+/// `env_remove` names inherited environment variables the child must not
+/// see (for example [`crate::ssh::SSH_ENV_REMOVE`] for a host SSH client).
 pub fn run_with_bound<S: AsRef<std::ffi::OsStr>>(
     argv: &[S],
+    env_remove: &[&str],
     cwd: Option<&Path>,
     stdin_payload: Option<&[u8]>,
     bound: &OperationBound,
@@ -102,6 +105,7 @@ pub fn run_with_bound<S: AsRef<std::ffi::OsStr>>(
 ) -> Result<BoundedWait, BoundedError> {
     run_with_bound_mode(
         argv,
+        env_remove,
         cwd,
         stdin_payload,
         bound,
@@ -113,6 +117,7 @@ pub fn run_with_bound<S: AsRef<std::ffi::OsStr>>(
 
 pub fn run_cleanup_with_bound<S: AsRef<std::ffi::OsStr>>(
     argv: &[S],
+    env_remove: &[&str],
     cwd: Option<&Path>,
     stdin_payload: Option<&[u8]>,
     bound: &OperationBound,
@@ -120,6 +125,7 @@ pub fn run_cleanup_with_bound<S: AsRef<std::ffi::OsStr>>(
 ) -> Result<BoundedWait, BoundedError> {
     run_with_bound_mode(
         argv,
+        env_remove,
         cwd,
         stdin_payload,
         bound,
@@ -129,8 +135,10 @@ pub fn run_cleanup_with_bound<S: AsRef<std::ffi::OsStr>>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_bound_mode<S: AsRef<std::ffi::OsStr>, F: FnMut() -> bool>(
     argv: &[S],
+    env_remove: &[&str],
     cwd: Option<&Path>,
     stdin_payload: Option<&[u8]>,
     bound: &OperationBound,
@@ -163,6 +171,9 @@ fn run_with_bound_mode<S: AsRef<std::ffi::OsStr>, F: FnMut() -> bool>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    for variable in env_remove {
+        command.env_remove(variable);
+    }
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -456,19 +467,29 @@ pub enum RemovalFailure {
 /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub fn remove_container(target: Option<&str>, container: &str) -> Removal {
     let bound = OperationBound::finite(REMOVAL_TIMEOUT);
-    let argv = match target {
-        Some(target) => crate::ssh::ssh_argv(
-            target,
-            &format!("docker rm -f {}", crate::shell::shell_quote(container)),
+    // The SSH transport is a host tool: strip the stack's dynamic-linker
+    // overrides ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). A local docker client is
+    // not in that scope.
+    let (argv, env_remove): (Vec<String>, &[&str]) = match target {
+        Some(target) => (
+            crate::ssh::ssh_argv(
+                target,
+                &format!("docker rm -f {}", crate::shell::shell_quote(container)),
+            ),
+            crate::ssh::SSH_ENV_REMOVE,
         ),
-        None => vec![
-            "docker".to_owned(),
-            "rm".to_owned(),
-            "-f".to_owned(),
-            container.to_owned(),
-        ],
+        None => (
+            vec![
+                "docker".to_owned(),
+                "rm".to_owned(),
+                "-f".to_owned(),
+                container.to_owned(),
+            ],
+            &[],
+        ),
     };
-    let (status, stderr) = match run_cleanup_with_bound(&argv, None, None, &bound, None) {
+    let (status, stderr) = match run_cleanup_with_bound(&argv, env_remove, None, None, &bound, None)
+    {
         Ok(BoundedWait::Exited { status, stderr, .. }) => {
             (status, String::from_utf8_lossy(&stderr).into_owned())
         }
@@ -538,26 +559,32 @@ pub fn remove_container(target: Option<&str>, container: &str) -> Removal {
 /// knows the container, bounded by [`REMOVAL_TIMEOUT`]. Any answer other
 /// than a definitive not-found keeps polling; the deadline decides.
 fn confirm_container_absent(target: Option<&str>, container: &str, bound: &OperationBound) -> bool {
-    let argv = match target {
-        Some(target) => crate::ssh::ssh_argv(
-            target,
-            &format!(
-                "docker container inspect --format {{{{.Id}}}} {}",
-                crate::shell::shell_quote(container)
+    let (argv, env_remove): (Vec<String>, &[&str]) = match target {
+        Some(target) => (
+            crate::ssh::ssh_argv(
+                target,
+                &format!(
+                    "docker container inspect --format {{{{.Id}}}} {}",
+                    crate::shell::shell_quote(container)
+                ),
             ),
+            crate::ssh::SSH_ENV_REMOVE,
         ),
-        None => vec![
-            "docker".to_owned(),
-            "container".to_owned(),
-            "inspect".to_owned(),
-            "--format".to_owned(),
-            "{{.Id}}".to_owned(),
-            container.to_owned(),
-        ],
+        None => (
+            vec![
+                "docker".to_owned(),
+                "container".to_owned(),
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{.Id}}".to_owned(),
+                container.to_owned(),
+            ],
+            &[],
+        ),
     };
     loop {
         if let Ok(BoundedWait::Exited { status, stderr, .. }) =
-            run_cleanup_with_bound(&argv, None, None, bound, None)
+            run_cleanup_with_bound(&argv, env_remove, None, None, bound, None)
             && !status.success()
             && String::from_utf8_lossy(&stderr).contains("No such container")
         {
@@ -584,7 +611,7 @@ mod tests {
     #[test]
     fn unbounded_command_wait_terminates_when_the_process_exits() {
         let argv = vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()];
-        let outcome = run_with_bound(&argv, None, None, &OperationBound::unbounded(), None);
+        let outcome = run_with_bound(&argv, &[], None, None, &OperationBound::unbounded(), None);
 
         assert!(matches!(
             outcome,
@@ -597,6 +624,7 @@ mod tests {
         let argv = vec!["sh".to_owned(), "-c".to_owned(), "sleep 60".to_owned()];
         let outcome = run_with_bound_mode(
             &argv,
+            &[],
             None,
             None,
             &OperationBound::unbounded(),
@@ -637,7 +665,7 @@ mod tests {
         let payload = vec![b'x'; 1024 * 1024];
         let bound = OperationBound::finite(Duration::from_millis(50));
 
-        let outcome = run_with_bound(&argv, None, Some(&payload), &bound, None);
+        let outcome = run_with_bound(&argv, &[], None, Some(&payload), &bound, None);
 
         assert!(matches!(
             outcome,
@@ -654,11 +682,39 @@ mod tests {
         ];
         let bound = OperationBound::finite(Duration::from_millis(50));
 
-        let outcome = run_with_bound(&argv, None, None, &bound, None);
+        let outcome = run_with_bound(&argv, &[], None, None, &bound, None);
 
         assert!(matches!(
             outcome,
             Ok(BoundedWait::Expired { kill: Ok(()), .. })
+        ));
+    }
+
+    #[test]
+    fn env_remove_strips_inherited_variables_from_the_child() {
+        // `/usr/bin/env` reports the received environment verbatim; a shell
+        // child would re-default an unset PATH and hide the strip.
+        let argv = vec!["/usr/bin/env".to_owned()];
+
+        let inherited = run_with_bound(&argv, &[], None, None, &OperationBound::unbounded(), None);
+        assert!(matches!(
+            inherited,
+            Ok(BoundedWait::Exited { ref stdout, .. }) if stdout.starts_with(b"PATH=")
+                || stdout.windows(6).any(|window| window == b"\nPATH=")
+        ));
+
+        let stripped = run_with_bound(
+            &argv,
+            &["PATH"],
+            None,
+            None,
+            &OperationBound::unbounded(),
+            None,
+        );
+        assert!(matches!(
+            stripped,
+            Ok(BoundedWait::Exited { ref stdout, .. }) if !stdout.starts_with(b"PATH=")
+                && !stdout.windows(6).any(|window| window == b"\nPATH=")
         ));
     }
 }

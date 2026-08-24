@@ -304,7 +304,8 @@ pub(crate) fn probe_external_framework(
     let probe_failed = |message: String| InferlabError::ImageSelection { message };
     let bound = OperationBound::finite(timeout);
     let (status, stdout, stderr) =
-        match inferlab_runtime::container::run_with_bound(&launcher, None, None, &bound, None) {
+        match inferlab_runtime::container::run_with_bound(&launcher, &[], None, None, &bound, None)
+        {
             Ok(inferlab_runtime::container::BoundedWait::Exited {
                 status,
                 stdout,
@@ -507,6 +508,7 @@ fn invoke_adapter(
     let bound = OperationBound::finite(timeout);
     let (status, stdout, stderr) = match inferlab_runtime::container::run_with_bound(
         launcher,
+        &[],
         Some(workspace_root),
         Some(&payload),
         &bound,

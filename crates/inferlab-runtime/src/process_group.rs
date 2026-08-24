@@ -263,7 +263,7 @@ pub fn process_start_time(pid: u32) -> Result<Option<u64>, ProcessGroupError> {
 }
 
 fn cleanup_output(argv: &[&str], bound: &OperationBound) -> Result<Output, ProcessGroupError> {
-    match crate::container::run_cleanup_with_bound(argv, None, None, bound, None) {
+    match crate::container::run_cleanup_with_bound(argv, &[], None, None, bound, None) {
         Ok(crate::container::BoundedWait::Exited {
             status,
             stdout,

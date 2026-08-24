@@ -571,21 +571,25 @@ pub(crate) fn target_output(
     mode: CommandActionMode,
 ) -> Result<Output, TargetCommandError> {
     let local_argv;
-    let (command, cwd) = match &target.launch {
-        ProfilerLaunch::Local => (argv, Some(target.command_cwd.as_path())),
+    let (command, cwd, env_remove): (&[String], Option<&Path>, &[&str]) = match &target.launch {
+        ProfilerLaunch::Local => (argv, Some(target.command_cwd.as_path()), &[]),
         ProfilerLaunch::Ssh { target: ssh_target } => {
             let script = ssh_control_script(&target.command_cwd, argv);
             local_argv = inferlab_runtime::ssh::ssh_argv(ssh_target, &script);
-            (local_argv.as_slice(), None)
+            (
+                local_argv.as_slice(),
+                None,
+                inferlab_runtime::ssh::SSH_ENV_REMOVE,
+            )
         }
     };
     let outcome = match mode {
         CommandActionMode::Operation => {
-            inferlab_runtime::container::run_with_bound(command, cwd, None, bound, None)
+            inferlab_runtime::container::run_with_bound(command, env_remove, cwd, None, bound, None)
         }
-        CommandActionMode::Cleanup => {
-            inferlab_runtime::container::run_cleanup_with_bound(command, cwd, None, bound, None)
-        }
+        CommandActionMode::Cleanup => inferlab_runtime::container::run_cleanup_with_bound(
+            command, env_remove, cwd, None, bound, None,
+        ),
     };
     match outcome {
         Ok(inferlab_runtime::container::BoundedWait::Exited {

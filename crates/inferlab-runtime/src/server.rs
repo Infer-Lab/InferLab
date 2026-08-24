@@ -718,6 +718,7 @@ mod tests {
         let started = Instant::now();
         let error = run_status_command(
             &["sh", "-c", "sleep 5"],
+            &[],
             &OperationBound::finite(Duration::from_millis(50)),
         )
         .err()
@@ -780,6 +781,7 @@ mod tests {
     fn unbounded_process_status_command_does_not_acquire_a_timeout() -> Result<(), String> {
         let output = run_status_command(
             &["sh", "-c", "sleep 0.1; printf alive"],
+            &[],
             &OperationBound::unbounded(),
         )
         .map_err(|error| error.to_string())?;
@@ -803,6 +805,7 @@ mod tests {
     fn run_script_with_input(script: &str, input: &[u8]) -> Result<Output, String> {
         match crate::container::run_with_bound(
             &["bash", "-c", script],
+            &[],
             None,
             Some(input),
             &OperationBound::unbounded(),

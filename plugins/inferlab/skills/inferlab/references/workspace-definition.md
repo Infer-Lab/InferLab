@@ -90,6 +90,43 @@ the selected case, and invocation overrides:
   and the verbatim block owns the spelling. This exists because store-true
   flags cannot be retracted by last-wins parsing.
 
+## Synthetic acceptance
+
+For speculative-decoding benchmarks that must use a controlled acceptance
+length (for example InferenceX AgentX golden-AL policy), declare
+`synthetic_acceptance` on the server or a case. The speculative method, draft
+model, and method-specific flags stay in framework settings as usual —
+InferLab only overlays the resolved acceptance length onto that operator-owned
+configuration, and planning fails with a typed error when no speculative
+configuration exists to overlay. A case-level declaration replaces the
+server-level declaration wholesale.
+
+```toml
+# Explicit acceptance length:
+[servers.example.synthetic_acceptance]
+acceptance_length = 2.49
+
+# Or a digest-pinned golden acceptance-length curve (InferenceX shape):
+[servers.example.synthetic_acceptance.curve]
+path = "curves/deepseek_mtp.yaml"
+expected_sha256 = "<64 lowercase hex of the file bytes>"
+model_key = "deepseek-v4-pro"
+thinking_mode = "thinking_on"     # optional; defaults to thinking_on for matrix curves
+# No draft count is declared: the integration reads it from the operator's
+# speculative configuration and resolves the effective acceptance length.
+```
+
+A curve file maps each model key to either a flat list of
+`{draft_length: acceptance_length}` entries or a `{thinking_mode: {draft_length:
+acceptance_length}}` matrix. The plan-returned acceptance length, the
+determined draft count, and the curve provenance are preserved in dry-run and
+the serve record. An Eval bound to a
+server with synthetic acceptance fails at planning, because synthetic
+acceptance bypasses real draft-model verification; run correctness evals
+against a variant without the declaration. Per-backend overlay support is
+listed in the
+[backend support matrix](../../../../../docs/backend-support.md).
+
 A stack selects one integration and Pixi environment. Its `source_paths` name
 workspace-relative framework sources; declared checks verify the realized
 environment, and optional image postprocessing belongs to the stack rather
@@ -187,10 +224,10 @@ as verbatim-replaceable, so one post-`--` mention suppresses the managed group
 and the engine derives the remaining CP facts:
 
 ```toml
-[servers.dsv4.parallelism.attention]
+[servers.deepseek-mla.parallelism.attention]
 context_parallel_size = 2
 
-[servers.dsv4.settings]
+[servers.deepseek-mla.settings]
 extra_args = ["--", "--enable-dsa-prefill-context-parallel"]
 ```
 
@@ -359,6 +396,18 @@ declared repair hint but does not repair or otherwise mutate the realization.
 Dry-run then resolves local placement, effective settings, endpoints, device
 assignments, commands, environment, and override provenance without launching
 or writing an execution record.
+
+## Upgrading to the protocol-v9 line
+
+The next release after 0.13.1 hard-cuts the adapter protocol to version 9:
+protocol version 8 input or output is rejected rather than partially
+interpreted, and server records written before this line fail through the
+schema-version gate (server record schema version 8). Existing workspaces must
+update their exact package pins to `inferlab-adapter-sdk==0.9.0` and version
+`0.8.0` of the selected vLLM, SGLang, TensorRT-LLM, TokenSpeed, or Specialized
+Engine integration. Update the SDK and selected integration together, then run
+`inferlab workspace lock` so the committed Pixi lock becomes the new workspace
+authority.
 
 ## Upgrading to 0.12
 

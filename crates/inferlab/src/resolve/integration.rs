@@ -4,7 +4,7 @@ use super::selection::{EffectiveServerInput, WorkflowSelection, validate_effecti
 use super::topology::{
     endpoint_url, expand_replica_requirements, links_for_node, uses_explicit_replica_placement,
     validate_capture_targets, validate_integration_identity, validate_launch_dependencies,
-    validate_serve_graph,
+    validate_serve_graph, validate_synthetic_acceptance_outcome,
 };
 use crate::InferlabError;
 use crate::adapter::{AdapterClient, AdapterLowering};
@@ -389,10 +389,22 @@ pub(super) fn plan_integration<C: AdapterClient>(
             kv_transfer: effective.kv_transfer,
             roles: effective.role_inputs.clone(),
             profiling: effective.profiling,
+            synthetic_acceptance: effective
+                .synthetic_acceptance
+                .as_ref()
+                .map(|resolved| resolved.input.clone()),
         },
     )?;
     let (planned, evidence) = split_lowering(lowering);
     validate_integration_identity(&stack.integration, &planned.integration.framework)?;
+    validate_synthetic_acceptance_outcome(
+        &stack.integration,
+        effective
+            .synthetic_acceptance
+            .as_ref()
+            .map(|resolved| &resolved.input),
+        planned.synthetic_acceptance,
+    )?;
     validate_serve_graph(
         &stack.integration,
         effective.topology,
@@ -637,6 +649,10 @@ pub(super) fn render_integration<C: AdapterClient>(
             kv_transfer: effective.kv_transfer,
             allocations: render_allocations,
             profiling: effective.profiling,
+            synthetic_acceptance: effective
+                .synthetic_acceptance
+                .as_ref()
+                .map(|resolved| resolved.input.clone()),
         },
     )?;
     let (rendered, evidence) = split_lowering(lowering);

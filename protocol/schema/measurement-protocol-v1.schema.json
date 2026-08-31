@@ -196,7 +196,7 @@
           ],
           "default": null
         },
-        "cache_warmup_seconds": {
+        "cache_warmup_requests_per_lane": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -298,6 +298,10 @@
           "format": "uint32",
           "minimum": 0
         },
+        "trace_idle_gap_cap_seconds": {
+          "type": "number",
+          "format": "double"
+        },
         "trajectory_start_max": {
           "type": "number",
           "format": "double"
@@ -340,7 +344,8 @@
         "trajectory_start_min",
         "trajectory_start_max",
         "global_idle_gap_cap_seconds",
-        "cache_warmup_seconds",
+        "trace_idle_gap_cap_seconds",
+        "cache_warmup_requests_per_lane",
         "warmup_grace_seconds",
         "dataset_configuration_timeout_seconds",
         "service_profile_configuration_timeout_seconds",
@@ -437,9 +442,6 @@
           "format": "uint64",
           "minimum": 0
         },
-        "profiling_began_after_warmup_and_drain": {
-          "type": "boolean"
-        },
         "profiling_records": {
           "type": "integer",
           "format": "uint64",
@@ -504,6 +506,7 @@
           "minimum": 0
         },
         "warmup_succeeded": {
+          "description": "Whether the native run crossed the warmup phase and entered profiling\n(`profiling_records > 0`); snapshot-warmup failure aborts natively\nbefore profiling and therefore surfaces as an invalid submission.",
           "type": "boolean"
         }
       },
@@ -515,7 +518,6 @@
         "warmup_records",
         "warmup_error_records",
         "warmup_succeeded",
-        "profiling_began_after_warmup_and_drain",
         "profiling_records",
         "distinct_runtime_conversations",
         "distinct_transport_requests",
@@ -3905,12 +3907,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `8` (serialized as the\nstring `\"8\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `9` (serialized as the\nstring `\"9\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 8.",
+          "description": "Protocol version 9.",
           "type": "string",
-          "const": "8"
+          "const": "9"
         }
       ]
     },

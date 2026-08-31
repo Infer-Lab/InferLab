@@ -108,6 +108,11 @@ pub(crate) struct ServerPlan {
     pub capture_finalization_deadline_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
+    /// The declared synthetic-acceptance overlay and its resolved effective
+    /// values ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]); absent when the
+    /// serve declaration carries no synthetic acceptance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_acceptance: Option<SyntheticAcceptancePlan>,
     /// The closed frontend boundary: logical components, their explicit
     /// process bindings, and every concrete process realizing those
     /// components. A routed topology has this section; a direct Engine does
@@ -222,6 +227,30 @@ pub(crate) struct RoleDeclarationPlan {
 
 fn parallelism_is_empty(parallelism: &Parallelism) -> bool {
     parallelism == &Parallelism::default()
+}
+
+/// The declared synthetic-acceptance overlay and its effective values as
+/// returned by the accepted plan ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]],
+/// [[ADR-0043]]). Dry-run, execution, and serve-record evidence share this
+/// one object; curve provenance (path, digest, model key) stays on the
+/// declaration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct SyntheticAcceptancePlan {
+    /// The effective declaration after case composition.
+    pub declared: crate::workspace::SyntheticAcceptanceDefinition,
+    /// The effective mean acceptance length resolved and returned by the
+    /// integration.
+    pub acceptance_length: f64,
+    /// The effective thinking mode of a matrix-shape curve entry (omission
+    /// resolved to `thinking_on`); absent for the explicit form and for
+    /// flat-list curve entries, where no mode applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<String>,
+    /// The draft count the integration determined from the operator's
+    /// speculative configuration; present for the curve form, absent for the
+    /// explicit form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_count: Option<u32>,
 }
 
 impl ServerPlan {

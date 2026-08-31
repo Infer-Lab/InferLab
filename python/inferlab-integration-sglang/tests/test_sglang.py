@@ -1094,3 +1094,188 @@ def test_render_rejects_multi_node() -> None:
     second = ServeProcessAllocation.model_validate(second_payload)
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[allocation, second]))
+
+
+_SPECULATIVE_EXTRA_ARGS = SettingValue.model_validate(
+    [
+        "--speculative-algorithm",
+        "EAGLE",
+        "--speculative-num-steps",
+        "3",
+        "--speculative-eagle-topk",
+        "1",
+        "--speculative-num-draft-tokens",
+        "4",
+    ]
+)
+
+
+# Flat-list golden curve: draft count 3 -> acceptance length 2.49.
+_CURVE = {
+    "model_key": "dsv4",
+    "text": "dsv4:\n  - 3: 2.49\n  - 4: 3.1\n",
+    "sha256": "f" * 64,
+}
+
+
+def test_plan_and_render_overlay_the_curve_form_end_to_end() -> None:
+    result = plan_serve(
+        _plan_input(
+            settings={"extra_args": _SPECULATIVE_EXTRA_ARGS},
+            synthetic_acceptance={"curve": _CURVE},
+        )
+    )
+
+    # The overlay target is validated per role; the spelling itself is
+    # rendered per engine process, so effective settings stay unchanged.
+    assert "extra_args" in result.roles[0].effective_settings
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 2.49
+    assert outcome.draft_count == 3
+
+    render_input = _render_input(
+        settings=result.roles[0].effective_settings,
+        synthetic_acceptance={"curve": _CURVE},
+    )
+    env = render_serve(render_input).processes[0].root.command.env
+    assert env["SGLANG_SIMULATE_ACC_LEN"] == "2.49"
+    assert env["SGLANG_SIMULATE_ACC_METHOD"] == "match-expected"
+    assert env["SGLANG_SIMULATE_ACC_TOKEN_MODE"] == "real-draft-token"
+
+
+def test_render_omits_the_simulate_acc_environment_without_a_declared_overlay() -> None:
+    env = render_serve(_render_input()).processes[0].root.command.env
+    assert not any(key.startswith("SGLANG_SIMULATE_ACC_") for key in env)
+
+
+def test_plan_overlays_the_explicit_form_without_a_draft_count() -> None:
+    result = plan_serve(
+        _plan_input(
+            settings={"extra_args": _SPECULATIVE_EXTRA_ARGS},
+            synthetic_acceptance={"explicit": {"acceptance_length": 2.49}},
+        )
+    )
+
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 2.49
+    assert outcome.draft_count is None
+
+    render_input = _render_input(
+        settings=result.roles[0].effective_settings,
+        synthetic_acceptance={"explicit": {"acceptance_length": 2.49}},
+    )
+    env = render_serve(render_input).processes[0].root.command.env
+    assert env["SGLANG_SIMULATE_ACC_LEN"] == "2.49"
+
+
+def test_plan_without_speculative_flags_cannot_overlay_synthetic_acceptance() -> None:
+    with pytest.raises(AdapterOperationError, match="--speculative-\\*"):
+        plan_serve(_plan_input(synthetic_acceptance={"explicit": {"acceptance_length": 2.49}}))
+
+
+def test_plan_rejects_a_curve_lookup_without_a_determinable_draft_count() -> None:
+    with pytest.raises(AdapterOperationError, match="--speculative-num-steps"):
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(["--speculative-algorithm", "EAGLE"])
+                },
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_plan_rejects_a_curve_without_the_configured_draft_count_entry() -> None:
+    with pytest.raises(AdapterOperationError, match="draft count 2"):
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(
+                        ["--speculative-algorithm", "EAGLE", "--speculative-num-steps", "2"]
+                    )
+                },
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_plan_rejects_a_malformed_num_steps_value() -> None:
+    with pytest.raises(AdapterOperationError, match="--speculative-num-steps='three'"):
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(
+                        ["--speculative-algorithm", "EAGLE", "--speculative-num-steps", "three"]
+                    )
+                },
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_plan_rejects_extra_env_restating_the_overlay_environment() -> None:
+    with pytest.raises(AdapterOperationError, match="SGLANG_SIMULATE_ACC_LEN"):
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": _SPECULATIVE_EXTRA_ARGS,
+                    "extra_env": SettingValue.model_validate({"SGLANG_SIMULATE_ACC_LEN": "2.49"}),
+                },
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_plan_leaves_extra_env_free_without_a_declared_overlay() -> None:
+    result = plan_serve(
+        _plan_input(
+            settings={
+                "extra_env": SettingValue.model_validate({"SGLANG_SIMULATE_ACC_LEN": "2.49"}),
+            }
+        )
+    )
+
+    assert result.roles[0].id == "serve"
+
+
+def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
+    # Prefill resolves draft count 3 -> 2.49, decode 4 -> 3.1: the plan
+    # response carries one effective acceptance length, so per-role
+    # disagreement fails planning with a typed error.
+    parallelism = Parallelism(outer=ParallelismOuter(tensor_parallel_size=2))
+    roles = [
+        ServeRoleInput(
+            id=role_id,
+            kind=kind,
+            replica_count=1,
+            parallelism=parallelism,
+            settings={
+                "extra_args": SettingValue.model_validate(
+                    [
+                        "--speculative-algorithm",
+                        "EAGLE",
+                        "--speculative-num-steps",
+                        str(steps),
+                    ]
+                )
+            },
+        )
+        for role_id, kind, steps in [
+            ("prefill", ServeRoleKind.prefill, 3),
+            ("decode", ServeRoleKind.decode, 4),
+        ]
+    ]
+
+    with pytest.raises(AdapterOperationError, match="different synthetic acceptance outcomes"):
+        plan_serve(
+            _plan_input(
+                topology=ServeTopology.prefill_decode,
+                gateway_backend="builtin",
+                pd_router_backend="builtin",
+                kv_transfer=KvTransferMechanism.mooncake,
+                roles=roles,
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )

@@ -64,7 +64,7 @@ def request(
     effective_prompt = resolved_prompt_input(prompt)
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "8",
+            "protocol_version": "9",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",

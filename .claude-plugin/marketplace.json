@@ -8,7 +8,7 @@
     {
       "name": "inferlab",
       "description": "Agent Skill for operating the InferLab CLI: serve lifecycles, closed-loop recipes, benches, runtime images, and the scratchpad journal.",
-      "version": "0.13.1",
+      "version": "0.13.2",
       "source": "./plugins/inferlab"
     }
   ]

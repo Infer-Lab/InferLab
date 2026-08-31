@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-check}"
-adapter_schema="${root}/protocol/schema/adapter-protocol-v8.schema.json"
+adapter_schema="${root}/protocol/schema/adapter-protocol-v9.schema.json"
 measurement_schema="${root}/protocol/schema/measurement-protocol-v1.schema.json"
 adapter_models="${root}/python/inferlab-adapter-sdk/src/inferlab_adapter_sdk/_generated.py"
 measurement_models="${root}/python/inferlab-measurement-sdk/src/inferlab_measurement_sdk/_generated.py"
@@ -13,7 +13,7 @@ trap 'rm -rf "${temporary}"' EXIT
 mkdir -p "${temporary}/schema"
 cargo run --quiet --locked --manifest-path "${root}/Cargo.toml" \
   -p inferlab-protocol --example generate_schema -- \
-  "${temporary}/schema/adapter-protocol-v8.schema.json" \
+  "${temporary}/schema/adapter-protocol-v9.schema.json" \
   "${temporary}/schema/measurement-protocol-v1.schema.json"
 
 generate_models() {
@@ -43,7 +43,7 @@ generate_models() {
 }
 
 generate_models \
-  "${temporary}/schema/adapter-protocol-v8.schema.json" \
+  "${temporary}/schema/adapter-protocol-v9.schema.json" \
   "${temporary}/adapter_generated.py" \
   "# Rust wire source: crates/inferlab-protocol/src/wire.rs"
 generate_models \
@@ -58,13 +58,13 @@ case "${mode}" in
       "$(dirname "${measurement_schema}")" \
       "$(dirname "${adapter_models}")" \
       "$(dirname "${measurement_models}")"
-    cp "${temporary}/schema/adapter-protocol-v8.schema.json" "${adapter_schema}"
+    cp "${temporary}/schema/adapter-protocol-v9.schema.json" "${adapter_schema}"
     cp "${temporary}/schema/measurement-protocol-v1.schema.json" "${measurement_schema}"
     cp "${temporary}/adapter_generated.py" "${adapter_models}"
     cp "${temporary}/measurement_generated.py" "${measurement_models}"
     ;;
   check)
-    cmp "${temporary}/schema/adapter-protocol-v8.schema.json" "${adapter_schema}"
+    cmp "${temporary}/schema/adapter-protocol-v9.schema.json" "${adapter_schema}"
     cmp "${temporary}/schema/measurement-protocol-v1.schema.json" "${measurement_schema}"
     cmp "${temporary}/adapter_generated.py" "${adapter_models}"
     cmp "${temporary}/measurement_generated.py" "${measurement_models}"

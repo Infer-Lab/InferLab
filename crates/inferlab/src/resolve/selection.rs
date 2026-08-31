@@ -1,3 +1,4 @@
+use super::synthetic_acceptance::ResolvedSyntheticAcceptance;
 use super::{ExecutionTarget, ResolveRequest};
 use crate::InferlabError;
 use crate::execution::{
@@ -101,6 +102,11 @@ pub(super) struct EffectiveServerInput {
     /// server, or `None` when profiling is off
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     pub(super) profiling: Option<CaptureMechanism>,
+    /// The resolved synthetic acceptance request material: the composed
+    /// declaration plus, for the curve form, the digest-verified curve text
+    /// and effective thinking mode ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]);
+    /// `None` when the composed server declaration carries none.
+    pub(super) synthetic_acceptance: Option<ResolvedSyntheticAcceptance>,
     pub(super) capture_arm_deadline_seconds: u64,
     pub(super) capture_control_deadline_seconds: u64,
     pub(super) capture_finalization_deadline_seconds: u64,
@@ -530,6 +536,7 @@ pub(super) fn resolve_effective_server_input(
     selection: &WorkflowSelection<'_>,
     request: &ResolveRequest<'_>,
     overrides: &[InvocationOverride],
+    workspace_root: &std::path::Path,
 ) -> Result<EffectiveServerInput, InferlabError> {
     let server = selection.server;
     let case = selection.case;
@@ -621,6 +628,17 @@ pub(super) fn resolve_effective_server_input(
         });
     }
     let effective_server = compose_server_definition(server, case, &override_patches)?;
+    let synthetic_acceptance = effective_server
+        .synthetic_acceptance
+        .as_ref()
+        .map(|declared| {
+            super::synthetic_acceptance::resolve_synthetic_acceptance(
+                workspace_root,
+                &selection.server_id,
+                declared,
+            )
+        })
+        .transpose()?;
     let readiness_timeout_seconds = effective_server.readiness_timeout_seconds;
     let readiness_attempt_timeout_seconds = effective_server
         .readiness_attempt_timeout_seconds
@@ -721,6 +739,7 @@ pub(super) fn resolve_effective_server_input(
         pd_router_backend,
         kv_transfer,
         profiling,
+        synthetic_acceptance,
         capture_arm_deadline_seconds,
         capture_control_deadline_seconds,
         capture_finalization_deadline_seconds,
@@ -733,7 +752,7 @@ pub(super) fn resolve_effective_server_input(
 
 /// The effective capture mechanism under [[RFC-0003:C-RESOLUTION]]: role
 /// declarations replace the server's scalar, every role must resolve to the
-/// same mechanism because protocol version 8 carries one effective mechanism
+/// same mechanism because protocol version 9 carries one effective mechanism
 /// per plan request, and an engine-trace target must not declare nsys escape
 /// inputs ([[RFC-0004:C-WORKLOAD-PROFILING]]).
 fn resolve_capture_mechanism(
@@ -759,7 +778,7 @@ fn resolve_capture_mechanism(
     }
     if mechanisms.len() > 1 {
         return Err(InferlabError::InvalidConfig {
-            message: "capture mechanism declarations differ across roles; protocol version 8 \
+            message: "capture mechanism declarations differ across roles; protocol version 9 \
                       carries one effective capture mechanism per server"
                 .to_owned(),
         });
@@ -780,6 +799,15 @@ fn compose_server_definition(
         let patch = toml::Value::try_from(case).map_err(|error| InferlabError::InvalidConfig {
             message: format!("failed to prepare the selected server case: {error}"),
         })?;
+        // A case-level synthetic_acceptance declaration replaces the
+        // server-level declaration wholesale
+        // ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]), unlike the generic
+        // deep table merge.
+        if patch.get("synthetic_acceptance").is_some()
+            && let toml::Value::Table(table) = &mut definition
+        {
+            table.remove("synthetic_acceptance");
+        }
         apply_toml_patch(&mut definition, patch).map_err(|message| {
             InferlabError::InvalidConfig {
                 message: format!("invalid selected server case composition: {message}"),

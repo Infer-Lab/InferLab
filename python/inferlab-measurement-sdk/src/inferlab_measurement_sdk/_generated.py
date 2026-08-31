@@ -53,7 +53,6 @@ class BenchAgenticRunEvidence(BaseModel):
     distinct_transport_requests: Annotated[int, Field(ge=0)]
     native_run_id: str
     ordinary_failure_count: Annotated[int, Field(ge=0)]
-    profiling_began_after_warmup_and_drain: bool
     profiling_records: Annotated[int, Field(ge=0)]
     raw_records_artifact: Annotated[
         str | None,
@@ -81,7 +80,12 @@ class BenchAgenticRunEvidence(BaseModel):
             ge=0,
         ),
     ] = None
-    warmup_succeeded: bool
+    warmup_succeeded: Annotated[
+        bool,
+        Field(
+            description='Whether the native run crossed the warmup phase and entered profiling\n(`profiling_records > 0`); snapshot-warmup failure aborts natively\nbefore profiling and therefore surfaces as an invalid submission.'
+        ),
+    ]
 
 
 class BenchArtifactLevelInput(StrEnum):
@@ -708,13 +712,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['8']]):
+class ProtocolVersion(RootModel[Literal['9']]):
     root: Annotated[
-        Literal['8'],
+        Literal['9'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `8` (serialized as the\nstring `"8"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `9` (serialized as the\nstring `"9"`); a mismatch is rejected before lowering.'
         ),
-    ] = '8'
+    ] = '9'
 
 
 class RawArtifact(BaseModel):
@@ -759,7 +763,7 @@ class BenchAgenticCatalogInput(BaseModel):
     cache_bust: str
     cache_path: str | None = None
     cache_state: BenchDatasetCacheState | None = None
-    cache_warmup_seconds: Annotated[int, Field(ge=0)]
+    cache_warmup_requests_per_lane: Annotated[int, Field(ge=0)]
     concurrency_semantics: str
     dataset_configuration_timeout_seconds: Annotated[int, Field(ge=0)]
     dataset_entries: Annotated[int, Field(ge=0)]
@@ -786,6 +790,7 @@ class BenchAgenticCatalogInput(BaseModel):
     source_format: str
     streaming: bool
     trace_count: Annotated[int, Field(ge=0)]
+    trace_idle_gap_cap_seconds: float
     trajectory_start_max: float
     trajectory_start_min: float
     unavailable_dimensions: list[str]

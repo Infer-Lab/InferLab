@@ -32,7 +32,6 @@
       "warmup_error_records": 0,
       "warmup_source_coordinate_records": 1,
       "warmup_succeeded": true,
-      "profiling_began_after_warmup_and_drain": true,
       "profiling_records": 1,
       "source_coordinate_records": 1,
       "distinct_source_traces": 1,

@@ -1,0 +1,75 @@
+{
+  "kind": "agentic",
+  "command": {
+    "argv": [
+      "/operator/.local/share/inferlab/toolchains/0.13.2/linux-x86_64/.pixi/envs/bench/bin/python",
+      "-m",
+      "inferlab_bench_runner.bench_client"
+    ],
+    "env": {
+      "CUDA_VISIBLE_DEVICES": "0,1",
+      "HOME": "/home/operator",
+      "LANG": "C.UTF-8",
+      "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "PWD": "/workspace",
+      "SHELL": "/bin/bash",
+      "USER": "operator"
+    },
+    "cwd": "/workspace/.inferlab"
+  },
+  "dataset": "semianalysis_agentx_062126_256k",
+  "profile": "inferencex",
+  "catalog": {
+    "repository": "semianalysisai/cc-traces-weka-062126-256k",
+    "revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+    "filename": "traces.jsonl",
+    "sha256": "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef",
+    "cache_path": null,
+    "cache_state": null,
+    "trace_count": 393,
+    "approximate_bytes": 569000000,
+    "license": "apache-2.0",
+    "source_format": "weka_kv_cache_tester_agentic_trace_v7_jsonl",
+    "aiperf_loader": "semianalysis_cc_traces_weka_062126_256k",
+    "materialization_identity": "aiperf.dataset.loader.semianalysis_cc_traces_weka:SemiAnalysisCCTracesWekaLoader",
+    "scenario": "inferencex-agentx-mvp",
+    "concurrency_semantics": "root_session_tree_lanes",
+    "replay_semantics": "source_response_inclusive",
+    "cache_bust": "first_turn_prefix",
+    "trajectory_start_min": 0.25,
+    "trajectory_start_max": 0.75,
+    "global_idle_gap_cap_seconds": 10.0,
+    "trace_idle_gap_cap_seconds": 300.0,
+    "cache_warmup_requests_per_lane": 10,
+    "warmup_grace_seconds": 1800,
+    "dataset_configuration_timeout_seconds": 1800,
+    "service_profile_configuration_timeout_seconds": 1800,
+    "default_duration_seconds": 1800,
+    "minimum_duration_seconds": 900,
+    "failure_threshold": 0.1,
+    "dataset_entries": 393,
+    "streaming": true,
+    "ignore_eos": true,
+    "use_server_token_count": true,
+    "gpu_telemetry": false,
+    "server_metric_slice_seconds": 1,
+    "required_artifacts": [
+      "aggregate",
+      "records",
+      "raw_records"
+    ],
+    "unavailable_dimensions": [
+      "exported_per_lane_time_origin",
+      "recycle_identity",
+      "individual_global_idle_shift",
+      "warmup_handoff_state",
+      "residual_delay"
+    ],
+    "inferencex_repository": "SemiAnalysisAI/InferenceX",
+    "inferencex_revision": "900b3d8199350a51d731409b690cb79b804b31bf",
+    "inferencex_reference": "benchmarks/benchmark_lib.sh",
+    "aiperf_revision": "0d2aa0572ac685943d38c580675c4a61023581d3",
+    "aiperf_version": "0.12.0"
+  },
+  "acquisition_runtime_identity": "0.13.2:fad2dc9f64624a0840b8b48478f8a28a1ecdbd9c26255536eab7cb093b6160df:0.12.0:52b503dbd0e94a47c35ae59d958aab7c08442d76e76e12b07a5ed606982f8616"
+}

@@ -5,6 +5,7 @@ from typing import cast
 import pytest
 import yaml  # type: ignore[import-untyped]
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
     KvTransferMechanism,
@@ -761,3 +762,236 @@ def test_render_rejects_multi_node() -> None:
     second = ServeProcessAllocation.model_validate(second_payload)
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[allocation, second]))
+
+
+# Thinking-mode matrix golden curve: minimaxm3 thinking_on draft 3 -> 2.78.
+_CURVE = {
+    "model_key": "minimaxm3",
+    "thinking_mode": "thinking_on",
+    "text": "minimaxm3:\n  thinking_on:\n    3: 2.78\n",
+    "sha256": "f" * 64,
+}
+
+_SPECULATIVE_PATCH = SettingValue.model_validate(
+    {"speculative_config": {"max_draft_len": 3, "speculative_model": "/models/draft"}}
+)
+
+
+def test_plan_and_render_overlay_the_curve_form_end_to_end() -> None:
+    result = plan_serve(
+        _plan_input(
+            settings={"extra_llm_api_options_patch": _SPECULATIVE_PATCH},
+            synthetic_acceptance={"curve": _CURVE},
+        )
+    )
+
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 2.78
+    assert outcome.draft_count == 3
+
+    # The forced count excludes the bonus verification token (off-by-one).
+    render_input = _render_input(
+        settings=result.roles[0].effective_settings,
+        synthetic_acceptance={"curve": _CURVE},
+    )
+    env = render_serve(render_input).processes[0].root.command.env
+    assert env["TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS"] == "1.78"
+
+
+def test_plan_overlays_synthetic_acceptance_from_the_source_yaml(tmp_path: Path) -> None:
+    operator_config = tmp_path / "operator.yaml"
+    operator_config.write_text(
+        """\
+speculative_config:
+  max_draft_len: 3
+  speculative_model: /models/draft
+""",
+        encoding="utf-8",
+    )
+    settings = {"extra_llm_api_options": SettingValue(root=str(operator_config))}
+    explicit = {"explicit": {"acceptance_length": 2.0}}
+
+    result = plan_serve(_plan_input(settings=settings, synthetic_acceptance=explicit))
+
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 2.0
+    assert outcome.draft_count is None
+    # The overlay re-resolves at render, so planning declares the source YAML
+    # as a render input and rendering consumes the supplied frozen text.
+    declaration = result.roles[0].render_inputs[0]
+    assert declaration.source_path == str(operator_config)
+    text = operator_config.read_text(encoding="utf-8")
+    render_input = _render_input(
+        settings=result.roles[0].effective_settings,
+        synthetic_acceptance=explicit,
+        render_inputs=[
+            SuppliedRenderInput(
+                source_path=declaration.source_path,
+                text=text,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+            )
+        ],
+    )
+    env = render_serve(render_input).processes[0].root.command.env
+    assert env["TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS"] == "1"
+
+
+def test_render_resolves_the_curve_from_the_supplied_render_input_text(tmp_path: Path) -> None:
+    operator_config = tmp_path / "operator.yaml"
+    operator_config.write_text(
+        "speculative_config:\n  max_draft_len: 3\n  speculative_model: /models/draft\n",
+        encoding="utf-8",
+    )
+    # The control plane froze a later revision of the same file: draft count 4.
+    supplied_text = "speculative_config:\n  max_draft_len: 4\n  speculative_model: /models/draft\n"
+    settings = {
+        "extra_llm_api_options": SettingValue(root=str(operator_config)),
+        "extra_llm_api_options_patch": SettingValue.model_validate({"stream_interval": 40}),
+    }
+    curve = {
+        "model_key": "minimaxm3",
+        "thinking_mode": "thinking_on",
+        "text": "minimaxm3:\n  thinking_on:\n    3: 2.5\n    4: 2.9\n",
+        "sha256": "f" * 64,
+    }
+
+    render_input = _render_input(
+        settings=settings,
+        synthetic_acceptance={"curve": curve},
+        render_inputs=[
+            SuppliedRenderInput(
+                source_path=str(operator_config),
+                text=supplied_text,
+                sha256=hashlib.sha256(supplied_text.encode()).hexdigest(),
+            )
+        ],
+    )
+    env = render_serve(render_input).processes[0].root.command.env
+
+    # The supplied frozen text, not the on-disk file, determined draft count 4
+    # and hence acceptance length 2.9 (forced count 1.9 after the off-by-one).
+    assert env["TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS"] == "1.9"
+
+
+def test_render_requires_the_supplied_render_input_for_the_overlay(tmp_path: Path) -> None:
+    operator_config = tmp_path / "operator.yaml"
+    operator_config.write_text(
+        "speculative_config:\n  max_draft_len: 3\n  speculative_model: /models/draft\n",
+        encoding="utf-8",
+    )
+    settings = {"extra_llm_api_options": SettingValue(root=str(operator_config))}
+
+    render_input = _render_input(
+        settings=settings,
+        synthetic_acceptance={"explicit": {"acceptance_length": 2.0}},
+    )
+
+    with pytest.raises(AdapterOperationError, match="was not supplied") as captured:
+        render_serve(render_input)
+    assert captured.value.code == AdapterErrorCode.invalid_request
+
+
+def test_plan_without_a_speculative_config_cannot_overlay_synthetic_acceptance() -> None:
+    with pytest.raises(AdapterOperationError, match="speculative_config"):
+        plan_serve(_plan_input(synthetic_acceptance={"explicit": {"acceptance_length": 2.78}}))
+
+
+def test_plan_rejects_a_curve_lookup_without_a_determinable_draft_count() -> None:
+    settings = {
+        "extra_llm_api_options_patch": SettingValue.model_validate(
+            {"speculative_config": {"speculative_model": "/models/draft"}}
+        ),
+    }
+    with pytest.raises(AdapterOperationError, match="max_draft_len"):
+        plan_serve(
+            _plan_input(
+                settings=settings,
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_plan_rejects_a_curve_without_the_configured_draft_count_entry() -> None:
+    # The curve holds only draft count 3; the operator configured 4.
+    settings = {
+        "extra_llm_api_options_patch": SettingValue.model_validate(
+            {"speculative_config": {"max_draft_len": 4, "speculative_model": "/models/draft"}}
+        ),
+    }
+    with pytest.raises(AdapterOperationError, match="draft count 4"):
+        plan_serve(
+            _plan_input(
+                settings=settings,
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_plan_rejects_extra_env_restating_the_forced_acceptance_variable() -> None:
+    settings = {
+        "extra_llm_api_options_patch": _SPECULATIVE_PATCH,
+        "extra_env": SettingValue.model_validate(
+            {"TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS": "1.78"}
+        ),
+    }
+    with pytest.raises(AdapterOperationError, match="TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS"):
+        plan_serve(
+            _plan_input(
+                settings=settings,
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+
+
+def test_render_omits_the_forced_acceptance_variable_without_a_declared_overlay() -> None:
+    env = render_serve(_render_input()).processes[0].root.command.env
+    assert "TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS" not in env
+
+
+def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
+    # Prefill resolves draft count 3 -> 2.78, decode 4 -> 3.2: the plan
+    # response carries one effective acceptance length, so per-role
+    # disagreement fails planning with a typed error.
+    curve = {
+        "model_key": "minimaxm3",
+        "thinking_mode": "thinking_on",
+        "text": "minimaxm3:\n  thinking_on:\n    3: 2.78\n    4: 3.2\n",
+        "sha256": "f" * 64,
+    }
+    parallelism = Parallelism(outer=ParallelismOuter(tensor_parallel_size=2))
+    roles = [
+        ServeRoleInput(
+            id=role_id,
+            kind=kind,
+            replica_count=1,
+            parallelism=parallelism,
+            settings={
+                "extra_llm_api_options_patch": SettingValue.model_validate(
+                    {
+                        "speculative_config": {
+                            "max_draft_len": draft,
+                            "speculative_model": "/models/draft",
+                        }
+                    }
+                )
+            },
+        )
+        for role_id, kind, draft in [
+            ("prefill", ServeRoleKind.prefill, 3),
+            ("decode", ServeRoleKind.decode, 4),
+        ]
+    ]
+
+    with pytest.raises(AdapterOperationError, match="different synthetic acceptance outcomes"):
+        plan_serve(
+            _plan_input(
+                topology=ServeTopology.prefill_decode,
+                gateway_backend="builtin",
+                pd_router_backend="builtin",
+                kv_transfer=KvTransferMechanism.nixl,
+                roles=roles,
+                synthetic_acceptance={"curve": curve},
+            )
+        )

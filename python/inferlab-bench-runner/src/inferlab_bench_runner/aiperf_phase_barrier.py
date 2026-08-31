@@ -76,7 +76,9 @@ _warmup_checkpoint: WarmupCheckpoint | None = None
 
 
 def warmup_completion_error(
-    expectation: WarmupExpectation, counts: Mapping[str, int | None]
+    expectation: WarmupExpectation,
+    counts: Mapping[str, int | None],
+    tolerate_request_errors: bool = False,
 ) -> str | None:
     request_values = (
         counts.get("final_requests_sent"),
@@ -89,7 +91,7 @@ def warmup_completion_error(
     sent, completed, cancelled, errors = request_values
     if cancelled != 0:
         return f"AIPerf warmup cancelled {cancelled} requests"
-    if errors != 0:
+    if errors != 0 and not tolerate_request_errors:
         return f"AIPerf warmup reported {errors} request errors"
     if sent != completed:
         return f"AIPerf warmup sent {sent} requests but completed {completed}"
@@ -248,8 +250,14 @@ class AiperfAgenticProfileBarrierStrategy:
         _warmup_checkpoint = None
         if checkpoint is None:
             raise RuntimeError("AIPerf AgentX profiling reached the barrier without warmup")
+        # AgentX cache-pressure warmup request failures are recorded evidence,
+        # not a barrier failure input (ADR-0044); snapshot-warmup failure
+        # aborts natively before profiling setup, so only the drain invariants
+        # that capture safety depends on are enforced here.
         error = warmup_completion_error(
-            checkpoint.expectation, _counter_values(checkpoint.progress.counter)
+            checkpoint.expectation,
+            _counter_values(checkpoint.progress.counter),
+            tolerate_request_errors=True,
         )
         if error is not None:
             raise RuntimeError(error)

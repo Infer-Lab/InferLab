@@ -86,7 +86,7 @@ def profiling_config(request: BenchClientRequest) -> JsonObject:
             "trajectoryStartMinRatio": policy.trajectory_start_min,
             "trajectoryStartMaxRatio": policy.trajectory_start_max,
             "systemIdleGapCapSeconds": policy.global_idle_gap_cap_seconds,
-            "agenticCacheWarmupDuration": policy.cache_warmup_seconds,
+            "warmupRequestsPerLane": policy.cache_warmup_requests_per_lane,
             "agenticWarmupGracePeriod": policy.warmup_grace_seconds,
         }
     if request.case.session_count is not None:
@@ -271,6 +271,7 @@ def resolve_aiperf_population(request: BenchClientRequest) -> AiperfRequestPopul
                 "dataset": agentic_source.catalog.aiperf_loader,
                 "entries": agentic_source.catalog.dataset_entries,
                 "sampling": "sequential",
+                "traceIdleGapCapSeconds": agentic_source.catalog.trace_idle_gap_cap_seconds,
             },
             tpot_applicable=False,
         )

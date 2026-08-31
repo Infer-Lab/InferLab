@@ -43,6 +43,10 @@ const INVALID_RESPONSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/invalid/response-wrong-shape.json"
 ));
+const INVALID_PROTOCOL_V8_REQUEST: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/invalid/request-protocol-version-8.json"
+));
 const VALID_HTTP_TARGET_REGISTRY_READINESS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/http-target-registry-readiness.json"
@@ -105,7 +109,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v8.schema.json"
+    "/../../protocol/schema/adapter-protocol-v9.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -126,6 +130,14 @@ fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
     }"#;
 
     assert!(serde_json::from_str::<AdapterRequest>(request).is_err());
+}
+
+#[test]
+fn protocol_v8_requests_are_rejected_instead_of_partially_interpreted() {
+    // The fixture is a well-formed protocol-v8 plan request carrying the
+    // synthetic acceptance member; protocol v9 MUST reject it outright rather
+    // than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
+    assert!(serde_json::from_str::<AdapterRequest>(INVALID_PROTOCOL_V8_REQUEST).is_err());
 }
 
 #[test]
@@ -287,7 +299,7 @@ fn failed_agentic_source_fixture_preserves_partial_evidence() -> Result<(), Box<
 }
 
 #[test]
-fn protocol_v8_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
+fn protocol_v9_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     let capture_target = response
         .pointer_mut("/result/output/replicas/0/capture_target")
@@ -300,14 +312,14 @@ fn protocol_v8_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box
     });
 
     let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
-        return Err("protocol v8 accepted the pre-binding capture-control shape".into());
+        return Err("protocol v9 accepted the pre-binding capture-control shape".into());
     };
     assert!(error.to_string().contains("unknown field `control`"));
     Ok(())
 }
 
 #[test]
-fn protocol_v8_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
+fn protocol_v9_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["replicas"][0]["capture_target"]["window_control"]["start"]["body"] =
         serde_json::json!({"activities": ["CUDA_PROFILER"]});
@@ -332,7 +344,7 @@ fn protocol_v8_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn protocol_v8_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>>
+fn protocol_v9_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>>
 {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["roles"][0]["public_endpoint"]["prefix_cache_reset"] = serde_json::json!({
@@ -342,7 +354,7 @@ fn protocol_v8_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Resul
     });
 
     let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
-        return Err("protocol v8 accepted a capture body on a prefix-cache action".into());
+        return Err("protocol v9 accepted a capture body on a prefix-cache action".into());
     };
     assert!(error.to_string().contains("unknown field `body`"));
     Ok(())
@@ -371,11 +383,19 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let launch_file_response: AdapterResponse = serde_json::from_str(VALID_LAUNCH_FILE_RESPONSE)?;
     let error_response: AdapterResponse = serde_json::from_str(VALID_ERROR_RESPONSE)?;
 
-    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V8);
-    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V8);
-    assert_eq!(render_request.protocol_version(), ProtocolVersion::V8);
-    assert_eq!(render_response.protocol_version(), ProtocolVersion::V8);
-    assert_eq!(error_response.protocol_version(), ProtocolVersion::V8);
+    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V9);
+    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V9);
+    assert_eq!(render_request.protocol_version(), ProtocolVersion::V9);
+    assert_eq!(render_response.protocol_version(), ProtocolVersion::V9);
+    assert_eq!(error_response.protocol_version(), ProtocolVersion::V9);
+
+    // The projected string form must stay identical to the wire spelling.
+    assert_eq!(
+        ProtocolVersion::CURRENT.as_str(),
+        serde_json::to_value(ProtocolVersion::V9)?
+            .as_str()
+            .ok_or("protocol version must serialize as a string")?
+    );
 
     let AdapterRequest::PlanServe {
         input: plan_input, ..
@@ -387,6 +407,19 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
         plan_input.profiling,
         Some(inferlab_protocol::CaptureMechanism::ManagedCollection)
     );
+    let curve_text = "dsv4:\n  thinking_on:\n    4: 3.5\n";
+    assert_eq!(
+        plan_input.synthetic_acceptance,
+        Some(inferlab_protocol::SyntheticAcceptanceInput::Curve(
+            inferlab_protocol::SyntheticAcceptanceCurveInput {
+                model_key: "dsv4".to_owned(),
+                thinking_mode: Some("thinking_on".to_owned()),
+                text: curve_text.to_owned(),
+                sha256: "ffef53d9ea69fae0072145c80b35ed9ba7f852f328dda9786bc2c07fca8ba8e7"
+                    .to_owned(),
+            }
+        ))
+    );
 
     let AdapterResponse::Ok { result, .. } = &plan_response else {
         return Err("plan fixture did not contain a successful response".into());
@@ -394,6 +427,15 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let AdapterResult::PlanServe { output } = result.as_ref() else {
         return Err("plan fixture did not contain plan output".into());
     };
+    // The curve form returns the effective acceptance length and the draft
+    // count the integration determined from the operator configuration.
+    assert_eq!(
+        output.synthetic_acceptance,
+        Some(inferlab_protocol::SyntheticAcceptanceOutcome {
+            acceptance_length: 3.5,
+            draft_count: Some(4),
+        })
+    );
     let gateway = output
         .gateway
         .as_ref()
@@ -425,6 +467,18 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         input.profiling,
         Some(inferlab_protocol::CaptureMechanism::EngineTrace)
+    );
+    // The explicit form carries no curve lookup material.
+    assert_eq!(
+        input.synthetic_acceptance,
+        Some(inferlab_protocol::SyntheticAcceptanceInput::Explicit {
+            acceptance_length: 2.25,
+        })
+    );
+    let input_json = serde_json::to_value(&input.synthetic_acceptance)?;
+    assert_eq!(
+        input_json,
+        serde_json::json!({"explicit": {"acceptance_length": 2.25}})
     );
     let render_json = serde_json::to_value(input)?;
     let allocation = render_json["allocations"][0]
@@ -587,7 +641,7 @@ fn eval_client_fixture_preserves_workspace_yaml_task_source() -> Result<(), Box<
         return Err("fixture did not contain a workspace YAML task source".into());
     };
 
-    assert_eq!(request.protocol_version, ProtocolVersion::V8);
+    assert_eq!(request.protocol_version, ProtocolVersion::V9);
     assert_eq!(request.endpoint.completions_path, "/v1/completions");
     assert_eq!(
         request.endpoint.chat_completions_path,
@@ -677,7 +731,7 @@ fn data_asset_preparation_fixtures_preserve_opaque_readiness() -> Result<(), Box
     let request = serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
         VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL,
     )?;
-    assert_eq!(request.protocol_version, ProtocolVersion::V8);
+    assert_eq!(request.protocol_version, ProtocolVersion::V9);
     let result = serde_json::from_str::<MeasurementDataAssetPreparationResult>(
         VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE,
     )?;

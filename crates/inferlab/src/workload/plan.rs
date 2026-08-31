@@ -349,6 +349,10 @@ pub(crate) struct MeasurementResolveContext<'a> {
     /// frontend backend declares one ([[RFC-0004:C-BENCH-CACHE-STATE]]).
     pub prefix_cache_conditioning: Option<WorkloadHttpAction>,
     pub conditioning_serving: ConditioningServingShape,
+    /// Whether the bound server's resolved configuration carries synthetic
+    /// acceptance ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]); every Eval kind
+    /// fails measurement planning against it while Benches stay plannable.
+    pub synthetic_acceptance: bool,
     pub capture_ids: &'a [String],
     pub command_env: &'a BTreeMap<String, String>,
     pub command_cwd: &'a Path,

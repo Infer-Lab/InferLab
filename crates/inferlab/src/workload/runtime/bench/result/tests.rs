@@ -47,7 +47,8 @@ fn agentic_source() -> ResolvedBenchAgenticSource {
             trajectory_start_min: 0.25,
             trajectory_start_max: 0.75,
             global_idle_gap_cap_seconds: 10.0,
-            cache_warmup_seconds: 600,
+            trace_idle_gap_cap_seconds: 300.0,
+            cache_warmup_requests_per_lane: 10,
             warmup_grace_seconds: 1800,
             dataset_configuration_timeout_seconds: 1800,
             service_profile_configuration_timeout_seconds: 1800,
@@ -96,7 +97,6 @@ fn complete_agentic_evidence(source: &ResolvedBenchAgenticSource) -> BenchAgenti
             warmup_records: 3,
             warmup_error_records: 0,
             warmup_succeeded: true,
-            profiling_began_after_warmup_and_drain: true,
             profiling_records: 2,
             distinct_runtime_conversations: 1,
             distinct_transport_requests: 2,
@@ -166,6 +166,24 @@ fn agentic_bench_defers_failed_request_threshold_to_native_scenario()
     ];
     result.agentic_evidence = Some(Box::new(evidence));
 
+    assert_eq!(
+        bench_result_error(
+            &result,
+            BenchResultExpectations {
+                agentic_source: Some(&source),
+                ..expectations(0)
+            },
+        ),
+        None
+    );
+
+    // Cache-pressure warmup failures are recorded evidence, not a case-failure
+    // input: the native scenario outcome remains the acceptance authority.
+    if let Some(evidence) = result.agentic_evidence.as_mut()
+        && let Some(run) = evidence.run.as_mut()
+    {
+        run.warmup_error_records = 2;
+    }
     assert_eq!(
         bench_result_error(
             &result,

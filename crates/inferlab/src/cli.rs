@@ -22,7 +22,9 @@ mod help;
 #[derive(Debug, Parser)]
 #[command(
     name = "inferlab",
-    version,
+    // clap requires a 'static version string; this leaks a few bytes once per
+    // process so the protocol version stays projected from the wire enum.
+    version = &*Box::leak(version_with_protocol().into_boxed_str()),
     about = "Inference optimization control plane",
     long_about = help::ROOT,
     after_long_help = help::ROOT_EXAMPLES
@@ -34,6 +36,16 @@ pub struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+/// The `--version` output: the product version plus the adapter protocol
+/// version this control plane speaks ([[RFC-0006:C-INTEGRATIONS]]).
+fn version_with_protocol() -> String {
+    format!(
+        "{} (adapter protocol v{})",
+        env!("CARGO_PKG_VERSION"),
+        inferlab_protocol::ProtocolVersion::CURRENT.as_str()
+    )
 }
 
 #[derive(Debug, Subcommand)]

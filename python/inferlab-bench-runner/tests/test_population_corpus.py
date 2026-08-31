@@ -58,7 +58,7 @@ def corpus_request(
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "8",
+            "protocol_version": "9",
             "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

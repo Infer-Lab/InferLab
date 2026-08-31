@@ -166,7 +166,8 @@ fn bench_agentic_catalog_input(catalog: &BenchAgenticCatalog) -> BenchAgenticCat
         trajectory_start_min: catalog.trajectory_start_min,
         trajectory_start_max: catalog.trajectory_start_max,
         global_idle_gap_cap_seconds: catalog.global_idle_gap_cap_seconds,
-        cache_warmup_seconds: catalog.cache_warmup_seconds,
+        trace_idle_gap_cap_seconds: catalog.trace_idle_gap_cap_seconds,
+        cache_warmup_requests_per_lane: catalog.cache_warmup_requests_per_lane,
         warmup_grace_seconds: catalog.warmup_grace_seconds,
         dataset_configuration_timeout_seconds: catalog.dataset_configuration_timeout_seconds,
         service_profile_configuration_timeout_seconds: catalog

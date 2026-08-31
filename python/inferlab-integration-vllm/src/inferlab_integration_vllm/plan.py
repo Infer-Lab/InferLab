@@ -34,6 +34,7 @@ from inferlab_adapter_sdk import (
     ServeRoleLinkSideChannel,
     ServeRoleResult,
     ServeTopology,
+    SyntheticAcceptanceOutcome,
     TargetEndpointScheme,
     effective_settings,
     fused_pd_frontend_plans,
@@ -43,6 +44,7 @@ from inferlab_adapter_sdk import (
 )
 
 from .settings import _settings
+from .synthetic import apply_synthetic_acceptance
 
 
 def _identity() -> IntegrationIdentity:
@@ -185,13 +187,16 @@ def _plan_role(
     input: PlanServeInput,
     role: ServeRoleInput,
     role_ports: list[str],
-) -> tuple[ServeRoleResult, list[ServeReplicaRequirement]]:
+) -> tuple[ServeRoleResult, list[ServeReplicaRequirement], SyntheticAcceptanceOutcome | None]:
     if role.replica_count < 1:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
             f"role {role.id!r} replica count must be positive",
         )
     settings = _settings(role.settings)
+    outcome: SyntheticAcceptanceOutcome | None = None
+    if input.synthetic_acceptance is not None:
+        outcome = apply_synthetic_acceptance(settings, input.synthetic_acceptance, role.id)
     parallelism = _effective_parallelism(role.parallelism, role.kind)
     device_count = _device_count(parallelism, role.kind)
     replicas = []
@@ -233,6 +238,7 @@ def _plan_role(
             effective_parallelism=parallelism,
         ),
         replicas,
+        outcome,
     )
 
 
@@ -248,7 +254,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
             "vLLM single topology does not have a qualified Gateway backend",
         )
     role = require_role(input, ServeRoleKind.serve)
-    role_result, replicas = _plan_role(input, role, [])
+    role_result, replicas, outcome = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
     role_result.public_endpoint = EndpointRequirement(
         protocol=EndpointProtocol(),
@@ -270,6 +276,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         roles=[role_result],
         replicas=replicas,
         links=[],
+        synthetic_acceptance=outcome,
     )
 
 
@@ -300,8 +307,16 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     decode = require_role(input, ServeRoleKind.decode)
     prefill_ports = ["bootstrap" if transport == KvTransferMechanism.mooncake else "side_channel"]
     decode_ports = [] if transport == KvTransferMechanism.mooncake else ["side_channel"]
-    prefill_result, prefill_replicas = _plan_role(input, prefill, prefill_ports)
-    decode_result, decode_replicas = _plan_role(input, decode, decode_ports)
+    prefill_result, prefill_replicas, prefill_outcome = _plan_role(input, prefill, prefill_ports)
+    decode_result, decode_replicas, decode_outcome = _plan_role(input, decode, decode_ports)
+    if prefill_outcome != decode_outcome:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the prefill and decode roles resolve different synthetic acceptance "
+            f"outcomes ({prefill_outcome} vs {decode_outcome}); the plan response "
+            "carries one effective acceptance length, so both roles must determine "
+            "the same draft count",
+        )
     roles = [prefill_result, decode_result]
     replicas = [*prefill_replicas, *decode_replicas]
     links = [
@@ -409,6 +424,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         links=links,
         gateway=gateway,
         pd_router=pd_router,
+        synthetic_acceptance=prefill_outcome,
     )
 
 

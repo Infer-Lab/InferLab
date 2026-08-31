@@ -23,8 +23,14 @@ pub(super) struct DataAssetConsumer {
     pub definition_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+// The wire shape is internally tagged by `kind`, but deserialization cannot
+// use serde's derived internally-tagged enum representation: combined with
+// the variants' `#[serde(flatten)]` payload structs it misroutes the variant's
+// own fields (a recorded agentic source fails strict decode with
+// "unknown field `command`"). Serialize stays derived; Deserialize dispatches
+// on `kind` explicitly and hands the remaining members to the variant struct.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum DataAssetSource {
     Eval {
         #[serde(flatten)]
@@ -38,6 +44,39 @@ pub(super) enum DataAssetSource {
         #[serde(flatten)]
         source: Box<AgenticDataAssetSource>,
     },
+}
+
+impl<'de> Deserialize<'de> for DataAssetSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("data asset source must be an object"))?;
+        let kind = object
+            .remove("kind")
+            .and_then(|kind| kind.as_str().map(str::to_owned))
+            .ok_or_else(|| D::Error::missing_field("kind"))?;
+        match kind.as_str() {
+            "eval" => Ok(Self::Eval {
+                source: Box::new(serde_json::from_value(value).map_err(D::Error::custom)?),
+            }),
+            "release_catalog" => Ok(Self::ReleaseCatalog {
+                source: Box::new(serde_json::from_value(value).map_err(D::Error::custom)?),
+            }),
+            "agentic" => Ok(Self::Agentic {
+                source: Box::new(serde_json::from_value(value).map_err(D::Error::custom)?),
+            }),
+            other => Err(D::Error::unknown_variant(
+                other,
+                &["eval", "release_catalog", "agentic"],
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -610,6 +649,42 @@ mod tests {
             DataAssetReproducibility::NotEstablished
         ));
         assert_eq!(attempt.error.as_deref(), Some("resolution failed"));
+        Ok(())
+    }
+
+    // Regression: a serve record carrying an agentic data-asset source failed
+    // strict decode with "unknown field `command`" because the derived
+    // internally tagged enum misroutes the variant's members through the
+    // flattened payload struct. The fragment keeps the shape captured from a
+    // real recipe-driven AgentX serve record, with operator-local values
+    // replaced by placeholders.
+    #[test]
+    fn agentic_source_fragment_from_a_serve_record_decodes() -> Result<(), crate::InferlabError> {
+        let fragment = include_str!("tests/agentic-serve-record-source-fragment.json");
+        let source: DataAssetSource = serde_json::from_str(fragment).map_err(|error| {
+            crate::InferlabError::InvalidConfig {
+                message: format!("agentic source fragment must decode: {error}"),
+            }
+        })?;
+        let DataAssetSource::Agentic { source } = source else {
+            return Err(crate::InferlabError::InvalidConfig {
+                message: "expected the agentic variant".to_owned(),
+            });
+        };
+        assert_eq!(source.definition.dataset, "semianalysis_agentx_062126_256k");
+        assert!(!source.command.argv.is_empty());
+        // The wire shape is unchanged: the reserialized form is field-identical.
+        let reparsed: DataAssetSource = serde_json::from_str(
+            &serde_json::to_string(&DataAssetSource::Agentic { source }).map_err(|error| {
+                crate::InferlabError::InvalidConfig {
+                    message: format!("agentic source must serialize: {error}"),
+                }
+            })?,
+        )
+        .map_err(|error| crate::InferlabError::InvalidConfig {
+            message: format!("round-trip must decode: {error}"),
+        })?;
+        assert!(matches!(reparsed, DataAssetSource::Agentic { .. }));
         Ok(())
     }
 }

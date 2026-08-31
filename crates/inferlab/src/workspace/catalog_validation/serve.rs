@@ -1,12 +1,18 @@
 //! Serving topology, case, parallelism, and profiler-escape validation.
 
-use super::{invalid, require_id, require_nonempty, require_reference};
+use super::{
+    invalid, require_id, require_nonempty, require_reference, validate_expected_digest,
+    validate_workspace_relative_source_path,
+};
 use crate::InferlabError;
-use crate::workspace::definitions::{JsonValue, ProfilerEscapes, WorkspaceConfig};
+use crate::workspace::definitions::{
+    JsonValue, ProfilerEscapes, SyntheticAcceptanceDefinition, WorkspaceConfig,
+};
 use inferlab_protocol::{CaptureMechanism, Parallelism, ServeTopology};
 use std::collections::BTreeMap;
+use std::path::Path;
 
-pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
+pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), InferlabError> {
     for (id, server) in &config.servers {
         require_id("server", id)?;
         require_reference("stack", &server.stack, &config.stacks)?;
@@ -57,6 +63,11 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
             require_nonempty("server P/D Router backend", id, backend)?;
         }
         validate_parallelism("server", id, &server.parallelism)?;
+        validate_synthetic_acceptance(
+            root,
+            &format!("server {id:?}"),
+            &server.synthetic_acceptance,
+        )?;
         validate_profiler_escapes(&format!("server {id:?}"), &server.profiler)?;
         validate_extra_args(&format!("server {id:?}"), &server.settings)?;
         for (role_id, role) in &server.roles {
@@ -138,6 +149,11 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
                 require_nonempty("server case P/D Router backend", case_id, backend)?;
             }
             validate_parallelism("server case", case_id, &case.parallelism)?;
+            validate_synthetic_acceptance(
+                root,
+                &format!("server case {case_id:?}"),
+                &case.synthetic_acceptance,
+            )?;
             validate_extra_args(&format!("server case {case_id:?}"), &case.settings)?;
             for (role_id, role) in &case.roles {
                 require_id("server case role", role_id)?;
@@ -182,6 +198,69 @@ fn validate_extra_args(
         .collect::<Result<Vec<_>, _>>()?;
     crate::toml_override::validate_extra_args_segmentation(&tokens, &path)
         .map_err(|message| InferlabError::InvalidConfig { message })
+}
+
+/// [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]] declaration shape: exactly one
+/// of the explicit and curve forms, a finite acceptance length of at least
+/// one, and well-formed curve coordinates. When the curve file is readable
+/// and digest-matched, its two-shape contract, entry values, and the
+/// thinking-mode-vs-flat rule also fail here at workspace validation; a
+/// missing or unreadable file, a digest mismatch, and the lookup itself
+/// belong to resolution.
+fn validate_synthetic_acceptance(
+    root: &Path,
+    context: &str,
+    declaration: &Option<SyntheticAcceptanceDefinition>,
+) -> Result<(), InferlabError> {
+    let Some(declaration) = declaration else {
+        return Ok(());
+    };
+    match (&declaration.acceptance_length, &declaration.curve) {
+        (Some(_), Some(_)) | (None, None) => invalid(format!(
+            "{context} synthetic_acceptance must declare exactly one of acceptance_length or curve"
+        )),
+        (Some(length), None) if !length.is_finite() || *length < 1.0 => invalid(format!(
+            "{context} synthetic_acceptance.acceptance_length must be a finite number of at least one"
+        )),
+        (Some(_), None) => Ok(()),
+        (None, Some(curve)) => {
+            let path = curve
+                .path
+                .to_str()
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "{context} synthetic_acceptance.curve.path must be valid UTF-8"
+                    ),
+                })?;
+            validate_workspace_relative_source_path(
+                context,
+                "synthetic_acceptance.curve.path",
+                path,
+            )?;
+            validate_expected_digest(
+                context,
+                "synthetic_acceptance.curve.expected_sha256",
+                &curve.expected_sha256,
+            )?;
+            if curve.model_key.is_empty() {
+                return invalid(format!(
+                    "{context} synthetic_acceptance.curve.model_key must not be empty"
+                ));
+            }
+            if let Some(mode) = &curve.thinking_mode
+                && mode.is_empty()
+            {
+                return invalid(format!(
+                    "{context} synthetic_acceptance.curve.thinking_mode must be non-empty when present"
+                ));
+            }
+            crate::workspace::synthetic_acceptance::validate_curve_shape_at_load(
+                root,
+                &format!("{context} synthetic_acceptance.curve"),
+                curve,
+            )
+        }
+    }
 }
 
 fn validate_server_role(

@@ -231,7 +231,6 @@ max_input_tokens = 4096
                 "submission_invalid_reasons": ["context_overflow_rate"],
                 "warmup_records": 2, "warmup_error_records": 0,
                 "warmup_source_coordinate_records": 2, "warmup_succeeded": true,
-                "profiling_began_after_warmup_and_drain": true,
                 "profiling_records": 20, "source_coordinate_records": 20,
                 "distinct_source_traces": 4, "distinct_runtime_conversations": 6,
                 "distinct_transport_requests": 20, "cache_bust_records": 1,

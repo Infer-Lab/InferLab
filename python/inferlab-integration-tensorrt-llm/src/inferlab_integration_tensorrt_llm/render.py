@@ -35,28 +35,16 @@ from .plan import (
     _PREFILL_DECODE_OWNED_OPTIONS,
     _identity,
     _render_source_path,
+    _resolve_synthetic_acceptance,
 )
 from .settings import (
     _INFERLAB_OWNED_OPTIONS,
     TrtllmServeSettings,
-    YamlValue,
+    _merge_yaml_patch,
     _settings,
+    _yaml_mapping,
 )
-
-
-def _yaml_mapping(value: object, source: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"TensorRT-LLM YAML {source} must be a mapping",
-        )
-    mapping = cast(dict[object, object], value)
-    if not all(isinstance(key, str) for key in mapping):
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"TensorRT-LLM YAML {source} must use string keys",
-        )
-    return cast(dict[str, object], mapping)
+from .synthetic import synthetic_acceptance_env
 
 
 def _load_worker_config(
@@ -93,15 +81,6 @@ def _nested_mapping(config: dict[str, object], key: str) -> dict[str, object]:
         nested = dict(_yaml_mapping(value, key))
     config[key] = nested
     return nested
-
-
-def _merge_yaml_patch(config: dict[str, object], patch: dict[str, YamlValue]) -> None:
-    for key, value in patch.items():
-        current = config.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
-            _merge_yaml_patch(_yaml_mapping(current, key), value)
-        else:
-            config[key] = value
 
 
 def _worker_launch_text(
@@ -223,6 +202,18 @@ def _render_worker(
     argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, owned_options))
     process_env = runtime_cache_env(allocation.cache)
     process_env.update(settings.extra_env or {})
+    if input.synthetic_acceptance is not None:
+        # Re-resolve from the same inputs planning saw: the wire member plus
+        # this role's effective settings. Deterministic by construction. The
+        # operator's source YAML is consumed from the control-plane-supplied
+        # frozen text, never reopened from disk ([[RFC-0006:C-LAUNCH-FILES]]).
+        outcome = _resolve_synthetic_acceptance(
+            settings,
+            input.synthetic_acceptance,
+            allocation.role,
+            render_inputs=allocation.render_inputs,
+        )
+        process_env.update(synthetic_acceptance_env(outcome.acceptance_length))
     return rendered_model_rank(
         allocation,
         ProcessSpec(argv=argv, env=process_env),

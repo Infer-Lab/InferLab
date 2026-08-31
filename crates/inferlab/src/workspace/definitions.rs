@@ -132,6 +132,11 @@ pub(crate) struct ServerDefinition {
     pub kv_transfer: Option<KvTransferMechanism>,
     #[serde(default)]
     pub profiling: Option<bool>,
+    /// The controlled synthetic speculative-acceptance overlay
+    /// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]); InferLab does not model
+    /// the speculative method or draft model.
+    #[serde(default)]
+    pub synthetic_acceptance: Option<SyntheticAcceptanceDefinition>,
     /// Operator escape inputs onto the managed profiler commands
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(default, skip_serializing_if = "ProfilerEscapes::is_empty")]
@@ -211,6 +216,44 @@ pub(crate) struct ServeRoleOverride {
     pub replicas: Option<u32>,
     pub parallelism: Parallelism,
     pub settings: BTreeMap<String, JsonValue>,
+}
+
+/// A controlled synthetic speculative-acceptance overlay declaration
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]): exactly one of an explicit
+/// acceptance length or a digest-pinned workspace-referenced golden curve.
+/// InferLab does not model the speculative method, draft model, or
+/// method-specific framework parameters; those remain operator-owned
+/// framework settings.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyntheticAcceptanceDefinition {
+    /// The explicit form: a finite mean acceptance length of at least one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_length: Option<f64>,
+    /// The curve form: a digest-pinned golden acceptance-length curve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<SyntheticAcceptanceCurveDefinition>,
+}
+
+/// The curve form of a synthetic-acceptance declaration
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]): the workspace-referenced
+/// golden curve plus its lookup coordinates. The draft count is not declared:
+/// its sole authority is the operator's framework speculative configuration,
+/// read by the integration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyntheticAcceptanceCurveDefinition {
+    /// Workspace-relative path of the golden acceptance-length curve YAML.
+    pub path: PathBuf,
+    /// The SHA-256 digest of the complete curve file bytes: exactly 64
+    /// lowercase hexadecimal characters.
+    pub expected_sha256: String,
+    pub model_key: String,
+    /// Non-empty when present. Omission resolves to `thinking_on` when the
+    /// model's curve entry uses the thinking-mode shape; a declared mode
+    /// against a flat-list entry fails validation because no mode applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1037,6 +1080,10 @@ pub(crate) struct ServerCaseDefinition {
     pub pd_router_backend: Option<String>,
     pub kv_transfer: Option<KvTransferMechanism>,
     pub profiling: Option<bool>,
+    /// Case-scoped synthetic-acceptance declaration; a declared case value
+    /// replaces the server-level declaration wholesale
+    /// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+    pub synthetic_acceptance: Option<SyntheticAcceptanceDefinition>,
     /// Case-scoped capture-mechanism declaration; the mechanism is the only
     /// profiler field a case may carry ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(skip_serializing_if = "ProfilerEscapes::is_empty")]

@@ -108,7 +108,7 @@ impl AdapterClient for ProcessAdapterClient {
         input: PlanServeInput,
     ) -> Result<AdapterLowering<PlanServeResult>, InferlabError> {
         let request = AdapterRequest::PlanServe {
-            protocol_version: ProtocolVersion::V8,
+            protocol_version: ProtocolVersion::V9,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
@@ -123,7 +123,7 @@ impl AdapterClient for ProcessAdapterClient {
         input: RenderServeInput,
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError> {
         let request = AdapterRequest::RenderServe {
-            protocol_version: ProtocolVersion::V8,
+            protocol_version: ProtocolVersion::V9,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
@@ -425,7 +425,7 @@ impl AdapterClient for ImageAdapterClient {
         input: PlanServeInput,
     ) -> Result<AdapterLowering<PlanServeResult>, InferlabError> {
         let request = AdapterRequest::PlanServe {
-            protocol_version: ProtocolVersion::V8,
+            protocol_version: ProtocolVersion::V9,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, request)?;
@@ -440,7 +440,7 @@ impl AdapterClient for ImageAdapterClient {
         input: RenderServeInput,
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError> {
         let request = AdapterRequest::RenderServe {
-            protocol_version: ProtocolVersion::V8,
+            protocol_version: ProtocolVersion::V9,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, request)?;

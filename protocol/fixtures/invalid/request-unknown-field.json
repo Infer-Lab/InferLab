@@ -1,6 +1,6 @@
 {
   "operation": "plan_serve",
-  "protocol_version": "8",
+  "protocol_version": "9",
   "input": {
     "model": {
       "id": "dsv4",

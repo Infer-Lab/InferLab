@@ -1288,6 +1288,53 @@ fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(),
     Ok(())
 }
 
+// Downstream suspicion check: an adaptive-serving Bench declaring
+// cache.start = "cold" must reset the prefix cache before EVERY rate probe,
+// not just once, or later probes would measure the previous probes' hot
+// prefixes.
+#[test]
+fn adaptive_bench_resets_the_prefix_cache_before_every_probe() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replace(
+        "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+        "benches = [\"adaptive-c8k1k\"]",
+    );
+    fs::write(manifest, text)?;
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "dsv4-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("adaptive bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; stderr: {}",
+        bench["error"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases = bench["cases"]
+        .as_array()
+        .ok_or("bench has no probe cases")?;
+    assert!(cases.len() >= 2, "expected multiple probes, got {cases:?}");
+    for case in cases {
+        assert_eq!(case["status"], "succeeded");
+        assert_eq!(case["cache_preparation"]["start"], "cold");
+        assert_eq!(case["cache_preparation"]["reset"]["succeeded"], true);
+        assert_eq!(case["cache_preparation"]["reset"]["http_status"], 200);
+        assert_eq!(
+            case["cache_preparation"]["transitions"][0]["phase"],
+            "cache_reset"
+        );
+    }
+    assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
 #[test]
 fn uncontrolled_warmup_failure_never_releases_profiling() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;

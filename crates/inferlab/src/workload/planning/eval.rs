@@ -53,6 +53,18 @@ pub(super) fn resolve_eval(
             })?;
     let (mut definition, override_plan) =
         apply_eval_overrides(id, declared_definition.clone(), overrides)?;
+    // Synthetic acceptance bypasses real draft-model verification, so an Eval
+    // of any kind bound to such a server is not plannable
+    // ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+    if context.synthetic_acceptance {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "eval {id:?} is bound to a server whose resolved configuration carries synthetic \
+                 acceptance, which bypasses real draft-model verification; evals are not \
+                 plannable against it"
+            ),
+        });
+    }
     crate::workspace::validate_eval_task_source(context.workspace_root, id, &definition)?;
     if let EvalDefinition::LmEval {
         task: crate::workspace::EvalTaskSource::WorkspaceYaml { yaml },

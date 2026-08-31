@@ -8,6 +8,7 @@ mod local;
 mod realization;
 mod source;
 mod state;
+pub(crate) mod synthetic_acceptance;
 
 use crate::InferlabError;
 
@@ -23,7 +24,8 @@ pub(crate) use definitions::{
     BenchRequestSource, BenchSessionSource, BenchTokenSelector, BenchTpotApplicability,
     EvalDefinition, EvalPrompt, EvalTaskSource, JsonValue, ModelDefinition, RecipeDefinition,
     RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition, StackDefinition,
-    WorkloadSuiteDefinition, WorkspaceConfig,
+    SyntheticAcceptanceCurveDefinition, SyntheticAcceptanceDefinition, WorkloadSuiteDefinition,
+    WorkspaceConfig,
 };
 pub(crate) use definitions::{
     BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,

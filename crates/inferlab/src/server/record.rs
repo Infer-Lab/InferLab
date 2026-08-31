@@ -137,11 +137,15 @@ pub(crate) struct ServerRecord {
 }
 
 impl ServerRecord {
-    /// Bumped on the protocol-v7 to v8 hard cut: version-6 records (products
-    /// 0.10 and 0.11) predate the separate frontend component evidence and
-    /// the engine-trace capture fields and must be stopped by the version
+    /// Version 6 was cut on the protocol-v7 to v8 hard cut (products 0.10 and
+    /// 0.11 predate the separate frontend component evidence and the
+    /// engine-trace capture fields). Version 8 introduces the optional
+    /// synthetic-acceptance evidence member under
+    /// [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]
+    /// ([[RFC-0005:C-EVIDENCE]]); it MUST NOT be encoded under an earlier
+    /// server record version, so older records are stopped by the version
     /// gate, not by a bare serde variant error.
-    pub(crate) const SCHEMA_VERSION: u32 = 7;
+    pub(crate) const SCHEMA_VERSION: u32 = 8;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

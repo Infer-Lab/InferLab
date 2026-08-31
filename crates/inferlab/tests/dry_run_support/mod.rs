@@ -290,6 +290,16 @@ if operation == "plan_serve":
             }
         } if gateway_backend else {}),
     }
+    synthetic = input.get("synthetic_acceptance")
+    if synthetic:
+        # Echo a deterministic valid outcome: the declared length for the
+        # explicit form, a fixed resolved pair for the curve form.
+        if "explicit" in synthetic:
+            output["synthetic_acceptance"] = {
+                "acceptance_length": synthetic["explicit"]["acceptance_length"],
+            }
+        else:
+            output["synthetic_acceptance"] = {"acceptance_length": 3.5, "draft_count": 4}
 elif operation == "render_serve":
     allocations = input["allocations"]
     master = allocations[0]["ports"].get("master")
@@ -379,7 +389,7 @@ else:
     raise ValueError(f"unexpected operation {operation}")
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "8",
+    "protocol_version": "9",
     "result": {
         "operation": operation,
         "output": output,
@@ -760,7 +770,7 @@ elif operation == "render_serve":
 else:
     raise ValueError(operation)
 
-print(json.dumps({"status": "ok", "protocol_version": "8", "result": {"operation": operation, "output": output}}))
+print(json.dumps({"status": "ok", "protocol_version": "9", "result": {"operation": operation, "output": output}}))
 "#;
 
 pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> String {

@@ -14,6 +14,8 @@ from inferlab_bench_runner.aiperf import (
 from inferlab_bench_runner.aiperf_phase_barrier import (
     AiperfAgenticProfileBarrierStrategy,
     AiperfProfileBarrierStrategy,
+    PhaseProgress,
+    WarmupCheckpoint,
     WarmupExpectation,
     await_capture_open,
     warmup_completion_error,
@@ -250,3 +252,81 @@ def test_agentic_profile_barrier_preserves_native_warmup_and_branch_contract(
         ("trace-1", "warmup"),
         ("report", None),
     ]
+
+
+def test_agentic_profile_barrier_tolerates_warmup_request_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+
+    class Delegate:
+        wants_returns_after_sending_complete = True
+        allows_pending_branch_handoff_after_sending_complete = True
+
+        async def setup_phase(self) -> None:
+            observed.append("native-setup")
+
+    counter = type(
+        "Counter",
+        (),
+        {
+            "final_requests_sent": 3,
+            "final_requests_completed": 3,
+            "final_requests_cancelled": 0,
+            "final_request_errors": 1,
+            "final_sent_sessions": None,
+            "final_completed_sessions": None,
+            "final_cancelled_sessions": None,
+        },
+    )()
+    progress = type("Progress", (), {"counter": counter})()
+    monkeypatch.setattr(
+        aiperf_phase_barrier,
+        "_warmup_checkpoint",
+        WarmupCheckpoint(
+            expectation=WarmupExpectation(requests=None, sessions=None),
+            progress=cast(PhaseProgress, progress),
+        ),
+    )
+    monkeypatch.setenv("INFERLAB_AIPERF_PROFILE_BARRIER", "127.0.0.1:1")
+    monkeypatch.setattr(
+        aiperf_phase_barrier,
+        "_native_agentic_strategy_factory",
+        lambda: lambda **_kwargs: Delegate(),
+    )
+    monkeypatch.setattr(
+        aiperf_phase_barrier,
+        "await_capture_open",
+        lambda _address: observed.append("inferlab-release"),
+    )
+    config = type(
+        "Config",
+        (),
+        {
+            "phase": "profiling",
+            "total_expected_requests": None,
+            "expected_num_sessions": None,
+        },
+    )()
+
+    asyncio.run(AiperfAgenticProfileBarrierStrategy(config=config).setup_phase())
+
+    assert observed == ["native-setup", "inferlab-release"]
+
+    # The drain invariants that capture safety depends on still fail closed.
+    undrained = {
+        "final_requests_sent": 3,
+        "final_requests_completed": 2,
+        "final_requests_cancelled": 0,
+        "final_request_errors": 1,
+        "final_sent_sessions": None,
+        "final_completed_sessions": None,
+        "final_cancelled_sessions": None,
+    }
+    error = warmup_completion_error(
+        WarmupExpectation(requests=None, sessions=None),
+        undrained,
+        tolerate_request_errors=True,
+    )
+    assert error is not None
+    assert "completed" in error

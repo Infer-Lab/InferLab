@@ -157,6 +157,7 @@ pub(crate) fn resolve_manual_bench(
                     path: action.path.clone(),
                 }),
             conditioning_serving,
+            synthetic_acceptance: recorded.server.synthetic_acceptance.is_some(),
             capture_ids: &capture_ids,
             command_env: &command_env,
             command_cwd: &root.join(".inferlab"),

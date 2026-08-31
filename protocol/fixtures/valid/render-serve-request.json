@@ -1,6 +1,6 @@
 {
   "operation": "render_serve",
-  "protocol_version": "8",
+  "protocol_version": "9",
   "input": {
     "model": {
       "id": "dsv4",
@@ -232,6 +232,11 @@
         ],
         "render_inputs": []
       }
-    ]
+    ],
+    "synthetic_acceptance": {
+      "explicit": {
+        "acceptance_length": 2.25
+      }
+    }
   }
 }

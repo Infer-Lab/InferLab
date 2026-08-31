@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v8",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v9",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -441,7 +441,7 @@
       ]
     },
     "FrontendComponents": {
-      "description": "The only two frontend bindings protocol v8 accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
+      "description": "The only two frontend bindings protocol v9 accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
       "anyOf": [
         {
           "$ref": "#/$defs/GatewayFrontendBinding"
@@ -473,7 +473,7 @@
       ]
     },
     "FrontendProcessRole": {
-      "description": "The one canonical process role available to a protocol-v8 frontend.",
+      "description": "The one canonical process role available to a protocol-v9 frontend.",
       "type": "string",
       "enum": [
         "gateway"
@@ -962,6 +962,17 @@
             "$ref": "#/$defs/ServeRoleInput"
           }
         },
+        "synthetic_acceptance": {
+          "description": "The synthetic acceptance declaration when the serve declaration\ncarries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SyntheticAcceptanceInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "topology": {
           "$ref": "#/$defs/ServeTopology"
         }
@@ -1017,6 +1028,17 @@
           "items": {
             "$ref": "#/$defs/ServeRoleResult"
           }
+        },
+        "synthetic_acceptance": {
+          "description": "The resolved synthetic acceptance outcome; required in the accepted\nplan whenever the request carried the declaration, and forbidden\notherwise ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SyntheticAcceptanceOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -1059,12 +1081,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `8` (serialized as the\nstring `\"8\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `9` (serialized as the\nstring `\"9\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 8.",
+          "description": "Protocol version 9.",
           "type": "string",
-          "const": "8"
+          "const": "9"
         }
       ]
     },
@@ -1216,6 +1238,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/CaptureMechanism"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "synthetic_acceptance": {
+          "description": "The synthetic acceptance declaration when the serve declaration\ncarries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SyntheticAcceptanceInput"
             },
             {
               "type": "null"
@@ -1961,6 +1994,102 @@
         "source_path",
         "text",
         "sha256"
+      ]
+    },
+    "SyntheticAcceptanceCurveInput": {
+      "description": "The curve form's wire payload ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
+      "type": "object",
+      "properties": {
+        "model_key": {
+          "type": "string"
+        },
+        "sha256": {
+          "description": "The SHA-256 digest of the curve file bytes, verified by the control\nplane against the declaration.",
+          "type": "string"
+        },
+        "text": {
+          "description": "The complete digest-verified curve file text.",
+          "type": "string"
+        },
+        "thinking_mode": {
+          "description": "The effective thinking mode: the declared mode, or `thinking_on` when\nthe declaration omits it and the model entry uses the thinking-mode\nshape. Absent when the model entry is a flat list (no mode applies).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model_key",
+        "text",
+        "sha256"
+      ]
+    },
+    "SyntheticAcceptanceInput": {
+      "description": "The synthetic acceptance declaration carried to the selected integration\n([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]): exactly one of the explicit\nacceptance length or the digest-verified golden curve with its lookup\ncoordinates. The draft count is not declared; the integration determines\nit from the operator's speculative configuration ([[ADR-0043]]).",
+      "oneOf": [
+        {
+          "description": "The explicit form: the declared acceptance length, overlaid as-is.",
+          "type": "object",
+          "properties": {
+            "explicit": {
+              "type": "object",
+              "properties": {
+                "acceptance_length": {
+                  "description": "The declared mean acceptance length.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "acceptance_length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "explicit"
+          ]
+        },
+        {
+          "description": "The curve form: the digest-verified golden curve text with its digest\nand lookup coordinates; the integration resolves the effective\nacceptance length from it.",
+          "type": "object",
+          "properties": {
+            "curve": {
+              "$ref": "#/$defs/SyntheticAcceptanceCurveInput"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "curve"
+          ]
+        }
+      ]
+    },
+    "SyntheticAcceptanceOutcome": {
+      "description": "The integration's resolved synthetic acceptance outcome, returned in the\n`plan_serve` response whenever the request carried the declaration\n([[RFC-0006:C-INTEGRATIONS]]).",
+      "type": "object",
+      "properties": {
+        "acceptance_length": {
+          "description": "The effective acceptance length the integration resolved and overlaid.",
+          "type": "number",
+          "format": "double"
+        },
+        "draft_count": {
+          "description": "The draft count the integration determined from the operator's\nspeculative configuration; present for the curve form, absent for the\nexplicit form.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "acceptance_length"
       ]
     },
     "TargetEndpointScheme": {

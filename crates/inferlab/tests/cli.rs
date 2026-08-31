@@ -145,3 +145,24 @@ fn recipe_help_advertises_only_valid_measurement_override_paths() -> Result<(), 
     assert!(!stdout.contains("evals.smoke.limit"), "{stdout}");
     Ok(())
 }
+
+#[test]
+fn version_output_states_the_adapter_protocol_version() -> Result<(), Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_inferlab"))
+        .arg("--version")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    let protocol = inferlab_protocol::ProtocolVersion::CURRENT;
+    assert_eq!(
+        stdout.trim(),
+        format!(
+            "inferlab {} (adapter protocol v{})",
+            env!("CARGO_PKG_VERSION"),
+            protocol.as_str()
+        ),
+        "version output must state the wire protocol version: {stdout}"
+    );
+    Ok(())
+}

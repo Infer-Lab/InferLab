@@ -324,6 +324,11 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "the TokenSpeed integration does not support profiling capture yet",
         )
+    if input.synthetic_acceptance is not None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the TokenSpeed integration cannot apply the synthetic acceptance overlay",
+        )
     if input.topology == ServeTopology.single:
         return _plan_single(input)
     return _plan_prefill_decode(input)

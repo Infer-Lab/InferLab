@@ -558,7 +558,8 @@ fn resolve_bench_agentic_source(
             trajectory_start_min: resolved.policy.trajectory_start_min,
             trajectory_start_max: resolved.policy.trajectory_start_max,
             global_idle_gap_cap_seconds: resolved.policy.global_idle_gap_cap_seconds,
-            cache_warmup_seconds: resolved.policy.cache_warmup_seconds,
+            trace_idle_gap_cap_seconds: resolved.policy.trace_idle_gap_cap_seconds,
+            cache_warmup_requests_per_lane: resolved.policy.cache_warmup_requests_per_lane,
             warmup_grace_seconds: resolved.policy.warmup_grace_seconds,
             dataset_configuration_timeout_seconds: resolved
                 .policy

@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import traceback
 from collections.abc import Callable, Collection, Mapping
@@ -6,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TextIO
 
+import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationError
 
 from ._generated import (
@@ -58,7 +60,7 @@ type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
 type ServeAllocation = ServeProcessAllocationModelRank | ServeProcessAllocationFrontend
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-PROTOCOL_V8 = ProtocolVersion()
+PROTOCOL_V9 = ProtocolVersion()
 
 # Inferlab owns readiness; the router's internal guard must not expire first.
 ROUTER_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
@@ -384,16 +386,111 @@ class AdapterOperationError(Exception):
         self.message = message
 
 
+def resolve_golden_acceptance_length(
+    *,
+    curve_text: str,
+    model_key: str,
+    thinking_mode: str | None,
+    draft_count: int,
+) -> float:
+    """Resolve the effective acceptance length from a digest-verified golden curve.
+
+    Shared lookup for the curve form of the synthetic acceptance declaration
+    ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]): the curve maps model keys to
+    either a flat list of single-entry ``{draft: al}`` mappings or a
+    thinking-mode matrix ``{mode: {draft: al}}``. The control plane
+    digest-verifies and shape-validates the curve before shipping its text;
+    the integration calls this with the draft count it determined from the
+    operator's speculative configuration. A missing model key, thinking mode,
+    or draft entry and a non-finite or below-one value fail with a typed
+    ``invalid_settings`` error naming the missing element. A matrix-shaped
+    entry without a thinking mode, or a mode shipped against a flat-list
+    entry, is a control-plane bug and fails as ``invalid_request``.
+    """
+    try:
+        document: object = yaml.safe_load(curve_text)
+    except yaml.YAMLError as error:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"cannot parse the golden acceptance curve: {error}",
+        ) from error
+    if not isinstance(document, dict) or not all(isinstance(key, str) for key in document):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the golden acceptance curve must map model keys to acceptance-length entries",
+        )
+    if model_key not in document:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"the golden acceptance curve has no entry for model key {model_key!r}",
+        )
+    entry = document[model_key]
+    if isinstance(entry, list):
+        if thinking_mode is not None:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_request,
+                f"the golden curve entry for model key {model_key!r} is a flat list, "
+                f"but thinking mode {thinking_mode!r} was shipped; no mode applies to "
+                "that entry",
+            )
+        table: dict[object, object] = {}
+        for item in entry:
+            if isinstance(item, dict) and len(item) == 1:
+                table.update(item)
+    elif isinstance(entry, dict):
+        if thinking_mode is None:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_request,
+                f"the golden curve entry for model key {model_key!r} uses the "
+                "thinking-mode shape, but no thinking mode was shipped; the control "
+                "plane must resolve the effective mode before supplying the curve",
+            )
+        mode_block = entry.get(thinking_mode)
+        if not isinstance(mode_block, dict):
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                f"the golden acceptance curve has no thinking mode {thinking_mode!r} "
+                f"for model key {model_key!r}",
+            )
+        table = dict(mode_block)
+    else:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"the golden curve entry for model key {model_key!r} must be a flat "
+            "list of draft-length mappings or a thinking-mode mapping",
+        )
+    if draft_count not in table:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"the golden acceptance curve has no draft count {draft_count} entry "
+            f"for model key {model_key!r}",
+        )
+    value = table[draft_count]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 1
+    ):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"the golden acceptance curve entry for model key {model_key!r} at "
+            f"draft count {draft_count} must be a finite acceptance length of at "
+            f"least one, got {value!r}",
+        )
+    return float(value)
+
+
 def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     return AdapterResponse(
         root=AdapterResponseError(
-            protocol_version=PROTOCOL_V8,
+            protocol_version=PROTOCOL_V9,
             error=AdapterError(code=code, message=message),
         )
     )
 
 
-SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V8.root
+SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V9.root
 
 
 def handle_request(
@@ -444,7 +541,7 @@ def handle_request(
 
     return AdapterResponse(
         root=AdapterResponseOk(
-            protocol_version=PROTOCOL_V8,
+            protocol_version=PROTOCOL_V9,
             result=AdapterResult(root=result),
         )
     )

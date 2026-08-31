@@ -37,7 +37,7 @@ from .support import resolved_prompt_input
 def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchClientRequest:
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "8",
+            "protocol_version": "9",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -84,7 +84,8 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
                         "trajectory_start_min": 0.25,
                         "trajectory_start_max": 0.75,
                         "global_idle_gap_cap_seconds": 10.0,
-                        "cache_warmup_seconds": 600,
+                        "trace_idle_gap_cap_seconds": 300.0,
+                        "cache_warmup_requests_per_lane": 10,
                         "warmup_grace_seconds": 1800,
                         "dataset_configuration_timeout_seconds": 1800,
                         "service_profile_configuration_timeout_seconds": 1800,
@@ -151,7 +152,7 @@ def test_agentic_source_preparation_closes_the_release_qualified_file(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "8",
+            "protocol_version": "9",
             "phase": {
                 "kind": "acquire",
                 "resolved_revision": source.catalog.revision,
@@ -185,7 +186,7 @@ def test_agentic_source_resolution_uses_the_release_revision_not_mutable_main(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "8",
+            "protocol_version": "9",
             "phase": {"kind": "resolve"},
             "source": {"kind": "agentic", "source": source.model_dump()},
             "artifact_dir": str(tmp_path / "assets"),
@@ -251,6 +252,7 @@ def test_agentic_config_lowers_the_release_profile_without_an_inferlab_dag(
         "dataset": "semianalysis_cc_traces_weka_062126_256k",
         "entries": 393,
         "sampling": "sequential",
+        "traceIdleGapCapSeconds": 300.0,
     }
     assert profiling == {
         "type": "concurrency",
@@ -260,7 +262,7 @@ def test_agentic_config_lowers_the_release_profile_without_an_inferlab_dag(
         "trajectoryStartMinRatio": 0.25,
         "trajectoryStartMaxRatio": 0.75,
         "systemIdleGapCapSeconds": 10.0,
-        "agenticCacheWarmupDuration": 600,
+        "warmupRequestsPerLane": 10,
         "agenticWarmupGracePeriod": 1800,
     }
     assert artifacts["sliceDuration"] == 1
@@ -431,6 +433,86 @@ def test_agentic_result_preserves_public_scenario_coordinates_and_branch_stats(
     )
     assert not invalid_evidence.submission_valid
     assert invalid_evidence.submission_invalid_reasons == ["context_overflow_rate_exceeded"]
+
+
+def test_agentic_result_records_warmup_failures_as_evidence_not_handoff_state(
+    tmp_path: Path,
+) -> None:
+    request_value = agentic_request(tmp_path)
+    source = request_value.definition.agentic_source
+    assert source is not None
+    raw_path = tmp_path / "raw.jsonl"
+    raw_path.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in [
+                {
+                    "metadata": {
+                        "benchmark_phase": "warmup",
+                        "source_trace_id": "trace-1",
+                        "source_outer_idx": 2,
+                        "source_kind": "parent",
+                        "x_request_id": "warmup-request-1",
+                        "x_correlation_id": "session-1",
+                        "root_correlation_id": "root-1",
+                    },
+                    "error": {"message": "empty visible content"},
+                },
+                {
+                    "metadata": {
+                        "benchmark_phase": "profiling",
+                        "source_trace_id": "trace-1",
+                        "source_outer_idx": 3,
+                        "source_inner_idx": None,
+                        "source_kind": "parent",
+                        "x_request_id": "request-1",
+                        "x_correlation_id": "session-1",
+                        "root_correlation_id": "root-1",
+                    },
+                    "error": None,
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary: dict[str, object] = {
+        "benchmark_id": "agentx-run-1",
+        "metadata": {
+            "scenario": "inferencex-agentx-mvp",
+            "submission_valid": True,
+            "dataset": {
+                "loader": "semianalysis_cc_traces_weka_062126_256k",
+                "hf_dataset_name": "semianalysisai/cc-traces-weka-062126-256k",
+                "num_dataset_entries": 393,
+            },
+        },
+        "context_overflow_count": {"avg": 0.0},
+        "skipped_context_overflow_count": {"avg": 0.0},
+        "error_request_count": {"avg": 0.0},
+        "branch_stats": {
+            "children_spawned": 0,
+            "children_completed": 0,
+            "children_errored": 0,
+            "children_truncated": 0,
+            "children_delayed": 0,
+            "parents_suspended": 0,
+            "parents_resumed": 0,
+            "parents_failed_due_to_child_error": 0,
+            "joins_suppressed": 0,
+        },
+    }
+
+    evidence = agentic_result_evidence(
+        source, summary, tmp_path / "summary.json", tmp_path / "records.jsonl", raw_path
+    )
+
+    assert evidence.warmup_records == 1
+    assert evidence.warmup_error_records == 1
+    assert evidence.warmup_succeeded
+    assert evidence.profiling_records == 1
+    assert evidence.submission_valid
+    assert "profiling_began_after_warmup_and_drain" not in evidence.model_dump()
 
 
 def test_performance_agentic_result_degrades_raw_derived_dimensions(

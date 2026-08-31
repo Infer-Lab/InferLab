@@ -1,6 +1,6 @@
 {
   "status": "error",
-  "protocol_version": "8",
+  "protocol_version": "9",
   "error": {
     "code": "invalid_request",
     "message": "request does not match the adapter protocol"

@@ -2,13 +2,14 @@ mod allocation;
 mod integration;
 mod realization;
 mod selection;
+mod synthetic_acceptance;
 mod topology;
 
 use crate::InferlabError;
 use crate::adapter::{AdapterClient, executable_name};
 use crate::execution::{
     CasePlan, EndpointPlan, IntegrationPlan, ModelPlan, PlacementPlan, ResolvedExecution,
-    ResourcePlan, ServerPlan, StackPlan, Workflow,
+    ResourcePlan, ServerPlan, StackPlan, SyntheticAcceptancePlan, Workflow,
 };
 use crate::toml_override::InvocationOverride;
 use crate::workload::{
@@ -49,11 +50,13 @@ pub(crate) struct ResolveRequest<'a> {
     pub external: Option<&'a crate::image::launch::ExternalImagePlan>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compose_measurements(
     workspace: &LoadedWorkspace,
     request: &ResolveRequest<'_>,
     overrides: &[InvocationOverride],
     selection: &WorkflowSelection<'_>,
+    synthetic_acceptance: bool,
     public_endpoint: &EndpointPlan,
     conditioning_serving: ConditioningServingShape,
     allocations: &[ResolvedProcessAllocation],
@@ -140,6 +143,7 @@ fn compose_measurements(
                 },
             ),
             conditioning_serving,
+            synthetic_acceptance,
             capture_ids: request.captures,
             command_env: &command_env,
             command_cwd: &command_cwd,
@@ -155,7 +159,8 @@ pub(crate) fn resolve<C: AdapterClient>(
 ) -> Result<ResolvedExecution, InferlabError> {
     let overrides = InvocationOverride::parse_all(request.overrides)?;
     let selection = select_workflow(workspace, request)?;
-    let effective = resolve_effective_server_input(&selection, request, &overrides)?;
+    let effective =
+        resolve_effective_server_input(&selection, request, &overrides, &workspace.root)?;
     let server = selection.server;
     let stack = selection.stack;
     let server_id = selection.server_id.as_str();
@@ -174,6 +179,28 @@ pub(crate) fn resolve<C: AdapterClient>(
         adapter,
     )?;
     let planned = planned_stage.planned();
+    // The accepted plan's outcome was validated against the request
+    // declaration during planning; pair them into the evidence object.
+    let synthetic_acceptance = match (
+        &effective.synthetic_acceptance,
+        planned.synthetic_acceptance,
+    ) {
+        (Some(resolved), Some(outcome)) => Some(SyntheticAcceptancePlan {
+            declared: resolved.declared.clone(),
+            acceptance_length: outcome.acceptance_length,
+            thinking_mode: resolved.effective_thinking_mode().map(str::to_owned),
+            draft_count: outcome.draft_count,
+        }),
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {:?} synthetic acceptance outcome does not match the request declaration",
+                    stack.integration
+                ),
+            });
+        }
+    };
     let RuntimeRealizationParts {
         processes,
         public_endpoint,
@@ -211,6 +238,7 @@ pub(crate) fn resolve<C: AdapterClient>(
         request,
         &overrides,
         &selection,
+        effective.synthetic_acceptance.is_some(),
         &public_endpoint,
         conditioning_serving,
         rendered_stage.allocations(),
@@ -257,6 +285,7 @@ pub(crate) fn resolve<C: AdapterClient>(
             capture_control_deadline_seconds: effective.capture_control_deadline_seconds,
             capture_finalization_deadline_seconds: effective.capture_finalization_deadline_seconds,
             kv_transfer: effective.kv_transfer,
+            synthetic_acceptance,
             frontend,
             profiler_escapes: profiler_escapes_plan(server),
             model: ModelPlan {
@@ -272,7 +301,7 @@ pub(crate) fn resolve<C: AdapterClient>(
                 framework: planned.integration.framework.clone(),
                 framework_version: planned.integration.framework_version.clone(),
                 executable: executable_name(&stack.integration),
-                protocol_version: ProtocolVersion::V8,
+                protocol_version: ProtocolVersion::V9,
                 plan_request_sha256: planned_stage.evidence().request_sha256().to_owned(),
                 plan_response_sha256: planned_stage.evidence().response_sha256().to_owned(),
                 render_request_sha256: rendered_stage.evidence().request_sha256().to_owned(),

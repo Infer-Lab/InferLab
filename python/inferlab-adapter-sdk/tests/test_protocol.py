@@ -62,7 +62,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v8.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v9.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -343,6 +343,21 @@ def test_unsupported_request_protocol_version_is_reported_before_shape(
     response_error = response.root
     assert isinstance(response_error, AdapterResponseError)
     assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
+
+
+def test_protocol_v8_request_is_rejected_instead_of_partially_interpreted() -> None:
+    # The fixture is a well-formed protocol-v8 plan request carrying the
+    # synthetic acceptance member; protocol v9 MUST reject it outright rather
+    # than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
+    payload = (FIXTURES / "invalid" / "request-protocol-version-8.json").read_text()
+
+    response = handle_request(payload, fixture_plan_serve)
+
+    response_error = response.root
+    assert isinstance(response_error, AdapterResponseError)
+    assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
+    assert "received protocol version 8" in response_error.error.message
+    assert "protocol version 9" in response_error.error.message
 
 
 def test_malformed_request_json_stays_invalid_request() -> None:

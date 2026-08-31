@@ -304,7 +304,7 @@ pub(super) fn run_eval_operation(
             ..
         } => {
             let request = EvalClientRequest {
-                protocol_version: ProtocolVersion::V8,
+                protocol_version: ProtocolVersion::V9,
                 workspace_root: workspace_root.to_path_buf(),
                 workspace_source_exclusions: plan.workspace_source_exclusions.clone(),
                 endpoint: wire::endpoint_input(&plan.endpoint),

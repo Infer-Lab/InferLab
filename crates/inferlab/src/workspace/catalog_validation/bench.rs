@@ -1,6 +1,9 @@
 //! Static and adaptive serving-Bench validation.
 
-use super::{invalid, require_nonempty, require_positive, validate_request_body};
+use super::{
+    invalid, require_nonempty, require_positive, validate_expected_digest, validate_request_body,
+    validate_workspace_relative_source_path,
+};
 use crate::InferlabError;
 use crate::workspace::definitions::{
     AggregateSlo, BenchCacheStart, BenchDefinition, BenchPrefixSharing, BenchPrompt,
@@ -328,45 +331,11 @@ fn validate_cache_policy(
 }
 
 fn validate_replay_path(id: &str, path: &str) -> Result<(), InferlabError> {
-    validate_workspace_relative_source_path(id, "replay request_source.path", path)
-}
-
-// One shared locator rule for operator-supplied workspace files: the replay
-// population file and the random source's corpus
-// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
-fn validate_workspace_relative_source_path(
-    id: &str,
-    field: &str,
-    path: &str,
-) -> Result<(), InferlabError> {
-    let candidate = std::path::Path::new(path);
-    if path.is_empty()
-        || candidate.is_absolute()
-        || candidate.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::Prefix(_) | std::path::Component::ParentDir
-            )
-        })
-    {
-        return invalid(format!(
-            "bench {id:?} {field} must be a workspace-relative path without parent traversal"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_expected_digest(id: &str, field: &str, digest: &str) -> Result<(), InferlabError> {
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return invalid(format!(
-            "bench {id:?} {field} must be 64 lowercase hexadecimal characters"
-        ));
-    }
-    Ok(())
+    validate_workspace_relative_source_path(
+        &format!("bench {id:?}"),
+        "replay request_source.path",
+        path,
+    )
 }
 
 fn validate_request_rates(id: &str, rates: &[RequestRate]) -> Result<(), InferlabError> {
@@ -524,13 +493,13 @@ fn validate_bench_common(
                 }
                 if let Some(corpus) = corpus {
                     validate_workspace_relative_source_path(
-                        id,
+                        &format!("bench {id:?}"),
                         "random request_source.corpus.path",
                         &corpus.path,
                     )?;
                     if let Some(digest) = &corpus.expected_sha256 {
                         validate_expected_digest(
-                            id,
+                            &format!("bench {id:?}"),
                             "request_source.corpus.expected_sha256",
                             digest,
                         )?;
@@ -651,7 +620,11 @@ fn validate_bench_common(
             } => {
                 validate_replay_path(id, path)?;
                 if let Some(digest) = expected_sha256 {
-                    validate_expected_digest(id, "request_source.expected_sha256", digest)?;
+                    validate_expected_digest(
+                        &format!("bench {id:?}"),
+                        "request_source.expected_sha256",
+                        digest,
+                    )?;
                 }
                 if prompt.declared().is_none() {
                     return invalid(format!(

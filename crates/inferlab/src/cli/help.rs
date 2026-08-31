@@ -92,7 +92,7 @@ WORKSPACE TOML — SEMIANALYSIS AGENTX TRACE REPLAY:
   concurrency = [1]
   timeout_seconds = 7200
 
-AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, 600 seconds of cache-pressure warmup, a 900-second minimum and 1800-second default profiling duration, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context profile is about 1.85 GB. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
+AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, a 300-second per-trace idle-gap cap, a cache-pressure warmup of 10 requests per lane, a 900-second minimum and 1800-second default profiling duration, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context profile is about 1.85 GB. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
 
 Omitted static Bench and synthetic prompt kinds resolve to serving and flat. Use `inferlab workspace show --json` to inspect their canonical explicit values.";
 

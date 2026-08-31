@@ -1,6 +1,6 @@
 {
   "operation": "plan_serve",
-  "protocol_version": "8",
+  "protocol_version": "9",
   "input": {
     "model": {
       "id": "dsv4",
@@ -38,6 +38,14 @@
         }
       }
     ],
-    "profiling": "managed_collection"
+    "profiling": "managed_collection",
+    "synthetic_acceptance": {
+      "curve": {
+        "model_key": "dsv4",
+        "thinking_mode": "thinking_on",
+        "text": "dsv4:\n  thinking_on:\n    4: 3.5\n",
+        "sha256": "ffef53d9ea69fae0072145c80b35ed9ba7f852f328dda9786bc2c07fca8ba8e7"
+      }
+    }
   }
 }

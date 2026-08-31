@@ -256,6 +256,20 @@ def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
         plan_serve(_plan_input(profiling=CaptureMechanism.managed_collection))
     with pytest.raises(AdapterOperationError):
         plan_serve(_plan_input(profiling=CaptureMechanism.engine_trace))
+    with pytest.raises(AdapterOperationError, match="synthetic acceptance"):
+        plan_serve(_plan_input(synthetic_acceptance={"explicit": {"acceptance_length": 2.49}}))
+    with pytest.raises(AdapterOperationError, match="synthetic acceptance"):
+        plan_serve(
+            _plan_input(
+                synthetic_acceptance={
+                    "curve": {
+                        "model_key": "dsv4",
+                        "text": "dsv4:\n  - 3: 2.49\n",
+                        "sha256": "f" * 64,
+                    }
+                }
+            )
+        )
 
     unsupported = [
         Parallelism(outer=ParallelismOuter(tensor_parallel_size=4, pipeline_parallel_size=2)),

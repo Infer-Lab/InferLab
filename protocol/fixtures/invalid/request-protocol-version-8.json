@@ -1,0 +1,17 @@
+{
+  "operation": "plan_serve",
+  "protocol_version": "8",
+  "input": {
+    "model": {
+      "id": "model",
+      "served_name": "model"
+    },
+    "topology": "single",
+    "roles": [],
+    "synthetic_acceptance": {
+      "explicit": {
+        "acceptance_length": 3.5
+      }
+    }
+  }
+}

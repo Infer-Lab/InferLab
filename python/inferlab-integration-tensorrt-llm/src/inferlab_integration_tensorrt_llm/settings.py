@@ -1,4 +1,8 @@
+from typing import cast
+
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
+    AdapterOperationError,
     SettingValue,
     validate_extra_args,
     validate_settings,
@@ -65,3 +69,27 @@ def _settings(values: dict[str, SettingValue]) -> TrtllmServeSettings:
     settings = validate_settings(TrtllmServeSettings, values)
     validate_extra_args(settings.extra_args or [], _INFERLAB_OWNED_OPTIONS)
     return settings
+
+
+def _yaml_mapping(value: object, source: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"TensorRT-LLM YAML {source} must be a mapping",
+        )
+    mapping = cast(dict[object, object], value)
+    if not all(isinstance(key, str) for key in mapping):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"TensorRT-LLM YAML {source} must use string keys",
+        )
+    return cast(dict[str, object], mapping)
+
+
+def _merge_yaml_patch(config: dict[str, object], patch: dict[str, YamlValue]) -> None:
+    for key, value in patch.items():
+        current = config.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            _merge_yaml_patch(_yaml_mapping(current, key), value)
+        else:
+            config[key] = value

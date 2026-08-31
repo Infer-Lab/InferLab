@@ -1,5 +1,5 @@
 {
-  "protocol_version": "8",
+  "protocol_version": "9",
   "endpoint": {
     "protocol": "http",
     "host": "127.0.0.1",
@@ -36,7 +36,8 @@
         "trajectory_start_min": 0.25,
         "trajectory_start_max": 0.75,
         "global_idle_gap_cap_seconds": 10.0,
-        "cache_warmup_seconds": 600,
+        "trace_idle_gap_cap_seconds": 300.0,
+        "cache_warmup_requests_per_lane": 10,
         "warmup_grace_seconds": 1800,
         "dataset_configuration_timeout_seconds": 1800,
         "service_profile_configuration_timeout_seconds": 1800,

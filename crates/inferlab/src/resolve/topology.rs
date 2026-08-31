@@ -6,7 +6,7 @@ use inferlab_protocol::{
     CaptureMechanism, CaptureWindowControlEndpoint, EndpointAssignment, EndpointRequirement,
     FrontendComponents, FrontendProcessRole, GatewayTarget, KvTransferMechanism, PlanServeResult,
     RenderSource, ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink,
-    ServeTopology, SuppliedRenderInput,
+    ServeTopology, SuppliedRenderInput, SyntheticAcceptanceInput, SyntheticAcceptanceOutcome,
 };
 use inferlab_serve_domain::{
     FixedDeviceAssignment, PendingCaptureTargetPlan, PendingCaptureWindowActionPlan,
@@ -912,14 +912,151 @@ pub(super) fn validate_integration_identity(
     }
 }
 
+/// [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]: the accepted plan must return
+/// the effective acceptance length whenever the request carried the
+/// declaration — a finite value of at least one — and must not return the
+/// outcome when the request carried none. The curve form additionally
+/// requires the determined draft count; the explicit form must not carry one.
+pub(super) fn validate_synthetic_acceptance_outcome(
+    integration: &str,
+    request: Option<&SyntheticAcceptanceInput>,
+    outcome: Option<SyntheticAcceptanceOutcome>,
+) -> Result<(), InferlabError> {
+    match (request, outcome) {
+        (Some(_), None) => Err(InferlabError::InvalidConfig {
+            message: format!(
+                "integration {integration:?} omitted the synthetic acceptance outcome although the plan request carried the declaration"
+            ),
+        }),
+        (None, Some(_)) => Err(InferlabError::InvalidConfig {
+            message: format!(
+                "integration {integration:?} returned a synthetic acceptance outcome although the plan request carried no declaration"
+            ),
+        }),
+        (Some(_), Some(outcome))
+            if !outcome.acceptance_length.is_finite() || outcome.acceptance_length < 1.0 =>
+        {
+            Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {integration:?} returned synthetic acceptance length {}; it must be a finite number of at least one",
+                    outcome.acceptance_length
+                ),
+            })
+        }
+        (Some(SyntheticAcceptanceInput::Curve(_)), Some(outcome))
+            if outcome.draft_count.is_none() =>
+        {
+            Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {integration:?} omitted the determined draft count although the plan request carried the curve form"
+                ),
+            })
+        }
+        (Some(SyntheticAcceptanceInput::Explicit { .. }), Some(outcome))
+            if outcome.draft_count.is_some() =>
+        {
+            Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "integration {integration:?} returned a draft count although the plan request carried the explicit form"
+                ),
+            })
+        }
+        (Some(_), Some(_)) | (None, None) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use inferlab_protocol::{
         EndpointProtocol, FrontendCoRendering, FrontendHandoff, FrontendProcessRole, GatewayPlan,
         IntegrationIdentity, Parallelism, PdRouterPlan, PdRoutingPolicies, ReadinessProbe,
-        ServeRoleResult, TargetEndpointScheme,
+        ServeRoleResult, SyntheticAcceptanceCurveInput, SyntheticAcceptanceOutcome,
+        TargetEndpointScheme,
     };
+
+    // [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]: the outcome is required with
+    // the declaration, forbidden without it, and always a finite value >= 1;
+    // the curve form additionally requires the determined draft count and the
+    // explicit form forbids it.
+    #[test]
+    fn synthetic_acceptance_outcome_matches_the_declaration_and_is_valid() {
+        let outcome = |acceptance_length, draft_count| SyntheticAcceptanceOutcome {
+            acceptance_length,
+            draft_count,
+        };
+        let explicit = SyntheticAcceptanceInput::Explicit {
+            acceptance_length: 2.0,
+        };
+        let curve = SyntheticAcceptanceInput::Curve(SyntheticAcceptanceCurveInput {
+            model_key: "model".to_owned(),
+            thinking_mode: None,
+            text: "model:\n  - 4: 3.5\n".to_owned(),
+            sha256: "a".repeat(64),
+        });
+
+        assert!(
+            validate_synthetic_acceptance_outcome(
+                "fixture",
+                Some(&explicit),
+                Some(outcome(2.0, None))
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_synthetic_acceptance_outcome(
+                "fixture",
+                Some(&curve),
+                Some(outcome(3.5, Some(4)))
+            )
+            .is_ok()
+        );
+        assert!(validate_synthetic_acceptance_outcome("fixture", None, None).is_ok());
+
+        for (request, value, expected) in [
+            (
+                Some(&explicit),
+                None,
+                "omitted the synthetic acceptance outcome",
+            ),
+            (None, Some(outcome(2.0, None)), "carried no declaration"),
+            (
+                Some(&explicit),
+                Some(outcome(f64::NAN, None)),
+                "finite number of at least one",
+            ),
+            (
+                Some(&curve),
+                Some(outcome(f64::INFINITY, Some(4))),
+                "finite number of at least one",
+            ),
+            (
+                Some(&explicit),
+                Some(outcome(0.5, None)),
+                "finite number of at least one",
+            ),
+            (
+                Some(&curve),
+                Some(outcome(3.5, None)),
+                "omitted the determined draft count",
+            ),
+            (
+                Some(&explicit),
+                Some(outcome(2.0, Some(4))),
+                "returned a draft count",
+            ),
+        ] {
+            let error = validate_synthetic_acceptance_outcome("fixture", request, value)
+                .err()
+                .map(|error| error.to_string());
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(expected)),
+                "{expected}: {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn rejects_an_integration_that_rebinds_a_named_workload_path()
@@ -1072,6 +1209,7 @@ mod tests {
                 framework: framework.to_owned(),
                 framework_version: "test".to_owned(),
             },
+            synthetic_acceptance: None,
             roles,
             replicas,
             links: vec![

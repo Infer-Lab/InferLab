@@ -98,6 +98,23 @@ def test_plan_rejects_engine_trace_capture() -> None:
         plan_serve(_plan_input(profiling=CaptureMechanism.engine_trace))
 
 
+def test_plan_rejects_the_synthetic_acceptance_overlay() -> None:
+    with pytest.raises(AdapterOperationError, match="synthetic acceptance"):
+        plan_serve(_plan_input(synthetic_acceptance={"explicit": {"acceptance_length": 2.49}}))
+    with pytest.raises(AdapterOperationError, match="synthetic acceptance"):
+        plan_serve(
+            _plan_input(
+                synthetic_acceptance={
+                    "curve": {
+                        "model_key": "dsv4",
+                        "text": "dsv4:\n  - 3: 2.49\n",
+                        "sha256": "f" * 64,
+                    }
+                }
+            )
+        )
+
+
 def test_plan_profiles_the_engine_through_the_smg_gateway_window() -> None:
     result = plan_serve(_plan_input(profiling=CaptureMechanism.managed_collection))
 

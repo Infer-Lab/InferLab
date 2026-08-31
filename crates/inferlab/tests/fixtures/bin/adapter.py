@@ -24,7 +24,7 @@ if fault.get("adapter_reject"):
         json.dumps(
             {
                 "status": "error",
-                "protocol_version": "8",
+                "protocol_version": "9",
                 "error": {"code": "invalid_settings", "message": "fixture rejection"},
             }
         )
@@ -155,6 +155,16 @@ if operation == "plan_serve":
             else {}
         ),
     }
+    synthetic = input.get("synthetic_acceptance")
+    if synthetic:
+        # Echo a deterministic valid outcome: the declared length for the
+        # explicit form, a fixed resolved pair for the curve form.
+        if "explicit" in synthetic:
+            output["synthetic_acceptance"] = {
+                "acceptance_length": synthetic["explicit"]["acceptance_length"],
+            }
+        else:
+            output["synthetic_acceptance"] = {"acceptance_length": 3.5, "draft_count": 4}
 elif operation == "render_serve":
     allocations = input["allocations"]
     with_launch_file = (
@@ -232,7 +242,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "8",
+            "protocol_version": "9",
             "result": {"operation": operation, "output": output},
         }
     )

@@ -417,15 +417,13 @@ fn agentic_result_error(
             "raw-derived agentic evidence dimensions disagree with the artifact level".to_owned(),
         );
     }
-    if !run.warmup_succeeded
-        || run.warmup_error_records != 0
-        || !run.profiling_began_after_warmup_and_drain
-        || run
-            .warmup_source_coordinate_records
-            .is_some_and(|coordinates| coordinates != run.warmup_records)
+    if run
+        .warmup_source_coordinate_records
+        .is_some_and(|coordinates| coordinates != run.warmup_records)
     {
         return Some(
-            "native warmup outcome does not establish a clean profiling handoff".to_owned(),
+            "warmup source-coordinate records do not reconcile with native warmup records"
+                .to_owned(),
         );
     }
     if !run.submission_valid {

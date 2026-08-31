@@ -26,6 +26,7 @@ from inferlab_adapter_sdk import (
 
 from .plan import _identity
 from .settings import _INFERLAB_OWNED_OPTIONS, _settings
+from .synthetic import resolve_synthetic_acceptance, synthetic_acceptance_env
 
 _RUNTIME_CACHE_EXTRA_SUBDIRS = {
     "TILELANG_CACHE_DIR": "tilelang",
@@ -173,6 +174,13 @@ def _render_process(
     argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OWNED_OPTIONS))
     process_env = runtime_cache_env(allocation.cache, _RUNTIME_CACHE_EXTRA_SUBDIRS)
     process_env.update(settings.extra_env or {})
+    if input.synthetic_acceptance is not None:
+        # Re-resolve from the same inputs planning saw: the wire member plus
+        # this role's effective settings. Deterministic by construction.
+        outcome = resolve_synthetic_acceptance(
+            settings, input.synthetic_acceptance, allocation.role
+        )
+        process_env.update(synthetic_acceptance_env(outcome.acceptance_length))
     if input.profiling == CaptureMechanism.engine_trace:
         # SGLang's torch profiler reads its output directory from the
         # environment when the start action body omits it

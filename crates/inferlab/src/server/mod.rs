@@ -1346,7 +1346,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 7);
+        assert_eq!(value["schema_version"], 8);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1398,7 +1398,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 3; expected 7"),
+                .contains("unsupported schema version 3; expected 8"),
             "{error}"
         );
         Ok(())
@@ -1428,7 +1428,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 6; expected 7"),
+                .contains("unsupported schema version 6; expected 8"),
             "{error}"
         );
         Ok(())
@@ -1627,6 +1627,7 @@ mod tests {
                 capture_control_deadline_seconds: 60,
                 capture_finalization_deadline_seconds: 300,
                 kv_transfer: None,
+                synthetic_acceptance: None,
                 frontend: None,
                 profiler_escapes: None,
                 model: ModelPlan {
@@ -1642,7 +1643,7 @@ mod tests {
                     framework: "fixture".to_owned(),
                     framework_version: "test".to_owned(),
                     executable: "fixture".to_owned(),
-                    protocol_version: ProtocolVersion::V8,
+                    protocol_version: ProtocolVersion::V9,
                     plan_request_sha256: "request".to_owned(),
                     plan_response_sha256: "response".to_owned(),
                     render_request_sha256: "request".to_owned(),

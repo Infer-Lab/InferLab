@@ -703,10 +703,6 @@ fn agentic_result(case: &str, value: &BenchAgenticResultEvidence) -> FactSection
                 "Warmup source coordinates",
                 unavailable_count(run.warmup_source_coordinate_records),
             ),
-            fact(
-                "Profiling handoff",
-                yes_no(run.profiling_began_after_warmup_and_drain),
-            ),
             fact("Profiling records", run.profiling_records.to_string()),
             fact(
                 "Profiling source coordinates",

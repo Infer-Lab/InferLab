@@ -243,6 +243,11 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "the Specialized Engine integration does not support engine-trace capture",
         )
+    if input.synthetic_acceptance is not None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the Specialized Engine integration cannot apply the synthetic acceptance overlay",
+        )
     role_result = ServeRoleResult(
         id=role.id,
         kind=role.kind,

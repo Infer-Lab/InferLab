@@ -11,8 +11,10 @@ from inferlab_adapter_sdk import (
     AdapterRequestPlanServe,
     AdapterRequestRenderServe,
     AdapterResponse,
+    PlanServeResult,
     PromptCacheReadZeroRepresentation,
     RenderedServeProcessFrontend,
+    SettingValue,
     handle_request,
 )
 from inferlab_adapter_sdk._generated import AdapterResultPlanServe
@@ -26,6 +28,15 @@ def load_json(path: Path) -> dict[str, object]:
     return cast(dict[str, object], json.loads(path.read_text()))
 
 
+def load_plan_payload() -> dict[str, object]:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    # The shared fixture declares synthetic acceptance; tests that exercise
+    # unrelated behavior drop the member instead of spelling an operator
+    # speculative configuration into every payload.
+    cast(dict[str, object], payload["input"]).pop("synthetic_acceptance")
+    return payload
+
+
 def distribution_version(name: str) -> str:
     try:
         return importlib.metadata.version(name)
@@ -34,9 +45,7 @@ def distribution_version(name: str) -> str:
 
 
 def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
-    request = AdapterRequest.model_validate(
-        load_json(FIXTURES / "valid" / "plan-serve-request.json")
-    )
+    request = AdapterRequest.model_validate(load_plan_payload())
     expected = AdapterResponse.model_validate(
         load_json(FIXTURES / "valid" / "plan-serve-response.json")
     )
@@ -46,7 +55,11 @@ def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
 
     assert expected.root.status == "ok"
     assert isinstance(expected.root.result.root, AdapterResultPlanServe)
-    expected_output = expected.root.result.root.output
+    # The shared fixture pair declares the curve form; this test drops the
+    # member (see load_plan_payload), so the expected outcome goes with it.
+    expected_output = expected.root.result.root.output.model_copy(
+        update={"synthetic_acceptance": None}
+    )
     assert result.gateway is not None
     assert result.pd_router is not None
     assert expected_output.gateway is not None
@@ -80,7 +93,7 @@ def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
 
 
 def test_unknown_vllm_setting_returns_a_typed_protocol_error() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     settings = cast(dict[str, object], roles[0]["settings"])
@@ -93,7 +106,7 @@ def test_unknown_vllm_setting_returns_a_typed_protocol_error() -> None:
 
 
 def test_single_topology_rejects_a_routed_backend() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["topology"] = "single"
     input_payload["gateway_backend"] = "vllm-router"
@@ -116,7 +129,7 @@ def test_single_topology_rejects_a_routed_backend() -> None:
 
 
 def test_single_topology_declares_its_server_metrics_capability() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["topology"] = "single"
     input_payload["gateway_backend"] = None
@@ -143,7 +156,7 @@ def test_single_topology_declares_its_server_metrics_capability() -> None:
 
 
 def test_single_topology_declares_explicit_zero_cache_usage_when_enabled() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["topology"] = "single"
     input_payload["gateway_backend"] = None
@@ -170,7 +183,7 @@ def test_single_topology_declares_explicit_zero_cache_usage_when_enabled() -> No
 
 
 def test_vllm_rejects_an_expert_size_that_does_not_match_tp_times_dp() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     prefill_parallelism = cast(dict[str, object], roles[0]["parallelism"])
@@ -183,7 +196,7 @@ def test_vllm_rejects_an_expert_size_that_does_not_match_tp_times_dp() -> None:
 
 
 def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     cast(dict[str, object], roles[0]["settings"])["extra_args"] = ["--block-size", "32"]
@@ -309,7 +322,7 @@ def test_render_managed_collection_uses_the_cuda_profiler() -> None:
 
 
 def test_plan_engine_trace_echoes_the_requested_mechanism() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     cast(dict[str, object], payload["input"])["profiling"] = "engine_trace"
     request = AdapterRequest.model_validate(payload)
     assert isinstance(request.root, AdapterRequestPlanServe)
@@ -374,7 +387,7 @@ def test_render_lowers_published_vllm_settings() -> None:
 
 
 def test_plan_nixl_declares_side_channel_links_and_ports() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["kv_transfer"] = "nixl"
 
@@ -390,7 +403,7 @@ def test_plan_nixl_declares_side_channel_links_and_ports() -> None:
 
 
 def test_plan_role_declares_the_whole_replica_accelerator_requirement() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     parallelism = cast(dict[str, object], roles[0]["parallelism"])
@@ -417,7 +430,7 @@ def test_plan_role_declares_the_whole_replica_accelerator_requirement() -> None:
 
 
 def test_plan_static_npmd_keeps_replicas_distinct_from_ranks() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     roles[0]["replica_count"] = 2
@@ -459,7 +472,7 @@ def test_render_nixl_uses_role_side_channels_and_connector() -> None:
 
 
 def test_plan_vllm_router_makes_the_external_router_public() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["gateway_backend"] = "vllm-router"
     input_payload["pd_router_backend"] = "vllm-router"
@@ -476,7 +489,7 @@ def test_plan_vllm_router_makes_the_external_router_public() -> None:
 
 
 def test_builtin_pd_frontends_declare_prefix_cache_reset() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["gateway_backend"] = "builtin"
     input_payload["pd_router_backend"] = "builtin"
@@ -503,7 +516,7 @@ def test_builtin_pd_frontends_declare_prefix_cache_reset() -> None:
 
 
 def test_builtin_pd_frontend_declares_cache_read_when_both_roles_report_details() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["gateway_backend"] = "builtin"
     input_payload["pd_router_backend"] = "builtin"
@@ -628,7 +641,7 @@ def test_vllm_router_targets_replica_entrypoints_and_defers_startup_timeout() ->
 
 
 def single_plan_payload(parallelism: dict[str, object]) -> dict[str, object]:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     input_payload["topology"] = "single"
     input_payload["gateway_backend"] = None
@@ -701,7 +714,7 @@ def test_decode_context_parallel_size_must_divide_tensor_parallel_size() -> None
 
 
 def test_prefill_role_lowers_context_parallelism_to_prefill_cp() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     roles[0]["parallelism"] = {
@@ -739,7 +752,7 @@ def test_prefill_role_lowers_context_parallelism_to_prefill_cp() -> None:
 
 
 def test_prefill_context_parallelism_excludes_attention_data_parallelism() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     roles[0]["parallelism"] = {
@@ -756,7 +769,7 @@ def test_prefill_context_parallelism_excludes_attention_data_parallelism() -> No
 
 
 def test_rejects_a_declared_expert_tensor_parallel_size_that_misses_the_derived_value() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     roles[0]["parallelism"] = {
@@ -776,7 +789,7 @@ def test_rejects_a_declared_expert_tensor_parallel_size_that_misses_the_derived_
 
 
 def test_prefill_context_parallelism_enters_the_expert_world() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     roles[0]["parallelism"] = {
@@ -808,7 +821,7 @@ def test_prefill_context_parallelism_enters_the_expert_world() -> None:
 
 
 def test_prefill_context_parallelism_rejects_an_expert_size_without_cp() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     roles[0]["parallelism"] = {
@@ -824,7 +837,7 @@ def test_prefill_context_parallelism_rejects_an_expert_size_without_cp() -> None
 
 
 def test_extra_args_rejects_inferlab_owned_context_parallel_options() -> None:
-    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
     roles = cast(list[dict[str, object]], input_payload["roles"])
     cast(dict[str, object], roles[0]["settings"])["extra_args"] = [
@@ -837,3 +850,185 @@ def test_extra_args_rejects_inferlab_owned_context_parallel_options() -> None:
     assert response.root.status == "error"
     assert response.root.error.code == "invalid_settings"
     assert "--decode-context-parallel-size" in response.root.error.message
+
+
+def synthetic_plan_payload(
+    speculative_config: object,
+    synthetic_acceptance: object = None,
+) -> dict[str, object]:
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    if synthetic_acceptance is not None:
+        input_payload["synthetic_acceptance"] = synthetic_acceptance
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    for role in roles:
+        settings = cast(dict[str, object], role["settings"])
+        if speculative_config is not None:
+            settings["extra_args"] = [
+                "--speculative-config",
+                speculative_config
+                if isinstance(speculative_config, str)
+                else json.dumps(speculative_config),
+            ]
+    return payload
+
+
+def synthetic_error(payload: dict[str, object]) -> str:
+    response = handle_request(json.dumps(payload), plan_serve)
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    return response.root.error.message
+
+
+def plan_synthetic(payload: dict[str, object]) -> PlanServeResult:
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    return plan_serve(request.root.input)
+
+
+def patched_speculative_configs(result: PlanServeResult) -> list[dict[str, object]]:
+    configs = []
+    for role in result.roles:
+        extra_args = role.effective_settings["extra_args"].root
+        assert isinstance(extra_args, list)
+        index = extra_args.index(SettingValue(root="--speculative-config"))
+        token = extra_args[index + 1].root
+        assert isinstance(token, str)
+        configs.append(json.loads(token))
+    return configs
+
+
+def test_plan_overlays_the_curve_form_onto_the_operator_speculative_config() -> None:
+    # The shared fixture declares the curve form: model dsv4, thinking_on,
+    # whose text holds draft count 4 -> acceptance length 3.5.
+    payload = synthetic_plan_payload({"method": "mtp", "num_speculative_tokens": 4})
+
+    result = plan_synthetic(payload)
+
+    assert (
+        patched_speculative_configs(result)
+        == [
+            {
+                "method": "mtp",
+                "num_speculative_tokens": 4,
+                "rejection_sample_method": "synthetic",
+                "synthetic_acceptance_length": 3.5,
+            }
+        ]
+        * 2
+    )
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 3.5
+    assert outcome.draft_count == 4
+
+
+def test_plan_overlays_the_explicit_form_without_a_draft_count() -> None:
+    payload = synthetic_plan_payload(
+        {"method": "mtp", "num_speculative_tokens": 3},
+        synthetic_acceptance={"explicit": {"acceptance_length": 2.25}},
+    )
+
+    result = plan_synthetic(payload)
+
+    configs = patched_speculative_configs(result)
+    assert configs[0]["synthetic_acceptance_length"] == 2.25
+    assert configs[0]["rejection_sample_method"] == "synthetic"
+    assert configs[0]["num_speculative_tokens"] == 3
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 2.25
+    assert outcome.draft_count is None
+
+
+def test_plan_patches_the_equals_spelling_of_speculative_config() -> None:
+    payload = synthetic_plan_payload(None)
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    for role in roles:
+        cast(dict[str, object], role["settings"])["extra_args"] = [
+            '--speculative-config={"method":"mtp","num_speculative_tokens":4}'
+        ]
+
+    result = plan_synthetic(payload)
+
+    for role_result in result.roles:
+        extra_args = role_result.effective_settings["extra_args"].root
+        assert isinstance(extra_args, list)
+        token = extra_args[0].root
+        assert isinstance(token, str)
+        assert token.startswith("--speculative-config=")
+        config = json.loads(token.partition("=")[2])
+        assert config["synthetic_acceptance_length"] == 3.5
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.draft_count == 4
+
+
+def test_plan_without_a_speculative_config_cannot_overlay_synthetic_acceptance() -> None:
+    payload = synthetic_plan_payload(None)
+
+    message = synthetic_error(payload)
+
+    assert "--speculative-config" in message
+
+
+def test_plan_rejects_an_unparseable_speculative_config() -> None:
+    payload = synthetic_plan_payload("{not json")
+
+    message = synthetic_error(payload)
+
+    assert "--speculative-config" in message
+
+
+def test_plan_rejects_a_curve_lookup_without_a_determinable_draft_count() -> None:
+    payload = synthetic_plan_payload({"method": "mtp"})
+
+    message = synthetic_error(payload)
+
+    assert "num_speculative_tokens" in message
+
+
+def test_plan_rejects_a_curve_without_the_configured_draft_count_entry() -> None:
+    # The shared fixture curve holds only draft count 4.
+    payload = synthetic_plan_payload({"method": "mtp", "num_speculative_tokens": 3})
+
+    message = synthetic_error(payload)
+
+    assert "draft count 3" in message
+
+
+def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
+    payload = synthetic_plan_payload(None)
+    input_payload = cast(dict[str, object], payload["input"])
+    curve = {
+        "model_key": "dsv4",
+        "thinking_mode": "thinking_on",
+        "text": "dsv4:\n  thinking_on:\n    3: 2.6\n    4: 3.5\n",
+        "sha256": "f" * 64,
+    }
+    input_payload["synthetic_acceptance"] = {"curve": curve}
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    for role, draft_count in zip(roles, [4, 3], strict=True):
+        cast(dict[str, object], role["settings"])["extra_args"] = [
+            "--speculative-config",
+            json.dumps({"method": "mtp", "num_speculative_tokens": draft_count}),
+        ]
+
+    message = synthetic_error(payload)
+
+    assert "different synthetic acceptance outcomes" in message
+
+
+def test_plan_rejects_an_operator_restated_synthetic_rejection_sampling() -> None:
+    payload = synthetic_plan_payload(
+        {
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+            "rejection_sample_method": "synthetic",
+        }
+    )
+
+    message = synthetic_error(payload)
+
+    assert "rejection_sample_method" in message

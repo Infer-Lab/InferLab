@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "8",
+  "protocol_version": "9",
   "result": {
     "operation": "plan_serve",
     "output": {
@@ -212,6 +212,10 @@
         "co_rendering": {
           "process_role": "gateway"
         }
+      },
+      "synthetic_acceptance": {
+        "acceptance_length": 3.5,
+        "draft_count": 4
       }
     }
   }

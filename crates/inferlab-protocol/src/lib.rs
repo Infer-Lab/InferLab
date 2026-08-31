@@ -48,10 +48,11 @@ pub use wire::{
     RenderedServeProcess, ServeModelInput, ServeProcessAllocation, ServeReplicaRequirement,
     ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeRoleResult, ServeTopology,
     ServerMetricsEndpointInput, ServerMetricsEndpointRequirement, SettingValue,
-    SuppliedRenderInput, TargetEndpointScheme,
+    SuppliedRenderInput, SyntheticAcceptanceCurveInput, SyntheticAcceptanceInput,
+    SyntheticAcceptanceOutcome, TargetEndpointScheme,
 };
 
-pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v8";
+pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v9";
 pub const MEASUREMENT_SCHEMA_ID: &str = "https://inferlab.dev/schema/measurement-protocol/v1";
 pub const PROTOCOL_WIRE_SOURCE: &str = "crates/inferlab-protocol/src/wire.rs";
 pub const MEASUREMENT_WIRE_SOURCE: &str =

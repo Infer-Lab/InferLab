@@ -2124,3 +2124,146 @@ fn engine_trace_rejects_a_non_local_placement() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+/// The synthetic acceptance overlay ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]):
+/// a digest-pinned golden curve resolves to its effective acceptance length
+/// with provenance in dry-run evidence, a case declaration replaces the
+/// server declaration wholesale, any Eval bound to the server fails
+/// measurement planning, and a Bench stays plannable.
+#[test]
+fn synthetic_acceptance_curve_evidence_case_replacement_and_eval_exclusion()
+-> Result<(), Box<dyn Error>> {
+    const CURVE_TEXT: &str = "deepseek-v4-flash:\n  - 1: 2.1\n  - 2: 2.8\n  - 4: 3.5\n";
+    const CURVE_SHA256: &str = "358949515add7a31004ce4e942249048a2730196780da5d7cb6b82a830a2e206";
+
+    let workspace = TestWorkspace::new()?;
+    let curve_dir = workspace.root.path().join("curves");
+    fs::create_dir_all(&curve_dir)?;
+    fs::write(curve_dir.join("golden.yaml"), CURVE_TEXT)?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n\
+             [servers.spec-decode]\n\
+             stack = \"vllm\"\n\
+             model = \"deepseek-v4-flash\"\n\
+             topology = \"single\"\n\
+             readiness_timeout_seconds = 900\n\
+             synthetic_acceptance = {{ curve = {{ path = \"curves/golden.yaml\", expected_sha256 = \"{CURVE_SHA256}\", model_key = \"deepseek-v4-flash\" }} }}\n\
+             \n\
+             [servers.spec-decode-cased]\n\
+             stack = \"vllm\"\n\
+             model = \"deepseek-v4-flash\"\n\
+             topology = \"single\"\n\
+             readiness_timeout_seconds = 900\n\
+             default_case = \"short\"\n\
+             synthetic_acceptance = {{ curve = {{ path = \"curves/golden.yaml\", expected_sha256 = \"{CURVE_SHA256}\", model_key = \"deepseek-v4-flash\" }} }}\n\
+             \n\
+             [servers.spec-decode-cased.cases.short]\n\
+             synthetic_acceptance = {{ acceptance_length = 1.5 }}\n\
+             \n\
+             [workload_suites.bench-only]\n\
+             benches = [\"c8k1k\"]\n\
+             \n\
+             [recipes.eval-on-spec]\n\
+             server = \"spec-decode\"\n\
+             workload_suite = \"qualify\"\n\
+             \n\
+             [recipes.bench-on-spec]\n\
+             server = \"spec-decode\"\n\
+             workload_suite = \"bench-only\"\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+
+    // The dry-run carries the declared curve provenance and the resolved
+    // effective acceptance length.
+    let serve = workspace.run_json(&["serve", "start", "spec-decode", "--dry-run"])?;
+    let synthetic = &serve["server"]["synthetic_acceptance"];
+    assert_eq!(synthetic["acceptance_length"], 3.5);
+    assert_eq!(synthetic["declared"]["curve"]["path"], "curves/golden.yaml");
+    assert_eq!(
+        synthetic["declared"]["curve"]["expected_sha256"],
+        CURVE_SHA256
+    );
+    assert_eq!(
+        synthetic["declared"]["curve"]["model_key"],
+        "deepseek-v4-flash"
+    );
+    // The effective acceptance length and the determined draft count come
+    // from the accepted plan response ([[ADR-0043]]); the declaration carries
+    // no draft-count coordinate.
+    assert_eq!(synthetic["draft_count"], 4);
+    assert!(
+        synthetic["declared"]["curve"]
+            .get("num_speculative_tokens")
+            .is_none(),
+        "the declaration carries no draft count: {synthetic}"
+    );
+    assert!(
+        synthetic.get("thinking_mode").is_none(),
+        "a flat curve entry has no thinking mode: {synthetic}"
+    );
+
+    // A case-level declaration replaces the server-level declaration
+    // wholesale: the explicit form resolves and no curve member survives.
+    let cased = workspace.run_json(&["serve", "start", "spec-decode-cased", "--dry-run"])?;
+    let synthetic = &cased["server"]["synthetic_acceptance"];
+    assert_eq!(synthetic["acceptance_length"], 1.5);
+    assert_eq!(synthetic["declared"]["acceptance_length"], 1.5);
+    assert!(
+        synthetic["declared"].get("curve").is_none(),
+        "the case declaration replaces the server curve wholesale: {synthetic}"
+    );
+    assert!(
+        synthetic.get("draft_count").is_none(),
+        "the explicit form determines no draft count: {synthetic}"
+    );
+
+    // An Eval bound to the synthetic-acceptance server fails measurement
+    // planning, naming the reason.
+    let output = workspace.run(&["recipe", "run", "eval-on-spec", "--dry-run"])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("synthetic acceptance")
+            && stderr.contains("draft-model verification")
+            && stderr.contains("\"smoke\""),
+        "the eval exclusion names the eval and the reason: {stderr}"
+    );
+
+    // A Bench bound to the same server stays plannable.
+    let bench = workspace.run_json(&["recipe", "run", "bench-on-spec", "--dry-run"])?;
+    assert_eq!(bench["workflow"], "recipe-run");
+    assert_eq!(
+        bench["server"]["synthetic_acceptance"]["acceptance_length"],
+        3.5
+    );
+    assert_eq!(bench["measurements"]["benches"][0]["id"], "c8k1k");
+
+    // Invocation overrides cannot patch the overlay: the server override
+    // patch type rejects unknown fields, so `synthetic_acceptance` is
+    // workspace-authored only.
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "spec-decode",
+        "--dry-run",
+        "--set",
+        "server.synthetic_acceptance={ acceptance_length = 2.0 }",
+    ])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown field `synthetic_acceptance`"),
+        "the override rejection names the field: {stderr}"
+    );
+
+    // Positive control: evals against a server without synthetic acceptance
+    // plan fine.
+    let control = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    assert_eq!(control["measurements"]["evals"][0]["id"], "smoke");
+    assert!(control["server"].get("synthetic_acceptance").is_none());
+    Ok(())
+}

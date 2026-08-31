@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-08-30
+
+### Added
+
+- Server definitions and cases accept a `synthetic_acceptance` declaration —
+  an explicit `acceptance_length`, or a digest-pinned workspace-relative
+  golden acceptance-length `curve` keyed by model key and thinking mode
+  ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]). InferLab overlays the resolved
+  length onto the operator's own framework speculative configuration without
+  modeling the speculative method, draft model, or draft count: the vLLM,
+  SGLang, and TensorRT-LLM integrations resolve golden curves against the
+  draft count in the operator's configuration and inject their framework
+  spellings (including the TensorRT-LLM off-by-one adjustment), failing
+  planning with a typed error when no speculative configuration exists to
+  overlay, while TokenSpeed and Specialized Engine reject the declaration.
+  The resolved length and curve provenance are preserved in dry-run and serve
+  record evidence, and an Eval bound to a synthetic-acceptance server fails at
+  measurement planning because synthetic acceptance bypasses real draft-model
+  verification.
+- `inferlab --version` now states the adapter protocol version the control
+  plane speaks, and the backend support matrix documents the correspondence
+  between the product line, the adapter protocol version, and the adapter SDK
+  and framework integration package versions ([[RFC-0006:C-INTEGRATIONS]]).
+
+### Changed
+
+- The adapter protocol hard-cuts to version 9 ([[RFC-0006:C-INTEGRATIONS]]),
+  which carries the synthetic acceptance declaration in `plan_serve` and
+  `render_serve` requests and returns the effective acceptance length in the
+  plan response. Protocol version 8 payloads are rejected rather
+  than partially interpreted; workspace adapter pins must move to adapter SDK
+  `0.9.0` and version `0.8.0` of the framework integrations.
+- The release-qualified AgentX replay profile now matches the pinned
+  InferenceX upstream parameters ([[RFC-0004:C-BENCH-AGENTIC-TRACE-REPLAY]]):
+  a 300-second per-trace idle-gap cap and a count-bounded cache-pressure
+  warmup of ten requests per lane replace the previous duration-mode warmup,
+  and cache-pressure warmup request failures are preserved as evidence rather
+  than failing the case on their own — acceptance rests on the native
+  submission validity and failure threshold.
+
+### Fixed
+
+- Serve records carrying agentic data-asset sources (every recipe-driven
+  AgentX serve) decode correctly again, so `serve status`, `serve stop`, and
+  recipe cleanup work on such records.
+
 ## [0.13.1] - 2026-08-23
 
 ### Fixed

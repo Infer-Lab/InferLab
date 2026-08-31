@@ -380,6 +380,109 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// A real serve record persists the resolved synthetic-acceptance evidence
+/// under server record schema version 8
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]], [[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn start_persists_synthetic_acceptance_in_the_schema_8_record() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n\
+             [servers.spec-decode]\n\
+             stack = \"vllm\"\n\
+             model = \"deepseek-v4-flash\"\n\
+             topology = \"single\"\n\
+             readiness_timeout_seconds = 900\n\
+             synthetic_acceptance = {{ acceptance_length = 2.5 }}\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+
+    let started = workspace.run_json(&["serve", "start", "spec-decode"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+    let synthetic = &started["resolved"]["server"]["synthetic_acceptance"];
+    assert_eq!(synthetic["acceptance_length"], 2.5);
+    assert_eq!(synthetic["declared"]["acceptance_length"], 2.5);
+
+    // The record on disk is the schema-8 shape carrying the same evidence.
+    let persisted: Value = serde_json::from_slice(&fs::read(
+        workspace
+            .root
+            .path()
+            .join(format!(".inferlab/records/{id}/record.json")),
+    )?)?;
+    assert_eq!(persisted["schema_version"], 8);
+    assert_eq!(
+        persisted["resolved"]["server"]["synthetic_acceptance"]["acceptance_length"],
+        2.5
+    );
+
+    workspace.run_json(&["serve", "stop", id])?;
+    Ok(())
+}
+
+/// The curve form end to end: a digest-pinned golden curve crosses to the
+/// integration, and the schema-8 record carries the declared provenance, the
+/// plan-returned acceptance length, and the determined draft count
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]], [[ADR-0043]]).
+#[test]
+fn start_persists_curve_form_synthetic_acceptance_evidence() -> Result<(), Box<dyn Error>> {
+    const CURVE_TEXT: &str = "deepseek-v4-flash:\n  thinking_on:\n    4: 3.5\n";
+    const CURVE_SHA256: &str = "9e4d937d9413e38c5eabe2d50e87aab2aa0d516d37fe92183468909b1e1a066b";
+
+    let workspace = TestWorkspace::new()?;
+    let curve_dir = workspace.root.path().join("curves");
+    fs::create_dir_all(&curve_dir)?;
+    fs::write(curve_dir.join("golden.yaml"), CURVE_TEXT)?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n\
+             [servers.spec-decode]\n\
+             stack = \"vllm\"\n\
+             model = \"deepseek-v4-flash\"\n\
+             topology = \"single\"\n\
+             readiness_timeout_seconds = 900\n\
+             synthetic_acceptance = {{ curve = {{ path = \"curves/golden.yaml\", expected_sha256 = \"{CURVE_SHA256}\", model_key = \"deepseek-v4-flash\" }} }}\n",
+            fs::read_to_string(&manifest)?,
+        ),
+    )?;
+
+    let started = workspace.run_json(&["serve", "start", "spec-decode"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+
+    // The record on disk carries the full curve-form evidence.
+    let persisted: Value = serde_json::from_slice(&fs::read(
+        workspace
+            .root
+            .path()
+            .join(format!(".inferlab/records/{id}/record.json")),
+    )?)?;
+    assert_eq!(persisted["schema_version"], 8);
+    let synthetic = &persisted["resolved"]["server"]["synthetic_acceptance"];
+    let declared = &synthetic["declared"]["curve"];
+    assert_eq!(declared["path"], "curves/golden.yaml");
+    assert_eq!(declared["expected_sha256"], CURVE_SHA256);
+    assert_eq!(declared["model_key"], "deepseek-v4-flash");
+    assert!(
+        declared.get("thinking_mode").is_none(),
+        "the declaration omitted the mode: {declared}"
+    );
+    assert_eq!(
+        synthetic["thinking_mode"], "thinking_on",
+        "omission resolved to the matrix default: {synthetic}"
+    );
+    assert_eq!(synthetic["acceptance_length"], 3.5);
+    assert_eq!(synthetic["draft_count"], 4);
+
+    workspace.run_json(&["serve", "stop", id])?;
+    Ok(())
+}
+
 #[test]
 fn start_materializes_launch_files_and_preserves_them_in_the_record() -> Result<(), Box<dyn Error>>
 {
@@ -1254,6 +1357,16 @@ if operation == "plan_serve":
         }],
         "links": [],
     }
+    synthetic = input.get("synthetic_acceptance")
+    if synthetic:
+        # Echo a deterministic valid outcome: the declared length for the
+        # explicit form, a fixed resolved pair for the curve form.
+        if "explicit" in synthetic:
+            output["synthetic_acceptance"] = {
+                "acceptance_length": synthetic["explicit"]["acceptance_length"],
+            }
+        else:
+            output["synthetic_acceptance"] = {"acceptance_length": 3.5, "draft_count": 4}
 elif operation == "render_serve":
     allocations = input["allocations"]
     settings = allocations[0]["effective_settings"]
@@ -1310,7 +1423,7 @@ else:
     raise ValueError(operation)
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "8",
+    "protocol_version": "9",
     "result": {"operation": operation, "output": output}
 }))
 "#;

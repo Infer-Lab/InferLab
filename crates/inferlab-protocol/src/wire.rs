@@ -16,13 +16,28 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `8` (serialized as the
-/// string `"8"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `9` (serialized as the
+/// string `"9"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 8.
-    #[serde(rename = "8")]
-    V8,
+    /// Protocol version 9.
+    #[serde(rename = "9")]
+    V9,
+}
+
+impl ProtocolVersion {
+    /// The current adapter protocol version.
+    pub const CURRENT: Self = Self::V9;
+
+    /// The protocol version as spelled on the wire, projected for surfaces
+    /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
+    /// Kept exhaustive so a future variant forces this projection to follow.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V9 => "9",
+        }
+    }
 }
 
 /// A framework-specific server setting value carried as structured JSON data
@@ -58,6 +73,57 @@ pub enum CaptureMechanism {
     /// The serving framework's internal profiler writes per-rank trace
     /// artifacts under InferLab-directed storage.
     EngineTrace,
+}
+
+/// The synthetic acceptance declaration carried to the selected integration
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]): exactly one of the explicit
+/// acceptance length or the digest-verified golden curve with its lookup
+/// coordinates. The draft count is not declared; the integration determines
+/// it from the operator's speculative configuration ([[ADR-0043]]).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SyntheticAcceptanceInput {
+    /// The explicit form: the declared acceptance length, overlaid as-is.
+    Explicit {
+        /// The declared mean acceptance length.
+        acceptance_length: f64,
+    },
+    /// The curve form: the digest-verified golden curve text with its digest
+    /// and lookup coordinates; the integration resolves the effective
+    /// acceptance length from it.
+    Curve(SyntheticAcceptanceCurveInput),
+}
+
+/// The curve form's wire payload ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyntheticAcceptanceCurveInput {
+    pub model_key: String,
+    /// The effective thinking mode: the declared mode, or `thinking_on` when
+    /// the declaration omits it and the model entry uses the thinking-mode
+    /// shape. Absent when the model entry is a flat list (no mode applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<String>,
+    /// The complete digest-verified curve file text.
+    pub text: String,
+    /// The SHA-256 digest of the curve file bytes, verified by the control
+    /// plane against the declaration.
+    pub sha256: String,
+}
+
+/// The integration's resolved synthetic acceptance outcome, returned in the
+/// `plan_serve` response whenever the request carried the declaration
+/// ([[RFC-0006:C-INTEGRATIONS]]).
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyntheticAcceptanceOutcome {
+    /// The effective acceptance length the integration resolved and overlaid.
+    pub acceptance_length: f64,
+    /// The draft count the integration determined from the operator's
+    /// speculative configuration; present for the curve form, absent for the
+    /// explicit form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_count: Option<u32>,
 }
 
 /// A concrete host/port endpoint the control plane allocated for a process.
@@ -137,6 +203,10 @@ pub struct PlanServeInput {
     /// means no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiling: Option<CaptureMechanism>,
+    /// The synthetic acceptance declaration when the serve declaration
+    /// carries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_acceptance: Option<SyntheticAcceptanceInput>,
 }
 
 /// The planned topology plus the control plane's concrete allocations that a
@@ -157,6 +227,10 @@ pub struct RenderServeInput {
     /// means no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiling: Option<CaptureMechanism>,
+    /// The synthetic acceptance declaration when the serve declaration
+    /// carries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_acceptance: Option<SyntheticAcceptanceInput>,
 }
 
 /// The one JSON response an integration writes to stdout, tagged by outcome.
@@ -437,6 +511,11 @@ pub struct ServeRoleResult {
 #[serde(deny_unknown_fields)]
 pub struct PlanServeResult {
     pub integration: IntegrationIdentity,
+    /// The resolved synthetic acceptance outcome; required in the accepted
+    /// plan whenever the request carried the declaration, and forbidden
+    /// otherwise ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_acceptance: Option<SyntheticAcceptanceOutcome>,
     pub roles: Vec<ServeRoleResult>,
     pub replicas: Vec<ServeReplicaRequirement>,
     pub links: Vec<ServeRoleLink>,
@@ -751,7 +830,7 @@ pub enum RenderSource {
     Integration,
 }
 
-/// The one canonical process role available to a protocol-v8 frontend.
+/// The one canonical process role available to a protocol-v9 frontend.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrontendProcessRole {
@@ -791,7 +870,7 @@ pub struct GatewayPdRouterFrontendBinding(
     pub (FrontendGatewayComponent, FrontendPdRouterComponent),
 );
 
-/// The only two frontend bindings protocol v8 accepts. Tuple representation
+/// The only two frontend bindings protocol v9 accepts. Tuple representation
 /// deliberately serializes as the closed ordered arrays `["gateway"]` and
 /// `["gateway", "pd_router"]` rather than as an open component list.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1490,7 +1569,8 @@ pub struct BenchAgenticCatalogInput {
     pub trajectory_start_min: f64,
     pub trajectory_start_max: f64,
     pub global_idle_gap_cap_seconds: f64,
-    pub cache_warmup_seconds: u64,
+    pub trace_idle_gap_cap_seconds: f64,
+    pub cache_warmup_requests_per_lane: u64,
     pub warmup_grace_seconds: u64,
     pub dataset_configuration_timeout_seconds: u64,
     pub service_profile_configuration_timeout_seconds: u64,
@@ -1802,8 +1882,10 @@ pub struct BenchAgenticRunEvidence {
     pub submission_invalid_reasons: Vec<String>,
     pub warmup_records: u64,
     pub warmup_error_records: u64,
+    /// Whether the native run crossed the warmup phase and entered profiling
+    /// (`profiling_records > 0`); snapshot-warmup failure aborts natively
+    /// before profiling and therefore surfaces as an invalid submission.
     pub warmup_succeeded: bool,
-    pub profiling_began_after_warmup_and_drain: bool,
     pub profiling_records: u64,
     pub distinct_runtime_conversations: u64,
     pub distinct_transport_requests: u64,

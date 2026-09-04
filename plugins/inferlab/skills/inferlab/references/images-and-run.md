@@ -54,7 +54,11 @@ inferlab run --external-image official --mount /data -- python3 /data/probe.py
 With multiple stacks, `--stack` is required. Container probes receive no host
 mount or device implicitly. `--mount /absolute/path` is same-path read-only;
 append `:rw` for write access. `--devices 0,1` exposes only those host device
-indexes. Use `run` for diagnostics, not evidence; qualification requires a
+indexes. Local probes execute with `CUDA_VISIBLE_DEVICES` set from the
+workspace's default placement when every machine it references launches
+locally — an explicit `CUDA_VISIBLE_DEVICES` in the environment wins, so
+ad-hoc GPU work lands on the workspace's own devices without extra flags.
+Use `run` for diagnostics, not evidence; qualification requires a
 managed recorded workflow.
 
 Never execute a binary directly through `.pixi/envs/<env>/bin/`. That bypasses

@@ -278,6 +278,32 @@ fn canonicalize_root(root: PathBuf) -> Result<PathBuf, InferlabError> {
     fs::canonicalize(&root).map_err(|source| InferlabError::Read { path: root, source })
 }
 
+/// Best-effort read of the machine-private local bindings for callers whose
+/// operation must not depend on them: absent, unreadable, or invalid bindings
+/// yield `None` instead of an error ([[RFC-0002:C-ADHOC-EXECUTION]]). A file
+/// that exists but fails to load or validate warns on stderr, so a broken
+/// binding never silently disables the ad-hoc device projection.
+pub(crate) fn soft_local_bindings(root: &Path) -> Option<LocalBindings> {
+    let path = root.join(DEFAULT_LOCAL_FILE);
+    if !path.exists() {
+        return None;
+    }
+    let loaded = load_toml(&path).and_then(|bindings: LocalBindings| {
+        validate_local_bindings(&bindings)?;
+        Ok(bindings)
+    });
+    match loaded {
+        Ok(bindings) => Some(bindings),
+        Err(error) => {
+            eprintln!(
+                "warning: ignoring local bindings at {}: {error}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 fn load_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, InferlabError> {
     let content = fs::read_to_string(path).map_err(|source| InferlabError::Read {
         path: path.to_path_buf(),

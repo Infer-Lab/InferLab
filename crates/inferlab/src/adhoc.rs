@@ -28,26 +28,51 @@ pub(crate) fn execute(
     // Mount requests parse before any selection I/O: a rejected request
     // should never cost a record read or a docker probe.
     let mounts = parse_mounts(request.mounts)?;
-    let argv = if let Some(record_id) = request.image {
+    let (argv, project_devices) = if let Some(record_id) = request.image {
         let image_id = crate::image::launch::select_for_adhoc(root, record_id)?;
-        container_argv(&image_id, &mounts, request.devices, request.command, false)
+        (
+            container_argv(&image_id, &mounts, request.devices, request.command, false),
+            false,
+        )
     } else if let Some(external_id) = request.external_image {
         let reference = crate::image::launch::select_external_for_adhoc(config, external_id)?;
-        container_argv(&reference, &mounts, request.devices, request.command, true)
+        (
+            container_argv(&reference, &mounts, request.devices, request.command, true),
+            false,
+        )
     } else {
-        local_argv(root, config, request.stack, request.command)?
+        (
+            local_argv(root, config, request.stack, request.command)?,
+            true,
+        )
     };
     // Ctrl-C must reach the foreground command, not kill the wrapper: the
     // installed handler keeps this process alive to report the command's
     // real exit status.
     inferlab_runtime::interrupt::prepare()
         .map_err(|source| InferlabError::AdHocInterrupt { source })?;
-    let status = Command::new(&argv[0])
-        .args(&argv[1..])
-        .status()
-        .map_err(|source| InferlabError::AdHocRun {
-            message: format!("failed to launch {:?}: {source}", argv[0]),
-        })?;
+    let mut process = Command::new(&argv[0]);
+    process.args(&argv[1..]);
+    // Project the workspace default placement's device set into local
+    // execution ([[RFC-0002:C-ADHOC-EXECUTION]]); an operator-provided
+    // CUDA_VISIBLE_DEVICES always wins.
+    if project_devices
+        && std::env::var_os("CUDA_VISIBLE_DEVICES").is_none()
+        && let Some(devices) = crate::workspace::soft_local_bindings(root)
+            .and_then(|local| local.default_local_devices())
+    {
+        process.env(
+            "CUDA_VISIBLE_DEVICES",
+            devices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    let status = process.status().map_err(|source| InferlabError::AdHocRun {
+        message: format!("failed to launch {:?}: {source}", argv[0]),
+    })?;
     Ok(exit_code(status))
 }
 

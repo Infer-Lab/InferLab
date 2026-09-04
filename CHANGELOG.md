@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-03
+
+### Added
+
+- `inferlab run` local execution now projects the workspace default
+  placement's device set as `CUDA_VISIBLE_DEVICES` when every machine the
+  placement references launches locally, so ad-hoc GPU work (kernel
+  benchmarks and similar probes) lands on the workspace's own devices
+  ([[RFC-0002:C-ADHOC-EXECUTION]]). An explicit `CUDA_VISIBLE_DEVICES` in the
+  operator environment wins; a remote or device-less default placement
+  projects nothing, and broken local bindings that would silently disable
+  the projection now raise a warning.
+
+### Changed
+
+- The bundled agent skill no longer restates product, protocol, or package
+  versions; agent-facing documentation points at the authority surfaces
+  (`inferlab --version`, the backend support matrix correspondence table,
+  and this changelog) for current values ([[ADR-0045]]).
+
 ## [0.13.2] - 2026-08-30
 
 ### Added

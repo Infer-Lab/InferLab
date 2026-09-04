@@ -274,6 +274,46 @@ pub(crate) enum LaunchBinding {
     },
 }
 
+impl LocalBindings {
+    /// The device set the default placement assigns to local work, projected
+    /// by ad-hoc local execution ([[RFC-0002:C-ADHOC-EXECUTION]]): rank-level
+    /// devices plus the full inventories of machines referenced by the
+    /// placement or role machine pools. Returns `None` when there is no
+    /// default placement, a referenced machine is missing or launches over
+    /// SSH, or the resolved set is empty.
+    pub(crate) fn default_local_devices(&self) -> Option<Vec<u32>> {
+        let placement = self.placements.get(self.default_placement.as_ref()?)?;
+        let mut pool_machines: Vec<&str> = placement.machines.iter().map(String::as_str).collect();
+        let mut devices: Vec<u32> = Vec::new();
+        for role in placement.roles.values() {
+            if let Some(pool) = role.machines() {
+                pool_machines.extend(pool.iter().map(String::as_str));
+            }
+            if let Some(replicas) = role.replica_count() {
+                for replica in 0..replicas {
+                    for rank in role.ranks_for_replica(replica).unwrap_or(&[]) {
+                        devices.extend(rank.devices.iter().copied());
+                        let machine = self.machines.get(&rank.machine)?;
+                        if !matches!(machine.launch, LaunchBinding::Local) {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        for id in pool_machines {
+            let machine = self.machines.get(id)?;
+            if !matches!(machine.launch, LaunchBinding::Local) {
+                return None;
+            }
+            devices.extend(machine.devices.iter().copied());
+        }
+        devices.sort_unstable();
+        devices.dedup();
+        (!devices.is_empty()).then_some(devices)
+    }
+}
+
 pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), InferlabError> {
     if let Some(default_placement) = &local.default_placement {
         require_nonempty("default placement", "local bindings", default_placement)?;

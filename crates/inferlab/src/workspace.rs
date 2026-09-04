@@ -16,7 +16,7 @@ pub(crate) use catalog_validation::{validate_bench, validate_eval, validate_eval
 pub(crate) use composition::{
     discover_workspace, load_workspace, load_workspace_config, workspace_summary,
 };
-pub(crate) use composition::{snapshot_workspace, workspace_identity};
+pub(crate) use composition::{snapshot_workspace, soft_local_bindings, workspace_identity};
 #[cfg(test)]
 pub(crate) use definitions::BenchRandomShape;
 pub(crate) use definitions::{

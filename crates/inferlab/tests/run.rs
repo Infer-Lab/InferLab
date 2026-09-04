@@ -131,7 +131,10 @@ exit 2
             .current_dir(self.root.path())
             .env("PATH", path)
             .env("FAKE_PIXI_LOG", &self.pixi_log)
-            .env("FAKE_DOCKER_LOG", &self.docker_log);
+            .env("FAKE_DOCKER_LOG", &self.docker_log)
+            // Deterministic device projection: the operator environment must
+            // not leak a device selection into the fixtures.
+            .env_remove("CUDA_VISIBLE_DEVICES");
         for (name, value) in envs {
             command.env(name, value);
         }
@@ -445,5 +448,142 @@ fn external_image_run_overrides_the_entrypoint_after_a_presence_probe() -> Resul
 
     let output = workspace.run(&["--external-image", "unknown", "--", "true"])?;
     assert_eq!(output.status.code(), Some(1));
+    Ok(())
+}
+
+fn write_local_bindings(root: &Path, local_toml: &str) -> Result<(), Box<dyn Error>> {
+    fs::write(root.join(".inferlab/local.toml"), local_toml)?;
+    Ok(())
+}
+
+const DEVICE_ECHO: &[&str] = &["sh", "-c", "echo \"CVD=${CUDA_VISIBLE_DEVICES-unset}\""];
+
+#[test]
+fn local_run_projects_the_default_placement_devices() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    write_local_bindings(
+        workspace.root.path(),
+        "default_placement = \"local\"\n\n\
+         [machines.local]\nhost = \"127.0.0.1\"\ndevices = [4, 5]\nports = [8100]\n\n\
+         [placements.local]\nmachines = [\"local\"]\n",
+    )?;
+
+    let output = workspace.run(
+        &["--"]
+            .iter()
+            .chain(DEVICE_ECHO)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("CVD=4,5"),
+        "the default placement device set must reach the command: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn operator_device_selection_wins_over_the_placement_projection() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    write_local_bindings(
+        workspace.root.path(),
+        "default_placement = \"local\"\n\n\
+         [machines.local]\nhost = \"127.0.0.1\"\ndevices = [4, 5]\nports = [8100]\n\n\
+         [placements.local]\nmachines = [\"local\"]\n",
+    )?;
+
+    let output = workspace.run_with_env(
+        &[("CUDA_VISIBLE_DEVICES", "7")],
+        &["--"]
+            .iter()
+            .chain(DEVICE_ECHO)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("CVD=7"),
+        "the operator's explicit selection must win: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn remote_or_deviceless_default_placement_projects_nothing() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    write_local_bindings(
+        workspace.root.path(),
+        "default_placement = \"remote\"\n\n\
+         [machines.remote]\nhost = \"192.0.2.10\"\ndevices = [0, 1]\nports = [8100]\n\
+         workspace = \"/tmp\"\n\
+         [machines.remote.launch]\nkind = \"ssh\"\ntarget = \"192.0.2.10\"\n\n\
+         [placements.remote]\nmachines = [\"remote\"]\n",
+    )?;
+
+    let output = workspace.run(
+        &["--"]
+            .iter()
+            .chain(DEVICE_ECHO)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("CVD=unset"),
+        "a remote default placement must not project devices: {stdout}"
+    );
+
+    write_local_bindings(
+        workspace.root.path(),
+        "default_placement = \"local\"\n\n\
+         [machines.local]\nhost = \"127.0.0.1\"\ndevices = []\nports = [8100]\n\n\
+         [placements.local]\nmachines = [\"local\"]\n",
+    )?;
+    let output = workspace.run(
+        &["--"]
+            .iter()
+            .chain(DEVICE_ECHO)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("CVD=unset"),
+        "a device-less default placement must not project: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rank_shaped_default_placement_projects_rank_devices() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    write_local_bindings(
+        workspace.root.path(),
+        "default_placement = \"local\"\n\n\
+         [machines.local]\nhost = \"127.0.0.1\"\ndevices = [0, 1, 2, 3]\nports = [8100]\n\n\
+         [placements.local.roles.serve]\nmachine = \"local\"\ndevices = [2, 3]\n",
+    )?;
+
+    let output = workspace.run(
+        &["--"]
+            .iter()
+            .chain(DEVICE_ECHO)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("CVD=2,3"),
+        "a rank-shaped placement projects its rank devices, not the machine inventory: {stdout}"
+    );
     Ok(())
 }

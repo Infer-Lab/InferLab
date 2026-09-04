@@ -397,44 +397,37 @@ Dry-run then resolves local placement, effective settings, endpoints, device
 assignments, commands, environment, and override provenance without launching
 or writing an execution record.
 
-## Upgrading to the protocol-v9 line
+## Upgrading across an adapter protocol hard cut
 
-The next release after 0.13.1 hard-cuts the adapter protocol to version 9:
-protocol version 8 input or output is rejected rather than partially
-interpreted, and server records written before this line fail through the
-schema-version gate (server record schema version 8). Existing workspaces must
-update their exact package pins to `inferlab-adapter-sdk==0.9.0` and version
-`0.8.0` of the selected vLLM, SGLang, TensorRT-LLM, TokenSpeed, or Specialized
-Engine integration. Update the SDK and selected integration together, then run
-`inferlab workspace lock` so the committed Pixi lock becomes the new workspace
-authority.
+A release may hard-cut the adapter protocol: input or output from the previous
+protocol line is rejected rather than partially interpreted, and records
+written before the cut fail through the record schema-version gate instead of
+loading. A protocol mismatch at runtime names both versions and the remedy.
 
-## Upgrading to 0.12
-
-InferLab 0.12 hard-cuts the adapter protocol to version 8: protocol version 7
-input or output is rejected rather than partially interpreted, and server and
-recipe records written before protocol version 8 fail through the
-schema-version gate instead of loading. Existing workspaces must update their
-exact package pins to `inferlab-adapter-sdk==0.8.0` and version `0.7.0` of the
-selected vLLM, SGLang, TensorRT-LLM, or TokenSpeed integration. A Specialized
-Engine workspace uses `inferlab-integration-specialized-engine==0.4.0`.
-Update the SDK and selected integration together, then run
-`inferlab workspace lock` so the committed Pixi lock becomes the new workspace
-authority. The product-owned `inferlab-measurement-sdk` remains internal to
-the installed measurement toolchain and must not be added to a serving
-workspace.
+To move a workspace across a hard cut, first learn the current correspondence
+from the authority surfaces: `inferlab --version` states the adapter protocol
+line the installed binary speaks, and the backend support matrix's front
+matter maps the product line to the exact adapter SDK and framework
+integration package versions. Then update the adapter SDK and the selected
+framework integration pins together to those versions — never one without the
+other — and run `inferlab workspace lock` so the committed Pixi lock becomes
+the new workspace authority.
 
 The release-owned measurement toolchain (lm-eval runner and AIPerf Bench
-runner `0.12.0`) is pinned by the product, not by the workspace. Re-run the
-installer after upgrading so the installed runtime matches the new release:
+runner) is pinned by the product, not by the workspace. Re-run the installer
+after upgrading so the installed runtime matches the new release:
 
 ```sh
 inferlab toolchain install
 ```
 
-Workspaces upgrading from 0.5 or earlier must replace the former
-`routing_backend` field because the current control plane does not interpret
-protocol-version-6 requests or responses.
+The product-owned measurement SDK remains internal to the installed
+measurement toolchain and must not be added to a serving workspace. Migration
+history for each release lives in the changelog.
+
+Workspaces upgrading from an older release that still declared the former
+`routing_backend` field must replace it; the current control plane no longer
+interprets it.
 A direct `single` server declares neither frontend backend; a routed `single`
 declares `gateway_backend`; and a `prefill_decode` server declares both
 `gateway_backend` and `pd_router_backend`. The control plane rejects the old

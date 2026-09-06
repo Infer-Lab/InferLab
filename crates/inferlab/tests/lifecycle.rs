@@ -377,6 +377,100 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     assert_eq!(evidence["cleanup"][0]["verified"], true);
     assert_eq!(evidence["cleanup"][0]["signals"][0]["signal"], "term");
     assert!(evidence["cleanup"][0]["signals"][0]["process_group"].is_u64());
+    // The verified cleanup probed the rank's assigned devices on their launch
+    // machine and found no surviving compute memory ([[RFC-0005:C-EVIDENCE]]).
+    let expected_residuals: Vec<Value> = rank
+        .devices
+        .iter()
+        .map(|device| serde_json::json!({"outcome": "freed", "machine": "local", "device": device}))
+        .collect();
+    assert_eq!(
+        evidence["cleanup"][0]["device_residuals"],
+        serde_json::json!(expected_residuals)
+    );
+    Ok(())
+}
+
+/// A stopped server whose assigned device still shows compute memory reports
+/// unverified cleanup naming the device ([[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn stop_reports_unverified_cleanup_when_a_device_still_holds_memory() -> Result<(), Box<dyn Error>>
+{
+    let workspace = TestWorkspace::new()?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+    let bytes = 1024_u64 * 1_048_576;
+
+    let mut command = workspace.command(&["serve", "stop", id]);
+    command.env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", "1024");
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a stop whose device still holds memory must fail: {stderr}"
+    );
+    assert!(stderr.contains("device 0"), "{stderr}");
+    assert!(stderr.contains("\"local\""), "{stderr}");
+
+    let record: Value = serde_json::from_slice(&fs::read(
+        workspace
+            .root
+            .path()
+            .join(format!(".inferlab/records/{id}/record.json")),
+    )?)?;
+    assert_eq!(record["status"], "failed");
+    let cleanup = &process_evidence(&record, "server")?["cleanup"][0];
+    assert_eq!(cleanup["verified"], false);
+    assert!(
+        cleanup["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("device 0") && error.contains("\"local\"")),
+        "{cleanup}"
+    );
+    assert_eq!(
+        cleanup["device_residuals"],
+        serde_json::json!([
+            {"outcome": "residual_held", "machine": "local", "device": 0, "bytes": bytes},
+            {"outcome": "residual_held", "machine": "local", "device": 1, "bytes": bytes},
+        ])
+    );
+    Ok(())
+}
+
+/// A machine without the probe tool records probe-unavailable evidence; it
+/// must not fail or unverify the cleanup ([[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn stop_records_probe_unavailable_without_failing_cleanup() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+
+    let mut command = workspace.command(&["serve", "stop", id]);
+    command.env("FIXTURE_NVIDIA_SMI_ERROR", "fixture probe boom");
+    let output = command.output()?;
+    assert!(
+        output.status.success(),
+        "probe-unavailable must not fail the stop: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stopped: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(stopped["status"], "stopped");
+    let cleanup = &process_evidence(&stopped, "server")?["cleanup"][0];
+    assert_eq!(cleanup["verified"], true);
+    let residuals = cleanup["device_residuals"]
+        .as_array()
+        .ok_or("device residual evidence")?;
+    assert_eq!(residuals.len(), 2);
+    assert!(
+        residuals.iter().all(|entry| {
+            entry["outcome"] == "probe_unavailable"
+                && entry["machine"] == "local"
+                && entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("fixture probe boom"))
+        }),
+        "{residuals:?}"
+    );
     Ok(())
 }
 
@@ -414,7 +508,7 @@ fn start_persists_synthetic_acceptance_in_the_record() -> Result<(), Box<dyn Err
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 10);
+    assert_eq!(persisted["schema_version"], 11);
     assert_eq!(
         persisted["resolved"]["server"]["synthetic_acceptance"]["acceptance_length"],
         2.5
@@ -462,7 +556,7 @@ fn start_persists_curve_form_synthetic_acceptance_evidence() -> Result<(), Box<d
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 10);
+    assert_eq!(persisted["schema_version"], 11);
     let synthetic = &persisted["resolved"]["server"]["synthetic_acceptance"];
     let declared = &synthetic["declared"]["curve"];
     assert_eq!(declared["path"], "curves/golden.yaml");
@@ -942,6 +1036,16 @@ fn ordered_two_node_ssh_lifecycle_preserves_logs_and_reverse_cleanup() -> Result
         assert_eq!(process["cleanup"][0]["verified"], true);
         assert_eq!(process["log_sync_error"], Value::Null);
     }
+    // The stop probed each rank's assigned device through its machine's SSH
+    // launch path and recorded the freed outcome ([[RFC-0005:C-EVIDENCE]]).
+    assert_eq!(
+        stopped["process_evidence"]["server-rank-000"]["cleanup"][0]["device_residuals"],
+        serde_json::json!([{"outcome": "freed", "machine": "node-a", "device": 0}])
+    );
+    assert_eq!(
+        stopped["process_evidence"]["server-rank-001"]["cleanup"][0]["device_residuals"],
+        serde_json::json!([{"outcome": "freed", "machine": "node-b", "device": 1}])
+    );
     let next = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(next["workspace"]["dirty"], false);
     write_executable(
@@ -966,6 +1070,11 @@ fn ordered_two_node_ssh_lifecycle_preserves_logs_and_reverse_cleanup() -> Result
         .collect::<Vec<_>>();
     assert_eq!(launches, ["node-a launch", "node-b launch"]);
     assert_eq!(cleanups, ["node-b cleanup", "node-a cleanup"]);
+    let residuals = events
+        .lines()
+        .filter(|line| line.ends_with(" residual"))
+        .collect::<Vec<_>>();
+    assert_eq!(residuals, ["node-a residual", "node-b residual"]);
     let lines: Vec<&str> = events.lines().collect();
     let first_launch = lines
         .iter()
@@ -1260,6 +1369,7 @@ case "$command" in
   *INFERLAB_HANDLE*) operation=launch ;;
   *INFERLAB_CLEANUP*) operation=cleanup ;;
   *INFERLAB_HARDWARE*) operation=hardware ;;
+  *INFERLAB_DEVICE_RESIDUAL*) operation=residual ;;
   *) operation=status ;;
 esac
 printf '%s %s\n' "$target" "$operation" >> "$FAKE_SSH_EVENTS"
@@ -1272,12 +1382,22 @@ eval "exec bash -c $command"
 "#;
 
 /// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape;
-/// `FIXTURE_NVIDIA_SMI_ERROR` forces a loud probe failure.
+/// `FIXTURE_NVIDIA_SMI_ERROR` forces a loud probe failure, and a
+/// compute-apps query answers with the `FIXTURE_NVIDIA_SMI_COMPUTE_APPS`
+/// rows (empty — no surviving compute applications — when unset).
 const NVIDIA_SMI: &str = r#"#!/bin/sh
 if [ -n "${FIXTURE_NVIDIA_SMI_ERROR:-}" ]; then
   printf '%s\n' "$FIXTURE_NVIDIA_SMI_ERROR" >&2
   exit 9
 fi
+case " $* " in
+  *" --query-compute-apps="*)
+    if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS:-}" ]; then
+      printf '%s\n' "$FIXTURE_NVIDIA_SMI_COMPUTE_APPS"
+    fi
+    exit 0
+    ;;
+esac
 ids="0,1,2,3,4,5,6,7"
 while [ $# -gt 0 ]; do
   case "$1" in

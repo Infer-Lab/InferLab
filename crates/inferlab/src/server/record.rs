@@ -137,10 +137,10 @@ pub(crate) struct ServerRecord {
 }
 
 impl ServerRecord {
-    /// The recorded model fallback locator ([[RFC-0003:C-RESOLUTION]]) MUST
-    /// NOT be encoded under an earlier server record version, so the version
-    /// gate stops older records before serde does.
-    pub(crate) const SCHEMA_VERSION: u32 = 10;
+    /// The device-residual cleanup evidence member ([[RFC-0005:C-EVIDENCE]])
+    /// MUST NOT be encoded under an earlier server record version, so the
+    /// version gate stops older records before serde does.
+    pub(crate) const SCHEMA_VERSION: u32 = 11;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

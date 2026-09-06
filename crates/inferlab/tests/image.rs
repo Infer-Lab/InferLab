@@ -2918,8 +2918,12 @@ const BENCH_CLIENT: &str = include_str!("fixtures/bin/bench-client.py");
 
 const FIXTURE_SERVER: &str = include_str!("fixtures/bin/fixture-server.py");
 
-/// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape.
+/// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape; a
+/// compute-apps query answers empty — no surviving compute applications.
 const NVIDIA_SMI: &str = r#"#!/bin/sh
+case " $* " in
+  *" --query-compute-apps="*) exit 0 ;;
+esac
 ids="0,1,2,3,4,5,6,7"
 while [ $# -gt 0 ]; do
   case "$1" in

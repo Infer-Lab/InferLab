@@ -1,4 +1,12 @@
 #!/bin/sh
+case " $* " in
+  *" --query-compute-apps="*)
+    if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS:-}" ]; then
+      printf '%s\n' "$FIXTURE_NVIDIA_SMI_COMPUTE_APPS"
+    fi
+    exit 0
+    ;;
+esac
 ids="0,1,2,3,4,5,6,7"
 while [ $# -gt 0 ]; do
   case "$1" in

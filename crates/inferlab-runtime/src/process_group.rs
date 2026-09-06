@@ -222,6 +222,33 @@ impl LocalProcessGroup {
     }
 
     pub fn has_live_members(&self, bound: &OperationBound) -> Result<bool, ProcessGroupError> {
+        Ok(!self.live_member_pids(bound)?.is_empty())
+    }
+
+    /// Members fork from the leader at or after its recorded start, so a
+    /// member predating the leader means the pgid was recycled and the
+    /// survivors are not the recorded cohort; the caller must not signal the
+    /// group. Returns the offending (pid, start ticks) pairs; empty means the
+    /// surviving members are consistent with the recorded leader. Defunct
+    /// members are dead already — they need no signal and do not participate.
+    /// A member exiting between enumeration and its stat read is skipped.
+    pub fn cohort_violations(
+        &self,
+        bound: &OperationBound,
+    ) -> Result<Vec<(u32, u64)>, ProcessGroupError> {
+        let mut violations = Vec::new();
+        for pid in self.live_member_pids(bound)? {
+            if let Some(start) = process_start_time(pid)?
+                && start < self.leader_start_time_ticks
+            {
+                violations.push((pid, start));
+            }
+        }
+        Ok(violations)
+    }
+
+    /// Live (non-defunct) member pids of the group.
+    fn live_member_pids(&self, bound: &OperationBound) -> Result<Vec<u32>, ProcessGroupError> {
         let output = cleanup_output(&["ps", "-eo", "pid=,pgid=,stat="], bound)?;
         if !output.status.success() {
             return Err(ProcessGroupError::QueryExit {
@@ -234,12 +261,14 @@ impl LocalProcessGroup {
             .lines()
             .filter_map(|line| {
                 let mut fields = line.split_whitespace();
-                let _pid = fields.next()?;
+                let pid = fields.next()?;
                 let group = fields.next()?;
                 let state = fields.next()?;
-                Some((group, state))
+                Some((pid, group, state))
             })
-            .any(|(group, state)| group == process_group && !state.starts_with('Z')))
+            .filter(|(_, group, state)| *group == process_group && !state.starts_with('Z'))
+            .filter_map(|(pid, _, _)| pid.parse().ok())
+            .collect())
     }
 }
 

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-06
+
+### Added
+
+- Cleanup evidence now verifies that a stopped server's assigned devices are
+  actually freed: after process cleanup terminates, each assigned device is
+  probed on its machine for residual compute memory, and a device still
+  holding bytes marks that cleanup unverified naming the machine, device,
+  and residual bytes; an unavailable probe is recorded without failing
+  verification. The per-device outcome is preserved in the serve record
+  (server record schema 11) ([[RFC-0005:C-EVIDENCE]]).
+
+### Fixed
+
+- An engine that died on its own no longer strands its worker group on the
+  devices: cleanup identified the process group by leader pid plus start
+  ticks, so a missing leader made ownership unverifiable and no signal was
+  ever sent. A cohort check — every live member's start time at or after the
+  recorded leader's — now restores ownership confidence, and a consistent
+  cohort receives the ordinary TERM-then-KILL group termination on the local
+  and SSH paths alike; a member predating the leader keeps the refusal and
+  names the offending pid ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+
 ## [0.14.0] - 2026-09-05
 
 ### Added

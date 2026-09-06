@@ -1,6 +1,7 @@
 mod network;
 mod preflight;
 mod record;
+mod residual;
 
 use crate::InferlabError;
 use crate::execution::{ProcessContext, ProcessPlan, ResolvedExecution};
@@ -9,12 +10,13 @@ use crate::workspace::WorkspaceSnapshot;
 use fs2::FileExt;
 use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::server::{
-    CleanupEvidence, CleanupTrigger, ProcessCleanup, ProcessHandle, ProcessObserver, ProcessSpec,
-    ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind, ServerRuntime,
-    SystemProcessRuntime,
+    CleanupEvidence, CleanupTrigger, DeviceResidualEvidence, ProcessCleanup, ProcessHandle,
+    ProcessObserver, ProcessSpec, ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind,
+    ServerRuntime, SystemProcessRuntime,
 };
 use preflight::{PreflightObserver, RemoteCheckError, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
+use residual::{ResidualProbe, probe_device_residual};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -230,7 +232,7 @@ pub(crate) fn resolve_network(
     })
 }
 
-fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
+fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     root: &Path,
     resolved: ResolvedExecution,
     requested_id: Option<&str>,
@@ -279,7 +281,7 @@ struct SpawnedProcesses<'a> {
 /// failed record, and produce the lifecycle error for the caller to return.
 /// `cleanup_ok` folds site-specific cleanup outcomes (profiler cleanup,
 /// container ownership) into the cleanup-verified verdict.
-fn fail_with<R: ProcessCleanup + ProcessObserver>(
+fn fail_with<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
     started: &[String],
@@ -300,7 +302,7 @@ fn fail_with<R: ProcessCleanup + ProcessObserver>(
 
 /// The failing operation is the record write itself, so the best-effort
 /// failure persist must not mask the original error behind a second one.
-fn fail_after_record_error<R: ProcessCleanup + ProcessObserver>(
+fn fail_after_record_error<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
     started: &[String],
@@ -322,7 +324,7 @@ fn fail_after_record_error<R: ProcessCleanup + ProcessObserver>(
 /// [[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]): declared checks run before
 /// any process launches. Image-backed launches skip this — their
 /// realization was checked during assembly.
-fn run_preflight_checks<R: ServerRuntime + PreflightObserver>(
+fn run_preflight_checks<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     root: &Path,
     resolved: &ResolvedExecution,
     session: &mut ServerRecordSession,
@@ -477,7 +479,7 @@ fn run_preflight_checks<R: ServerRuntime + PreflightObserver>(
 /// Device hardware identity is probed once per hosting machine through the
 /// same launch path as its serving processes, and a failed probe fails
 /// the launch before any process starts ([[RFC-0005:C-EVIDENCE]]).
-fn probe_hardware<R: ServerRuntime + PreflightObserver>(
+fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     resolved: &ResolvedExecution,
     session: &mut ServerRecordSession,
     runtime: &R,
@@ -521,7 +523,7 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver>(
     Ok(())
 }
 
-fn spawn_processes<'a, R: ServerRuntime>(
+fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
     resolved: &'a ResolvedExecution,
     session: &mut ServerRecordSession,
     runtime: &R,
@@ -673,7 +675,7 @@ fn spawn_processes<'a, R: ServerRuntime>(
 /// remains authoritative across every process readiness wait. Capture-
 /// armed startup is intentionally unbounded; ordinary startup uses the
 /// server's one resolved readiness budget.
-fn wait_until_ready<R: ServerRuntime>(
+fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
     resolved: &ResolvedExecution,
     session: &mut ServerRecordSession,
     runtime: &R,
@@ -747,7 +749,7 @@ fn wait_until_ready<R: ServerRuntime>(
     Ok(())
 }
 
-fn fail_if_startup_interrupted<R: ProcessCleanup + ProcessObserver>(
+fn fail_if_startup_interrupted<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
     started: &[String],
@@ -766,7 +768,7 @@ fn fail_if_startup_interrupted<R: ProcessCleanup + ProcessObserver>(
     Err(lifecycle_error(session, STARTUP_INTERRUPTED.to_owned()))
 }
 
-fn rollback_started<R: ProcessCleanup + ProcessObserver>(
+fn rollback_started<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
     started: &[String],
@@ -807,6 +809,7 @@ fn rollback_started<R: ProcessCleanup + ProcessObserver>(
             inferlab_profiler::cleanup::ProfilerCleanupTrigger::StartupRollback,
         )?;
     }
+    verified &= verify_freed_devices(session, runtime)?.is_none();
     Ok(verified)
 }
 
@@ -938,7 +941,7 @@ fn logs_with_runtime<R: ProcessObserver>(
     })
 }
 
-fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
+fn stop_with_runtime<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     root: &Path,
     id: &str,
     runtime: &R,
@@ -1063,6 +1066,12 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
             }
         }
     }
+    if let Some(error) = verify_freed_devices(&mut session, runtime)? {
+        all_verified = false;
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
     if all_verified {
         let status = if session.record().failure.is_some() {
             ServerStatus::Failed
@@ -1088,6 +1097,69 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver>(
         session.rewrite()?;
         Err(lifecycle_error(&session, message))
     }
+}
+
+/// Process-group verification proves the serving processes are gone; a dead
+/// framework can still leave compute memory held on its assigned devices, so
+/// every process whose latest cleanup entry claims verified gets its assigned
+/// devices probed on their launch machine ([[RFC-0005:C-EVIDENCE]]). An
+/// unverified entry is already honest and is not probed: while its process
+/// group may still live, residual memory says nothing about a leak. A device
+/// still holding memory flips the entry to unverified naming machine and
+/// device; a machine without the probe tool records probe-unavailable without
+/// failing the cleanup. Returns the first residual error for the caller's
+/// failure message.
+fn verify_freed_devices<R: ResidualProbe>(
+    session: &mut ServerRecordSession,
+    runtime: &R,
+) -> Result<Option<String>, InferlabError> {
+    let probes = session
+        .record()
+        .resolved
+        .server
+        .processes()
+        .map(|process| {
+            (
+                process.id.clone(),
+                process.machine.clone(),
+                process.launch.clone(),
+                process.allocation.devices.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut first_error = None;
+    for (process_id, machine, launch, devices) in probes {
+        if devices.is_empty() {
+            continue;
+        }
+        let cleanup = session.process_mut(&process_id)?.cleanup.last_mut();
+        let Some(cleanup) = cleanup.filter(|cleanup| cleanup.verified) else {
+            continue;
+        };
+        let residuals = devices
+            .iter()
+            .map(|&device| probe_device_residual(runtime, &launch, &machine, device))
+            .collect::<Vec<_>>();
+        let held = residuals.iter().find_map(|entry| match entry {
+            DeviceResidualEvidence::ResidualHeld {
+                machine,
+                device,
+                bytes,
+            } => Some(format!(
+                "device {device} on machine {machine:?} still holds {bytes} bytes of compute memory after process cleanup"
+            )),
+            _ => None,
+        });
+        cleanup.device_residuals = Some(residuals);
+        if let Some(error) = held {
+            cleanup.verified = false;
+            cleanup.error = Some(error.clone());
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    Ok(first_error)
 }
 
 fn finalize_profiler_process(
@@ -1134,6 +1206,7 @@ mod tests {
     use super::preflight::{
         HardwareProbeError, PreflightObserver, RemoteCheckOutcome, RemoteCheckRequest,
     };
+    use super::residual::ResidualProbeError;
     use super::*;
     use crate::execution::{
         AllocationPlan, CasePlan, CaseSelectionSource, EndpointPlan, IntegrationPlan,
@@ -1160,6 +1233,7 @@ mod tests {
         status_calls: Cell<usize>,
         bounded_status_calls: Cell<usize>,
         readiness_bounds: RefCell<Vec<usize>>,
+        residuals: BTreeMap<(String, u32), Result<u64, String>>,
     }
 
     impl ProcessLauncher for FakeRuntime {
@@ -1198,6 +1272,24 @@ mod tests {
 
         fn run_remote_checks(&self, _request: RemoteCheckRequest<'_>) -> RemoteCheckOutcome {
             Ok((Vec::new(), None))
+        }
+    }
+
+    impl ResidualProbe for FakeRuntime {
+        fn residual_bytes(
+            &self,
+            _launch: &LaunchPlan,
+            machine: &str,
+            device: u32,
+        ) -> Result<u64, ResidualProbeError> {
+            self.residuals
+                .get(&(machine.to_owned(), device))
+                .cloned()
+                .unwrap_or(Ok(0))
+                .map_err(|reason| ResidualProbeError::LocalLaunch {
+                    machine: machine.to_owned(),
+                    source: std::io::Error::other(reason),
+                })
         }
     }
 
@@ -1284,6 +1376,7 @@ mod tests {
                 signals: Vec::new(),
                 error: None,
                 container_removal: None,
+                device_residuals: None,
             }
         }
     }
@@ -1342,7 +1435,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 10);
+        assert_eq!(value["schema_version"], 11);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1394,7 +1487,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 3; expected 10"),
+                .contains("unsupported schema version 3; expected 11"),
             "{error}"
         );
         Ok(())
@@ -1424,7 +1517,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 6; expected 10"),
+                .contains("unsupported schema version 6; expected 11"),
             "{error}"
         );
         Ok(())
@@ -1445,6 +1538,7 @@ mod tests {
             status_calls: Cell::new(0),
             bounded_status_calls: Cell::new(0),
             readiness_bounds: RefCell::new(Vec::new()),
+            residuals: BTreeMap::new(),
         };
 
         let result =
@@ -1492,6 +1586,7 @@ mod tests {
             status_calls: Cell::new(0),
             bounded_status_calls: Cell::new(0),
             readiness_bounds: RefCell::new(Vec::new()),
+            residuals: BTreeMap::new(),
         };
         let record =
             start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
@@ -1523,6 +1618,7 @@ mod tests {
             status_calls: Cell::new(0),
             bounded_status_calls: Cell::new(0),
             readiness_bounds: RefCell::new(Vec::new()),
+            residuals: BTreeMap::new(),
         };
 
         start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;

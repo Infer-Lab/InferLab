@@ -35,6 +35,7 @@ impl CleanupEvidence {
             signals: Vec::new(),
             error: Some(message),
             container_removal: None,
+            device_residuals: None,
         }
     }
 
@@ -64,6 +65,7 @@ impl CleanupEvidence {
             signals: Vec::new(),
             error,
             container_removal: Some(removal),
+            device_residuals: None,
         }
     }
 }
@@ -171,15 +173,36 @@ pub(super) fn terminate_local(
             return evidence;
         }
         Ok(VerifiedStatus::LeaderMissingWithMembers) => {
-            let mut evidence = CleanupEvidence::unavailable(
-                trigger,
-                format!(
-                    "process-group {} still has members but recorded leader {} no longer exists; ownership cannot be verified",
-                    handle.process_group, handle.leader_pid
-                ),
-            );
-            evidence.elapsed_ms = duration_millis(started.elapsed());
-            return evidence;
+            // The leader died on its own: members forked from it at or after
+            // its recorded start, so a cohort-consistent group is still ours
+            // to signal; a member predating the leader means a recycled pgid.
+            let violations = match group.cohort_violations(&status_bound) {
+                Ok(violations) => violations,
+                Err(error) => {
+                    let mut evidence = CleanupEvidence::unavailable(trigger, error.to_string());
+                    evidence.elapsed_ms = duration_millis(started.elapsed());
+                    return evidence;
+                }
+            };
+            if !violations.is_empty() {
+                let members = violations
+                    .iter()
+                    .map(|(pid, ticks)| format!("member {pid} started at {ticks}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut evidence = CleanupEvidence::unavailable(
+                    trigger,
+                    format!(
+                        "process-group {} still has members but recorded leader {} no longer exists and the cohort check failed: {} before the recorded leader start {}",
+                        handle.process_group,
+                        handle.leader_pid,
+                        members,
+                        handle.leader_start_time_ticks
+                    ),
+                );
+                evidence.elapsed_ms = duration_millis(started.elapsed());
+                return evidence;
+            }
         }
         Err(error) => {
             let mut evidence = CleanupEvidence::unavailable(trigger, error.to_string());
@@ -213,6 +236,7 @@ pub(super) fn terminate_local(
                         handle.process_group
                     )),
                     container_removal: None,
+                    device_residuals: None,
                 },
                 Err(error) => cleanup_error(trigger, true, signals, error.to_string()),
             }
@@ -232,13 +256,13 @@ pub(super) fn terminate_ssh(handle: &SshProcessHandle, trigger: CleanupTrigger) 
     evidence
 }
 
-pub(super) fn terminate_ssh_under(
-    handle: &SshProcessHandle,
-    trigger: CleanupTrigger,
-    bound: &OperationBound,
-) -> CleanupEvidence {
-    let script = format!(
-        "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t0\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tleader-missing\\n'; exit 0; else printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep 0.1; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; i=0; while {} && [ $i -lt {kill_limit} ]; do sleep 0.1; i=$((i+1)); done; fi; alive=0; if {}; then alive=1; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\" \"$alive\"",
+/// The remote cleanup script: the leader-missing branch replicates the local
+/// cohort check — every live member must start at or after the recorded
+/// leader ticks, else the pgid reads as recycled and the script declines to
+/// signal, naming the offending members in the detail field.
+pub(super) fn remote_cleanup_script(handle: &SshProcessHandle) -> String {
+    format!(
+        "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t0\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then bad=\"\"; for mpid in $(ps -eo pid=,pgid=,stat= | awk -v pgid=\"$pgid\" '$2 == pgid && $3 !~ /^Z/ {{print $1}}'); do mticks=$(awk '{{print $22}}' /proc/$mpid/stat 2>/dev/null) || mticks=\"\"; if [ -n \"$mticks\" ] && [ \"$mticks\" -lt \"$expected\" ]; then bad=\"$bad $mpid:$mticks\"; fi; done; if [ -n \"$bad\" ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tleader-missing; cohort members%s predate recorded leader start %s\\n' \"$bad\" \"$expected\"; exit 0; fi; else printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep 0.1; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; i=0; while {} && [ $i -lt {kill_limit} ]; do sleep 0.1; i=$((i+1)); done; fi; alive=0; if {}; then alive=1; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\" \"$alive\"",
         handle.process_group,
         handle.leader_pid,
         handle.leader_start_time_ticks,
@@ -251,7 +275,15 @@ pub(super) fn terminate_ssh_under(
         term_limit = TERM_POLL_LIMIT,
         kill_limit = KILL_POLL_LIMIT,
         marker = CLEANUP_MARKER,
-    );
+    )
+}
+
+pub(super) fn terminate_ssh_under(
+    handle: &SshProcessHandle,
+    trigger: CleanupTrigger,
+    bound: &OperationBound,
+) -> CleanupEvidence {
+    let script = remote_cleanup_script(handle);
     match run_cleanup_command(
         &ssh_argv(&handle.target, &script),
         SSH_ENV_REMOVE,
@@ -455,6 +487,7 @@ pub(super) fn completed_cleanup(
         signals,
         error: None,
         container_removal: None,
+        device_residuals: None,
     }
 }
 
@@ -478,6 +511,7 @@ pub(super) fn cleanup_error(
         signals,
         error: Some(error),
         container_removal: None,
+        device_residuals: None,
     }
 }
 

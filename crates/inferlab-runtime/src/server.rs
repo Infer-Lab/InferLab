@@ -172,6 +172,38 @@ pub struct CleanupEvidence {
     /// before any handle existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_removal: Option<ContainerRemovalEvidence>,
+    /// Per-device residual compute-memory probes on the process's launch
+    /// machine, run after its process cleanup verified
+    /// ([[RFC-0005:C-EVIDENCE]]); present when the cleanup path probed the
+    /// assigned devices — a device-less process or an unverified cleanup
+    /// carries no probe claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_residuals: Option<Vec<DeviceResidualEvidence>>,
+}
+
+/// The post-cleanup probe outcome for one assigned device
+/// ([[RFC-0005:C-EVIDENCE]]): a dead framework can leave compute memory held
+/// after its process group is reaped, so a verified cleanup probes each
+/// assigned device and records what it found — freed, still held (with the
+/// observed bytes), or undeterminable on a machine without the probe tool
+/// (which must not fail the cleanup).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeviceResidualEvidence {
+    Freed {
+        machine: String,
+        device: u32,
+    },
+    ResidualHeld {
+        machine: String,
+        device: u32,
+        bytes: u64,
+    },
+    ProbeUnavailable {
+        machine: String,
+        device: u32,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1296,6 +1328,241 @@ mod tests {
         assert_eq!(cleanup.status_deadline_ms, 2_000);
         assert_eq!(cleanup.term_grace_ms, 2_000);
         assert_eq!(cleanup.kill_grace_ms, 10_000);
+        Ok(())
+    }
+
+    struct OrphanGroup {
+        handle: HostProcessHandle,
+        member_pid: u32,
+    }
+
+    /// A process group whose leader forks a member and is then SIGKILLed,
+    /// leaving the member orphaned: the managed engine died on its own and
+    /// the workers outlived it ([[RFC-0003:C-RUNTIME-WORKFLOWS]] cleanup).
+    fn spawn_orphan_group(root: &Path) -> Result<OrphanGroup, String> {
+        let marker = root.join("member.pid");
+        let mut child = Command::new("bash")
+            .args([
+                "-c",
+                &format!("sleep 300 & echo $! > {}; exec sleep 300", marker.display()),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let handle = HostProcessHandle::new(child.id(), None)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            if Instant::now() > deadline {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", handle.process_group)])
+                    .status();
+                return Err("orphan-group member did not start".to_owned());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().map_err(|error| error.to_string())?;
+        child.wait().map_err(|error| error.to_string())?;
+        let member_pid = fs::read_to_string(&marker)
+            .map_err(|error| error.to_string())?
+            .trim()
+            .parse::<u32>()
+            .map_err(|error| error.to_string())?;
+        Ok(OrphanGroup { handle, member_pid })
+    }
+
+    fn force_kill_group(process_group: u32) {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{process_group}")])
+            .status();
+    }
+
+    #[test]
+    fn termination_reaps_orphaned_members_after_the_leader_exits() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let orphan = spawn_orphan_group(root.path())?;
+        let cleanup = terminate_local(&orphan.handle, CleanupTrigger::Stop);
+        if !cleanup.verified {
+            force_kill_group(orphan.handle.process_group);
+        }
+
+        assert!(cleanup.verified, "{cleanup:?}");
+        assert!(!cleanup.already_exited, "{cleanup:?}");
+        assert!(!cleanup.signals.is_empty(), "{cleanup:?}");
+        assert_eq!(
+            process_start_time(orphan.member_pid).map_err(|error| error.to_string())?,
+            None,
+            "the orphaned member was reaped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn termination_refuses_a_cohort_inconsistent_orphan_group() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let orphan = spawn_orphan_group(root.path())?;
+        // A handle whose recorded leader start postdates the actual member:
+        // the pgid reads as recycled, so ownership stays unverifiable.
+        let inflated = HostProcessHandle {
+            leader_start_time_ticks: orphan.handle.leader_start_time_ticks + 1_000_000_000,
+            ..orphan.handle.clone()
+        };
+        let cleanup = terminate_local(&inflated, CleanupTrigger::Stop);
+        force_kill_group(orphan.handle.process_group);
+
+        assert!(!cleanup.verified, "{cleanup:?}");
+        assert!(!cleanup.forced, "{cleanup:?}");
+        let error = cleanup.error.ok_or("the refusal carries a reason")?;
+        assert!(
+            error.contains(&orphan.member_pid.to_string()),
+            "the refusal names the offending member: {error}"
+        );
+        assert!(
+            error.contains("before the recorded leader start"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ssh_cleanup_script_kills_a_cohort_consistent_orphan_group() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let orphan = spawn_orphan_group(root.path())?;
+        let script = super::cleanup::remote_cleanup_script(&SshProcessHandle {
+            target: "fixture".to_owned(),
+            leader_pid: orphan.handle.leader_pid,
+            process_group: orphan.handle.process_group,
+            leader_start_time_ticks: orphan.handle.leader_start_time_ticks,
+            stdout: root.path().join("stdout.log"),
+            stderr: root.path().join("stderr.log"),
+            container: None,
+        });
+        // The fixture ssh shim execs the remote script through bash; running
+        // it directly exercises the same bytes against local /proc and ps.
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .map_err(|error| error.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.contains("INFERLAB_CLEANUP\tcleanup") {
+            force_kill_group(orphan.handle.process_group);
+        }
+
+        assert!(output.status.success(), "{stdout}");
+        assert!(
+            stdout
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix("INFERLAB_CLEANUP\t"))
+                .is_some_and(|line| line.starts_with("cleanup\t")),
+            "{stdout}"
+        );
+        assert_eq!(
+            process_start_time(orphan.member_pid).map_err(|error| error.to_string())?,
+            None,
+            "the orphaned member was reaped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ssh_cleanup_script_refuses_a_cohort_inconsistent_orphan_group() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let orphan = spawn_orphan_group(root.path())?;
+        let script = super::cleanup::remote_cleanup_script(&SshProcessHandle {
+            target: "fixture".to_owned(),
+            leader_pid: orphan.handle.leader_pid,
+            process_group: orphan.handle.process_group,
+            leader_start_time_ticks: orphan.handle.leader_start_time_ticks + 1_000_000_000,
+            stdout: root.path().join("stdout.log"),
+            stderr: root.path().join("stderr.log"),
+            container: None,
+        });
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .map_err(|error| error.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        force_kill_group(orphan.handle.process_group);
+
+        assert!(output.status.success(), "{stdout}");
+        let line = stdout
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("INFERLAB_CLEANUP\t"))
+            .ok_or("the script printed no cleanup result")?;
+        assert!(line.starts_with("unknown\t"), "{stdout}");
+        assert!(
+            line.contains(&orphan.member_pid.to_string()),
+            "the detail names the offending member: {line}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_evidence_without_device_residuals_still_decodes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A schema-10-era entry predates the device-residual probe: the
+        // optional member decodes as absent and stays absent on re-encode
+        // ([[RFC-0005:C-EVIDENCE]]).
+        let legacy = serde_json::json!({
+            "trigger": "stop",
+            "elapsed_ms": 3,
+            "status_deadline_ms": 2_000,
+            "term_grace_ms": 2_000,
+            "kill_grace_ms": 10_000,
+            "reap_grace_ms": null,
+            "remote_deadline_ms": null,
+            "verified": true,
+            "already_exited": false,
+            "forced": false,
+            "signals": [],
+            "error": null
+        });
+
+        let evidence: CleanupEvidence = serde_json::from_value(legacy)?;
+
+        assert_eq!(evidence.device_residuals, None);
+        assert!(
+            serde_json::to_value(&evidence)?
+                .get("device_residuals")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn device_residual_evidence_encodes_under_its_outcome_tag()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let freed = DeviceResidualEvidence::Freed {
+            machine: "local".to_owned(),
+            device: 0,
+        };
+        let held = DeviceResidualEvidence::ResidualHeld {
+            machine: "local".to_owned(),
+            device: 1,
+            bytes: 42,
+        };
+        let unavailable = DeviceResidualEvidence::ProbeUnavailable {
+            machine: "node-b".to_owned(),
+            device: 3,
+            reason: "nvidia-smi exited".to_owned(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&freed)?,
+            serde_json::json!({"outcome": "freed", "machine": "local", "device": 0})
+        );
+        assert_eq!(
+            serde_json::to_value(&held)?,
+            serde_json::json!({"outcome": "residual_held", "machine": "local", "device": 1, "bytes": 42})
+        );
+        assert_eq!(
+            serde_json::to_value(&unavailable)?,
+            serde_json::json!({"outcome": "probe_unavailable", "machine": "node-b", "device": 3, "reason": "nvidia-smi exited"})
+        );
         Ok(())
     }
 

@@ -326,6 +326,7 @@ case "$command" in
   *INFERLAB_HANDLE*) operation=launch ;;
   *INFERLAB_CLEANUP*) operation=cleanup ;;
   *INFERLAB_HARDWARE*) operation=hardware ;;
+  *INFERLAB_DEVICE_RESIDUAL*) operation=residual ;;
   *) operation=status ;;
 esac
 printf '%s %s\n' "$target" "$operation" >> "$FAKE_SSH_EVENTS"

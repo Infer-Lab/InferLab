@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 from typing import cast
 
@@ -7,6 +8,9 @@ import yaml  # type: ignore[import-untyped]
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
+    AdapterRequest,
+    AdapterRequestPlanServe,
+    AdapterRequestRenderServe,
     CaptureMechanism,
     KvTransferMechanism,
     Parallelism,
@@ -25,6 +29,7 @@ from inferlab_adapter_sdk import (
     ServeTopology,
     SettingValue,
     SuppliedRenderInput,
+    handle_request,
 )
 from inferlab_integration_tensorrt_llm import plan_serve, render_serve
 
@@ -56,6 +61,7 @@ def _plan_input(**overrides: object) -> PlanServeInput:
     base: dict[str, object] = {
         "model": ServeModelInput(id="example", served_name="example"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -88,8 +94,6 @@ def test_plan_single_topology() -> None:
     assert isinstance(probe, ReadinessProbeHttp) and probe.path == "/health"
     endpoint = result.roles[0].public_endpoint
     assert endpoint is not None
-    assert endpoint.completions_path == "/v1/completions"
-    assert endpoint.chat_completions_path == "/v1/chat/completions"
     assert endpoint.prefix_cache_reset is None, "no flush endpoint in TensorRT-LLM"
     assert result.gateway is None
     assert result.pd_router is None
@@ -284,8 +288,6 @@ def test_plan_prefill_decode_uses_nixl_without_control_plane_transfer_ports() ->
     assert result.gateway is not None
     assert result.gateway.backend == "builtin"
     assert result.gateway.render_source == RenderSource.control_plane
-    assert result.gateway.endpoint.completions_path == "/v1/completions"
-    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
     assert result.gateway.endpoint.prefix_cache_reset is None
     assert result.pd_router is not None
     assert result.pd_router.backend == "builtin"
@@ -335,6 +337,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
     base: dict[str, object] = {
         "model": ServeModelInput(id="example", served_name="example"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -451,6 +454,7 @@ def _prefill_decode_render_input(
     return RenderServeInput(
         model=ServeModelInput(id="example", served_name="example"),
         topology=ServeTopology.prefill_decode,
+        state_dir=".inferlab",
         gateway_backend=frontend_backend,
         pd_router_backend=frontend_backend,
         kv_transfer=KvTransferMechanism.nixl,
@@ -984,7 +988,7 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
         ]
     ]
 
-    with pytest.raises(AdapterOperationError, match="different synthetic acceptance outcomes"):
+    with pytest.raises(AdapterOperationError) as captured:
         plan_serve(
             _plan_input(
                 topology=ServeTopology.prefill_decode,
@@ -995,3 +999,169 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
                 synthetic_acceptance={"curve": curve},
             )
         )
+    # The consistency message text is owned by the adapter SDK; the
+    # integration asserts the typed code and a stable concept fragment.
+    assert captured.value.code == AdapterErrorCode.invalid_settings
+    assert "synthetic acceptance" in captured.value.message
+
+
+ROOT = Path(__file__).parents[3]
+FIXTURES = ROOT / "protocol" / "fixtures"
+
+
+def load_json(path: Path) -> dict[str, object]:
+    return cast(dict[str, object], json.loads(path.read_text()))
+
+
+def auxiliary_plan_payload(speculative_config: object) -> dict[str, object]:
+    """The auxiliary-models plan fixture with the role's speculative
+    configuration replaced by the given TensorRT-LLM patch spelling (None
+    removes the splice target entirely)."""
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    if speculative_config is None:
+        roles[0]["settings"] = {}
+    else:
+        roles[0]["settings"] = {
+            "extra_llm_api_options_patch": {"speculative_config": speculative_config}
+        }
+    return payload
+
+
+def auxiliary_error(payload: dict[str, object]) -> str:
+    response = handle_request(json.dumps(payload), plan_serve)
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    return response.root.error.message
+
+
+def test_plan_accepts_a_declared_draft_model_with_a_splice_target(tmp_path: Path) -> None:
+    operator_config = tmp_path / "operator.yaml"
+    operator_config.write_text("speculative_config:\n  max_draft_len: 2\n", encoding="utf-8")
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["settings"] = {"extra_llm_api_options": str(operator_config)}
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    assert [role.id for role in result.roles] == ["serve"]
+    # Rendering re-reads the source YAML to splice the locator, so planning
+    # declares it as a supplied render input ([[RFC-0006:C-LAUNCH-FILES]]).
+    assert [item.source_path for item in result.roles[0].render_inputs] == [str(operator_config)]
+
+
+def test_plan_rejects_a_draft_model_without_a_splice_target() -> None:
+    message = auxiliary_error(auxiliary_plan_payload(None))
+
+    assert "splice target" in message
+    assert "draft-model" in message
+
+
+def test_plan_rejects_an_operator_spelling_of_the_draft_artifact() -> None:
+    message = auxiliary_error(
+        auxiliary_plan_payload({"speculative_model": "/other/draft", "max_draft_len": 2})
+    )
+
+    assert "'speculative_model'" in message
+    assert "single" in message
+    assert "authority" in message
+
+
+def test_render_splices_the_resolved_draft_model_locator() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    # The TensorRT-LLM splice target is the speculative_config mapping in the
+    # operator's extra_llm_api_options, here carried by the source YAML
+    # consumed as the control-plane-supplied frozen text.
+    allocations[0]["effective_settings"] = {"extra_llm_api_options": "configs/operator.yaml"}
+    text = "speculative_config:\n  max_draft_len: 2\n"
+    allocations[0]["render_inputs"] = [
+        {
+            "source_path": ".inferlab/configs/operator.yaml",
+            "text": text,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+    ]
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    process = result.processes[0].root
+    launch_file = process.launch_files[0]
+    assert hashlib.sha256(launch_file.text.encode("utf-8")).hexdigest() == launch_file.sha256
+    # The rendered launch configuration carries the final machine-resolved
+    # draft-model locator.
+    assert yaml.safe_load(launch_file.text) == {
+        "speculative_config": {
+            "max_draft_len": 2,
+            "speculative_model": "/models/deepseek-v4-flash-draft",
+        }
+    }
+    argv = process.command.argv
+    assert argv[argv.index("--extra_llm_api_options") + 1] == (
+        f"/cache/runtime/node-a/prefill/{launch_file.relative_path}"
+    )
+
+
+def test_operator_source_paths_resolve_against_the_request_state_dir() -> None:
+    # The state-dir spelling arrives on the request; the integration resolves
+    # operator-declared relative paths against it instead of restating the
+    # control plane's value ([[RFC-0006:C-LAUNCH-FILES]]).
+    plan = plan_serve(
+        _plan_input(
+            state_dir=".state",
+            settings={
+                "extra_llm_api_options": SettingValue(root="configs/operator.yaml"),
+                "extra_llm_api_options_patch": SettingValue.model_validate({"stream_interval": 40}),
+            },
+        )
+    )
+    assert [item.source_path for item in plan.roles[0].render_inputs] == [
+        ".state/configs/operator.yaml"
+    ]
+
+    payload = load_json(FIXTURES / "valid" / "render-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["state_dir"] = ".state"
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    allocations[0]["effective_settings"] = {"extra_llm_api_options": "configs/operator.yaml"}
+    text = "speculative_config:\n  max_draft_len: 2\n"
+    allocations[0]["render_inputs"] = [
+        {
+            "source_path": ".state/configs/operator.yaml",
+            "text": text,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+    ]
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    # The frozen text matched under the supplied spelling, so the splice ran.
+    assert yaml.safe_load(result.processes[0].root.launch_files[0].text) == {
+        "speculative_config": {
+            "max_draft_len": 2,
+            "speculative_model": "/models/deepseek-v4-flash-draft",
+        }
+    }
+
+    # The hard-coded spelling must not reappear: under a .state request an
+    # .inferlab-spelled supplied path is not a match.
+    allocations[0]["render_inputs"] = [
+        {
+            "source_path": ".inferlab/configs/operator.yaml",
+            "text": text,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+    ]
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    with pytest.raises(AdapterOperationError, match="was not supplied"):
+        render_serve(request.root.input)

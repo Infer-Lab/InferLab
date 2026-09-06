@@ -1,0 +1,153 @@
+{
+  "operation": "render_serve",
+  "protocol_version": "10",
+  "input": {
+    "model": {
+      "id": "fixture-model",
+      "served_name": "fixture-model"
+    },
+    "topology": "single",
+    "state_dir": ".inferlab",
+    "gateway_backend": "smg",
+    "allocations": [
+      {
+        "kind": "model_rank",
+        "process": "server",
+        "role": "serve",
+        "role_kind": "serve",
+        "replica": 0,
+        "rank": 0,
+        "rank_count": 1,
+        "machine": "engine-node",
+        "devices": [
+          0,
+          1
+        ],
+        "model_locator": "/models/fixture-model",
+        "endpoint": {
+          "host": "engine.example",
+          "port": 50051
+        },
+        "ports": {},
+        "cache": "/cache/server",
+        "launch": {
+          "kind": "local"
+        },
+        "effective_settings": {
+          "default_max_output_tokens": 3,
+          "max_num_batched_tokens": 12000
+        },
+        "effective_parallelism": {
+          "attention": {
+            "context_parallel_size": 1,
+            "data_parallel_size": 1,
+            "tensor_parallel_size": 2
+          },
+          "experts": {
+            "data_parallel_size": 1,
+            "dense_tensor_parallel_size": 2,
+            "expert_parallel_size": 1,
+            "tensor_parallel_size": 2
+          },
+          "outer": {
+            "pipeline_parallel_size": 1,
+            "tensor_parallel_size": 2
+          }
+        },
+        "links": [
+          {
+            "kind": "request_routing",
+            "source": "gateway",
+            "targets": [
+              "serve"
+            ]
+          }
+        ],
+        "dependencies": [],
+        "render_inputs": []
+      },
+      {
+        "kind": "frontend",
+        "process": "gateway",
+        "process_role": "gateway",
+        "components": [
+          "gateway"
+        ],
+        "machine": "gateway-node",
+        "devices": [],
+        "endpoint": {
+          "host": "gateway.example",
+          "port": 30000
+        },
+        "ports": {
+          "prometheus": {
+            "host": "gateway.example",
+            "port": 30001
+          }
+        },
+        "cache": "/cache/gateway",
+        "launch": {
+          "kind": "local"
+        },
+        "gateway": {
+          "backend": "smg",
+          "co_rendering": {
+            "process_role": "gateway"
+          },
+          "effective_settings": {
+            "worker_protocol": "tokenspeed_scheduler_v1",
+            "policy": "least_load",
+            "retries": false,
+            "circuit_breaker": false
+          },
+          "endpoint": {
+            "prefix_cache_conditioning": {
+              "method": "post",
+              "path": "/prime_prefix_cache"
+            },
+            "prefix_cache_reset": {
+              "method": "post",
+              "path": "/flush_cache"
+            },
+            "prompt_cache_read_zero_representation": "explicit",
+            "protocol": "http",
+            "server_metrics": {
+              "path": "/metrics",
+              "port": "prometheus"
+            }
+          },
+          "implementation": "tokenspeed-smg",
+          "implementation_version": "fixture-frontend-version",
+          "ports": [
+            "prometheus"
+          ],
+          "readiness": {
+            "kind": "http",
+            "path": "/readiness"
+          },
+          "render_inputs": [],
+          "render_source": "integration",
+          "targets": [
+            {
+              "kind": "engine",
+              "role": "serve"
+            }
+          ]
+        },
+        "links": [
+          {
+            "kind": "request_routing",
+            "source": "gateway",
+            "targets": [
+              "serve"
+            ]
+          }
+        ],
+        "dependencies": [
+          "server"
+        ],
+        "render_inputs": []
+      }
+    ]
+  }
+}

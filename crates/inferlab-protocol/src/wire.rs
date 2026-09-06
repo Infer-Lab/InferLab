@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `9` (serialized as the
-/// string `"9"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `10` (serialized as the
+/// string `"10"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 9.
-    #[serde(rename = "9")]
-    V9,
+    /// Protocol version 10.
+    #[serde(rename = "10")]
+    V10,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V9;
+    pub const CURRENT: Self = Self::V10;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V9 => "9",
+            Self::V10 => "10",
         }
     }
 }
@@ -192,6 +192,12 @@ impl AdapterRequest {
 pub struct PlanServeInput {
     pub model: ServeModelInput,
     pub topology: ServeTopology,
+    /// The control-plane-owned state directory spelling,
+    /// workspace-root-relative, that the integration resolves operator-declared
+    /// relative paths against when reading them through the workspace
+    /// filesystem and when declaring the supplied render-input source paths
+    /// those reads produce.
+    pub state_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +213,10 @@ pub struct PlanServeInput {
     /// carries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthetic_acceptance: Option<SyntheticAcceptanceInput>,
+    /// The auxiliary model declaration when the serve declaration carries
+    /// one ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_models: Vec<AuxiliaryModelInput>,
 }
 
 /// The planned topology plus the control plane's concrete allocations that a
@@ -216,6 +226,11 @@ pub struct PlanServeInput {
 pub struct RenderServeInput {
     pub model: ServeModelInput,
     pub topology: ServeTopology,
+    /// The control-plane-owned state directory spelling,
+    /// workspace-root-relative, that the integration resolves operator-declared
+    /// relative paths against when matching them to supplied render-input
+    /// source paths.
+    pub state_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +246,10 @@ pub struct RenderServeInput {
     /// carries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthetic_acceptance: Option<SyntheticAcceptanceInput>,
+    /// The auxiliary model declaration when the serve declaration carries
+    /// one ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_models: Vec<AuxiliaryModelInput>,
 }
 
 /// The one JSON response an integration writes to stdout, tagged by outcome.
@@ -334,6 +353,20 @@ pub enum ServeRoleKind {
     Decode,
 }
 
+impl ServeRoleKind {
+    /// The role id as spelled on the wire, projected for control-plane
+    /// surfaces that name roles. Kept exhaustive so a future variant forces
+    /// this projection to follow.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Serve => "serve",
+            Self::Prefill => "prefill",
+            Self::Decode => "decode",
+        }
+    }
+}
+
 /// The KV-transfer mechanism connecting prefill and decode.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -363,6 +396,69 @@ pub struct Parallelism {
 }
 
 impl Parallelism {
+    /// The declared parallelism dimensions as dotted-name/value pairs — the
+    /// single field projection consumed by both the load-time and the
+    /// resolution-time validators, so a new axis cannot silently escape one
+    /// of them ([[RFC-0003:C-SERVE-PARALLELISM]]).
+    pub fn field_values(&self) -> [(&'static str, Option<u32>); 9] {
+        [
+            (
+                "outer.tensor_parallel_size",
+                self.outer
+                    .as_ref()
+                    .and_then(|value| value.tensor_parallel_size),
+            ),
+            (
+                "outer.pipeline_parallel_size",
+                self.outer
+                    .as_ref()
+                    .and_then(|value| value.pipeline_parallel_size),
+            ),
+            (
+                "attention.tensor_parallel_size",
+                self.attention
+                    .as_ref()
+                    .and_then(|value| value.tensor_parallel_size),
+            ),
+            (
+                "attention.data_parallel_size",
+                self.attention
+                    .as_ref()
+                    .and_then(|value| value.data_parallel_size),
+            ),
+            (
+                "attention.context_parallel_size",
+                self.attention
+                    .as_ref()
+                    .and_then(|value| value.context_parallel_size),
+            ),
+            (
+                "experts.tensor_parallel_size",
+                self.experts
+                    .as_ref()
+                    .and_then(|value| value.tensor_parallel_size),
+            ),
+            (
+                "experts.data_parallel_size",
+                self.experts
+                    .as_ref()
+                    .and_then(|value| value.data_parallel_size),
+            ),
+            (
+                "experts.expert_parallel_size",
+                self.experts
+                    .as_ref()
+                    .and_then(|value| value.expert_parallel_size),
+            ),
+            (
+                "experts.dense_tensor_parallel_size",
+                self.experts
+                    .as_ref()
+                    .and_then(|value| value.dense_tensor_parallel_size),
+            ),
+        ]
+    }
+
     /// Overlay the components present in `other` onto `self`, leaving
     /// components `other` omits untouched (the per-component precedence merge).
     pub fn merge_from(&mut self, other: &Self) {
@@ -473,6 +569,35 @@ pub struct ServeModelInput {
     pub served_name: String,
 }
 
+/// The governed auxiliary weight artifact kinds a serve declaration may attach
+/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuxiliaryModelKind {
+    /// Separate weights the operator's framework speculative decoding
+    /// configuration consumes as its draft.
+    DraftModel,
+}
+
+/// A logical auxiliary weight identity supplied during serving planning and
+/// rendering: its governed kind plus the referenced logical model
+/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxiliaryModelInput {
+    pub kind: AuxiliaryModelKind,
+    pub model: ServeModelInput,
+}
+
+/// A machine-resolved auxiliary weight locator on a model-rank allocation
+/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxiliaryModelLocator {
+    pub kind: AuxiliaryModelKind,
+    pub locator: String,
+}
+
 /// A requested serving role: its identity, kind, replica cardinality, and
 /// declared (not-yet-completed) parallelism and settings.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -496,10 +621,11 @@ pub struct ServeRoleResult {
     pub effective_replica_count: u32,
     pub effective_settings: BTreeMap<String, SettingValue>,
     pub effective_parallelism: Parallelism,
-    /// The public endpoint contract for a direct `single` Engine. Gateway-
-    /// backed shapes leave this absent and carry the contract on Gateway.
+    /// The public endpoint capability declaration for a direct `single`
+    /// Engine. Gateway-backed shapes leave this absent and carry the
+    /// declaration on Gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_endpoint: Option<EndpointRequirement>,
+    pub public_endpoint: Option<EndpointDeclaration>,
     #[serde(default)]
     pub render_inputs: Vec<RenderInputDeclaration>,
 }
@@ -590,8 +716,34 @@ pub struct SuppliedRenderInput {
     pub sha256: String,
 }
 
-/// The workload endpoint's protocol and named OpenAI paths, plus an optional
-/// prefix-cache-reset action a Bench case can invoke between runs.
+/// The plan-response endpoint capability declaration
+/// ([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]): the protocol plus the
+/// integration-owned capability members (server metrics, prefix-cache
+/// actions, and the cache-read representation). The control plane owns the
+/// route paths, so this declaration carries no path values and rejects them
+/// as unknown fields.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointDeclaration {
+    pub protocol: EndpointProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_metrics: Option<ServerMetricsEndpointRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_reset: Option<HttpActionSpec>,
+    /// A Gateway-backend conditioning fan-out action: the frontend routes one
+    /// conditioning request per prefill replica and attention data-parallel
+    /// rank ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_conditioning: Option<HttpActionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_read_zero_representation: Option<PromptCacheReadZeroRepresentation>,
+}
+
+/// The resolved workload endpoint requirement: the accepted declaration plus
+/// the named OpenAI paths. The control plane fills the pinned
+/// `/v1/completions` and `/v1/chat/completions` paths at plan acceptance
+/// ([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]); resolved evidence and client
+/// inputs preserve both strings exactly.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointRequirement {
@@ -720,6 +872,10 @@ pub enum ServeProcessAllocation {
         machine: String,
         devices: Vec<u32>,
         model_locator: String,
+        /// The machine-resolved auxiliary weight locators for each declared
+        /// kind ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        auxiliary_model_locators: Vec<AuxiliaryModelLocator>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<EndpointAssignment>,
         ports: BTreeMap<String, EndpointAssignment>,
@@ -830,7 +986,7 @@ pub enum RenderSource {
     Integration,
 }
 
-/// The one canonical process role available to a protocol-v9 frontend.
+/// The one canonical process role available to a frontend.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrontendProcessRole {
@@ -870,7 +1026,7 @@ pub struct GatewayPdRouterFrontendBinding(
     pub (FrontendGatewayComponent, FrontendPdRouterComponent),
 );
 
-/// The only two frontend bindings protocol v9 accepts. Tuple representation
+/// The only two frontend bindings the adapter protocol accepts. Tuple representation
 /// deliberately serializes as the closed ordered arrays `["gateway"]` and
 /// `["gateway", "pd_router"]` rather than as an open component list.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -919,7 +1075,7 @@ pub struct GatewayPlan {
     pub implementation: String,
     pub implementation_version: String,
     pub effective_settings: BTreeMap<String, SettingValue>,
-    pub endpoint: EndpointRequirement,
+    pub endpoint: EndpointDeclaration,
     pub readiness: ReadinessProbe,
     #[serde(default)]
     pub ports: Vec<String>,
@@ -1086,7 +1242,13 @@ pub enum EvalDefinitionInput {
         request_body: BTreeMap<String, SettingValue>,
         limit: Option<u32>,
         few_shot: Option<u32>,
+        /// The seed the definition declared, absent when it omitted one; a
+        /// single trial with no declared seed does not invent one.
         seed: Option<u64>,
+        /// The effective base seed of the trial schedule, resolved by the
+        /// control plane: the declared seed, or the shared fallback when the
+        /// definition declared none ([[RFC-0004:C-LM-EVAL]]).
+        base_seed: u64,
         trials: u32,
         max_tokens: Option<u32>,
         concurrency: Option<u32>,

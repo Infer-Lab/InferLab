@@ -35,7 +35,11 @@ const WIDE_WIDTH: u16 = 112;
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 const PRESENTATION_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
 
-pub(crate) fn run(root: PathBuf, refresh_interval: Duration) -> Result<(), InferlabError> {
+pub(crate) fn run(
+    root: PathBuf,
+    refresh_interval: Duration,
+    local: Option<PathBuf>,
+) -> Result<(), InferlabError> {
     if refresh_interval.is_zero() {
         return Err(InferlabError::InvalidConfig {
             message: "--refresh-interval must be greater than zero".to_owned(),
@@ -48,7 +52,7 @@ pub(crate) fn run(root: PathBuf, refresh_interval: Duration) -> Result<(), Infer
     let (result_tx, result_rx) = mpsc::channel();
     thread::Builder::new()
         .name("inferlab-tui-refresh".to_owned())
-        .spawn(move || refresh_loop(root, refresh_interval, request_rx, result_tx))
+        .spawn(move || refresh_loop(root, refresh_interval, local, request_rx, result_tx))
         .map_err(|source| InferlabError::WriteOutput { source })?;
 
     let mut app = App::default();
@@ -266,6 +270,7 @@ enum RefreshRequest {
 fn refresh_loop(
     root: PathBuf,
     refresh_interval: Duration,
+    local: Option<PathBuf>,
     receiver: mpsc::Receiver<RefreshRequest>,
     sender: mpsc::Sender<Snapshot>,
 ) {
@@ -274,7 +279,7 @@ fn refresh_loop(
         match request {
             RefreshRequest::Refresh { force_declared } => {
                 if sender
-                    .send(collector.collect(&root, force_declared))
+                    .send(collector.collect(&root, local.as_deref(), force_declared))
                     .is_err()
                 {
                     return;

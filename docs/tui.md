@@ -10,9 +10,9 @@ inferlab --workspace /path/to/workspace tui
 inferlab tui --refresh-interval 2s
 ```
 
-The refresh override applies only to that invocation; the default is one
-second. Opening, refreshing, searching, and closing the TUI do not write a UI
-session or launch an InferLab workflow.
+The refresh override applies only to that invocation; `inferlab tui --help`
+prints the current default interval. Opening, refreshing, searching, and
+closing the TUI do not write a UI session or launch an InferLab workflow.
 
 ## Views and sources
 
@@ -81,8 +81,6 @@ not affect other objects; after an earlier successful probe its last value
 remains visible as stale.
 Terminal server records such as `stopped` are not probed because their recorded
 lifecycle is already authoritative and no running process is claimed.
-Recipe-owned server records remain children in Records, but a running or
-abnormal child server is still observed and surfaced in Overview.
 
 The Metrics selector groups recorded names into throughput, observed input,
 request latency, TTFT, TPOT, cache, speculation, SLO, and `OTHER` families.

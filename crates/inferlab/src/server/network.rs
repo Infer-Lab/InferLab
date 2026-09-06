@@ -9,13 +9,20 @@ use thiserror::Error;
 
 const NETWORK_MARKER: &str = "INFERLAB_NETWORK\t";
 const EXCLUDED_INTERFACE_PREFIXES: [&str; 4] = ["br-", "docker", "veth", "virbr"];
-const PROBE_SCRIPT: &str = r#"set -eu
+
+/// The probe script spells its marker through the parser's own constant, so
+/// the emitted rows and the parsed prefix cannot drift apart.
+fn probe_script() -> String {
+    format!(
+        r#"set -eu
 route_iface=$(ip route get 8.8.8.8 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n1 || true)
-printf 'INFERLAB_NETWORK\tROUTE\t%s\n' "$route_iface"
-ip -o -4 addr show scope global up | awk '{printf "INFERLAB_NETWORK\tADDR\t%s\t%s\n", $2, $4}'
+printf '{NETWORK_MARKER}ROUTE\t%s\n' "$route_iface"
+ip -o -4 addr show scope global up | awk '{{printf "{NETWORK_MARKER}ADDR\t%s\t%s\n", $2, $4}}'
 if command -v ibdev2netdev >/dev/null 2>&1; then
-    ibdev2netdev | awk '/\(Up\)/ {printf "INFERLAB_NETWORK\tRDMA\t%s\t%s\n", $5, $1}'
-fi"#;
+    ibdev2netdev | awk '/\(Up\)/ {{printf "{NETWORK_MARKER}RDMA\t%s\t%s\n", $5, $1}}'
+fi"#
+    )
+}
 
 #[derive(Debug, Error)]
 pub(super) enum NetworkResolutionError {
@@ -105,20 +112,22 @@ pub(super) fn resolve(
 }
 
 fn probe_machine(process: &ProcessPlan) -> Result<NetworkMachinePlan, NetworkResolutionError> {
-    let output = match &process.launch {
-        LaunchPlan::Local => Command::new("bash")
-            .args(["-c", PROBE_SCRIPT])
-            .output()
-            .map_err(|source| NetworkResolutionError::LocalLaunch {
-                machine: process.machine.clone(),
-                source,
-            })?,
-        LaunchPlan::Ssh { target } => inferlab_runtime::ssh::ssh_output(target, PROBE_SCRIPT)
-            .map_err(|source| NetworkResolutionError::Ssh {
-                machine: process.machine.clone(),
-                source,
-            })?,
-    };
+    let script = probe_script();
+    let output =
+        match &process.launch {
+            LaunchPlan::Local => Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .map_err(|source| NetworkResolutionError::LocalLaunch {
+                    machine: process.machine.clone(),
+                    source,
+                })?,
+            LaunchPlan::Ssh { target } => inferlab_runtime::ssh::ssh_output(target, &script)
+                .map_err(|source| NetworkResolutionError::Ssh {
+                    machine: process.machine.clone(),
+                    source,
+                })?,
+        };
     parse_output(&process.machine, output)
 }
 

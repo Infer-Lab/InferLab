@@ -1,12 +1,8 @@
-import os
-from pathlib import Path
-
-import yaml  # type: ignore[import-untyped]
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
+    EndpointDeclaration,
     EndpointProtocol,
-    EndpointRequirement,
     IntegrationIdentity,
     KvTransferMechanism,
     Parallelism,
@@ -34,6 +30,7 @@ from inferlab_adapter_sdk import (
     SyntheticAcceptanceInput2,
     SyntheticAcceptanceOutcome,
     TargetEndpointScheme,
+    consistent_acceptance_outcome,
     effective_settings,
     fused_pd_frontend_plans,
     integration_identity,
@@ -43,10 +40,12 @@ from inferlab_adapter_sdk import (
     validate_extra_args,
 )
 
+from .auxiliary import validate_auxiliary_models
 from .settings import (
     _INFERLAB_OWNED_OPTIONS,
     TrtllmServeSettings,
-    _merge_yaml_patch,
+    _operator_config,
+    _render_source_path,
     _settings,
     _yaml_mapping,
 )
@@ -54,12 +53,6 @@ from .synthetic import FORCE_ACCEPTED_TOKENS_ENV
 
 _NATIVE_ROUTING_BACKEND = "trtllm-disaggregated"
 _PREFILL_DECODE_OWNED_OPTIONS = _INFERLAB_OWNED_OPTIONS | {"--backend"}
-
-
-def _render_source_path(path: str) -> str:
-    if Path(path).is_absolute():
-        return path
-    return os.path.normpath(Path(".inferlab") / path)
 
 
 def _identity() -> IntegrationIdentity:
@@ -161,34 +154,11 @@ def _device_count(parallelism: Parallelism) -> int:
     return (outer.tensor_parallel_size or 1) * (outer.pipeline_parallel_size or 1)
 
 
-def _read_operator_config(path: str) -> str:
-    """Plan-time read of the operator's source YAML through the workspace filesystem."""
-    try:
-        return Path(_render_source_path(path)).read_text(encoding="utf-8")
-    except OSError as error:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"cannot read TensorRT-LLM extra_llm_api_options {path!r}: {error}",
-        ) from error
-
-
-def _parse_operator_config(text: str, path: str) -> dict[str, object]:
-    try:
-        value: object = yaml.safe_load(text)
-    except yaml.YAMLError as error:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"cannot parse TensorRT-LLM extra_llm_api_options {path!r}: {error}",
-        ) from error
-    if value is None:
-        return {}
-    return dict(_yaml_mapping(value, repr(path)))
-
-
 def _resolve_synthetic_acceptance(
     settings: TrtllmServeSettings,
     synthetic: SyntheticAcceptanceInput,
     role_id: str,
+    state_dir: str,
     render_inputs: list[SuppliedRenderInput] | None = None,
 ) -> SyntheticAcceptanceOutcome:
     """Validate the overlay target and resolve the effective acceptance length.
@@ -199,10 +169,7 @@ def _resolve_synthetic_acceptance(
     variable is rejected ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]). For the
     curve form the draft count comes from that merged configuration's
     `speculative_config.max_draft_len` ([[ADR-0043]]); the same resolution
-    runs at plan and at render, so both see one effective value. At plan no
-    supplied render inputs exist, so the source YAML is read through the
-    workspace filesystem; at render the control-plane-supplied frozen text is
-    consumed instead ([[RFC-0006:C-LAUNCH-FILES]]).
+    runs at plan and at render, so both see one effective value.
     """
     if settings.extra_env and FORCE_ACCEPTED_TOKENS_ENV in settings.extra_env:
         raise AdapterOperationError(
@@ -210,24 +177,7 @@ def _resolve_synthetic_acceptance(
             f"role {role_id!r} extra_env restates {FORCE_ACCEPTED_TOKENS_ENV}; the "
             "synthetic acceptance declaration is the single authority for that key",
         )
-    config: dict[str, object] = {}
-    path = settings.extra_llm_api_options
-    if path is not None:
-        if render_inputs is None:
-            text = _read_operator_config(path)
-        else:
-            supplied = next(
-                (item for item in render_inputs if item.source_path == _render_source_path(path)),
-                None,
-            )
-            if supplied is None:
-                raise AdapterOperationError(
-                    AdapterErrorCode.invalid_request,
-                    f"TensorRT-LLM render input {path!r} was not supplied",
-                )
-            text = supplied.text
-        config = _parse_operator_config(text, path)
-    _merge_yaml_patch(config, settings.extra_llm_api_options_patch or {})
+    config = _operator_config(settings, state_dir, render_inputs)
     speculative = config.get("speculative_config")
     if speculative is None:
         raise AdapterOperationError(
@@ -279,7 +229,9 @@ def _plan_role(
     settings = _settings(role.settings)
     outcome: SyntheticAcceptanceOutcome | None = None
     if input.synthetic_acceptance is not None:
-        outcome = _resolve_synthetic_acceptance(settings, input.synthetic_acceptance, role.id)
+        outcome = _resolve_synthetic_acceptance(
+            settings, input.synthetic_acceptance, role.id, input.state_dir
+        )
     parallelism = _effective_parallelism(role.parallelism)
     replicas = [
         ServeReplicaRequirement(
@@ -308,11 +260,9 @@ def _plan_role(
     )
 
 
-def _endpoint_requirement() -> EndpointRequirement:
-    return EndpointRequirement(
+def _endpoint_declaration() -> EndpointDeclaration:
+    return EndpointDeclaration(
         protocol=EndpointProtocol(),
-        completions_path="/v1/completions",
-        chat_completions_path="/v1/chat/completions",
     )
 
 
@@ -332,16 +282,20 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     settings = _settings(role_result.effective_settings)
     render_inputs: list[RenderInputDeclaration] = []
     # The source YAML crosses as a supplied render input when rendering
-    # re-reads its content: for the launch-file merge (patch present) or for
-    # the synthetic acceptance overlay's render-time re-resolution
-    # ([[RFC-0006:C-LAUNCH-FILES]]).
+    # re-reads its content: for the launch-file merge (patch present), for
+    # the synthetic acceptance overlay's render-time re-resolution, or for
+    # the draft-model locator splice ([[RFC-0006:C-LAUNCH-FILES]]).
     if settings.extra_llm_api_options is not None and (
-        settings.extra_llm_api_options_patch is not None or input.synthetic_acceptance is not None
+        settings.extra_llm_api_options_patch is not None
+        or input.synthetic_acceptance is not None
+        or input.auxiliary_models
     ):
         render_inputs.append(
-            RenderInputDeclaration(source_path=_render_source_path(settings.extra_llm_api_options))
+            RenderInputDeclaration(
+                source_path=_render_source_path(input.state_dir, settings.extra_llm_api_options)
+            )
         )
-    role_result.public_endpoint = _endpoint_requirement()
+    role_result.public_endpoint = _endpoint_declaration()
     role_result.render_inputs = render_inputs
     return PlanServeResult(
         integration=_identity(),
@@ -378,14 +332,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     decode = require_role(input, ServeRoleKind.decode)
     prefill_result, prefill_replicas, prefill_outcome = _plan_role(input, prefill)
     decode_result, decode_replicas, decode_outcome = _plan_role(input, decode)
-    if prefill_outcome != decode_outcome:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "the prefill and decode roles resolve different synthetic acceptance "
-            f"outcomes ({prefill_outcome} vs {decode_outcome}); the plan response "
-            "carries one effective acceptance length, so both roles must determine "
-            "the same draft count",
-        )
+    outcome = consistent_acceptance_outcome(prefill_outcome, decode_outcome)
     roles = [prefill_result, decode_result]
     replicas = [*prefill_replicas, *decode_replicas]
     for role in roles:
@@ -396,7 +343,9 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         validate_extra_args(settings.extra_args or [], _PREFILL_DECODE_OWNED_OPTIONS)
         path = settings.extra_llm_api_options
         if path is not None:
-            role.render_inputs = [RenderInputDeclaration(source_path=_render_source_path(path))]
+            role.render_inputs = [
+                RenderInputDeclaration(source_path=_render_source_path(input.state_dir, path))
+            ]
     links = [
         ServeRoleLink(
             root=ServeRoleLinkRequestRouting(
@@ -434,7 +383,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         implementation=implementation,
         implementation_version=implementation_version,
         render_source=render_source,
-        endpoint=_endpoint_requirement(),
+        endpoint=_endpoint_declaration(),
         gateway_readiness=readiness,
         pd_router_readiness=readiness,
         policies=PdRoutingPolicies(prefill="round_robin", decode="context_first"),
@@ -449,11 +398,12 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         links=links,
         gateway=gateway,
         pd_router=pd_router,
-        synthetic_acceptance=prefill_outcome,
+        synthetic_acceptance=outcome,
     )
 
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
+    validate_auxiliary_models(input)
     if input.profiling is not None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,

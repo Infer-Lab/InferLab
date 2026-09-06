@@ -6,8 +6,8 @@ from inferlab_adapter_sdk import (
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
     CaptureWindowHttpActionSpec,
+    EndpointDeclaration,
     EndpointProtocol,
-    EndpointRequirement,
     HttpActionSpec,
     HttpMethod,
     IntegrationIdentity,
@@ -37,6 +37,7 @@ from inferlab_adapter_sdk import (
     SettingValue,
     SyntheticAcceptanceOutcome,
     TargetEndpointScheme,
+    consistent_acceptance_outcome,
     effective_settings,
     fused_pd_frontend_plans,
     integration_identity,
@@ -44,6 +45,7 @@ from inferlab_adapter_sdk import (
     require_role,
 )
 
+from .auxiliary import validate_auxiliary_models
 from .settings import _settings
 from .synthetic import resolve_synthetic_acceptance
 
@@ -261,16 +263,14 @@ def _plan_role(
     )
 
 
-def _endpoint_requirement(
+def _endpoint_declaration(
     *,
     include_server_metrics: bool,
     include_cache_reporting: bool,
     include_conditioning_fanout: bool = False,
-) -> EndpointRequirement:
-    return EndpointRequirement(
+) -> EndpointDeclaration:
+    return EndpointDeclaration(
         protocol=EndpointProtocol(),
-        completions_path="/v1/completions",
-        chat_completions_path="/v1/chat/completions",
         server_metrics=(
             ServerMetricsEndpointRequirement(path="/metrics") if include_server_metrics else None
         ),
@@ -300,7 +300,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas, outcome = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
-    role_result.public_endpoint = _endpoint_requirement(
+    role_result.public_endpoint = _endpoint_declaration(
         include_server_metrics=settings.enable_metrics,
         include_cache_reporting=settings.enable_cache_report,
     )
@@ -340,14 +340,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     decode = require_role(input, ServeRoleKind.decode)
     prefill_result, prefill_replicas, prefill_outcome = _plan_role(input, prefill, ["bootstrap"])
     decode_result, decode_replicas, decode_outcome = _plan_role(input, decode, [])
-    if prefill_outcome != decode_outcome:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "the prefill and decode roles resolve different synthetic acceptance "
-            f"outcomes ({prefill_outcome} vs {decode_outcome}); the plan response "
-            "carries one effective acceptance length, so both roles must determine "
-            "the same draft count",
-        )
+    outcome = consistent_acceptance_outcome(prefill_outcome, decode_outcome)
     roles = [prefill_result, decode_result]
     replicas = [*prefill_replicas, *decode_replicas]
     links = [
@@ -418,7 +411,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         implementation=implementation,
         implementation_version=implementation_version,
         render_source=render_source,
-        endpoint=_endpoint_requirement(
+        endpoint=_endpoint_declaration(
             include_server_metrics=False,
             include_cache_reporting=cache_reporting,
             include_conditioning_fanout=backend_pair == ("builtin", "builtin"),
@@ -437,11 +430,12 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         links=links,
         gateway=gateway,
         pd_router=pd_router,
-        synthetic_acceptance=prefill_outcome,
+        synthetic_acceptance=outcome,
     )
 
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
+    validate_auxiliary_models(input)
     if input.topology == ServeTopology.single:
         return _plan_single(input)
     return _plan_prefill_decode(input)

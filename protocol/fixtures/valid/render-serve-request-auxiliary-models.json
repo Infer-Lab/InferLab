@@ -1,0 +1,85 @@
+{
+  "operation": "render_serve",
+  "protocol_version": "10",
+  "input": {
+    "model": {
+      "id": "deepseek-v4-flash",
+      "served_name": "deepseek-v4-flash"
+    },
+    "topology": "single",
+    "state_dir": ".inferlab",
+    "allocations": [
+      {
+        "kind": "model_rank",
+        "process": "serve",
+        "role": "serve",
+        "role_kind": "serve",
+        "replica": 0,
+        "rank": 0,
+        "rank_count": 1,
+        "machine": "node-a",
+        "model_locator": "/models/deepseek-v4-flash",
+        "cache": "/cache/runtime/node-a/prefill",
+        "capture_storage": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/prefill",
+        "devices": [
+          0,
+          1
+        ],
+        "endpoint": {
+          "host": "node-a.example",
+          "port": 8000
+        },
+        "ports": {
+          "bootstrap": {
+            "host": "node-a.example",
+            "port": 29501
+          }
+        },
+        "launch": {
+          "kind": "local"
+        },
+        "effective_settings": {
+          "extra_args": [
+            "--speculative-config",
+            "{\"method\":\"dspark\",\"num_speculative_tokens\":2}"
+          ]
+        },
+        "effective_parallelism": {
+          "outer": {
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 1
+          },
+          "attention": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "context_parallel_size": 1
+          },
+          "experts": {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "expert_parallel_size": 1,
+            "dense_tensor_parallel_size": 1
+          }
+        },
+        "links": [],
+        "dependencies": [],
+        "render_inputs": [],
+        "auxiliary_model_locators": [
+          {
+            "kind": "draft-model",
+            "locator": "/models/deepseek-v4-flash-draft"
+          }
+        ]
+      }
+    ],
+    "auxiliary_models": [
+      {
+        "kind": "draft-model",
+        "model": {
+          "id": "deepseek-v4-flash-draft",
+          "served_name": "deepseek-v4-flash-draft"
+        }
+      }
+    ]
+  }
+}

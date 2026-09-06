@@ -1,8 +1,8 @@
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
+    EndpointDeclaration,
     EndpointProtocol,
-    EndpointRequirement,
     HttpActionSpec,
     HttpMethod,
     IntegrationIdentity,
@@ -36,6 +36,7 @@ from inferlab_adapter_sdk import (
     require_role,
 )
 
+from .auxiliary import validate_auxiliary_models
 from .settings import _settings
 
 
@@ -179,11 +180,9 @@ def _plan_role(
     )
 
 
-def _endpoint_requirement() -> EndpointRequirement:
-    return EndpointRequirement(
+def _endpoint_declaration() -> EndpointDeclaration:
+    return EndpointDeclaration(
         protocol=EndpointProtocol(),
-        completions_path="/v1/completions",
-        chat_completions_path="/v1/chat/completions",
         prefix_cache_reset=HttpActionSpec(
             method=HttpMethod(),
             path="/flush_cache",
@@ -214,7 +213,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         ["control", "dist_init"],
         ReadinessProbe(root=ReadinessProbeHttp(path="/readiness")),
     )
-    role_result.public_endpoint = _endpoint_requirement()
+    role_result.public_endpoint = _endpoint_declaration()
     return PlanServeResult(
         integration=_identity(),
         roles=[role_result],
@@ -285,7 +284,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         implementation="tokenspeed-smg",
         implementation_version=identity.adapter_version,
         render_source=RenderSource.integration,
-        endpoint=_endpoint_requirement(),
+        endpoint=_endpoint_declaration(),
         gateway_readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/readiness")),
         pd_router_readiness=ReadinessProbe(
             root=ReadinessProbeHttpTargetRegistry(
@@ -319,6 +318,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
 
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
+    validate_auxiliary_models(input)
     if input.profiling is not None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,

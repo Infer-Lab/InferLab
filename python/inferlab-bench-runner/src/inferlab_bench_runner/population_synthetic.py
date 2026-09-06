@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     BenchCacheStartInput,
     BenchInclusiveUniformInput,
     BenchPopulationInput,
@@ -1127,7 +1128,7 @@ def write_synthetic_population(
     prefix_counts = [value for value in resolved_prefix_counts if value is not None]
     system_counts = [value for value in resolved_system_counts if value is not None]
     return BenchPopulationPreparationResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         materialization_identity=(
             CORPUS_MATERIALIZATION_IDENTITY

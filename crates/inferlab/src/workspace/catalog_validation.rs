@@ -74,23 +74,25 @@ pub(super) fn validate_workspace(
     Ok(())
 }
 
+// Pinned by protocol/fixtures/reserved-request-members.json ([[RFC-0004:C-INFERENCE-REQUESTS]]).
+const RESERVED_REQUEST_MEMBERS: [&str; 8] = [
+    "model",
+    "prompt",
+    "messages",
+    "stream",
+    "n",
+    "max_tokens",
+    "max_completion_tokens",
+    "stop",
+];
+
 fn validate_request_body(
     kind: &str,
     id: &str,
     request_body: &BTreeMap<String, JsonValue>,
     additional_reserved: &[&str],
 ) -> Result<(), InferlabError> {
-    const RESERVED: [&str; 8] = [
-        "model",
-        "prompt",
-        "messages",
-        "stream",
-        "n",
-        "max_tokens",
-        "max_completion_tokens",
-        "stop",
-    ];
-    if let Some(member) = RESERVED
+    if let Some(member) = RESERVED_REQUEST_MEMBERS
         .iter()
         .chain(additional_reserved)
         .find(|member| request_body.contains_key(**member))
@@ -100,30 +102,33 @@ fn validate_request_body(
         ));
     }
     for (member, value) in request_body {
-        validate_request_body_value(kind, id, &format!("request_body.{member}"), value)?;
+        validate_finite_json_value(
+            &format!("{kind} {id:?}"),
+            &format!("request_body.{member}"),
+            value,
+        )?;
     }
     Ok(())
 }
 
-fn validate_request_body_value(
-    kind: &str,
-    id: &str,
+pub(crate) fn validate_finite_json_value(
+    owner: &str,
     path: &str,
     value: &JsonValue,
 ) -> Result<(), InferlabError> {
     match value {
         JsonValue::Float(value) if !value.is_finite() => {
-            invalid(format!("{kind} {id:?} {path} must be a finite JSON number"))
+            invalid(format!("{owner} {path} must be a finite JSON number"))
         }
         JsonValue::Array(values) => {
             for (index, value) in values.iter().enumerate() {
-                validate_request_body_value(kind, id, &format!("{path}[{index}]"), value)?;
+                validate_finite_json_value(owner, &format!("{path}[{index}]"), value)?;
             }
             Ok(())
         }
         JsonValue::Object(values) => {
             for (member, value) in values {
-                validate_request_body_value(kind, id, &format!("{path}.{member}"), value)?;
+                validate_finite_json_value(owner, &format!("{path}.{member}"), value)?;
             }
             Ok(())
         }
@@ -382,6 +387,80 @@ readiness_timeout_seconds = 60
         Ok(())
     }
 
+    // inf/nan are valid TOML but have no JSON representation; adapter
+    // projection maps them to null and the untagged wire enum then fails
+    // without naming a key, so every settings layer walks for finite values
+    // at load.
+    #[test]
+    fn non_finite_settings_values_are_rejected_at_load_across_layers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const HEADER: &str = r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "single"
+readiness_timeout_seconds = 60
+"#;
+        for value in ["inf", "nan"] {
+            for (layer, path) in [
+                (
+                    format!("[servers.server.settings]\ntemperature = {value}"),
+                    "server \"server\" settings.temperature",
+                ),
+                (
+                    format!("[servers.server.roles.serve.settings]\ntemperature = {value}"),
+                    "server \"server\" role \"serve\" settings.temperature",
+                ),
+                (
+                    format!("[servers.server.cases.c.settings]\ntemperature = {value}"),
+                    "server case \"c\" settings.temperature",
+                ),
+                (
+                    format!("[servers.server.cases.c.roles.serve.settings]\ntemperature = {value}"),
+                    "server case \"c\" role \"serve\" settings.temperature",
+                ),
+            ] {
+                let Err(error) = validate_manifest(&format!("{HEADER}\n{layer}\n")) else {
+                    return Err(std::io::Error::other(format!(
+                        "{layer} must fail load validation"
+                    ))
+                    .into());
+                };
+                assert!(
+                    error.to_string().contains("must be a finite JSON number"),
+                    "{layer}: {error}"
+                );
+                assert!(error.to_string().contains(path), "{layer}: {error}");
+            }
+        }
+
+        // The walk descends into nested arrays and objects.
+        let Err(error) = validate_manifest(&format!(
+            "{HEADER}\n[servers.server.settings]\nsampling = {{ penalties = [0.5, inf] }}\n"
+        )) else {
+            return Err(std::io::Error::other(
+                "a nested non-finite value must fail load validation",
+            )
+            .into());
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("settings.sampling.penalties[1] must be a finite JSON number"),
+            "{error}"
+        );
+        Ok(())
+    }
+
     // [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]] declaration validation at
     // workspace load: exactly one form, a finite acceptance length of at
     // least one, and well-formed curve coordinates.
@@ -485,6 +564,65 @@ readiness_timeout_seconds = 60
                 error.to_string().contains(expected),
                 "{declaration}: {error}"
             );
+        }
+        Ok(())
+    }
+
+    // [[RFC-0003:C-SERVE-AUXILIARY-MODELS]] declaration validation at
+    // workspace load: governed kinds only, declared model references only,
+    // and no self-reference; cases cannot declare auxiliary models at all.
+    #[test]
+    fn auxiliary_models_declaration_validation() -> Result<(), Box<dyn std::error::Error>> {
+        const HEADER: &str = r#"
+schema_version = 2
+
+[models.model]
+served_name = "model"
+
+[models.draft]
+served_name = "draft"
+
+[stacks.stack]
+integration = "fixture"
+pixi_environment = "fixture"
+
+[servers.server]
+stack = "stack"
+model = "model"
+topology = "single"
+readiness_timeout_seconds = 60
+"#;
+
+        // The governed kind referencing a declared model loads.
+        validate_manifest(&format!(
+            "{HEADER}\n[servers.server.auxiliary_models]\ndraft-model = \"draft\"\n"
+        ))?;
+
+        for (manifest, expected) in [
+            (
+                "[servers.server.auxiliary_models]\nvision-encoder = \"draft\"",
+                "unknown kind \"vision-encoder\"",
+            ),
+            (
+                "[servers.server.auxiliary_models]\ndraft-model = \"missing\"",
+                "references unknown model \"missing\"",
+            ),
+            (
+                "[servers.server.auxiliary_models]\ndraft-model = \"model\"",
+                "references the server's own model",
+            ),
+            (
+                "[servers.server.cases.c.auxiliary_models]\ndraft-model = \"draft\"",
+                "unknown field `auxiliary_models`",
+            ),
+        ] {
+            let result = validate_manifest(&format!("{HEADER}\n{manifest}\n"));
+            let Err(error) = result else {
+                return Err(
+                    std::io::Error::other(format!("{manifest} must fail load validation")).into(),
+                );
+            };
+            assert!(error.to_string().contains(expected), "{manifest}: {error}");
         }
         Ok(())
     }
@@ -639,6 +777,36 @@ readiness_timeout_seconds = 60
             None,
         )
         .map_err(|error| format!("an unknown model key defers to resolution: {error}"))?;
+        Ok(())
+    }
+
+    // [[RFC-0004:C-INFERENCE-REQUESTS]]: the shared fixture spells the
+    // runtime-owned request members once; the load gate must reject exactly
+    // that enumeration, and the Python evidence classifier pins the same set.
+    #[test]
+    fn reserved_request_members_match_the_shared_cross_language_fixture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../protocol/fixtures/reserved-request-members.json"
+        ))?;
+        let pinned: Vec<&str> = fixture.iter().map(String::as_str).collect();
+
+        assert_eq!(RESERVED_REQUEST_MEMBERS.as_slice(), pinned.as_slice());
+        for member in pinned {
+            let request_body = BTreeMap::from([(member.to_owned(), JsonValue::Bool(true))]);
+            let Err(error) = validate_request_body("eval", "task", &request_body, &[]) else {
+                return Err(std::io::Error::other(format!(
+                    "request_body.{member} must fail definition resolution"
+                ))
+                .into());
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("request_body.{member}")),
+                "{error}"
+            );
+        }
         Ok(())
     }
 }

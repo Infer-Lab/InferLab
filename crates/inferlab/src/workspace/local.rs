@@ -495,6 +495,11 @@ pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), Infer
         let mut explicit_ports = BTreeSet::new();
         for (role, role_placement) in &placement.roles {
             require_id("placement role", role)?;
+            if !matches!(role.as_str(), "serve" | "prefill" | "decode" | "gateway") {
+                return invalid(format!(
+                    "placement binding {id:?} contains non-canonical role {role:?}"
+                ));
+            }
             if let Some(role_machines) = role_placement.machines() {
                 if role_machines.is_empty() {
                     return invalid(format!(
@@ -515,11 +520,6 @@ pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), Infer
                     }
                 }
                 continue;
-            }
-            if !matches!(role.as_str(), "serve" | "prefill" | "decode" | "gateway") {
-                return invalid(format!(
-                    "placement binding {id:?} contains non-canonical role {role:?}"
-                ));
             }
             if role == "gateway" && !role_placement.is_direct_single_replica() {
                 return invalid(format!(

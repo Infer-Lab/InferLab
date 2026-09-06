@@ -35,11 +35,9 @@ pub(crate) struct ExportOutcome {
 }
 
 /// Durable pre-execution command evidence ([[RFC-0007:C-IMAGE-BUILD]]): a
-/// pushed command is persisted before it runs, so a build killed mid-command
-/// still records exactly what was launched.
-pub(crate) trait CommandSink {
-    fn push(&mut self, command: NativeCommand) -> Result<(), InferlabError>;
-}
+/// recorded command is persisted before it runs, so a build killed
+/// mid-command still records exactly what was launched.
+pub(crate) type CommandRecorder<'a> = dyn FnMut(NativeCommand) -> Result<(), InferlabError> + 'a;
 
 /// A read-only resolution probe result: the observed value together with the
 /// exact command that produced it ([[RFC-0007:C-IMAGE-BUILD]]). Observations
@@ -67,18 +65,18 @@ pub(crate) trait BuilderTool {
         platform: &str,
         tag: &str,
         log_relative: &str,
-        sink: &mut dyn CommandSink,
+        sink: &mut CommandRecorder<'_>,
     ) -> Result<BuildOutcome, InferlabError>;
     fn inspect_image(
         &self,
         image_id: &str,
-        sink: &mut dyn CommandSink,
+        sink: &mut CommandRecorder<'_>,
     ) -> Result<InspectOutcome, InferlabError>;
     fn export_image(
         &self,
         image_id: &str,
         path: &Path,
-        sink: &mut dyn CommandSink,
+        sink: &mut CommandRecorder<'_>,
     ) -> Result<ExportOutcome, InferlabError>;
 }
 
@@ -170,6 +168,11 @@ fn lossy_tail(bytes: &[u8], limit: usize) -> String {
 }
 
 impl BuilderTool for DockerBuilderTool {
+    /// The platform the builder produces for, answered by the daemon (the
+    /// `Server` fields, not `Client`): the daemon performs the build and
+    /// need not be the invoking host. The distinct launch-side question —
+    /// which recorded assembly runs on the invoking host — is answered
+    /// without a builder invocation by `crate::image::launch::host_platform`.
     fn host_platform(&self) -> Result<Observed<String>, InferlabError> {
         let (stdout, command) = Self::run(&argv(&[
             "docker",
@@ -254,7 +257,7 @@ impl BuilderTool for DockerBuilderTool {
         platform: &str,
         tag: &str,
         log_relative: &str,
-        sink: &mut dyn CommandSink,
+        sink: &mut CommandRecorder<'_>,
     ) -> Result<BuildOutcome, InferlabError> {
         std::fs::create_dir_all(work_dir).map_err(|source| InferlabError::EnvironmentIo {
             path: work_dir.to_path_buf(),
@@ -273,7 +276,7 @@ impl BuilderTool for DockerBuilderTool {
             tag,
             &context_dir.display().to_string(),
         ]);
-        sink.push(NativeCommand {
+        sink(NativeCommand {
             argv: argv.clone(),
             log: Some(log_relative.to_owned()),
         })?;
@@ -297,7 +300,7 @@ impl BuilderTool for DockerBuilderTool {
     fn inspect_image(
         &self,
         image_id: &str,
-        sink: &mut dyn CommandSink,
+        sink: &mut CommandRecorder<'_>,
     ) -> Result<InspectOutcome, InferlabError> {
         let argv = argv(&[
             "docker",
@@ -307,7 +310,7 @@ impl BuilderTool for DockerBuilderTool {
             "{{json .Config.Entrypoint}}",
             image_id,
         ]);
-        sink.push(NativeCommand {
+        sink(NativeCommand {
             argv: argv.clone(),
             log: None,
         })?;
@@ -324,7 +327,7 @@ impl BuilderTool for DockerBuilderTool {
         &self,
         image_id: &str,
         path: &Path,
-        sink: &mut dyn CommandSink,
+        sink: &mut CommandRecorder<'_>,
     ) -> Result<ExportOutcome, InferlabError> {
         let argv = argv(&[
             "docker",
@@ -333,7 +336,7 @@ impl BuilderTool for DockerBuilderTool {
             &path.display().to_string(),
             image_id,
         ]);
-        sink.push(NativeCommand {
+        sink(NativeCommand {
             argv: argv.clone(),
             log: None,
         })?;

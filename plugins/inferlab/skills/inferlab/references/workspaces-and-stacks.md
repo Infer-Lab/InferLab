@@ -39,12 +39,9 @@ current declared-check outcomes and overall readiness. Checks run on every
 status call for a confirmed realization and before launches. Failure reports
 captured output and the declared repair hint; InferLab does not run the repair.
 
-Machine-local runtime caches remain convenience state. Their presence is not
-stack confirmation or portable experiment evidence.
-
 ## Lock And Upgrade Workflow
 
-Read [Upgrading](workspace-definition.md#upgrading-to-012) before changing
+Read [Upgrading](workspace-definition.md#upgrading-across-an-adapter-protocol-hard-cut) before changing
 workspace package pins. Update the committed manifest, then produce and inspect
 the lock through the workspace command:
 

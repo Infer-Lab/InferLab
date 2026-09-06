@@ -58,6 +58,12 @@ struct PendingClientCleanup {
     handle_path: PathBuf,
 }
 
+/// The measurement client-result schema version the result gate accepts and
+/// the native OpenAI smoke writer emits; Python measurement clients spell the
+/// same value as `inferlab_measurement_sdk.SCHEMA_VERSION`
+/// ([[RFC-0004:C-MEASUREMENTS]]).
+const CLIENT_RESULT_SCHEMA_VERSION: u32 = 1;
+
 /// The lenient result-envelope header: only the version, no field policy, so
 /// an evolved envelope still reads far enough to be rejected by version
 /// rather than dying in the strict v1 parse ([[RFC-0004:C-MEASUREMENTS]]).

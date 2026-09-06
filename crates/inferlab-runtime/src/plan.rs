@@ -68,6 +68,17 @@ pub struct CommandPlan {
     pub cwd: PathBuf,
 }
 
+impl CommandPlan {
+    /// The per-process runtime directory on the process's own machine,
+    /// `<cwd>/runtime/<record_id>/<process_id>`: an SSH launch lands its
+    /// log and handle files here, and a profiler capture keeps its output
+    /// in a `profiles` subdirectory.
+    #[must_use]
+    pub fn runtime_dir(&self, record_id: &str, process_id: &str) -> PathBuf {
+        self.cwd.join("runtime").join(record_id).join(process_id)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProcessEndpointPlan {
     pub host: String,

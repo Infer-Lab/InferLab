@@ -148,8 +148,6 @@ if operation == "plan_serve":
                     {
                         "public_endpoint": {
                             "protocol": "http",
-                            "completions_path": "/v1/completions",
-                            "chat_completions_path": "/v1/chat/completions",
                             "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
                             **cache_read_capability(),
                         }
@@ -172,8 +170,6 @@ if operation == "plan_serve":
                     "effective_settings": {},
                     "endpoint": {
                         "protocol": "http",
-                        "completions_path": "/v1/completions",
-                        "chat_completions_path": "/v1/chat/completions",
                         "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
                         **cache_read_capability(),
                         **(
@@ -275,7 +271,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "9",
+            "protocol_version": "10",
             "result": {"operation": operation, "output": output},
         }
     )

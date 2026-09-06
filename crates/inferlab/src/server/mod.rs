@@ -173,7 +173,7 @@ pub(crate) fn acquire_operation(
 ) -> Result<ServerOperationGuard, InferlabError> {
     load_record(root, id)?;
     let path = root
-        .join(".inferlab/records")
+        .join(crate::record::RECORDS_DIR)
         .join(id)
         .join(OPERATION_LOCK_FILE);
     let lock = OpenOptions::new()
@@ -238,10 +238,13 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver>(
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
     let mut session = ServerRecordSession::begin(root, &resolved, requested_id)?;
-    progress.phase(Phase::named("record created").record(
-        session.record().id.clone(),
-        root.join(".inferlab/records").join(&session.record().id),
-    ))?;
+    progress.phase(
+        Phase::named("record created").record(
+            session.record().id.clone(),
+            root.join(crate::record::RECORDS_DIR)
+                .join(&session.record().id),
+        ),
+    )?;
     progress.phase(Phase::named("local and remote preflight"))?;
 
     run_preflight_checks(root, &resolved, &mut session, runtime, progress)?;
@@ -538,7 +541,9 @@ fn spawn_processes<'a, R: ServerRuntime>(
                 .item(&process.id, process_index + 1, process_total)
                 .log(&stderr),
         )?;
-        let remote_dir = remote_runtime_dir(process, session.record());
+        let remote_dir = process
+            .command
+            .runtime_dir(&session.record().id, &process.id);
         let control_endpoint = process.capture_target.as_ref().and_then(|target| {
             process_contexts
                 .iter()
@@ -761,15 +766,6 @@ fn fail_if_startup_interrupted<R: ProcessCleanup + ProcessObserver>(
     Err(lifecycle_error(session, STARTUP_INTERRUPTED.to_owned()))
 }
 
-fn remote_runtime_dir(process: &ProcessPlan, record: &ServerRecord) -> PathBuf {
-    process
-        .command
-        .cwd
-        .join("runtime")
-        .join(&record.id)
-        .join(&process.id)
-}
-
 fn rollback_started<R: ProcessCleanup + ProcessObserver>(
     session: &mut ServerRecordSession,
     runtime: &R,
@@ -937,7 +933,7 @@ fn logs_with_runtime<R: ProcessObserver>(
     }
     Ok(ServerLogsReport {
         id: record.id,
-        record_dir: root.join(".inferlab/records").join(id),
+        record_dir: root.join(crate::record::RECORDS_DIR).join(id),
         processes,
     })
 }
@@ -1346,7 +1342,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 8);
+        assert_eq!(value["schema_version"], 10);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1398,7 +1394,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 3; expected 8"),
+                .contains("unsupported schema version 3; expected 10"),
             "{error}"
         );
         Ok(())
@@ -1428,7 +1424,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema version 6; expected 8"),
+                .contains("unsupported schema version 6; expected 10"),
             "{error}"
         );
         Ok(())
@@ -1552,6 +1548,7 @@ mod tests {
                 devices: vec![index as u32],
                 model_locator: Some("/model".to_owned()),
                 model_locator_source: Some(ModelLocatorSource::Fallback),
+                auxiliary_model_locators: Vec::new(),
                 ports: BTreeMap::new(),
                 runtime_cache: RuntimeCachePlan {
                     storage_root: std::env::temp_dir(),
@@ -1628,11 +1625,13 @@ mod tests {
                 capture_finalization_deadline_seconds: 300,
                 kv_transfer: None,
                 synthetic_acceptance: None,
+                auxiliary_models: Vec::new(),
                 frontend: None,
                 profiler_escapes: None,
                 model: ModelPlan {
                     id: "model".to_owned(),
                     served_name: "model".to_owned(),
+                    fallback_locator: None,
                 },
                 image: None,
                 external_image: None,
@@ -1643,7 +1642,7 @@ mod tests {
                     framework: "fixture".to_owned(),
                     framework_version: "test".to_owned(),
                     executable: "fixture".to_owned(),
-                    protocol_version: ProtocolVersion::V9,
+                    protocol_version: ProtocolVersion::CURRENT,
                     plan_request_sha256: "request".to_owned(),
                     plan_response_sha256: "response".to_owned(),
                     render_request_sha256: "request".to_owned(),

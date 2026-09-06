@@ -2,7 +2,7 @@
 //! [[RFC-0003:C-TENSORRT-LLM-PREFILL-DECODE]].
 
 use crate::core::{
-    self, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response, join_path,
+    self, ProxyHealthcheckResponse, ProxyHttpError, forward_response, join_path,
     outbound_authorization,
 };
 use crate::error::ProxyError;
@@ -17,8 +17,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const ID: &str = "inferlab-trtllm-proxy";
 pub const VERSION: u32 = 2;
+
+pub const HEALTHCHECK_PATH: &str = "/healthcheck";
+
+pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "TensorRT-LLM proxy";
@@ -26,13 +30,6 @@ const PROXY_NAME: &str = "TensorRT-LLM proxy";
 const MIN_REQUEST_ID: u64 = 1_u64 << 42;
 const CONTEXT_FIRST_SCHEDULE_STYLE: u64 = 0;
 const TERMINAL_SSE: &[u8] = b"data: [DONE]\n\n";
-
-pub fn meta() -> ProxyMeta {
-    ProxyMeta {
-        id: ID,
-        version: VERSION,
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -56,9 +53,9 @@ pub async fn run_async(config: Config) -> Result<(), ProxyError> {
 
 fn router(state: ProxyState) -> Router {
     Router::new()
-        .route("/healthcheck", get(healthcheck))
-        .route("/v1/completions", post(completions))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route(HEALTHCHECK_PATH, get(healthcheck))
+        .route(COMPLETIONS_PATH, post(completions))
+        .route(CHAT_COMPLETIONS_PATH, post(chat_completions))
         .with_state(state)
 }
 
@@ -71,8 +68,8 @@ enum RequestFamily {
 impl RequestFamily {
     fn path(self) -> &'static str {
         match self {
-            Self::Completions => "/v1/completions",
-            Self::ChatCompletions => "/v1/chat/completions",
+            Self::Completions => COMPLETIONS_PATH,
+            Self::ChatCompletions => CHAT_COMPLETIONS_PATH,
         }
     }
 }
@@ -618,14 +615,6 @@ mod tests {
     use tokio::task::JoinHandle;
 
     #[test]
-    fn meta_exports_proxy_identity() {
-        assert_eq!(ID, "inferlab-trtllm-proxy");
-        assert_eq!(VERSION, 2);
-        assert_eq!(meta().id, ID);
-        assert_eq!(meta().version, VERSION);
-    }
-
-    #[test]
     fn context_request_is_non_streaming_context_first_with_large_integer_id() -> Result<()> {
         let state = proxy_state(
             vec!["http://prefill".to_owned()],
@@ -1032,8 +1021,8 @@ mod tests {
         let decode_requests = decode_backend.requests.lock().await;
         assert_eq!(context_requests.len(), 1);
         assert_eq!(decode_requests.len(), 1);
-        assert_eq!(context_requests[0].path, "/v1/chat/completions");
-        assert_eq!(decode_requests[0].path, "/v1/chat/completions");
+        assert_eq!(context_requests[0].path, CHAT_COMPLETIONS_PATH);
+        assert_eq!(decode_requests[0].path, CHAT_COMPLETIONS_PATH);
         assert_eq!(context_requests[0].body["messages"], messages);
         assert_eq!(decode_requests[0].body["messages"], messages);
         assert_eq!(decode_requests[0].body["prompt_token_ids_b64"], "encoded");

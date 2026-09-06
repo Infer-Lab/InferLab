@@ -13,9 +13,9 @@ inferlab agent update [--agent codex|claude|all]
 inferlab agent uninstall [--agent codex|claude|all]
 ```
 
-Use `install` for a fresh runtime or to qualify an unreleased checkout, `update`
-after changing the InferLab binary, `doctor` for read-only source and CLI
-diagnosis, and `uninstall` only when removing the plugin. For a checkout:
+Use `install` for a fresh runtime or to qualify an unreleased checkout,
+`doctor` for read-only source and CLI diagnosis, and `uninstall` only when
+removing the plugin. For a checkout:
 
 ```sh
 inferlab agent install --agent all --from-checkout /path/to/inferlab
@@ -25,7 +25,7 @@ Read the final machine-readable report rather than scraping native agent CLI
 output. A partial failure still retains the attempted commands and per-runtime
 outcomes.
 
-After installing a new InferLab binary, run:
+After changing the InferLab binary, run `update` then `doctor`:
 
 ```sh
 inferlab agent update --agent all

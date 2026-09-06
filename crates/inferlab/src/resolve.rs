@@ -3,7 +3,7 @@ mod integration;
 mod realization;
 mod selection;
 mod synthetic_acceptance;
-mod topology;
+pub(crate) mod topology;
 
 use crate::InferlabError;
 use crate::adapter::{AdapterClient, executable_name};
@@ -11,6 +11,7 @@ use crate::execution::{
     CasePlan, EndpointPlan, IntegrationPlan, ModelPlan, PlacementPlan, ResolvedExecution,
     ResourcePlan, ServerPlan, StackPlan, SyntheticAcceptancePlan, Workflow,
 };
+use crate::record::STATE_DIR;
 use crate::toml_override::InvocationOverride;
 use crate::workload::{
     ConditioningServingShape, MeasurementPlan, MeasurementResolveContext, resolve_measurements,
@@ -19,7 +20,9 @@ use crate::workspace::LoadedWorkspace;
 use inferlab_protocol::{EndpointProtocol, ProtocolVersion, ServeProcessAllocation};
 use std::collections::BTreeMap;
 
-use inferlab_serve_domain::{ResolvedProcessAllocation, RuntimeRealizationParts};
+use inferlab_serve_domain::{
+    ModelLocatorSource, ResolvedProcessAllocation, RuntimeRealizationParts,
+};
 use integration::{plan_integration, render_integration};
 use realization::{assemble_process_hierarchy, realize_runtime};
 use selection::{WorkflowSelection, resolve_effective_server_input, select_workflow};
@@ -65,33 +68,45 @@ fn compose_measurements(
         return Ok(None);
     }
     let command_env = current_environment()?;
-    let command_cwd = workspace.root.join(".inferlab");
+    let command_cwd = workspace.root.join(STATE_DIR);
     let suite = selection
         .suite
         .ok_or_else(|| InferlabError::InvalidConfig {
             message: "recipe workflow has no workload suite".to_owned(),
         })?;
-    let model_locator = selection
-        .weight
-        .locator
-        .clone()
-        .or_else(|| {
-            allocations
-                .iter()
-                .find(|allocation| {
-                    matches!(
-                        allocation.wire(),
-                        ServeProcessAllocation::ModelRank { rank: 0, .. }
-                    )
-                })
-                .and_then(|allocation| allocation.model_locator().map(str::to_owned))
-        })
-        .ok_or_else(|| InferlabError::InvalidConfig {
-            message: format!(
-                "recipe target server {:?} has no model locator usable by its measurements",
-                selection.server_id
+    let model_locator = inferlab_serve_domain::measurement_model_locator(
+        allocations
+            .iter()
+            .filter_map(|allocation| {
+                let locator = allocation.model_locator()?;
+                let controller_local = matches!(
+                    allocation.wire(),
+                    ServeProcessAllocation::ModelRank {
+                        launch: inferlab_protocol::AllocationLaunch::Local,
+                        ..
+                    }
+                );
+                Some((
+                    controller_local,
+                    allocation.model_locator_source(),
+                    locator,
+                ))
+            })
+            .chain(
+                selection
+                    .weight
+                    .locator
+                    .as_deref()
+                    .map(|locator| (false, Some(ModelLocatorSource::Fallback), locator)),
             ),
-        })?;
+    )
+    .ok_or_else(|| InferlabError::InvalidConfig {
+        message: format!(
+            "recipe target server {:?} declares no model locator usable by measurements on the controller machine (model weight binding {:?})",
+            selection.server_id, selection.server.model
+        ),
+    })?
+    .to_owned();
     resolve_measurements(
         suite,
         &workspace.config.evals,
@@ -193,7 +208,7 @@ pub(crate) fn resolve<C: AdapterClient>(
         }),
         (None, None) => None,
         (Some(_), None) | (None, Some(_)) => {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} synthetic acceptance outcome does not match the request declaration",
                     stack.integration
@@ -216,8 +231,7 @@ pub(crate) fn resolve<C: AdapterClient>(
         &effective,
         &planned_stage,
         &rendered_stage,
-    )?
-    .into_parts();
+    )?;
     let conditioning_serving = ConditioningServingShape::resolve(
         planned.gateway.is_some(),
         planned.roles.iter().map(|role| {
@@ -286,11 +300,24 @@ pub(crate) fn resolve<C: AdapterClient>(
             capture_finalization_deadline_seconds: effective.capture_finalization_deadline_seconds,
             kv_transfer: effective.kv_transfer,
             synthetic_acceptance,
+            auxiliary_models: effective
+                .auxiliary_models
+                .iter()
+                .map(|auxiliary| crate::execution::AuxiliaryModelPlan {
+                    kind: auxiliary.kind,
+                    model: ModelPlan {
+                        id: auxiliary.model.id.clone(),
+                        served_name: auxiliary.model.served_name.clone(),
+                        fallback_locator: None,
+                    },
+                })
+                .collect(),
             frontend,
             profiler_escapes: profiler_escapes_plan(server),
             model: ModelPlan {
                 id: server.model.clone(),
                 served_name,
+                fallback_locator: selection.weight.locator.clone(),
             },
             image: None,
             external_image: None,
@@ -301,7 +328,7 @@ pub(crate) fn resolve<C: AdapterClient>(
                 framework: planned.integration.framework.clone(),
                 framework_version: planned.integration.framework_version.clone(),
                 executable: executable_name(&stack.integration),
-                protocol_version: ProtocolVersion::V9,
+                protocol_version: ProtocolVersion::CURRENT,
                 plan_request_sha256: planned_stage.evidence().request_sha256().to_owned(),
                 plan_response_sha256: planned_stage.evidence().response_sha256().to_owned(),
                 render_request_sha256: rendered_stage.evidence().request_sha256().to_owned(),

@@ -1,0 +1,10 @@
+[
+  "model",
+  "prompt",
+  "messages",
+  "stream",
+  "n",
+  "max_tokens",
+  "max_completion_tokens",
+  "stop"
+]

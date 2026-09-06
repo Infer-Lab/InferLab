@@ -1,0 +1,6 @@
+{
+  "profile_barrier_env": "INFERLAB_AIPERF_PROFILE_BARRIER",
+  "profile_barrier_requires_warmup_env": "INFERLAB_AIPERF_PROFILE_BARRIER_REQUIRES_WARMUP",
+  "profile_ready_message": "profiling-ready\n",
+  "capture_open_message": "capture-open\n"
+}

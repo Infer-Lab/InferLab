@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-const WORKSPACE: &str = include_str!("fixtures/dsv4-workspace.toml");
+const WORKSPACE: &str = include_str!("fixtures/deepseek-v4-flash-workspace.toml");
 
 struct TestWorkspace {
     // Declared before `root` so fixture process groups are reaped before the
@@ -220,7 +220,7 @@ impl TestWorkspace {
 #[test]
 fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let start_output = workspace.run(&["serve", "start", "dsv4-qualify"])?;
+    let start_output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify"])?;
     assert!(
         start_output.status.success(),
         "{}",
@@ -228,7 +228,7 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
     );
     let started: Value = serde_json::from_slice(&start_output.stdout)?;
     let id = started["id"].as_str().ok_or("missing record id")?;
-    assert_datetime_record_id(id, "serve-dsv4-qualify-tp2")?;
+    assert_datetime_record_id(id, "serve-deepseek-v4-flash-qualify-tp2")?;
     let start_progress = String::from_utf8_lossy(&start_output.stderr);
     for phase in [
         "resolution",
@@ -384,7 +384,7 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
 /// under server record schema version 8
 /// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]], [[RFC-0005:C-EVIDENCE]]).
 #[test]
-fn start_persists_synthetic_acceptance_in_the_schema_8_record() -> Result<(), Box<dyn Error>> {
+fn start_persists_synthetic_acceptance_in_the_record() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let manifest = workspace.root.path().join(".inferlab/workspace.toml");
     fs::write(
@@ -407,14 +407,14 @@ fn start_persists_synthetic_acceptance_in_the_schema_8_record() -> Result<(), Bo
     assert_eq!(synthetic["acceptance_length"], 2.5);
     assert_eq!(synthetic["declared"]["acceptance_length"], 2.5);
 
-    // The record on disk is the schema-8 shape carrying the same evidence.
+    // The record on disk is the current schema shape carrying the same evidence.
     let persisted: Value = serde_json::from_slice(&fs::read(
         workspace
             .root
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 8);
+    assert_eq!(persisted["schema_version"], 10);
     assert_eq!(
         persisted["resolved"]["server"]["synthetic_acceptance"]["acceptance_length"],
         2.5
@@ -462,7 +462,7 @@ fn start_persists_curve_form_synthetic_acceptance_evidence() -> Result<(), Box<d
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 8);
+    assert_eq!(persisted["schema_version"], 10);
     let synthetic = &persisted["resolved"]["server"]["synthetic_acceptance"];
     let declared = &synthetic["declared"]["curve"];
     assert_eq!(declared["path"], "curves/golden.yaml");
@@ -490,7 +490,7 @@ fn start_materializes_launch_files_and_preserves_them_in_the_record() -> Result<
     let started = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"launch-file\"",
     ])?;
@@ -529,7 +529,7 @@ fn local_launch_file_conflict_fails_the_record_before_spawn() -> Result<(), Box<
     let args = [
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"launch-file\"",
     ];
@@ -561,7 +561,7 @@ fn remote_machine_realizations_run_declared_checks_before_launch() -> Result<(),
     workspace.configure_ssh_pair()?;
     workspace.declare_environment_check()?;
 
-    let started = workspace.run_json(&["serve", "start", "dsv4-qualify"])?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
     let id = started["id"].as_str().ok_or("missing record id")?;
     let checks = started["environment_checks"]
         .as_array()
@@ -620,7 +620,7 @@ fn local_adapter_timeout_is_effective_for_plan_and_render_evidence() -> Result<(
     bindings.push_str("\n[adapter]\ntimeout_seconds = 7\n");
     fs::write(local, bindings)?;
 
-    let started = workspace.run_json(&["serve", "start", "dsv4-qualify"])?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
     let operations = started["adapter_operations"]
         .as_array()
         .ok_or("missing adapter operation evidence")?;
@@ -648,7 +648,8 @@ fn interruption_during_remote_preflight_reaps_the_ssh_process() -> Result<(), Bo
     workspace.configure_ssh_pair()?;
     let control = tempfile::tempdir()?;
     let marker = control.path().join("ssh-preflight.pid");
-    let mut command = workspace.command(&["serve", "start", "dsv4-qualify", "--dry-run"]);
+    let mut command =
+        workspace.command(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"]);
     let mut child = command
         .env("FAKE_SSH_HANG_PREFLIGHT", &marker)
         .stdout(Stdio::piped())
@@ -716,7 +717,7 @@ fn ssh_launch_materializes_files_before_each_remote_spawn() -> Result<(), Box<dy
     let started = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"launch-file\"",
     ])?;
@@ -757,7 +758,7 @@ fn ssh_launch_file_conflict_records_failure_without_launching() -> Result<(), Bo
     let args = [
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"launch-file\"",
     ];
@@ -823,7 +824,7 @@ fn image_selection_rejects_remote_placement() -> Result<(), Box<dyn Error>> {
     let output = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--image",
         "fixture-image-record",
         "--dry-run",
@@ -848,7 +849,7 @@ fn ordered_two_node_ssh_lifecycle_preserves_logs_and_reverse_cleanup() -> Result
     let workspace = TestWorkspace::new()?;
     workspace.configure_ssh_pair()?;
 
-    let started = workspace.run_json(&["serve", "start", "dsv4-qualify"])?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
     let id = started["id"].as_str().ok_or("missing record id")?;
     let evidence = started["process_evidence"]
         .as_object()
@@ -941,7 +942,7 @@ fn ordered_two_node_ssh_lifecycle_preserves_logs_and_reverse_cleanup() -> Result
         assert_eq!(process["cleanup"][0]["verified"], true);
         assert_eq!(process["log_sync_error"], Value::Null);
     }
-    let next = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let next = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(next["workspace"]["dirty"], false);
     write_executable(
         &workspace.bin.join("ssh"),
@@ -1004,7 +1005,7 @@ fn ssh_children_do_not_inherit_dynamic_linker_overrides() -> Result<(), Box<dyn 
         command.output()
     };
 
-    let output = spawn(&["serve", "start", "dsv4-qualify"])?;
+    let output = spawn(&["serve", "start", "deepseek-v4-flash-qualify"])?;
     assert!(
         output.status.success(),
         "{}",
@@ -1045,7 +1046,7 @@ fn ssh_children_do_not_inherit_dynamic_linker_overrides() -> Result<(), Box<dyn 
 #[test]
 fn hardware_probe_failure_fails_the_launch_before_any_process() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let mut command = workspace.command(&["serve", "start", "dsv4-qualify"]);
+    let mut command = workspace.command(&["serve", "start", "deepseek-v4-flash-qualify"]);
     command.env("FIXTURE_NVIDIA_SMI_ERROR", "fixture probe boom");
     let output = command.output()?;
     assert!(!output.status.success());
@@ -1100,7 +1101,7 @@ fn process_exit_before_readiness_finalizes_the_precreated_record() -> Result<(),
     let output = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"launch-failure\"",
     ])?;
@@ -1124,7 +1125,7 @@ fn sigterm_during_readiness_rolls_back_the_recorded_process_group() -> Result<()
     let mut command = workspace.command(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"timeout\"",
     ]);
@@ -1340,8 +1341,6 @@ if operation == "plan_serve":
             "effective_parallelism": effective_parallelism,
             "public_endpoint": {
                 "protocol": "http",
-                "completions_path": "/v1/completions",
-                "chat_completions_path": "/v1/chat/completions",
             },
             "render_inputs": [],
         }],
@@ -1423,7 +1422,7 @@ else:
     raise ValueError(operation)
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "9",
+    "protocol_version": "10",
     "result": {"operation": operation, "output": output}
 }))
 "#;

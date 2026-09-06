@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::process::Command;
 
-const WORKSPACE: &str = include_str!("fixtures/dsv4-workspace.toml");
+const WORKSPACE: &str = include_str!("fixtures/deepseek-v4-flash-workspace.toml");
 
 fn workspace_without_local_bindings() -> Result<tempfile::TempDir, Box<dyn Error>> {
     let root = tempfile::tempdir()?;
@@ -43,10 +43,13 @@ fn workspace_show_json_returns_the_merged_public_definition_without_local_bindin
     assert_eq!(value["schema_version"], 2);
     assert_eq!(value["stacks"]["vllm"]["integration"], "vllm");
     assert_eq!(
-        value["servers"]["dsv4-qualify"]["model"],
+        value["servers"]["deepseek-v4-flash-qualify"]["model"],
         "deepseek-v4-flash"
     );
-    assert_eq!(value["recipes"]["dsv4-qualify"]["server"], "dsv4-qualify");
+    assert_eq!(
+        value["recipes"]["deepseek-v4-flash-qualify"]["server"],
+        "deepseek-v4-flash-qualify"
+    );
     assert!(!root.path().join(".inferlab/local.toml").exists());
     Ok(())
 }

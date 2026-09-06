@@ -80,7 +80,7 @@ if args.prepare_source:
         "cache_stores": [
             {
                 "authority": "huggingface_hub",
-                "purpose": "dataset_repository_files",
+                "purpose": "repository_files",
                 "path": "/fixture/huggingface/hub",
                 "outcome": cache_outcome,
             }

@@ -1,8 +1,8 @@
-use crate::plan::ProfilerLaunch;
 use crate::poll::{Poll, poll_until};
 use crate::record::ProfilerTargetRecord;
 use crate::transport::{CommandActionMode, TargetCommandError, target_output};
 use inferlab_runtime::operation_bound::{OperationBound, duration_millis};
+use inferlab_runtime::plan::LaunchPlan;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -189,8 +189,8 @@ fn cleanup_error(
 
 fn strategy(target: &ProfilerTargetRecord) -> &'static str {
     match &target.launch {
-        ProfilerLaunch::Local => "local-pgrep-command-line",
-        ProfilerLaunch::Ssh { .. } => "ssh-pgrep-command-line",
+        LaunchPlan::Local => "local-pgrep-command-line",
+        LaunchPlan::Ssh { .. } => "ssh-pgrep-command-line",
     }
 }
 
@@ -304,8 +304,8 @@ fn target_pid_alive(
     bound: &OperationBound,
 ) -> Result<bool, ProfilerCleanupCommandError> {
     match &target.launch {
-        ProfilerLaunch::Local => Ok(Path::new(&format!("/proc/{pid}")).exists()),
-        ProfilerLaunch::Ssh { .. } => {
+        LaunchPlan::Local => Ok(Path::new(&format!("/proc/{pid}")).exists()),
+        LaunchPlan::Ssh { .. } => {
             let output = target_output(
                 target,
                 &[

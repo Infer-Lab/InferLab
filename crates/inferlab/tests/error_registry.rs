@@ -47,6 +47,9 @@ fn representative_errors() -> Vec<InferlabError> {
             required: 1,
             available: 0,
         },
+        InferlabError::NetworkResolution {
+            source: Box::new(std::io::Error::other("fixture")),
+        },
         InferlabError::RecipeFailed {
             record_id: "fixture".to_owned(),
         },
@@ -54,6 +57,9 @@ fn representative_errors() -> Vec<InferlabError> {
             message: "fixture".to_owned(),
         },
         InferlabError::ImageBuild {
+            message: "fixture".to_owned(),
+        },
+        InferlabError::DatasetPreparation {
             message: "fixture".to_owned(),
         },
         InferlabError::RecordIo {

@@ -95,6 +95,9 @@ struct TuiArgs {
     /// Fixed workspace refresh interval for this invocation.
     #[arg(long, default_value = "1s", value_parser = humantime::parse_duration)]
     refresh_interval: Duration,
+    /// Alternate machine-local bindings file.
+    #[arg(long, value_name = "FILE")]
+    local: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,17 +229,21 @@ struct InternalProxyArgs {
     command: InternalProxyCommand,
 }
 
+// The built-in proxy subcommand names come from the proxy crate's registry
+// ([[RFC-0006:C-INTEGRATIONS]]), which owns the name vocabulary.
 #[derive(Debug, Subcommand)]
 enum InternalProxyCommand {
     /// Run the vLLM Mooncake proxy.
-    #[command(name = "vllm-mooncake")]
+    #[command(name = inferlab_proxy::registry::VLLM_MOONCAKE.command_name)]
     VllmMooncake(VllmMooncakeProxyArgs),
     /// Run the vLLM NIXL proxy.
-    #[command(name = "vllm-nixl")]
+    #[command(name = inferlab_proxy::registry::VLLM_NIXL.command_name)]
     VllmNixl(VllmNixlProxyArgs),
     /// Run the SGLang prefill/decode proxy.
+    #[command(name = inferlab_proxy::registry::SGLANG.command_name)]
     Sglang(SglangProxyArgs),
     /// Run the TensorRT-LLM prefill/decode proxy.
+    #[command(name = inferlab_proxy::registry::TRTLLM.command_name)]
     Trtllm(TrtllmProxyArgs),
 }
 
@@ -484,18 +491,23 @@ pub fn run(cli: Cli) -> Result<(), InferlabError> {
     match command {
         Command::Tui(args) => {
             let root = discover_workspace(workspace.as_deref())?;
-            crate::tui::run(root, args.refresh_interval)
+            crate::tui::run(root, args.refresh_interval, args.local)
         }
         Command::Workspace(WorkspaceCommand::Show(args)) => {
             let root = discover_workspace(workspace.as_deref())?;
-            with_workspace_operation(&root, "workspace show", "workspace inspection", || {
-                let config = load_workspace_config(&root)?;
+            let observation = OperationGuard::begin(&root, "workspace show")?;
+            observation.publisher().publish(OperationProgress {
+                phase: "workspace inspection".to_owned(),
+                ..OperationProgress::default()
+            })?;
+            let result = load_workspace_config(&root).and_then(|config| {
                 if args.json {
                     write_json(&config)
                 } else {
                     write_text(&crate::workspace::workspace_summary(&config))
                 }
-            })
+            });
+            finish_workspace_operation(result, observation.finish())
         }
         Command::Workspace(WorkspaceCommand::Lock) => with_workspace_progress(
             workspace,
@@ -512,9 +524,14 @@ pub fn run(cli: Cli) -> Result<(), InferlabError> {
             |root, progress| run_stack_status(root, args, progress),
         ),
         Command::Toolchain(ToolchainCommand::Install) => {
-            with_progress("toolchain install", ProgressMode::Immediate, |progress| {
-                write_json(&toolchain::install_with_progress(progress)?)
-            })
+            let progress = Progress::stderr("toolchain install", ProgressMode::Immediate)?;
+            let result =
+                toolchain::install_with_progress(&progress).and_then(|report| write_json(&report));
+            let progress_result = progress.finish();
+            match result {
+                Err(error) => Err(error),
+                Ok(()) => progress_result,
+            }
         }
         Command::Serve(ServeCommand::Start(args)) => {
             let mode = if args.selection.dry_run {
@@ -1080,20 +1097,6 @@ fn write_text(value: &str) -> Result<(), InferlabError> {
     Ok(())
 }
 
-fn with_progress<T>(
-    command: &str,
-    mode: ProgressMode,
-    operation: impl FnOnce(&Progress) -> Result<T, InferlabError>,
-) -> Result<T, InferlabError> {
-    let progress = Progress::stderr(command, mode)?;
-    let result = operation(&progress);
-    let progress_result = progress.finish();
-    match result {
-        Err(error) => Err(error),
-        Ok(value) => progress_result.map(|()| value),
-    }
-}
-
 fn with_workspace_progress<T>(
     workspace: Option<PathBuf>,
     command: &str,
@@ -1107,22 +1110,6 @@ fn with_workspace_progress<T>(
     let progress_result = progress.finish();
     let observation_result = observation.finish();
     finish_workspace_operation(result, progress_result.and(observation_result))
-}
-
-fn with_workspace_operation<T>(
-    root: &std::path::Path,
-    command: &str,
-    phase: &str,
-    operation: impl FnOnce() -> Result<T, InferlabError>,
-) -> Result<T, InferlabError> {
-    let observation = OperationGuard::begin(root, command)?;
-    observation.publisher().publish(OperationProgress {
-        phase: phase.to_owned(),
-        ..OperationProgress::default()
-    })?;
-    let result = operation();
-    let observation_result = observation.finish();
-    finish_workspace_operation(result, observation_result)
 }
 
 fn finish_workspace_operation<T>(

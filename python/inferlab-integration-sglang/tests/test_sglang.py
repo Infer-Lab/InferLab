@@ -1,9 +1,14 @@
+import json
+from pathlib import Path
 from typing import cast
 
 import pytest
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
+    AdapterRequest,
+    AdapterRequestPlanServe,
+    AdapterRequestRenderServe,
     CaptureMechanism,
     KvTransferMechanism,
     Parallelism,
@@ -24,6 +29,7 @@ from inferlab_adapter_sdk import (
     ServeRoleLinkKvTransfer,
     ServeTopology,
     SettingValue,
+    handle_request,
 )
 from inferlab_integration_sglang import plan_serve, render_serve
 
@@ -55,6 +61,7 @@ def _plan_input(**overrides: object) -> PlanServeInput:
     base: dict[str, object] = {
         "model": ServeModelInput(id="example", served_name="example"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -76,8 +83,6 @@ def test_plan_single_topology() -> None:
     assert isinstance(probe, ReadinessProbeHttp) and probe.path == "/v1/models"
     endpoint = result.roles[0].public_endpoint
     assert endpoint is not None
-    assert endpoint.completions_path == "/v1/completions"
-    assert endpoint.chat_completions_path == "/v1/chat/completions"
     assert endpoint.server_metrics is None
     assert endpoint.prefix_cache_reset is not None
     assert endpoint.prefix_cache_reset.path == "/flush_cache"
@@ -207,8 +212,6 @@ def test_plan_prefill_decode_uses_the_shared_bootstrap_shape(
     assert result.gateway is not None
     assert result.gateway.backend == "builtin"
     assert result.gateway.render_source == RenderSource.control_plane
-    assert result.gateway.endpoint.completions_path == "/v1/completions"
-    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
     assert result.gateway.endpoint.server_metrics is None
     assert result.gateway.endpoint.prefix_cache_reset is not None
     assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
@@ -476,6 +479,7 @@ def _decode_render_input(
         {
             "model": ServeModelInput(id="example", served_name="example"),
             "topology": ServeTopology.prefill_decode,
+            "state_dir": ".inferlab",
             "gateway_backend": "builtin",
             "pd_router_backend": "builtin",
             "kv_transfer": KvTransferMechanism.mooncake,
@@ -765,6 +769,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
     base: dict[str, object] = {
         "model": ServeModelInput(id="example", served_name="example"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -877,6 +882,7 @@ def _prefill_decode_render_input(
     return RenderServeInput(
         model=ServeModelInput(id="example", served_name="example"),
         topology=ServeTopology.prefill_decode,
+        state_dir=".inferlab",
         gateway_backend=frontend_backend,
         pd_router_backend=frontend_backend,
         kv_transfer=transport,
@@ -1112,8 +1118,8 @@ _SPECULATIVE_EXTRA_ARGS = SettingValue.model_validate(
 
 # Flat-list golden curve: draft count 3 -> acceptance length 2.49.
 _CURVE = {
-    "model_key": "dsv4",
-    "text": "dsv4:\n  - 3: 2.49\n  - 4: 3.1\n",
+    "model_key": "deepseek-v4-flash",
+    "text": "deepseek-v4-flash:\n  - 3: 2.49\n  - 4: 3.1\n",
     "sha256": "f" * 64,
 }
 
@@ -1215,6 +1221,27 @@ def test_plan_rejects_a_malformed_num_steps_value() -> None:
         )
 
 
+def test_plan_rejects_a_trailing_num_steps_flag_without_its_value() -> None:
+    with pytest.raises(AdapterOperationError, match="--speculative-num-steps") as captured:
+        plan_serve(
+            _plan_input(
+                settings={
+                    "extra_args": SettingValue.model_validate(
+                        [
+                            "--speculative-algorithm",
+                            "EAGLE",
+                            "--speculative-num-steps",
+                            "3",
+                            "--speculative-num-steps",
+                        ]
+                    )
+                },
+                synthetic_acceptance={"curve": _CURVE},
+            )
+        )
+    assert captured.value.code == AdapterErrorCode.invalid_settings
+
+
 def test_plan_rejects_extra_env_restating_the_overlay_environment() -> None:
     with pytest.raises(AdapterOperationError, match="SGLANG_SIMULATE_ACC_LEN"):
         plan_serve(
@@ -1268,7 +1295,7 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
         ]
     ]
 
-    with pytest.raises(AdapterOperationError, match="different synthetic acceptance outcomes"):
+    with pytest.raises(AdapterOperationError) as captured:
         plan_serve(
             _plan_input(
                 topology=ServeTopology.prefill_decode,
@@ -1279,3 +1306,112 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
                 synthetic_acceptance={"curve": _CURVE},
             )
         )
+    # The consistency message text is owned by the adapter SDK; the
+    # integration asserts the typed code and a stable concept fragment.
+    assert captured.value.code == AdapterErrorCode.invalid_settings
+    assert "synthetic acceptance" in captured.value.message
+
+
+ROOT = Path(__file__).parents[3]
+FIXTURES = ROOT / "protocol" / "fixtures"
+
+
+def load_json(path: Path) -> dict[str, object]:
+    return cast(dict[str, object], json.loads(path.read_text()))
+
+
+# The operator's speculative decoding declaration in SGLang spelling: the
+# splice target the draft-model auxiliary rides on. Same flags as
+# _SPECULATIVE_EXTRA_ARGS, as a plain list for the JSON fixtures.
+_SPECULATIVE_ARGS = [
+    "--speculative-algorithm",
+    "EAGLE",
+    "--speculative-num-steps",
+    "3",
+    "--speculative-eagle-topk",
+    "1",
+    "--speculative-num-draft-tokens",
+    "4",
+]
+
+
+def _auxiliary_plan_payload(extra_args: list[str] | None) -> dict[str, object]:
+    """The auxiliary-models plan fixture with the role's extra_args replaced
+    by the given SGLang spelling (None removes the splice target entirely)."""
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    settings = cast(dict[str, object], roles[0]["settings"])
+    if extra_args is None:
+        settings.pop("extra_args", None)
+    else:
+        settings["extra_args"] = extra_args
+    return payload
+
+
+def _auxiliary_render_payload() -> dict[str, object]:
+    """The auxiliary-models render fixture with the allocation's effective
+    settings rewritten to the SGLang speculative spelling."""
+    payload = load_json(FIXTURES / "valid" / "render-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    settings = cast(dict[str, object], allocations[0]["effective_settings"])
+    settings["extra_args"] = _SPECULATIVE_ARGS
+    return payload
+
+
+def _auxiliary_error(payload: dict[str, object]) -> str:
+    response = handle_request(json.dumps(payload), plan_serve)
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    return response.root.error.message
+
+
+def test_plan_accepts_a_declared_draft_model_with_a_splice_target() -> None:
+    request = AdapterRequest.model_validate(_auxiliary_plan_payload(_SPECULATIVE_ARGS))
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+    assert [role.id for role in result.roles] == ["serve"]
+
+
+def test_plan_rejects_a_draft_model_without_a_splice_target() -> None:
+    message = _auxiliary_error(_auxiliary_plan_payload(None))
+    assert "--speculative-algorithm" in message
+    assert "splice target" in message
+    assert "draft-model" in message
+
+
+def test_plan_rejects_an_operator_spelling_of_the_draft_artifact() -> None:
+    message = _auxiliary_error(
+        _auxiliary_plan_payload(
+            [*_SPECULATIVE_ARGS, "--speculative-draft-model-path", "/other/draft"]
+        )
+    )
+    assert "--speculative-draft-model-path" in message
+    assert "single" in message
+    assert "authority" in message
+
+
+def test_render_splices_the_resolved_draft_model_locator() -> None:
+    request = AdapterRequest.model_validate(_auxiliary_render_payload())
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    argv = result.processes[0].root.command.argv
+    index = argv.index("--speculative-draft-model-path")
+    assert argv[index + 1] == "/models/deepseek-v4-flash-draft"
+    assert argv[argv.index("--speculative-algorithm") + 1] == "EAGLE"
+
+
+def test_render_rejects_a_declaration_without_an_allocation_locator() -> None:
+    payload = _auxiliary_render_payload()
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    allocations[0].pop("auxiliary_model_locators")
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+
+    with pytest.raises(AdapterOperationError) as caught:
+        render_serve(request.root.input)
+    assert caught.value.code == AdapterErrorCode.invalid_request
+    assert "draft-model" in caught.value.message

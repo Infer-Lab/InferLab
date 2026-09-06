@@ -11,6 +11,7 @@ use crate::toolchain::BundledEvalTask;
 use crate::workspace::{
     BenchArtifactLevel, BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent,
     BenchTokenSelector, EvalDefinition, EvalPrompt, EvalTaskSource, RequestSlo,
+    effective_lm_eval_base_seed,
 };
 use inferlab_protocol::{
     BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchArtifactLevelInput,
@@ -498,6 +499,7 @@ pub(super) fn eval_definition_input(
             limit: *limit,
             few_shot: *few_shot,
             seed: *seed,
+            base_seed: effective_lm_eval_base_seed(*seed),
             trials: *trials,
             max_tokens: *max_tokens,
             concurrency: *concurrency,
@@ -515,5 +517,56 @@ fn request_slo_input(slo: &RequestSlo) -> BenchRequestSloInput {
         ttft_ms: slo.ttft_ms,
         tpot_ms: slo.tpot_ms,
         minimum_good_request_ratio: slo.minimum_good_request_ratio,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lm_eval_definition(seed: Option<u64>) -> EvalDefinition {
+        EvalDefinition::LmEval {
+            task: EvalTaskSource::BuiltIn("gsm8k".to_owned()),
+            prompt: Default::default(),
+            request_body: BTreeMap::new(),
+            limit: None,
+            few_shot: None,
+            seed,
+            trials: 3,
+            max_tokens: None,
+            concurrency: None,
+            metric: "exact_match".to_owned(),
+            metric_filter: None,
+            threshold: 0.9,
+            timeout_seconds: 300,
+        }
+    }
+
+    #[test]
+    fn eval_definition_input_resolves_the_base_seed_once() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let undeclared = eval_definition_input(&lm_eval_definition(None), None)?;
+        let EvalDefinitionInput::LmEval {
+            seed, base_seed, ..
+        } = undeclared
+        else {
+            return Err("expected an lm-eval wire definition".into());
+        };
+        assert_eq!(seed, None, "an undeclared seed stays absent on the wire");
+        assert_eq!(
+            base_seed, 1234,
+            "the resolved base seed applies the fallback"
+        );
+
+        let declared = eval_definition_input(&lm_eval_definition(Some(41)), None)?;
+        let EvalDefinitionInput::LmEval {
+            seed, base_seed, ..
+        } = declared
+        else {
+            return Err("expected an lm-eval wire definition".into());
+        };
+        assert_eq!(seed, Some(41));
+        assert_eq!(base_seed, 41, "a declared seed is the resolved base seed");
+        Ok(())
     }
 }

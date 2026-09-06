@@ -32,6 +32,17 @@ pub fn docker_device_args(spec: &str) -> [String; 2] {
     ["--gpus".to_owned(), format!("\"device={spec}\"")]
 }
 
+/// The `--mount` argv pair for a read-only host bind. The explicit long
+/// form, not the `-v` shorthand: at least one site docker proxy mis-parses
+/// the shorthand's `:ro` suffix on same-path binds and silently drops the
+/// mount (verified on real hardware), while the long form passes through.
+pub fn docker_bind_mount_readonly(source: &str, target: &str) -> [String; 2] {
+    [
+        "--mount".to_owned(),
+        format!("type=bind,source={source},target={target},readonly"),
+    ]
+}
+
 /// A bounded invocation that ran to an observable end.
 pub enum BoundedWait {
     Exited {

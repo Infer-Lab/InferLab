@@ -81,7 +81,13 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
     let workspace = TestWorkspace::new()?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
 
     assert!(
@@ -95,7 +101,6 @@ fn recipe_captures_one_selected_bench_and_verifies_static_ranges() -> Result<(),
         .ok_or("captured Bench has no record id")?;
     let bench = workspace.load_record(bench_id)?;
     assert_eq!(bench["capture"]["status"], "succeeded");
-    assert_eq!(bench["capture"]["plan"]["control"], "framework-range");
     assert_eq!(
         bench["capture"]["plan"]["deadlines"],
         serde_json::json!({
@@ -209,7 +214,13 @@ fn captured_bench_opens_the_window_after_warmup_and_before_profiling() -> Result
     workspace.configure_c8k_warmup()?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
 
     assert!(
@@ -237,13 +248,19 @@ fn captured_bench_keeps_the_window_closed_when_warmup_fails() -> Result<(), Box<
     workspace.configure_capture_finalization_deadline(1)?;
     workspace.configure_c8k_warmup()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys.env]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys.env]\n\
          NSYS_FIXTURE = \"fallback\"\n",
     )?;
     let output = workspace
         .command()
         .env("FIXTURE_BENCH_FAIL_BEFORE_PROFILE", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
 
     assert!(!output.status.success());
@@ -314,7 +331,7 @@ fn captured_bench_without_reset_starts_its_budget_after_the_window_opens()
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--capture",
             "c8k1k",
             "--set",
@@ -348,19 +365,25 @@ fn captured_bench_without_reset_starts_its_budget_after_the_window_opens()
 fn capture_renders_declared_escapes_and_records_raw_and_effective() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\n\
          launch_options = [\"--cuda-graph-trace=node\"]\n\
          start_options = [\"--nic-metrics=true\"]\n\
          trace = [\"cuda\", \"nvtx\"]\n\
          sampling = \"cpu\"\n\
          context_switch = \"process-tree\"\n\
          \n\
-         [servers.dsv4-qualify.profiler.nsys.env]\n\
+         [servers.deepseek-v4-flash-qualify.profiler.nsys.env]\n\
          NSYS_FIXTURE = \"a b\"\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(
         output.status.success(),
@@ -472,19 +495,19 @@ fn role_escapes_merge_over_common_server_escapes_in_the_resolved_plan() -> Resul
     let workspace = TestWorkspace::new()?;
     workspace.configure_pd("nixl")?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\n\
          launch_options = [\"--cuda-graph-trace=node\"]\n\
          sampling = \"cpu\"\n\
          \n\
-         [servers.dsv4-qualify.profiler.nsys.env]\n\
+         [servers.deepseek-v4-flash-qualify.profiler.nsys.env]\n\
          NSYS_SHARED = \"profile\"\n\
          NSYS_PROFILE_ONLY = \"1\"\n\
          \n\
-         [servers.dsv4-qualify.roles.prefill.profiler.nsys]\n\
+         [servers.deepseek-v4-flash-qualify.roles.prefill.profiler.nsys]\n\
          launch_options = [\"--nvtx-domain-include=prefill\"]\n\
          sampling = \"process-tree\"\n\
          \n\
-         [servers.dsv4-qualify.roles.prefill.profiler.nsys.env]\n\
+         [servers.deepseek-v4-flash-qualify.roles.prefill.profiler.nsys.env]\n\
          NSYS_SHARED = \"role\"\n",
     )?;
     let output = workspace
@@ -493,7 +516,7 @@ fn role_escapes_merge_over_common_server_escapes_in_the_resolved_plan() -> Resul
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--capture",
             "c8k1k",
             "--dry-run",
@@ -543,12 +566,12 @@ fn role_escapes_merge_over_common_server_escapes_in_the_resolved_plan() -> Resul
 fn a_managed_launch_escape_option_is_rejected_at_workspace_load() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\n\
          launch_options = [\"--wait=none\"]\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(!output.status.success());
     Ok(())
@@ -561,12 +584,12 @@ fn a_managed_launch_escape_option_is_rejected_at_workspace_load() -> Result<(), 
 fn an_attached_managed_escape_option_is_rejected_at_workspace_load() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\n\
          start_options = [\"-cnone\"]\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(!output.status.success());
     Ok(())
@@ -580,12 +603,12 @@ fn an_abbreviated_managed_escape_option_is_rejected_at_workspace_load() -> Resul
 {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\n\
          launch_options = [\"--wai=all\"]\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(!output.status.success());
     Ok(())
@@ -599,12 +622,12 @@ fn an_abbreviated_managed_escape_option_is_rejected_at_workspace_load() -> Resul
 fn a_standalone_terminator_escape_is_rejected_at_workspace_load() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\n\
          launch_options = [\"--\"]\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(!output.status.success());
     Ok(())
@@ -617,12 +640,12 @@ fn a_standalone_terminator_escape_is_rejected_at_workspace_load() -> Result<(), 
 fn a_non_identifier_escape_env_key_is_rejected_at_workspace_load() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler.nsys.env]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler.nsys.env]\n\
          \"--unset\" = \"NSYS_FIXTURE\"\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(!output.status.success());
     Ok(())
@@ -633,12 +656,12 @@ fn a_managed_start_escape_option_is_rejected_at_workspace_load() -> Result<(), B
     let workspace = TestWorkspace::new()?;
     workspace.configure_pd("nixl")?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.roles.prefill.profiler.nsys]\n\
+        "\n[servers.deepseek-v4-flash-qualify.roles.prefill.profiler.nsys]\n\
          start_options = [\"-c=cudaProfilerApi\"]\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(!output.status.success());
     Ok(())
@@ -654,7 +677,13 @@ fn capture_armed_readiness_outlasts_the_profile_timeout() -> Result<(), Box<dyn 
     let output = workspace
         .command()
         .env("FIXTURE_READY_DELAY_SECONDS", "3")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(
         output.status.success(),
@@ -665,7 +694,7 @@ fn capture_armed_readiness_outlasts_the_profile_timeout() -> Result<(), Box<dyn 
     let output = workspace
         .command()
         .env("FIXTURE_READY_DELAY_SECONDS", "3")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
     assert!(!output.status.success());
     let record: Value = serde_json::from_slice(&output.stdout)?;
@@ -695,7 +724,7 @@ fn readiness_probing_backs_off_for_slow_starts() -> Result<(), Box<dyn Error>> {
     let output = workspace
         .command()
         .env("FIXTURE_READY_DELAY_SECONDS", "3")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
     assert!(
         output.status.success(),
@@ -726,7 +755,13 @@ fn capture_armed_readiness_fails_immediately_on_process_exit() -> Result<(), Box
     let output = workspace
         .command()
         .env("FIXTURE_EXIT_BEFORE_READY", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(!output.status.success());
     let record: Value = serde_json::from_slice(&output.stdout)?;
@@ -755,12 +790,18 @@ fn capture_armed_readiness_fails_immediately_on_process_exit() -> Result<(), Box
 fn engine_trace_capture_collects_rank_trace_artifacts() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler]\n\
          mechanism = \"engine_trace\"\n",
     )?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
 
     assert!(
@@ -802,7 +843,7 @@ fn engine_trace_capture_collects_rank_trace_artifacts() -> Result<(), Box<dyn Er
         .ok_or("engine-trace coverage has no trace directory")?
         .to_owned();
     assert!(
-        trace_dir.ends_with(".inferlab/runtime/engine-trace/dsv4-qualify/server"),
+        trace_dir.ends_with(".inferlab/runtime/engine-trace/deepseek-v4-flash-qualify/server"),
         "the trace directory lives under the record-owned runtime root: {trace_dir}"
     );
     assert_eq!(
@@ -850,13 +891,19 @@ fn engine_trace_capture_fails_when_a_rank_artifact_is_missing() -> Result<(), Bo
     let workspace = TestWorkspace::new()?;
     workspace.configure_capture_finalization_deadline(1)?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler]\n\
          mechanism = \"engine_trace\"\n",
     )?;
     let output = workspace
         .command()
         .env("FIXTURE_STOP_PROFILE_SKIP_REPORT", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
 
     assert!(!output.status.success());
@@ -887,13 +934,19 @@ fn engine_trace_capture_fails_when_a_rank_artifact_is_missing() -> Result<(), Bo
 fn engine_trace_failed_window_stop_is_adjudicated_by_coverage() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler]\n\
          mechanism = \"engine_trace\"\n",
     )?;
     let output = workspace
         .command()
         .env("FIXTURE_STOP_PROFILE_FAIL", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
 
     assert!(
@@ -930,7 +983,7 @@ fn engine_trace_slow_window_stop_records_flush_pending_and_succeeds_via_coverage
     let workspace = TestWorkspace::new()?;
     workspace.configure_capture_finalization_deadline(2)?;
     workspace.append_manifest(
-        "\n[servers.dsv4-qualify.profiler]\n\
+        "\n[servers.deepseek-v4-flash-qualify.profiler]\n\
          mechanism = \"engine_trace\"\n",
     )?;
     let output = workspace
@@ -942,7 +995,7 @@ fn engine_trace_slow_window_stop_records_flush_pending_and_succeeds_via_coverage
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--capture",
             "c8k1k",
             "--set",
@@ -999,7 +1052,7 @@ fn managed_window_stop_keeps_the_per_action_control_deadline() -> Result<(), Box
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--capture",
             "c8k1k",
             "--set",
@@ -1046,7 +1099,13 @@ fn capture_control_deadline_bounds_slow_window_starts() -> Result<(), Box<dyn Er
     let output = slow
         .command()
         .env("FIXTURE_START_PROFILE_DELAY_SECONDS", "2")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(!output.status.success());
     let record: Value = serde_json::from_slice(&output.stdout)?;
@@ -1069,7 +1128,13 @@ fn capture_control_deadline_bounds_slow_window_starts() -> Result<(), Box<dyn Er
     let output = raised
         .command()
         .env("FIXTURE_START_PROFILE_DELAY_SECONDS", "2")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(
         output.status.success(),
@@ -1088,7 +1153,13 @@ fn failed_window_stop_is_adjudicated_by_report_coverage() -> Result<(), Box<dyn 
     let output = workspace
         .command()
         .env("FIXTURE_STOP_PROFILE_FAIL", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(
         output.status.success(),
@@ -1125,7 +1196,13 @@ fn failed_window_stop_with_missing_report_fails_with_both_evidences() -> Result<
         .command()
         .env("FIXTURE_STOP_PROFILE_FAIL", "1")
         .env("FIXTURE_STOP_PROFILE_SKIP_REPORT", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--capture", "c8k1k"])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
         .output()?;
     assert!(!output.status.success());
     let record: Value = serde_json::from_slice(&output.stdout)?;

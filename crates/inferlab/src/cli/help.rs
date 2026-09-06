@@ -142,3 +142,40 @@ The operation does not read experiment workspace facts or records. It emits one 
 pub(super) const AGENT_DOCTOR: &str = "Read-only diagnosis of selected native agent CLIs and registered InferLab marketplace sources.
 
 Doctor does not install, update, or remove a plugin and does not read experiment workspace facts or records. It emits one JSON report containing readiness and source health plus every native probe attempted in order.";
+
+#[cfg(test)]
+mod tests {
+    use super::BENCH_EXAMPLES;
+    use crate::bench_agentic_catalog::resolve;
+
+    /// The AgentX help sentence deliberately restates release-catalog scalars
+    /// so operators can budget timeouts; pin every restated scalar against the
+    /// parsed catalog so a catalog edit cannot leave the help text stale.
+    #[test]
+    fn agentx_help_scalars_match_the_release_catalog() -> Result<(), Box<dyn std::error::Error>> {
+        let limited = resolve("semianalysis_agentx_062126_256k", "inferencex")?;
+        let full = resolve("semianalysis_agentx_062126", "inferencex")?;
+        let policy = &limited.policy;
+        let needles = [
+            format!(
+                "{}-second per-trace idle-gap cap",
+                policy.trace_idle_gap_cap_seconds
+            ),
+            format!(
+                "cache-pressure warmup of {} requests per lane",
+                policy.cache_warmup_requests_per_lane
+            ),
+            format!("{}-second minimum", policy.minimum_duration_seconds),
+            format!("{}-second default", policy.default_duration_seconds),
+            format!("about {} MB", limited.source.approximate_bytes / 1_000_000),
+            format!("about {} GB", full.source.approximate_bytes as f64 / 1e9),
+        ];
+        for needle in needles {
+            assert!(
+                BENCH_EXAMPLES.contains(&needle),
+                "the AgentX bench help drifted from the release catalog: missing {needle:?}"
+            );
+        }
+        Ok(())
+    }
+}

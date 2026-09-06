@@ -14,12 +14,14 @@ from inferlab_eval_runner.eval_client import (
     run_lm_eval,
 )
 from inferlab_eval_runner.lm_eval_entry import (
+    STRUCTURAL_REQUEST_MEMBERS,
     PayloadEvidenceWriter,
     RepeatedTrialState,
     initialize_payload_evidence,
     install_repeated_response_capture,
     install_request_body,
     merge_request_body,
+    nonstructural_request_body,
     prepare_repeated_task,
 )
 from inferlab_eval_runner.lm_eval_entry import (
@@ -46,10 +48,12 @@ from inferlab_eval_runner.prompt_logprobs import (
 )
 from inferlab_eval_runner.task_resolution import (
     bind_prepared_task,
+    failed_task_resolution_evidence,
     lm_eval_task_argument,
     prepare_lm_eval_task,
     resolve_lm_eval_target,
     resolve_lm_eval_task,
+    resolved_task_resolution_evidence,
     task_requires_prompt_logprobs,
     workspace_yaml_include_closure,
 )
@@ -84,7 +88,7 @@ def lm_eval_request(
 ) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "workspace_root": str(tmp_path),
             "workspace_source_exclusions": [],
             "endpoint": {
@@ -94,7 +98,7 @@ def lm_eval_request(
                 "completions_path": "/v1/completions",
                 "chat_completions_path": "/v1/chat/completions",
             },
-            "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
+            "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "definition": {
                 "kind": "lm_eval",
                 "task": {"kind": "built_in", "name": "gsm8k"},
@@ -103,6 +107,7 @@ def lm_eval_request(
                 "limit": 8,
                 "few_shot": 5,
                 "seed": 1,
+                "base_seed": 1,
                 "trials": 1,
                 "max_tokens": 256,
                 "concurrency": 4,
@@ -124,7 +129,7 @@ def lm_eval_request(
 def openai_smoke_request(tmp_path: Path) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "workspace_root": str(tmp_path),
             "workspace_source_exclusions": [],
             "endpoint": {
@@ -134,7 +139,7 @@ def openai_smoke_request(tmp_path: Path) -> EvalClientRequest:
                 "completions_path": "/v1/completions",
                 "chat_completions_path": "/v1/chat/completions",
             },
-            "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
+            "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "definition": {
                 "kind": "openai_smoke",
                 "prompt": "hi",
@@ -232,10 +237,10 @@ def test_lm_eval_command_targets_chat_for_a_server_chat_authority(tmp_path: Path
     assert command[run_index + 1 : run_index + 3] == ["--model", "local-chat-completions"]
     model_args_index = command.index("--model_args")
     assert command[model_args_index + 1] == (
-        "model=dsv4,"
+        "model=deepseek-v4-flash,"
         "base_url=http://127.0.0.1:8000/v1/chat/completions,"
         "timeout=300.0,"
-        "tokenizer=/models/dsv4,"
+        "tokenizer=/models/deepseek-v4-flash,"
         "tokenized_requests=False,"
         "tokenizer_backend=huggingface,"
         "seed=1,"
@@ -257,6 +262,7 @@ def test_single_lm_eval_does_not_invent_an_undeclared_seed(tmp_path: Path) -> No
     definition = request.definition.root
     assert isinstance(definition, EvalDefinitionInputLmEval)
     definition.seed = None
+    definition.base_seed = 1234
 
     command = lm_eval_command(
         request,
@@ -301,6 +307,19 @@ def test_request_body_recursively_replaces_client_defaults() -> None:
         "logprobs": 1,
         "reasoning_effort": "high",
     }
+
+
+def test_structural_request_members_match_the_shared_fixture() -> None:
+    fixture = Path(__file__).parents[3] / "protocol" / "fixtures" / "reserved-request-members.json"
+    pinned = frozenset(cast(list[str], json.loads(fixture.read_text(encoding="utf-8"))))
+
+    # The Rust load gate rejects exactly this enumeration at workspace load;
+    # evidence classification must agree with it ([[RFC-0004:C-INFERENCE-REQUESTS]]).
+    assert pinned == STRUCTURAL_REQUEST_MEMBERS
+    for member in pinned:
+        assert nonstructural_request_body({member: True, "temperature": 0.2}) == {
+            "temperature": 0.2
+        }
 
 
 def test_lm_eval_command_accepts_a_workspace_task_yaml(tmp_path: Path) -> None:
@@ -390,6 +409,35 @@ def test_lm_eval_entry_reads_cli_paths_as_paths(
     assert evidence_path.is_file()
 
 
+def test_lm_eval_entry_rejects_a_config_without_the_resolved_base_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "request.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "definition_request_body": {},
+                "trials": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "lm_eval_entry.py",
+            "--request-config",
+            str(config_path),
+            "--request-evidence",
+            str(tmp_path / "requests.jsonl"),
+            "run",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="invalid trials or base_seed"):
+        lm_eval_entry_main()
+
+
 def test_bundled_task_resolution_preserves_release_asset_identities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -463,7 +511,7 @@ def test_payload_evidence_records_real_task_defaults_and_nested_replacements(
 ) -> None:
     evidence_path = tmp_path / "inference-requests.jsonl"
     defaults = {
-        "model": "dsv4",
+        "model": "deepseek-v4-flash",
         "messages": [{"role": "user", "content": "dynamic"}],
         "temperature": 0.2,
         "top_p": 0.9,
@@ -509,7 +557,7 @@ def test_trial_evidence_is_incremental_and_keeps_unissued_trials_planned(
     writer.issue(
         "trial-0001",
         {
-            "model": "dsv4",
+            "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "question"}],
             "seed": 41,
         },
@@ -557,7 +605,7 @@ def test_trial_evidence_promotes_task_classification_from_native_sample_record(
 ) -> None:
     path = tmp_path / "eval-trials.json"
     writer = TrialEvidenceWriter(path, requested_trials=1, base_seed=41)
-    writer.issue("trial-0001", {"model": "dsv4", "messages": [], "seed": 41})
+    writer.issue("trial-0001", {"model": "deepseek-v4-flash", "messages": [], "seed": 41})
     writer.complete(
         "trial-0001",
         {
@@ -625,7 +673,7 @@ def test_repeated_payload_is_not_issued_until_transport_release_and_retry_is_fla
             messages: object,
             **kwargs: object,
         ) -> dict[str, object]:
-            return {"model": "dsv4", "prompt": messages, "seed": kwargs["seed"]}
+            return {"model": "deepseek-v4-flash", "prompt": messages, "seed": kwargs["seed"]}
 
     class FakeChat:
         @staticmethod
@@ -634,7 +682,7 @@ def test_repeated_payload_is_not_issued_until_transport_release_and_retry_is_fla
             messages: object,
             **kwargs: object,
         ) -> dict[str, object]:
-            return {"model": "dsv4", "messages": messages, "seed": kwargs["seed"]}
+            return {"model": "deepseek-v4-flash", "messages": messages, "seed": kwargs["seed"]}
 
     monkeypatch.setattr(
         "inferlab_eval_runner.lm_eval_entry.importlib.import_module",
@@ -648,11 +696,11 @@ def test_repeated_payload_is_not_issued_until_transport_release_and_retry_is_fla
     state = RepeatedTrialState(trials, "trial-0001", time.monotonic() + 60)
     install_request_body({}, PayloadEvidenceWriter(payload_path), state)
 
-    first = FakeChat._create_payload(object(), [{"role": "user", "content": "q"}])
+    first = FakeChat._create_payload(object(), [{"role": "user", "content": "q"}], seed=41)
     evidence = json.loads((tmp_path / "eval-trials.json").read_text(encoding="utf-8"))
     assert evidence["endpoint_outcomes"] == []
     state.release(first)
-    retry = FakeChat._create_payload(object(), [{"role": "user", "content": "q"}])
+    retry = FakeChat._create_payload(object(), [{"role": "user", "content": "q"}], seed=41)
     state.release(retry)
 
     assert first["seed"] == 71
@@ -699,8 +747,8 @@ def test_expired_repeated_request_is_not_recorded_as_issued_before_transport(
     state.prepare(
         object(),
         "chat_completions",
-        {"model": "dsv4"},
-        {"model": "dsv4", "seed": 71},
+        {"model": "deepseek-v4-flash"},
+        {"model": "deepseek-v4-flash", "seed": 71},
         {},
         PayloadEvidenceWriter(tmp_path / "inference-requests.jsonl"),
     )
@@ -709,7 +757,7 @@ def test_expired_repeated_request_is_not_recorded_as_issued_before_transport(
     with pytest.raises(TimeoutError, match="deadline expired before request release"):
         api_models.requests.post(
             "http://127.0.0.1/v1/chat/completions",
-            json={"model": "dsv4", "seed": 71},
+            json={"model": "deepseek-v4-flash", "seed": 71},
             headers={},
             verify=True,
         )
@@ -733,12 +781,12 @@ def test_repeated_completion_count_uses_the_resolved_huggingface_tokenizer(
     state.prepare(
         SimpleNamespace(tokenizer=FakeTokenizer()),
         "chat_completions",
-        {"model": "dsv4"},
-        {"model": "dsv4", "seed": 71},
+        {"model": "deepseek-v4-flash"},
+        {"model": "deepseek-v4-flash", "seed": 71},
         {},
         PayloadEvidenceWriter(tmp_path / "inference-requests.jsonl"),
     )
-    state.release({"model": "dsv4", "seed": 71})
+    state.release({"model": "deepseek-v4-flash", "seed": 71})
 
     assert state.tokenizer_count("trial-0001", "generated answer") == 3
 
@@ -888,7 +936,7 @@ def test_workspace_eval_source_is_prepared_as_explicitly_opaque(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "phase": {"kind": "resolve"},
             "source": {
                 "kind": "eval",
@@ -958,7 +1006,7 @@ def test_workspace_eval_local_files_are_snapshotted_and_bound(
         },
     )
     request_value = {
-        "protocol_version": "9",
+        "protocol_version": "10",
         "source": {
             "kind": "eval",
             "workspace_root": str(tmp_path),
@@ -1065,7 +1113,7 @@ def test_builtin_eval_source_stays_opaque_without_materializing_the_task(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "phase": {"kind": "resolve"},
             "source": {
                 "kind": "eval",
@@ -1144,7 +1192,7 @@ def test_bundled_eval_source_preparation_closes_verified_release_assets(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "phase": {"kind": "resolve"},
             "source": {
                 "kind": "eval",
@@ -1344,6 +1392,31 @@ def test_non_individual_selection_is_rejected_in_favor_of_recipe_composition(
 def test_only_likelihood_tasks_require_the_probe() -> None:
     assert not task_requires_prompt_logprobs(task_resolution(("generation", "generate_until")))
     assert task_requires_prompt_logprobs(task_resolution(("scoring", "multiple_choice")))
+
+
+def test_failed_task_resolution_evidence_shares_the_resolved_base() -> None:
+    resolved = resolved_task_resolution_evidence(
+        task_source={"kind": "built_in", "name": "gsm8k"},
+        task_identity="gsm8k",
+        output_type="generate_until",
+        emitted_request_types=["generate_until"],
+        reduces_to_one_request_type=True,
+        observed_request_documents=None,
+        include_closure=[],
+        effective_task_config={"task": "gsm8k", "output_type": "generate_until"},
+        tokenizer_locator="/models/deepseek-v4-flash",
+    )
+
+    failed = failed_task_resolution_evidence("gsm8k", "boom")
+
+    # The failure variant is the resolved base with the failure fields overlaid,
+    # so the shared keys cannot drift and a base change cannot drop them silently.
+    assert failed == {
+        "schema_version": resolved["schema_version"],
+        "status": "failed",
+        "task_source": "gsm8k",
+        "error": "boom",
+    }
 
 
 def prompt_logprob_response(
@@ -1710,7 +1783,7 @@ def test_repeated_normalization_scores_each_issued_trial_and_uses_issued_denomin
     evidence_path = tmp_path / "eval-trials.json"
     writer = TrialEvidenceWriter(evidence_path, requested_trials=4, base_seed=1)
     for index, trial_id in enumerate(("trial-0001", "trial-0002", "trial-0003"), 1):
-        writer.issue(trial_id, {"model": "dsv4", "messages": [], "seed": index})
+        writer.issue(trial_id, {"model": "deepseek-v4-flash", "messages": [], "seed": index})
     write_repeated_native_sample(tmp_path, "trial-0001", metric_filter="strict-match", score=1.0)
     write_repeated_native_sample(tmp_path, "trial-0002", metric_filter="strict-match", score=0.0)
 
@@ -1758,7 +1831,7 @@ def test_repeated_normalization_requires_the_corresponding_native_sample(
     definition.trials = 2
     evidence_path = tmp_path / "eval-trials.json"
     writer = TrialEvidenceWriter(evidence_path, requested_trials=2, base_seed=1)
-    writer.issue("trial-0001", {"model": "dsv4", "messages": [], "seed": 1})
+    writer.issue("trial-0001", {"model": "deepseek-v4-flash", "messages": [], "seed": 1})
 
     with pytest.raises(ValueError, match="native samples JSONL artifact"):
         normalize_repeated_lm_eval_result(
@@ -1783,7 +1856,7 @@ def test_repeated_normalization_rejects_completed_response_without_task_score(
     definition.trials = 2
     evidence_path = tmp_path / "eval-trials.json"
     writer = TrialEvidenceWriter(evidence_path, requested_trials=2, base_seed=1)
-    writer.issue("trial-0001", {"model": "dsv4", "messages": [], "seed": 1})
+    writer.issue("trial-0001", {"model": "deepseek-v4-flash", "messages": [], "seed": 1})
     writer.complete(
         "trial-0001",
         {
@@ -2014,7 +2087,7 @@ def test_repeated_run_uses_one_native_eval_per_trial_and_preserves_native_task_s
             initialize=False,
         )
         request_body = {
-            "model": "dsv4",
+            "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "question"}],
             "seed": writer.seed_for(trial_id),
             "n": 1,
@@ -2063,6 +2136,7 @@ def test_repeated_run_uses_one_native_eval_per_trial_and_preserves_native_task_s
     definition.trials = 3
     definition.limit = 1
     definition.seed = None
+    definition.base_seed = 1234
     definition.threshold = 1.0
 
     result = run_lm_eval(request, definition, checkpoints.append)

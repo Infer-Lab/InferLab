@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from huggingface_hub import constants
 from inferlab_measurement_sdk import (
+    HUGGINGFACE_HUB_CACHE_PURPOSE,
+    SCHEMA_VERSION,
     BenchAgenticAcquisitionOutcome,
     BenchDatasetCacheState,
     ClientStatus,
@@ -36,7 +38,7 @@ def _cache_store(
     return [
         MeasurementDataAssetCacheStore(
             authority="huggingface_hub",
-            purpose="dataset_repository_files",
+            purpose=HUGGINGFACE_HUB_CACHE_PURPOSE,
             path=str(constants.HUGGINGFACE_HUB_CACHE),
             outcome=outcome,
         )
@@ -84,7 +86,7 @@ def prepare_agentic_data_asset(
             else MeasurementDataAssetCacheOutcome.unavailable
         )
         return MeasurementDataAssetPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=(ClientStatus.succeeded if resolution.error is None else ClientStatus.failed),
             effective_selection=selection,
             readiness=None,
@@ -126,7 +128,7 @@ def prepare_agentic_data_asset(
         source_bytes = MeasurementDataAssetSourceBytesOutcome.downloaded
     if acquisition.error is not None:
         return MeasurementDataAssetPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             effective_selection=effective_selection,
             readiness=None,
@@ -178,7 +180,7 @@ def prepare_agentic_data_asset(
         )
     )
     return MeasurementDataAssetPreparationResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         effective_selection=effective_selection,
         readiness=readiness,

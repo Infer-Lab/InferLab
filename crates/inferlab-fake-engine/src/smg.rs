@@ -17,7 +17,7 @@ use wire::{
     token_speed_scheduler_server::{TokenSpeedScheduler, TokenSpeedSchedulerServer},
 };
 
-use crate::{EchoEngine, GenerateRequest, TokenEngine};
+use crate::{EchoEngine, GenerateRequest};
 
 const MAX_CONTEXT_LENGTH: i32 = 32_768;
 const VOCAB_SIZE: i32 = 1_000_000;

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     BenchCacheStartInput,
     BenchPopulationInput,
     BenchPopulationPreparationRequest,
@@ -126,7 +127,7 @@ def prepare_replay_population(
         entries.append(_parse_entry(value, line_number, flat_prompt))
     if len(entries) < required:
         return BenchPopulationPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             materialization_identity=REPLAY_MATERIALIZATION_IDENTITY,
             requested_entries=required,
@@ -242,7 +243,7 @@ def prepare_replay_population(
             }
             evidence_file.write(json_line(evidence))
     return BenchPopulationPreparationResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         materialization_identity=REPLAY_MATERIALIZATION_IDENTITY,
         requested_entries=required,

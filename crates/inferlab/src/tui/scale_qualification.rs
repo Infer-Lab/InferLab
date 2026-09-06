@@ -51,7 +51,7 @@ fn thousand_record_catalog_reports_aggregate_scale_evidence()
     };
     let mut terminal = Terminal::new(TestBackend::new(120, 40))?;
     let first_started = Instant::now();
-    let first = collector.collect(workspace.path(), true);
+    let first = collector.collect(workspace.path(), None, true);
     let collected_records = first.records.len();
     app.accept(first);
     app.select_view(2);
@@ -59,7 +59,7 @@ fn thousand_record_catalog_reports_aggregate_scale_evidence()
     let first_frame = first_started.elapsed();
 
     let steady_started = Instant::now();
-    let steady = collector.collect(workspace.path(), false);
+    let steady = collector.collect(workspace.path(), None, false);
     app.accept(steady);
     terminal.draw(|frame| super::ui::render(frame, &mut app, refresh_status))?;
     let steady_refresh = steady_started.elapsed();

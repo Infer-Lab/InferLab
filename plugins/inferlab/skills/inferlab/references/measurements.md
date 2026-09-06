@@ -39,26 +39,18 @@ changes use repeatable `--set PATH=VALUE`; read
 [Invocation patches](execution-authoring.md#invocation-patches) for the owned
 paths and restrictions.
 
-The built-in smoke workload is the smallest completion-path correctness check.
 lm-eval execution resolves the selected task and tokenizer before sending
 requests. Serving Bench execution freezes its request population before
 traffic, preserving the same seeded population basis across cases.
 
 ## Runtime Phases
 
-Cache start defaults to uncontrolled. For a cold or primed start, native
-warmup drains first, then InferLab resets the cache; primed additionally sends
-the frozen maximum canonical prefix before profiling release. Under attention
-data parallelism the conditioning fans out one `X-Data-Parallel-Rank`-pinned
-request per prefill replica and rank — through `POST /prime_prefix_cache` on
-the built-in vLLM Mooncake, vLLM NIXL, and SGLang prefill/decode proxies — and
-preserves per-(replica, rank) evidence; any rank's failure fails the case. A
-primed or prefix-geometry Bench against an endpoint without declared backend
-cache-read capability fails at planning with the enable-reporting remediation,
-and router-fronted pairs without primed capability reject a primed start at
-planning. Population preparation, warmup, reset, and conditioning remain
-outside normalized profiling counts and metrics. A default captured Bench opens
-the framework window only after these preparation actions succeed.
+For a cold or primed cache start, warmup drains, then reset, then primed
+conditioning, before profiling release; preparation stays outside normalized
+profiling counts and metrics. Planning rejects ineligible endpoints, and a
+captured Bench opens the framework window only after preparation succeeds.
+[Bench authoring](bench-authoring.md#serving-bench-warmup-and-metrics) owns the
+fan-out, evidence, and rejection detail.
 
 Independent request populations and dependent linear sessions use separate
 native phase identities. A session keeps each conversation live across its
@@ -68,8 +60,8 @@ an unrelated request.
 AgentX trace replay delegates source-tree materialization, snapshot warmup,
 branch scheduling, and scenario validity to the release-pinned AIPerf runtime.
 Its declared concurrency is root-tree lanes, while completed and failed counts
-remain transport-request counts. Its 600-second warmup and at least 900 seconds
-of profiling make the ordinary timeout examples too short; budget source
+remain transport-request counts. Its cache-pressure warmup and minimum
+profiling duration make the ordinary timeout examples too short; budget source
 configuration, warmup grace, profiling, and result handling explicitly.
 
 Adaptive Bench records every measured rate and selects the highest observed

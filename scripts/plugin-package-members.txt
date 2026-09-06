@@ -1,0 +1,5 @@
+LICENSE
+docs/backend-support.md
+.claude-plugin
+.agents
+plugins

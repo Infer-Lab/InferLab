@@ -41,7 +41,7 @@ fn agentic_source_dry_run_preserves_declared_boundary_and_effective_profile()
         serde_json::Value::Null
     );
 
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     let bench = &plan["measurements"]["benches"][0];
     assert_eq!(bench["execution"]["cases"][0]["duration_seconds"], 1800);
     assert_eq!(
@@ -122,7 +122,7 @@ fn ordinary_measurement_shorthand_is_explicit_in_workspace_and_dry_run_evidence(
         serde_json::json!({"kind": "inclusive_uniform", "min": 819, "max": 1024})
     );
 
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(
         plan["measurements"]["evals"][0]["definition"]["prompt"],
         "Hello"
@@ -161,7 +161,7 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
     let plan = workspace.run_json(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "evals.gsm8k.limit=100",
         "--set",
@@ -272,7 +272,7 @@ fn concurrency_warmup_count_overflow_fails_definition_resolution() -> Result<(),
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "benches.c8k1k.concurrency=[2147483648]",
         "--set",
@@ -293,7 +293,7 @@ fn nested_measurement_override_rejects_traversing_a_scalar() -> Result<(), Box<d
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "evals.gsm8k.request_body.vendor=\"fixed\"",
         "--set",
@@ -315,7 +315,7 @@ fn bench_override_cannot_switch_the_declared_request_source_kind() -> Result<(),
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "benches.c8k1k.request_source.kind=\"dataset\"",
         "--dry-run",
@@ -337,7 +337,7 @@ fn repeated_eval_rejects_zero_trials_and_a_request_body_seed() -> Result<(), Box
     let zero = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "evals.gsm8k.trials=0",
         "--dry-run",
@@ -352,7 +352,7 @@ fn repeated_eval_rejects_zero_trials_and_a_request_body_seed() -> Result<(), Box
         fs::read_to_string(&path)?
     );
     fs::write(path, config)?;
-    let seed = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let seed = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!seed.status.success());
     let stderr = String::from_utf8(seed.stderr)?;
     assert!(
@@ -397,7 +397,7 @@ fn workspace_lm_eval_yaml_resolves_as_the_effective_task_source() -> Result<(), 
     let output = workspace
         .command()
         .env("FIXTURE_LOCAL_SNAPSHOT", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(
         output.status.success(),
@@ -454,7 +454,7 @@ fn workspace_lm_eval_yml_extension_uses_the_pinned_yaml_loader() -> Result<(), B
         .replace("task = \"gsm8k\"", "task = { yaml = \"evals/custom.yml\" }");
     fs::write(path, config)?;
 
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(
         plan["measurements"]["evals"][1]["declared_definition"]["task"],
         serde_json::json!({"yaml": "evals/custom.yml"})
@@ -473,12 +473,130 @@ fn standalone_lm_eval_dataset_override_is_rejected_with_field_context() -> Resul
     );
     fs::write(path, config)?;
 
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("dataset"),
         "validation names the unsupported second dataset authority"
+    );
+    Ok(())
+}
+
+#[test]
+fn recipe_override_addresses_a_dotted_bench_id() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let path = workspace.root.path().join(".inferlab/workspace.toml");
+    let config = fs::read_to_string(&path)?.replace(
+        "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+        "benches = [\"c8k1k\", \"adaptive-c8k1k\", \"my.bench\"]",
+    ) + r#"
+[benches."my.bench"]
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 8192, output_tokens = 1024 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 900
+"#;
+    fs::write(path, config)?;
+
+    let plan = workspace.run_json(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "benches.\"my.bench\".concurrency=[2]",
+        "--set",
+        "benches.my.bench.timeout_seconds=120",
+        "--dry-run",
+    ])?;
+
+    let bench = plan["measurements"]["benches"]
+        .as_array()
+        .ok_or("benches")?
+        .iter()
+        .find(|bench| bench["id"] == "my.bench")
+        .ok_or("the dotted bench resolves")?;
+    assert_eq!(bench["definition"]["concurrency"], serde_json::json!([2]));
+    assert_eq!(bench["definition"]["timeout_seconds"], 120);
+    assert_eq!(
+        bench["overrides"],
+        serde_json::json!([
+            {"invocation_index": 0, "value": "benches.\"my.bench\".concurrency=[2]"},
+            {"invocation_index": 1, "value": "benches.my.bench.timeout_seconds=120"},
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn recipe_override_targets_the_longest_matching_dotted_bench_id() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let path = workspace.root.path().join(".inferlab/workspace.toml");
+    let config = fs::read_to_string(&path)?.replace(
+        "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+        "benches = [\"chat\", \"chat.long\"]",
+    ) + r#"
+[benches.chat]
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 8192, output_tokens = 1024 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 900
+
+[benches."chat.long"]
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 8192, output_tokens = 1024 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 900
+"#;
+    fs::write(path, config)?;
+
+    let plan = workspace.run_json(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "benches.\"chat.long\".concurrency=[2]",
+        "--set",
+        "benches.chat.long.timeout_seconds=120",
+        "--dry-run",
+    ])?;
+
+    let benches = plan["measurements"]["benches"]
+        .as_array()
+        .ok_or("benches")?;
+    let short = benches
+        .iter()
+        .find(|bench| bench["id"] == "chat")
+        .ok_or("chat resolves")?;
+    let long = benches
+        .iter()
+        .find(|bench| bench["id"] == "chat.long")
+        .ok_or("chat.long resolves")?;
+    assert_eq!(
+        long["definition"]["concurrency"],
+        serde_json::json!([2]),
+        "the quoted spelling lands on chat.long"
+    );
+    assert_eq!(
+        long["definition"]["timeout_seconds"], 120,
+        "the unquoted spelling resolves identically"
+    );
+    assert_eq!(
+        long["overrides"],
+        serde_json::json!([
+            {"invocation_index": 0, "value": "benches.\"chat.long\".concurrency=[2]"},
+            {"invocation_index": 1, "value": "benches.chat.long.timeout_seconds=120"},
+        ])
+    );
+    assert_eq!(short["definition"]["concurrency"], serde_json::json!([1]));
+    assert_eq!(short["definition"]["timeout_seconds"], 900);
+    assert_eq!(
+        short["overrides"],
+        serde_json::json!([]),
+        "the shared-prefix bench records no override"
     );
     Ok(())
 }
@@ -490,13 +608,38 @@ fn recipe_measurement_override_rejects_a_definition_outside_the_selected_suite()
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "evals.not-selected.limit=1",
         "--dry-run",
     ])?;
 
     assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
+    assert!(
+        stderr.contains("\"not-selected\""),
+        "the unknown definition is named: {stderr}"
+    );
+    assert!(
+        stderr.contains("not a definition selected by the recipe's workload suite"),
+        "{stderr}"
+    );
+
+    let dotted = workspace.run(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "benches.\"unknown.bench\".concurrency=[2]",
+        "--dry-run",
+    ])?;
+    assert!(!dotted.status.success());
+    let stderr = String::from_utf8(dotted.stderr)?;
+    assert!(
+        stderr.contains("\"unknown.bench\""),
+        "the unknown dotted definition is named: {stderr}"
+    );
     Ok(())
 }
 
@@ -506,7 +649,7 @@ fn overrides_outside_the_typed_server_patch_are_rejected() -> Result<(), Box<dyn
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "bench.request_count=1",
         "--dry-run",
@@ -517,7 +660,7 @@ fn overrides_outside_the_typed_server_patch_are_rejected() -> Result<(), Box<dyn
     let reserved = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.model=\"other\"",
         "--dry-run",
@@ -532,7 +675,7 @@ fn missing_eval_toolchain_reports_the_explicit_install_action() -> Result<(), Bo
     let output = workspace
         .command()
         .env("XDG_DATA_HOME", workspace.root.path().join("missing-data"))
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
 
     assert!(!output.status.success());

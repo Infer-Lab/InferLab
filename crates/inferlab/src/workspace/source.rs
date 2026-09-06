@@ -5,26 +5,22 @@ use super::definitions::WorkspaceConfig;
 use super::invalid;
 use super::state::WorkspaceSnapshot;
 use crate::InferlabError;
+use crate::environment::{PIXI_LOCK, PIXI_MANIFEST};
+use crate::record::{CACHE_DIR, RECORDS_DIR, RUNTIME_DIR};
+use crate::scratchpad::SCRATCHPADS_DIR;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// [[RFC-0002:C-WORKSPACE-AUTHORITY]]: every symbolic link effectively
-/// present in the digested worktree must carry a target that resolves to
-/// identity-covered workspace content. The walk covers the whole digested
-/// worktree rather than the declared stack source subtrees because the digest
-/// pathspec covers the root: a link outside every stack source still enters
-/// identity as link text, so every intermediate link is enumerated and
-/// judged on its own by construction. The walk reads the filesystem rather
-/// than the git index because untracked and ignored links — and links
-/// replacing tracked entries — carry the same digest blindness as tracked
-/// ones; tracking state affects dirtiness, not containment. Resolution
-/// stays lexical because physical resolution would depend on machine state;
-/// a target resolving onto or through an enumerated link is judged against
-/// its link-resolved destination because git refuses pathspecs beyond a
-/// symbolic link.
+/// [[RFC-0002:C-WORKSPACE-AUTHORITY]]: every symbolic link in the digested
+/// worktree must resolve to identity-covered workspace content. The digest
+/// sees link text, not target content, so every digested-worktree link is
+/// enumerated and judged on its own, whatever its git tracking state.
+/// Resolution stays lexical because physical resolution would depend on
+/// machine state; a target resolving through an enumerated link is judged
+/// against its link-resolved destination.
 pub(super) fn reject_uncovered_worktree_links(
     root: &Path,
     config: &WorkspaceConfig,
@@ -520,27 +516,38 @@ pub(super) fn owning_repo(root: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
-pub(super) fn inspect_workspace(
-    root: &Path,
-    local_path: &Path,
-    config: &WorkspaceConfig,
-) -> Result<WorkspaceSnapshot, InferlabError> {
-    let revision = git_text(root, &["rev-parse", "HEAD"])?;
-    let mut source_exclusions = local_path
+/// The single authority for the source-identity exclusion set
+/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): the resolved local bindings file when
+/// it lives safely inside the workspace, plus the machine-local state
+/// directories. Both the execution snapshot and the lightweight identity used
+/// by the TUI derive their dirty verdict from this set, so the two can never
+/// disagree about what counts as a source mutation.
+pub(crate) fn source_exclusions(root: &Path, local_path: &Path) -> Vec<PathBuf> {
+    let mut exclusions = local_path
         .strip_prefix(root)
         .ok()
         .filter(|relative| is_safe_relative(relative))
         .map(Path::to_path_buf)
         .into_iter()
         .collect::<Vec<_>>();
-    source_exclusions.extend([
-        PathBuf::from(".inferlab/cache"),
-        PathBuf::from(".inferlab/records"),
-        PathBuf::from(".inferlab/runtime"),
+    exclusions.extend([
+        PathBuf::from(CACHE_DIR),
+        PathBuf::from(RECORDS_DIR),
+        PathBuf::from(RUNTIME_DIR),
         // Operator journal state: narrative, never a source fact
         // ([[RFC-0005:C-SCRATCHPAD-JOURNAL]]).
-        PathBuf::from(".inferlab/scratchpads"),
+        PathBuf::from(SCRATCHPADS_DIR),
     ]);
+    exclusions
+}
+
+pub(super) fn inspect_workspace(
+    root: &Path,
+    local_path: &Path,
+    config: &WorkspaceConfig,
+) -> Result<WorkspaceSnapshot, InferlabError> {
+    let revision = git_text(root, &["rev-parse", "HEAD"])?;
+    let source_exclusions = source_exclusions(root, local_path);
     // The containment guard precedes the identity reads: a snapshot must not
     // be claimed over a tree whose effective bytes live outside it.
     reject_uncovered_worktree_links(root, config, &source_exclusions)?;
@@ -552,8 +559,8 @@ pub(super) fn inspect_workspace(
         source_digest,
         source_exclusions,
         revision_reproducible: !dirty,
-        pixi_manifest_sha256: crate::digest::hash_file(&root.join("pixi.toml"))?,
-        pixi_lock_sha256: crate::digest::hash_file(&root.join("pixi.lock"))?,
+        pixi_manifest_sha256: crate::digest::hash_file(&root.join(PIXI_MANIFEST))?,
+        pixi_lock_sha256: crate::digest::hash_file(&root.join(PIXI_LOCK))?,
     })
 }
 
@@ -809,5 +816,69 @@ pub(super) fn symlink_guard(absolute: &Path, described: &str) -> Result<(), Infe
              the workspace source digest records link text rather than target content"
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_exclusions;
+    use std::path::{Path, PathBuf};
+
+    const STATE_DIRS: [&str; 4] = [
+        ".inferlab/cache",
+        ".inferlab/records",
+        ".inferlab/runtime",
+        ".inferlab/scratchpads",
+    ];
+
+    fn paths(root: &Path, local: &Path) -> Vec<String> {
+        source_exclusions(root, local)
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn default_local_file_headlines_the_exclusions() {
+        let root = Path::new("/workspace");
+        let exclusions = paths(root, &root.join(".inferlab/local.toml"));
+        assert_eq!(
+            exclusions,
+            [".inferlab/local.toml"]
+                .into_iter()
+                .chain(STATE_DIRS)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_non_default_in_root_local_file_is_excluded_instead() {
+        // The divergence this regression test pins: the lightweight identity
+        // used by the TUI previously hardcoded the default local file, so a
+        // custom in-root --local file was excluded from execution snapshots
+        // but counted as a source mutation there.
+        let root = Path::new("/workspace");
+        let exclusions = paths(root, &root.join("alternate-local.toml"));
+        assert_eq!(
+            exclusions,
+            ["alternate-local.toml"]
+                .into_iter()
+                .chain(STATE_DIRS)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_local_file_outside_the_workspace_is_not_a_source_fact() {
+        let root = Path::new("/workspace");
+        let exclusions = paths(root, Path::new("/elsewhere/local.toml"));
+        assert_eq!(
+            exclusions,
+            STATE_DIRS
+                .into_iter()
+                .map(PathBuf::from)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        );
     }
 }

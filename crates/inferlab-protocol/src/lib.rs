@@ -15,7 +15,8 @@ pub use measurement_data_asset::{
 };
 pub use wire::{
     AdapterError, AdapterErrorCode, AdapterProtocol, AdapterRequest, AdapterResponse,
-    AdapterResult, AllocationLaunch, BenchAgenticAcquisitionOutcome, BenchAgenticBranchStats,
+    AdapterResult, AllocationLaunch, AuxiliaryModelInput, AuxiliaryModelKind,
+    AuxiliaryModelLocator, BenchAgenticAcquisitionOutcome, BenchAgenticBranchStats,
     BenchAgenticCatalogInput, BenchAgenticResultEvidence, BenchAgenticRunEvidence,
     BenchAgenticSourceInput, BenchAgenticSourceVerification, BenchArtifactLevelInput,
     BenchCacheStartInput, BenchCaseInput, BenchClientRequest, BenchClientResult, BenchCorpusInput,
@@ -33,8 +34,8 @@ pub use wire::{
     BenchSharedSystemContentSummary, BenchTokenCountSummary, BenchTokenDistributionKindInput,
     BenchTokenSelectorInput, CaptureMechanism, CaptureTargetRequirement,
     CaptureWindowControlEndpoint, CaptureWindowControlRequirement, CaptureWindowHttpActionSpec,
-    ClientEndpointInput, ClientStatus, EndpointAssignment, EndpointProtocol, EndpointRequirement,
-    EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
+    ClientEndpointInput, ClientStatus, EndpointAssignment, EndpointDeclaration, EndpointProtocol,
+    EndpointRequirement, EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
     EvalMetricComparison, EvalMetricGate, EvalMetricGateConclusion, EvalNormalizedMetric,
     EvalPromptInput, EvalTaskSourceInput, EvalTrialSummary, FrontendCoRendering,
     FrontendComponents, FrontendGatewayComponent, FrontendHandoff, FrontendPdRouterComponent,
@@ -52,7 +53,7 @@ pub use wire::{
     SyntheticAcceptanceOutcome, TargetEndpointScheme,
 };
 
-pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v9";
+pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v10";
 pub const MEASUREMENT_SCHEMA_ID: &str = "https://inferlab.dev/schema/measurement-protocol/v1";
 pub const PROTOCOL_WIRE_SOURCE: &str = "crates/inferlab-protocol/src/wire.rs";
 pub const MEASUREMENT_WIRE_SOURCE: &str =

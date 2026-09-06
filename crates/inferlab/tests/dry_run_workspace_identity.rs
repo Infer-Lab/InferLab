@@ -16,7 +16,7 @@ fn unresolved_typed_reference_is_rejected() -> Result<(), Box<dyn Error>> {
         &path,
         WORKSPACE.replace("model = \"deepseek-v4-flash\"", "model = \"missing\""),
     )?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("unknown model"));
@@ -30,7 +30,7 @@ fn dirty_workspace_reports_a_digest_and_effective_values() -> Result<(), Box<dyn
         workspace.root.path().join("vendor/vllm/source.txt"),
         "local edit\n",
     )?;
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert_eq!(plan["workspace"]["dirty"], true);
     assert_eq!(plan["workspace"]["revision_reproducible"], false);
@@ -45,7 +45,8 @@ fn dirty_workspace_reports_a_digest_and_effective_values() -> Result<(), Box<dyn
 #[test]
 fn scratchpad_state_stays_outside_source_identity() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let baseline = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let baseline =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(baseline["workspace"]["dirty"], false);
 
     let note = workspace.run(&[
@@ -61,7 +62,8 @@ fn scratchpad_state_stays_outside_source_identity() -> Result<(), Box<dyn Error>
         String::from_utf8_lossy(&note.stderr)
     );
 
-    let after = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let after =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(after["workspace"]["dirty"], false);
     assert_eq!(
         after["workspace"]["source_digest"],
@@ -80,7 +82,7 @@ fn explicit_local_bindings_file_replaces_the_default() -> Result<(), Box<dyn Err
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--local",
         alternate.to_str().ok_or("non-UTF-8 test path")?,
         "--dry-run",
@@ -108,10 +110,31 @@ fn missing_weight_binding_is_reported_before_lowering() -> Result<(), Box<dyn Er
          machines = [\"local\"]\n",
     )?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("missing model weight binding"));
+    Ok(())
+}
+
+#[test]
+fn pool_form_placement_role_must_be_canonical_at_load() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let path = workspace.root.path().join(".inferlab/local.toml");
+    let mut local = fs::read_to_string(&path)?;
+    local.push_str("\n[placements.local.roles.prefil]\nmachines = [\"local\"]\n");
+    fs::write(path, local)?;
+
+    let output = workspace
+        .command()
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)?
+            .contains("placement binding \"local\" contains non-canonical role \"prefil\"")
+    );
     Ok(())
 }
 
@@ -120,17 +143,17 @@ fn placement_role_must_belong_to_the_resolved_topology() -> Result<(), Box<dyn E
     let workspace = TestWorkspace::new()?;
     let path = workspace.root.path().join(".inferlab/local.toml");
     let mut local = fs::read_to_string(&path)?;
-    local.push_str("\n[placements.local.roles.typo]\nmachines = [\"local\"]\n");
+    local.push_str("\n[placements.local.roles.decode]\nmachines = [\"local\"]\n");
     fs::write(path, local)?;
 
     let output = workspace
         .command()
-        .args(["serve", "start", "dsv4-qualify", "--dry-run"])
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains(
-        "placement references role \"typo\", which is not part of the resolved topology"
+        "placement references role \"decode\", which is not part of the resolved topology"
     ));
     Ok(())
 }
@@ -141,29 +164,64 @@ fn case_and_invocation_roles_must_belong_to_the_selected_topology() -> Result<()
     let invocation = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.roles.typo.replicas=2",
         "--dry-run",
     ])?;
     assert!(!invocation.status.success());
+    let stderr = String::from_utf8_lossy(&invocation.stderr);
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
+    assert!(
+        stderr.contains("server.roles.typo.replicas=2"),
+        "the offending override is identified: {stderr}"
+    );
+    assert!(
+        stderr.contains("role \"typo\", which is not part of the selected topology"),
+        "{stderr}"
+    );
 
     let path = workspace.root.path().join(".inferlab/workspace.toml");
     let mut config = fs::read_to_string(&path)?;
     config.push_str(
-        "\n[servers.dsv4-qualify.cases.tp4.roles.typo]\n\
+        "\n[servers.deepseek-v4-flash-qualify.cases.tp4.roles.typo]\n\
          replicas = 2\n",
     );
     fs::write(path, config)?;
     let case = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--dry-run",
     ])?;
     assert!(!case.status.success());
+    Ok(())
+}
+
+#[test]
+fn invocation_settings_override_must_be_finite_at_selection() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.settings.temperature=inf",
+        "--dry-run",
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("\"server.settings.temperature=inf\""),
+        "the offending override is identified: {stderr}"
+    );
+    assert!(
+        stderr.contains("server.settings.temperature must be a finite JSON number"),
+        "{stderr}"
+    );
     Ok(())
 }
 
@@ -189,10 +247,128 @@ fn insufficient_devices_are_reported_after_lowering() -> Result<(), Box<dyn Erro
         ),
     )?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("provides 1 devices"));
+    Ok(())
+}
+
+#[test]
+fn multi_candidate_device_shortfall_is_insufficient_devices() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"pair\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             \n\
+             [machines.node-a]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [8000]\n\
+             devices = [0]\n\
+             \n\
+             [machines.node-b]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [8001]\n\
+             devices = [0]\n\
+             \n\
+             [placements.pair]\n\
+             machines = [\"node-a\", \"node-b\"]\n",
+            workspace.private_weight
+        ),
+    )?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("error[E3001]"), "{stderr}");
+    assert!(
+        stderr.contains("provides 1 devices but the server requires 2"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn multi_candidate_port_shortfall_stays_invalid_config() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"pair\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             \n\
+             [machines.node-a]\n\
+             host = \"127.0.0.1\"\n\
+             ports = []\n\
+             devices = [0, 1]\n\
+             \n\
+             [machines.node-b]\n\
+             host = \"127.0.0.1\"\n\
+             ports = []\n\
+             devices = [0, 1]\n\
+             \n\
+             [placements.pair]\n\
+             machines = [\"node-a\", \"node-b\"]\n",
+            workspace.private_weight
+        ),
+    )?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("error[E1004]"), "{stderr}");
+    assert!(stderr.contains("free ports"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn adapter_duplicate_port_requirements_are_a_semantics_violation() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    fs::write(
+        workspace.root.path().join(".inferlab/workspace.toml"),
+        WORKSPACE.replace(
+            "max_model_len = 65536",
+            "max_model_len = 65536\nfixture_duplicate_named_port = true",
+        ),
+    )?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("error[E2001]"), "{stderr}");
+    assert!(
+        stderr.contains("invalid or duplicate port requirements"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn adapter_rendering_an_empty_argv_is_a_semantics_violation() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    fs::write(
+        workspace.root.path().join(".inferlab/workspace.toml"),
+        WORKSPACE.replace(
+            "max_model_len = 65536",
+            "max_model_len = 65536\nfixture_render_empty_argv = true",
+        ),
+    )?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("error[E2001]"), "{stderr}");
+    assert!(stderr.contains("rendered an empty argv"), "{stderr}");
     Ok(())
 }
 
@@ -208,7 +384,7 @@ fn unknown_pixi_environment_is_rejected_before_lowering() -> Result<(), Box<dyn 
         ),
     )?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("unknown Pixi environment"));
@@ -228,7 +404,7 @@ fn integration_must_be_selected_by_the_pixi_manifest() -> Result<(), Box<dyn Err
          vllm = []\n",
     )?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr)?.contains("is not selected by Pixi environment"));
@@ -260,13 +436,15 @@ fn dirty_submodule_state_changes_workspace_evidence() -> Result<(), Box<dyn Erro
         ],
     )?;
     TestWorkspace::git(workspace.root.path(), &["commit", "-qam", "use submodule"])?;
-    let clean = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let clean =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     fs::write(
         workspace.root.path().join("vendor/flashinfer/source.txt"),
         "submodule local edit\n",
     )?;
-    let dirty = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let dirty =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert_eq!(clean["workspace"]["dirty"], false);
     assert_eq!(dirty["workspace"]["dirty"], true);
@@ -310,10 +488,12 @@ fn workspace_with_file_submodule() -> Result<(TestWorkspace, tempfile::TempDir),
 fn submodule_local_refs_do_not_change_source_digest() -> Result<(), Box<dyn Error>> {
     let (workspace, _origin) = workspace_with_file_submodule()?;
     let submodule = workspace.root.path().join("vendor/flashinfer");
-    let baseline = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let baseline =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     TestWorkspace::git(&submodule, &["tag", "local-presentation-only"])?;
-    let tagged = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let tagged =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert_eq!(baseline["workspace"]["dirty"], false);
     assert_eq!(tagged["workspace"]["dirty"], false);
@@ -335,14 +515,16 @@ fn submodule_local_refs_do_not_change_source_digest() -> Result<(), Box<dyn Erro
             "--allow-empty",
         ],
     )?;
-    let moved = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let moved =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_ne!(
         tagged["workspace"]["source_digest"], moved["workspace"]["source_digest"],
         "the effective submodule HEAD must remain part of workspace source identity"
     );
 
     TestWorkspace::git(&submodule, &["tag", "moved-presentation-only"])?;
-    let moved_tagged = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let moved_tagged =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(
         moved["workspace"]["source_digest"], moved_tagged["workspace"]["source_digest"],
         "local refs must stay outside identity when the submodule HEAD differs from its gitlink"
@@ -360,11 +542,13 @@ fn submodule_untracked_links_enter_the_source_digest() -> Result<(), Box<dyn Err
     let probe = workspace.root.path().join("vendor/flashinfer/probe");
 
     fs::write(&probe, "hello\n")?;
-    let as_file = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let as_file =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     fs::remove_file(&probe)?;
     std::os::unix::fs::symlink("real", &probe)?;
-    let as_link = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let as_link =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_ne!(
         as_file["workspace"]["source_digest"], as_link["workspace"]["source_digest"],
         "a same-content link must not digest like the regular file it replaced"
@@ -372,7 +556,8 @@ fn submodule_untracked_links_enter_the_source_digest() -> Result<(), Box<dyn Err
 
     fs::remove_file(&probe)?;
     std::os::unix::fs::symlink("./real", &probe)?;
-    let retargeted = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let retargeted =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_ne!(
         as_link["workspace"]["source_digest"], retargeted["workspace"]["source_digest"],
         "the link target text alone must change the digest"
@@ -389,7 +574,8 @@ fn dangling_submodule_links_do_not_kill_the_digest() -> Result<(), Box<dyn Error
     let probe = workspace.root.path().join("vendor/flashinfer/probe");
 
     std::os::unix::fs::symlink("missing", &probe)?;
-    let dangling = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let dangling =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     let first = dangling["workspace"]["source_digest"]
         .as_str()
         .ok_or("dry run carries no source digest")?
@@ -397,7 +583,8 @@ fn dangling_submodule_links_do_not_kill_the_digest() -> Result<(), Box<dyn Error
 
     fs::remove_file(&probe)?;
     std::os::unix::fs::symlink("missing-elsewhere", &probe)?;
-    let retargeted = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let retargeted =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_ne!(
         retargeted["workspace"]["source_digest"].as_str(),
         Some(first.as_str()),
@@ -417,7 +604,8 @@ fn definitions_split_across_fragments_resolve_identically() -> Result<(), Box<dy
     // path identical, so the resolved server plan (including the adapter
     // request digest, which the locator flows into) can be compared exactly.
     let workspace = TestWorkspace::new()?;
-    let single_plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let single_plan =
+        workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     workspace.split_workspace(
         SPLIT_ROOT,
@@ -426,7 +614,8 @@ fn definitions_split_across_fragments_resolve_identically() -> Result<(), Box<dy
             ("measurements.toml", SPLIT_MEASUREMENTS),
         ],
     )?;
-    let split_plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let split_plan =
+        workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert_eq!(split_plan["workspace"]["dirty"], false);
     // The composed workspace resolves the same server topology, settings,
@@ -508,7 +697,7 @@ fn identifier_declared_by_two_files_is_rejected_naming_both() -> Result<(), Box<
             ("measurements.toml", SPLIT_MEASUREMENTS),
         ],
     )?;
-    let output = root_fragment.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = root_fragment.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -538,7 +727,7 @@ fn identifier_declared_by_two_files_is_rejected_naming_both() -> Result<(), Box<
             ),
         ],
     )?;
-    let output = two_fragments.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = two_fragments.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -564,7 +753,7 @@ fn schema_version_in_a_fragment_is_rejected() -> Result<(), Box<dyn Error>> {
             ("measurements.toml", SPLIT_MEASUREMENTS),
         ],
     )?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -601,7 +790,7 @@ fn empty_fragment_directory_leaves_the_single_file_workspace_unchanged()
         &["commit", "-qm", "empty fragment dir"],
     )?;
 
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(plan["workspace"]["dirty"], false);
     assert_eq!(plan["server"]["case"]["id"], "tp2");
     assert_eq!(plan["measurements"]["gate"], "gsm8k");
@@ -636,7 +825,7 @@ fn symlinked_workspace_files_are_rejected() -> Result<(), Box<dyn Error>> {
             .path()
             .join(".inferlab/workspace.d/extra.toml"),
     )?;
-    let output = fragment_link.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = fragment_link.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -656,7 +845,7 @@ fn symlinked_workspace_files_are_rejected() -> Result<(), Box<dyn Error>> {
         &real_dir,
         dir_link.root.path().join(".inferlab/workspace.d"),
     )?;
-    let output = dir_link.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = dir_link.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -677,7 +866,7 @@ fn symlinked_workspace_files_are_rejected() -> Result<(), Box<dyn Error>> {
         inferlab.join("workspace-real.toml"),
         inferlab.join("workspace.toml"),
     )?;
-    let output = root_link.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = root_link.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -705,7 +894,7 @@ fn fragment_type_errors_name_their_position() -> Result<(), Box<dyn Error>> {
             ),
         ],
     )?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -724,7 +913,7 @@ fn symlinked_inferlab_directory_is_rejected() -> Result<(), Box<dyn Error>> {
     let root = workspace.root.path();
     fs::rename(root.join(".inferlab"), root.join(".inferlab-real"))?;
     std::os::unix::fs::symlink(root.join(".inferlab-real"), root.join(".inferlab"))?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -748,7 +937,7 @@ fn symlinked_stack_source_components_are_rejected() -> Result<(), Box<dyn Error>
         root.join("flashinfer-elsewhere"),
         root.join("vendor/flashinfer"),
     )?;
-    let output = linked_root.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = linked_root.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -764,7 +953,7 @@ fn symlinked_stack_source_components_are_rejected() -> Result<(), Box<dyn Error>
     let root = linked_parent.root.path();
     fs::rename(root.join("vendor"), root.join("vendor-elsewhere"))?;
     std::os::unix::fs::symlink(root.join("vendor-elsewhere"), root.join("vendor"))?;
-    let output = linked_parent.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = linked_parent.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -792,7 +981,7 @@ fn escaping_source_links_are_rejected() -> Result<(), Box<dyn Error>> {
     )?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "absolute link"])?;
-    let output = absolute.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = absolute.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // A relative target that lexically steps above the workspace root.
@@ -804,7 +993,7 @@ fn escaping_source_links_are_rejected() -> Result<(), Box<dyn Error>> {
     )?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "escaping link"])?;
-    let output = escaping.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = escaping.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // An internal-looking link routing through an escaping intermediate is
@@ -816,7 +1005,7 @@ fn escaping_source_links_are_rejected() -> Result<(), Box<dyn Error>> {
     std::os::unix::fs::symlink("mid/module.py", root.join("vendor/vllm/deep"))?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "chained links"])?;
-    let output = chained.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = chained.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     Ok(())
 }
@@ -834,7 +1023,7 @@ fn out_of_stack_source_bridge_links_are_contained() -> Result<(), Box<dyn Error>
     std::os::unix::fs::symlink("../../bridge", root.join("vendor/vllm/deep"))?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "bridge"])?;
-    let output = onto.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = onto.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -853,7 +1042,7 @@ fn out_of_stack_source_bridge_links_are_contained() -> Result<(), Box<dyn Error>
     std::os::unix::fs::symlink("../../bridge/module.py", root.join("vendor/vllm/deep"))?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "bridge"])?;
-    let output = through.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = through.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -881,7 +1070,7 @@ fn chains_through_covered_link_directories_are_accepted() -> Result<(), Box<dyn 
     std::os::unix::fs::symlink("dir-link/module.py", root.join("vendor/vllm/through"))?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "benign chain"])?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(
         output.status.success(),
         "a covered chain must pass containment: {}",
@@ -908,7 +1097,7 @@ fn digest_visible_links_may_not_ride_machine_local_links() -> Result<(), Box<dyn
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "onto shape"])?;
     std::os::unix::fs::symlink("a.py", root.join("vendor/vllm/bridge-ig"))?;
-    let output = onto.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = onto.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // THROUGH: a tracked link routing through a git-ignored link directory.
@@ -924,7 +1113,7 @@ fn digest_visible_links_may_not_ride_machine_local_links() -> Result<(), Box<dyn
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "through shape"])?;
     std::os::unix::fs::symlink("real-dir", root.join("vendor/vllm/ig-dir"))?;
-    let output = through.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = through.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     Ok(())
 }
@@ -940,7 +1129,7 @@ fn symlink_cycles_are_rejected() -> Result<(), Box<dyn Error>> {
     std::os::unix::fs::symlink("cycle-a", root.join("vendor/vllm/cycle-b"))?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "cycle"])?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     Ok(())
 }
@@ -958,7 +1147,7 @@ fn uncovered_links_are_rejected_regardless_of_tracking_state() -> Result<(), Box
         "/outside-nowhere/module.py",
         root.join("vendor/vllm/untracked-escape"),
     )?;
-    let output = untracked.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = untracked.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // Ignored escaping link: git status and the digest see nothing at all,
@@ -975,7 +1164,7 @@ fn uncovered_links_are_rejected_regardless_of_tracking_state() -> Result<(), Box
         "/outside-nowhere/module.py",
         root.join("vendor/vllm/ignored-escape"),
     )?;
-    let output = ignored.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = ignored.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // A tracked regular file replaced in the worktree by an escaping link.
@@ -989,7 +1178,7 @@ fn uncovered_links_are_rejected_regardless_of_tracking_state() -> Result<(), Box
         "/outside-nowhere/swapped.py",
         root.join("vendor/vllm/swapped.py"),
     )?;
-    let output = replaced.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = replaced.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     Ok(())
 }
@@ -1009,7 +1198,7 @@ fn identity_uncovered_targets_are_rejected() -> Result<(), Box<dyn Error>> {
     )?;
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "cache link"])?;
-    let output = excluded.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = excluded.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // A tracked link to a git-ignored target: the link is committed and the
@@ -1024,14 +1213,15 @@ fn identity_uncovered_targets_are_rejected() -> Result<(), Box<dyn Error>> {
     TestWorkspace::git(root, &["add", "."])?;
     TestWorkspace::git(root, &["commit", "-qm", "link to ignored"])?;
     fs::write(root.join("vendor/vllm/generated.py"), "uncovered\n")?;
-    let output = ignored_target.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output =
+        ignored_target.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
 
     // A target inside git metadata.
     let git_target = TestWorkspace::new()?;
     let root = git_target.root.path();
     std::os::unix::fs::symlink("../../.git/config", root.join("vendor/vllm/git-link"))?;
-    let output = git_target.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = git_target.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     Ok(())
 }
@@ -1067,7 +1257,7 @@ fn submodule_ignore_rules_govern_submodule_targets() -> Result<(), Box<dyn Error
     // Ignored by the submodule's rules, invisible to the parent's.
     fs::write(root.join("vendor/vllm/subrepo/generated.py"), "uncovered\n")?;
     std::os::unix::fs::symlink("generated.py", root.join("vendor/vllm/subrepo/inner-link"))?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
@@ -1098,7 +1288,7 @@ fn internal_source_links_are_permitted() -> Result<(), Box<dyn Error>> {
     TestWorkspace::git(root, &["commit", "-qm", "internal links"])?;
     // An untracked internal link to covered content: ordinary dirty state.
     std::os::unix::fs::symlink("source.txt", root.join("vendor/vllm/untracked-internal"))?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(
         output.status.success(),
         "identity-covered internal links must be permitted: {}",
@@ -1130,7 +1320,7 @@ fn ignored_links_to_in_root_content_are_machine_local() -> Result<(), Box<dyn Er
     fs::create_dir_all(root.join("vendor/vllm/.deps"))?;
     fs::write(root.join("vendor/vllm/.deps/notes.md"), "machine local\n")?;
     std::os::unix::fs::symlink("notes.md", root.join("vendor/vllm/.deps/notes-link"))?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(
         output.status.success(),
         "ignored links to in-root content must be permitted: {}",
@@ -1184,10 +1374,10 @@ import sys
 json.load(sys.stdin)
 print(json.dumps({
     "status": "error",
-    "protocol_version": "9",
+    "protocol_version": "10",
     "error": {
         "code": "unsupported_protocol_version",
-        "message": "received protocol version 9; this integration supports protocol version 6",
+        "message": "received protocol version 10; this integration supports protocol version 6",
     },
 }))
 "#;
@@ -1202,14 +1392,14 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
         &workspace.adapter_bin.join("inferlab-adapter-vllm"),
         WRONG_VERSION_ADAPTER,
     )?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(
         !output.status.success(),
         "a protocol version 2 answer must fail the command"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 2") && stderr.contains("protocol version 9"),
+        stderr.contains("protocol version 2") && stderr.contains("protocol version 10"),
         "the mismatch names both versions: {stderr}"
     );
     assert!(
@@ -1224,19 +1414,112 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
         &workspace.adapter_bin.join("inferlab-adapter-vllm"),
         UNSUPPORTED_VERSION_ADAPTER,
     )?;
-    let output = workspace.run(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(
         !output.status.success(),
         "a structured unsupported-protocol-version rejection must fail the command"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 9") && stderr.contains("protocol version 6"),
+        stderr.contains("protocol version 10") && stderr.contains("protocol version 6"),
         "the structured rejection names both versions: {stderr}"
     );
     assert!(
         stderr.contains("bump the workspace adapter pins and relock"),
         "the structured rejection names the remedy: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn single_topology_rejects_multiple_serve_replicas() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let path = workspace.root.path().join(".inferlab/workspace.toml");
+    let mut config = fs::read_to_string(&path)?;
+    config.push_str(
+        "\n[servers.deepseek-v4-flash-qualify.roles.serve]\n\
+         replicas = 2\n",
+    );
+    fs::write(path, config)?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)?
+            .contains("single topology requires exactly one serve replica"),
+    );
+    Ok(())
+}
+
+#[test]
+fn recipe_measurements_require_a_controller_usable_model_locator() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"remote\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             machine_locators = {{ remote = \"/remote/weights\" }}\n\
+             \n\
+             [machines.remote]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [8000]\n\
+             devices = [0, 1]\n\
+             workspace = {:?}\n\
+             launch = {{ kind = \"ssh\", target = \"remote\" }}\n\
+             \n\
+             [placements.remote]\n\
+             machines = [\"remote\"]\n",
+            workspace.root.path()
+        ),
+    )?;
+
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("no model locator usable by measurements on the controller machine"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("\"deepseek-v4-flash\""), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn measurements_read_the_controller_machines_model_locator() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let shared = workspace.root.path().join("shared-weights");
+    let local = workspace.root.path().join("local-weights");
+    fs::create_dir_all(&shared)?;
+    fs::create_dir_all(&local)?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"local\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             machine_locators = {{ local = {:?} }}\n\
+             \n\
+             [machines.local]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [8000]\n\
+             devices = [0, 1]\n\
+             \n\
+             [placements.local]\n\
+             machines = [\"local\"]\n",
+            shared, local
+        ),
+    )?;
+
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert_eq!(
+        plan["measurements"]["evals"][0]["model"]["locator"].as_str(),
+        Some(local.to_string_lossy().as_ref())
     );
     Ok(())
 }

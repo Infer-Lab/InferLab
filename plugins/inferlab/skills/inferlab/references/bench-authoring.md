@@ -488,17 +488,17 @@ timeout_seconds = 7200
 `concurrency` counts root session-tree lanes. Spawned subagents can therefore
 produce more simultaneous HTTP requests than the declared value. The
 `inferencex` release profile fixes source-response replay, first-turn-prefix
-cache busting, trajectory sampling, a 600-second cache-pressure warmup,
-streaming chat requests, native failure thresholds, and a 900-second minimum
-profiling duration. Omitting `duration_seconds` selects 1800 seconds. Live
-server responses are measured but do not become the context for later source
-turns, so this workflow measures replay transport behavior rather than agent
-task quality.
+cache busting, trajectory sampling, a per-lane cache-pressure warmup,
+streaming chat requests, native failure thresholds, and minimum and default
+profiling durations. Omitting `duration_seconds` selects the profile's
+default duration. Live server responses are measured but do not become the
+context for later source turns, so this workflow measures replay transport
+behavior rather than agent task quality.
 
-The 256k corpus is approximately 569 MB. The full-context
-`semianalysis_agentx_062126` corpus is approximately 1.85 GB. InferLab verifies
-the immutable Hugging Face revision and complete `traces.jsonl` digest before
-AIPerf materializes the trace trees. The release profile, not workspace fields,
+The 256k corpus and the full-context `semianalysis_agentx_062126` corpus are
+sizable downloads. InferLab verifies the immutable Hugging Face revision and
+complete `traces.jsonl` digest before AIPerf materializes the trace trees.
+The release profile, not workspace fields,
 owns loader, scenario, timing, warmup, cache-bust, and failure-policy details.
 AgentX rejects request counts and rates, prompt and request-body controls,
 linear-session counts and delays, cache-start controls, SLOs, and adaptive

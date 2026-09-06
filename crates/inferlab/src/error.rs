@@ -97,7 +97,7 @@ pub enum InferlabError {
     #[error("invalid configuration: {message}")]
     InvalidConfig { message: String },
 
-    #[error("invalid configuration: network resolution failed: {source}")]
+    #[error("network resolution failed: {source}")]
     NetworkResolution {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -259,6 +259,12 @@ pub enum InferlabError {
         code: AdapterErrorCode,
         message: String,
     },
+
+    /// A well-formed adapter response that violates the operation's semantics
+    /// — the integration's fault, not the operator's configuration
+    /// ([[RFC-0001:C-ERROR-CODES]]).
+    #[error("{message}")]
+    AdapterSemantics { message: String },
 
     #[error("{message}")]
     AdapterProtocolVersion { message: String },
@@ -425,21 +431,21 @@ pub enum InferlabError {
     #[error("dataset preparation failed: {message}")]
     DatasetPreparation { message: String },
 
-    #[error("failed to access server record {path}: {source}")]
+    #[error("failed to access record {path}: {source}")]
     RecordIo {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("failed to decode server record {path}: {source}")]
+    #[error("failed to decode record {path}: {source}")]
     RecordDecode {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
     },
 
-    #[error("failed to encode server record: {source}")]
+    #[error("failed to encode record: {source}")]
     RecordEncode {
         #[source]
         source: serde_json::Error,
@@ -503,7 +509,7 @@ impl InferlabError {
             }
             Self::ParseToml { .. } => "E1003",
             Self::ParseYaml { .. } | Self::SerializeToml { .. } => "E1003",
-            Self::InvalidConfig { .. } | Self::NetworkResolution { .. } => "E1004",
+            Self::InvalidConfig { .. } => "E1004",
             Self::InvalidOverride { .. } => "E1005",
             Self::Git { .. } => "E1006",
             Self::LaunchPixi { .. }
@@ -528,8 +534,10 @@ impl InferlabError {
             | Self::AdapterExit { .. }
             | Self::AdapterProtocol { .. }
             | Self::AdapterRejected { .. }
+            | Self::AdapterSemantics { .. }
             | Self::AdapterProtocolVersion { .. } => "E2001",
             Self::InsufficientDevices { .. } => "E3001",
+            Self::NetworkResolution { .. } => "E3002",
             Self::RecipeFailed { .. }
             | Self::BenchFailed { .. }
             | Self::ImageBuildFailed { .. } => "E4001",
@@ -550,11 +558,11 @@ impl InferlabError {
             | Self::Profiling { .. }
             | Self::ProfilingEvidence { .. }
             | Self::ProfileBarrierIo { .. }
-            | Self::ProfileBarrierProtocol { .. }
-            | Self::DatasetIo { .. }
+            | Self::ProfileBarrierProtocol { .. } => "E4002",
+            Self::DatasetIo { .. }
             | Self::DatasetHttp { .. }
             | Self::DatasetDigest { .. }
-            | Self::DatasetPreparation { .. } => "E4002",
+            | Self::DatasetPreparation { .. } => "E4004",
             Self::RecordIo { .. } | Self::RecordDecode { .. } | Self::RecordEncode { .. } => {
                 "E5001"
             }

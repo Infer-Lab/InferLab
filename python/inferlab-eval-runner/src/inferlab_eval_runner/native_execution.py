@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     CaseDeadline,
     ClientStatus,
     EvalClientRequest,
@@ -39,7 +40,6 @@ from inferlab_eval_runner.task_resolution import (
     LmEvalRequestTarget,
     lm_eval_task_argument,
     render_mapping,
-    repeated_base_seed,
     resolve_lm_eval_target,
 )
 
@@ -139,7 +139,7 @@ def write_inference_request_config(
                 "effective_public_url": target.url,
                 "definition_request_body": request_body,
                 "trials": definition.trials,
-                "base_seed": repeated_base_seed(definition),
+                "base_seed": definition.base_seed,
                 "task_identity": resolution.get("task_identity"),
                 "metric_filter": definition.metric_filter,
                 "threshold": definition.threshold,
@@ -176,7 +176,7 @@ def write_inference_request_config(
         TrialEvidenceWriter(
             trial_evidence_path,
             requested_trials=definition.trials,
-            base_seed=repeated_base_seed(definition),
+            base_seed=definition.base_seed,
             task_identity=task_identity,
             threshold=definition.threshold,
         )
@@ -471,7 +471,7 @@ def repeated_checkpoint(
     )
     publisher.publish(
         EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics=metrics,
             normalized_metrics=normalized_metrics,
@@ -623,7 +623,7 @@ def run_repeated_lm_eval(
                 deadline.remaining(),
                 request_config_path=config_path,
                 request_evidence_path=payload_evidence_path,
-                seed=repeated_base_seed(definition) + index - 1,
+                seed=definition.base_seed + index - 1,
             )
             trial_jobs.append(
                 NativeLmEvalAttempt(
@@ -689,7 +689,7 @@ def run_repeated_lm_eval(
             definition, resolution, evidence_path
         )
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics=metrics,
             normalized_metrics=normalized_metrics,
@@ -713,7 +713,7 @@ def run_repeated_lm_eval(
             definition, resolution, evidence_path
         )
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics=metrics,
             normalized_metrics=normalized_metrics,
@@ -748,7 +748,7 @@ def run_repeated_lm_eval(
             for run in pre_inference_failures
         )
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics=metrics,
             normalized_metrics=normalized_metrics,
@@ -771,7 +771,7 @@ def run_repeated_lm_eval(
         )
     except (OSError, TypeError, ValueError) as error:
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics={},
             native_command=native_command,
@@ -782,7 +782,7 @@ def run_repeated_lm_eval(
             error=f"lm-eval repeated-result normalization failed: {error}",
         )
     return EvalClientResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         metrics=metrics,
         normalized_metrics=normalized_metrics,

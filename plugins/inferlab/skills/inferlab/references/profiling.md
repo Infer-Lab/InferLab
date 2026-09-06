@@ -36,9 +36,8 @@ client completion or failure, finalizes collection, and verifies required
 report coverage.
 
 The configured arm, framework-control, and finalization budgets cover distinct
-parts of that lifecycle. They do not replace the measurement timeout. Capture-
-armed readiness has no overall deadline, but each readiness attempt remains
-bounded so process exit and operator interruption stay observable. Under
+parts of that lifecycle. They do not replace the measurement timeout, and
+capture-armed readiness stays observable through bounded attempts. Under
 engine trace, closing the window draws only the one global finalization
 budget; the per-action control budget applies to managed collection.
 

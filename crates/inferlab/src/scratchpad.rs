@@ -6,14 +6,16 @@
 
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
-use crate::record::{RECORD_FILE, RECORDS_DIR, now_unix_ms, utc_timestamp, validate_record_id};
+use crate::record::{
+    RECORD_FILE, RECORDS_DIR, now_unix_ms, state_dir, utc_timestamp, validate_record_id,
+};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-pub(crate) const SCRATCHPADS_DIR: &str = ".inferlab/scratchpads";
+pub(crate) const SCRATCHPADS_DIR: &str = concat!(state_dir!(), "/scratchpads");
 pub(crate) const JOURNAL_FILE: &str = "journal.jsonl";
 
 /// Entries the default view renders before pointing at `--all`.
@@ -94,15 +96,28 @@ pub(crate) fn note_with_progress(
     progress.phase(Phase::named("journal-lock waiting").lock(&path))?;
     file.lock_exclusive()
         .map_err(|source| io_fail(&path, source))?;
+    // The shared clock helpers construct ServerLifecycle; a broken clock on
+    // the note path is a scratchpad failure, remapped like the record
+    // references above.
+    let timestamp =
+        now_unix_ms()
+            .and_then(utc_timestamp)
+            .map_err(|error| InferlabError::Scratchpad {
+                message: error.to_string(),
+            })?;
     let entry = Entry {
-        timestamp: utc_timestamp(now_unix_ms()?)?,
+        timestamp,
         author: author.map_or_else(default_author, str::to_owned),
         text: text.to_owned(),
         topic,
         records: records.clone(),
     };
-    let mut line =
-        serde_json::to_vec(&entry).map_err(|source| InferlabError::RecordEncode { source })?;
+    let mut line = serde_json::to_vec(&entry).map_err(|source| InferlabError::Scratchpad {
+        message: format!(
+            "cannot encode journal entry for {}: {source}",
+            path.display()
+        ),
+    })?;
     line.push(b'\n');
     file.write_all(&line)
         .map_err(|source| io_fail(&path, source))?;
@@ -175,9 +190,11 @@ fn read_entries(root: &Path, progress: &Progress) -> Result<Vec<Entry>, Inferlab
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            serde_json::from_str(line).map_err(|source| InferlabError::RecordDecode {
-                path: path.clone(),
-                source,
+            serde_json::from_str(line).map_err(|source| InferlabError::Scratchpad {
+                message: format!(
+                    "cannot decode journal entry in {}: {source}",
+                    path.display()
+                ),
             })
         })
         .collect()
@@ -194,9 +211,9 @@ fn resolve_record_refs(root: &Path, refs: &[String]) -> Result<Vec<String>, Infe
         } else {
             reference.clone()
         };
-        validate_record_id("record", &id).map_err(|_| InferlabError::Scratchpad {
-            message: format!("invalid record reference {id:?}"),
-        })?;
+        if let Err(error) = validate_record_id("record reference", &id) {
+            return fail(error.to_string());
+        }
         if !records_root.join(&id).join(RECORD_FILE).is_file() {
             return fail(format!("record {id:?} does not exist in {RECORDS_DIR}"));
         }
@@ -259,8 +276,7 @@ fn fail<T>(message: String) -> Result<T, InferlabError> {
 }
 
 fn io_fail(path: &Path, source: std::io::Error) -> InferlabError {
-    InferlabError::RecordIo {
-        path: path.to_path_buf(),
-        source,
+    InferlabError::Scratchpad {
+        message: format!("cannot access {}: {source}", path.display()),
     }
 }

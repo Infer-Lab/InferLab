@@ -62,6 +62,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                         "bench {id:?} agentic_source requires non-empty positive concurrency"
                     ));
                 }
+                validate_unique_concurrency(id, concurrency)?;
                 if prompts_per_concurrency.is_some()
                     || *warmup_prompts_per_concurrency != 0
                     || sessions_per_concurrency.is_some()
@@ -125,6 +126,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                         "bench {id:?} session_source requires non-empty positive concurrency"
                     ));
                 }
+                validate_unique_concurrency(id, concurrency)?;
                 if sessions_per_concurrency.is_none_or(|value| value == 0) {
                     return invalid(format!(
                         "bench {id:?} session_source requires positive sessions_per_concurrency"
@@ -157,6 +159,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
             if concurrency.contains(&0) {
                 return invalid(format!("bench {id:?} concurrency values must be positive"));
             }
+            validate_unique_concurrency(id, concurrency)?;
             match (concurrency.is_empty(), prompts_per_concurrency) {
                 (false, None) => {
                     return invalid(format!(
@@ -347,6 +350,29 @@ fn validate_request_rates(id: &str, rates: &[RequestRate]) -> Result<(), Inferla
         return invalid(format!(
             "bench {id:?} request rates must be positive and finite"
         ));
+    }
+    let mut seen: Vec<&RequestRate> = Vec::with_capacity(rates.len());
+    for rate in rates {
+        if seen.contains(&rate) {
+            let rendered = match rate {
+                RequestRate::Finite(value) => value.to_string(),
+                RequestRate::Unbounded => "\"inf\"".to_owned(),
+            };
+            return invalid(format!("bench {id:?} repeats request rate {rendered}"));
+        }
+        seen.push(rate);
+    }
+    Ok(())
+}
+
+// Planning expands each entry into an index-keyed case, so a repeated value
+// would run the same load shape twice with no signal.
+fn validate_unique_concurrency(id: &str, concurrency: &[u32]) -> Result<(), InferlabError> {
+    let mut seen = BTreeSet::new();
+    for value in concurrency {
+        if !seen.insert(value) {
+            return invalid(format!("bench {id:?} repeats concurrency value {value}"));
+        }
     }
     Ok(())
 }
@@ -1620,6 +1646,76 @@ timeout_seconds = 60
         let error = error.to_string();
 
         assert!(error.contains("minimum_good_request_ratio"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_concurrency_values_are_rejected_at_load() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tokens = 128, output_tokens = 32 }
+concurrency = [1, 4, 4]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#,
+        )?;
+
+        let error = validate_bench("c8k1k", &definition)
+            .err()
+            .ok_or("duplicated concurrency values were accepted")?;
+        let error = error.to_string();
+        assert!(error.contains("\"c8k1k\""), "{error}");
+        assert!(error.contains("concurrency"), "{error}");
+        assert!(error.contains('4'), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_concurrency_values_are_rejected_for_agentic_benches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [2, 2]
+timeout_seconds = 3600
+"#,
+        )?;
+
+        let error = validate_bench("agentx", &definition)
+            .err()
+            .ok_or("duplicated agentic concurrency values were accepted")?;
+        let error = error.to_string();
+        assert!(error.contains("\"agentx\""), "{error}");
+        assert!(error.contains("concurrency"), "{error}");
+        assert!(error.contains('2'), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_request_rates_are_rejected_at_load() -> Result<(), Box<dyn std::error::Error>> {
+        for (label, rates) in [
+            ("finite", "[1.0, 4.0, 4.0]"),
+            ("unbounded", "[1.0, \"inf\", \"inf\"]"),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", prompt = {{ kind = "server_chat" }}, input_tokens = 128, output_tokens = 32 }}
+request_rates = {rates}
+request_count = 32
+timeout_seconds = 60
+"#
+            ))?;
+            let error = validate_bench("sweep", &definition)
+                .err()
+                .ok_or_else(|| format!("{label} duplicate request rate was accepted"))?;
+            let error = error.to_string();
+            assert!(error.contains("\"sweep\""), "{label}: {error}");
+            assert!(error.contains("request rate"), "{label}: {error}");
+        }
         Ok(())
     }
 }

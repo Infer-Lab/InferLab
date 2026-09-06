@@ -18,7 +18,6 @@ from inferlab_measurement_sdk import (
 )
 
 from inferlab_eval_runner.native_contract import TrialEvidenceWriter
-from inferlab_eval_runner.task_resolution import repeated_base_seed
 
 
 def lm_eval_result_files(output_dir: Path) -> list[Path]:
@@ -277,7 +276,7 @@ def preserve_repeated_trial_scores(
     writer = TrialEvidenceWriter(
         evidence_path,
         requested_trials=definition.trials,
-        base_seed=repeated_base_seed(definition),
+        base_seed=definition.base_seed,
         task_identity=source_identity,
         threshold=definition.threshold,
         initialize=False,

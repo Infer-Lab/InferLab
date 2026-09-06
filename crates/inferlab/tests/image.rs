@@ -296,7 +296,7 @@ fn stdout_json(output: &Output) -> Result<Value, Box<dyn Error>> {
 #[test]
 fn dry_run_reports_dedup_and_eligibility() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let output = workspace.build(&["dsv4-runtime", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime", "--dry-run"])?;
     assert!(
         output.status.success(),
         "dry-run failed: {}",
@@ -401,7 +401,7 @@ fn dry_run_reports_dedup_and_eligibility() -> Result<(), Box<dyn Error>> {
 #[test]
 fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let output = workspace.build(&["dsv4-runtime", "--export", "exports"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime", "--export", "exports"])?;
     assert!(
         output.status.success(),
         "the builder-producible subset must build clean: {}",
@@ -410,7 +410,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
     let report = stdout_json(&output)?;
     assert_eq!(report["status"], "succeeded");
     let record_id = report["record_id"].as_str().ok_or("record id")?;
-    assert_datetime_record_id(record_id, "image-dsv4-runtime")?;
+    assert_datetime_record_id(record_id, "image-deepseek-v4-flash-runtime")?;
 
     let progress = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -439,7 +439,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
         progress.contains(" INFO [image build] inspection ") && progress.contains("position=1/1")
     );
     assert!(progress.contains(" INFO [image build] export ") && progress.contains("position=1/1"));
-    assert!(progress.contains(" INFO [image build] validation item=\"dsv4-qualify/"));
+    assert!(progress.contains(" INFO [image build] validation item=\"deepseek-v4-flash-qualify/"));
 
     let manifest = &report["manifest"];
     let assemblies = manifest["assemblies"].as_array().ok_or("assemblies")?;
@@ -455,7 +455,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
     let image_id = assemblies[0]["image_id"].as_str().ok_or("image id")?;
     assert!(image_id.starts_with("sha256:"));
     let digest12 = &image_id.trim_start_matches("sha256:")[..12];
-    let archive_name = format!("dsv4-runtime-linux-amd64-{digest12}-{record_id}.tar");
+    let archive_name = format!("deepseek-v4-flash-runtime-linux-amd64-{digest12}-{record_id}.tar");
     assert_eq!(assemblies[0]["export_archive"], archive_name.as_str());
     assert!(assemblies[0]["export_sha256"].is_string());
 
@@ -667,7 +667,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
     assert_eq!(product["status"], "succeeded");
     assert_eq!(product["skipped_platforms"][0]["platform"], "linux/arm64");
 
-    let second = workspace.build(&["dsv4-runtime", "--export", "exports"])?;
+    let second = workspace.build(&["deepseek-v4-flash-runtime", "--export", "exports"])?;
     let second_report = stdout_json(&second)?;
     let second_archive = second_report["manifest"]["assemblies"][0]["export_archive"]
         .as_str()
@@ -687,7 +687,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
 #[test]
 fn image_validation_containerizes_an_integration_rendered_frontend() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let output = workspace.build(&["dsv4-runtime-routed"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-routed"])?;
     assert!(
         output.status.success(),
         "routed image validation failed: {}",
@@ -752,7 +752,7 @@ fn invalid_check_declarations_fail_at_load() -> Result<(), Box<dyn Error>> {
             workspace.root.path().join(".inferlab/workspace.toml"),
             manifest,
         )?;
-        let output = workspace.build(&["dsv4-runtime", "--dry-run"])?;
+        let output = workspace.build(&["deepseek-v4-flash-runtime", "--dry-run"])?;
         assert!(!output.status.success(), "declaration must fail at load");
     }
     Ok(())
@@ -771,7 +771,7 @@ fn failing_entry_check_aborts_before_package_builds() -> Result<(), Box<dyn Erro
         &["commit", "-qm", "break the environment check"],
     )?;
 
-    let output = workspace.build(&["dsv4-runtime"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime"])?;
     assert!(
         !output.status.success(),
         "a failed entry check must abort the build"
@@ -820,7 +820,7 @@ fn failing_entry_check_aborts_before_package_builds() -> Result<(), Box<dyn Erro
 #[test]
 fn all_unproducible_platforms_fail_resolution() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let output = workspace.build(&["dsv4-runtime-foreign", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-foreign", "--dry-run"])?;
     assert!(
         !output.status.success(),
         "an all-unproducible declaration must fail resolution"
@@ -836,7 +836,7 @@ fn all_unproducible_platforms_fail_resolution() -> Result<(), Box<dyn Error>> {
 #[test]
 fn native_only_image_succeeds() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let output = workspace.build(&["dsv4-runtime-native"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native"])?;
     assert!(
         output.status.success(),
         "native-only build failed: {}",
@@ -863,7 +863,7 @@ fn mutating_then_failing_package_build_still_reports_the_mutation() -> Result<()
         workspace.root.path(),
         &["commit", "-qm", "mutating failing fixture"],
     )?;
-    let output = workspace.build(&["dsv4-runtime-native"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native"])?;
     assert!(!output.status.success());
     let report = stdout_json(&output)?;
     let record_id = report["record_id"].as_str().ok_or("record id")?;
@@ -894,7 +894,7 @@ fn pass_env_value_declarations_are_rejected() -> Result<(), Box<dyn Error>> {
             "pass_env = [\"HF_TOKEN=literal-secret\"]",
         ),
     )?;
-    let output = workspace.build(&["dsv4-runtime-native", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
     assert!(
         !output.status.success(),
         "a NAME=value pass_env declaration must be rejected at load"
@@ -909,7 +909,7 @@ fn pass_env_value_declarations_are_rejected() -> Result<(), Box<dyn Error>> {
         &local_path,
         local.replace("pass_env = [\"HF_TOKEN\"]", "pass_env = [\"CONDA_PREFIX\"]"),
     )?;
-    let output = workspace.build(&["dsv4-runtime-native", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
     assert!(
         !output.status.success(),
         "an Inferlab-managed name must be rejected at load"
@@ -930,7 +930,7 @@ fn pass_env_value_declarations_are_rejected() -> Result<(), Box<dyn Error>> {
             "pass_env = [\"a[$(touch pwned)]\"]",
         ),
     )?;
-    let output = workspace.build(&["dsv4-runtime-native", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
     assert!(
         !output.status.success(),
         "a non-identifier pass_env name must be rejected at load"
@@ -956,7 +956,7 @@ fn external_image_adapter_container_mounts_modules_with_their_metadata()
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--external-image",
             "fixture-external",
             "--set",
@@ -1030,7 +1030,7 @@ fn container_hardware_facts_are_lowered_as_declared() -> Result<(), Box<dyn Erro
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--external-image",
             "fixture-external",
             "--dry-run",
@@ -1104,7 +1104,7 @@ fn invalid_container_hardware_declarations_are_rejected_at_load() -> Result<(), 
                 &format!("pass_env = [\"HF_TOKEN\"]\n{declaration}"),
             ),
         )?;
-        let output = workspace.build(&["dsv4-runtime-native", "--dry-run"])?;
+        let output = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
         assert!(
             !output.status.success(),
             "declaration {declaration:?} must be rejected at load"
@@ -1127,7 +1127,7 @@ fn mutating_package_build_fails_the_assembly() -> Result<(), Box<dyn Error>> {
         workspace.root.path(),
         &["commit", "-qm", "mutating fixture"],
     )?;
-    let output = workspace.build(&["dsv4-runtime-native"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native"])?;
     assert!(
         !output.status.success(),
         "a workspace-mutating build must fail the invocation"
@@ -1165,7 +1165,7 @@ fn dirty_workspace_is_rejected() -> Result<(), Box<dyn Error>> {
         workspace.root.path().join("vendor/vllm/dirty.txt"),
         "edit\n",
     )?;
-    let output = workspace.build(&["dsv4-runtime", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime", "--dry-run"])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("clean workspace"),
@@ -1184,7 +1184,7 @@ fn missing_builder_binding_is_rejected() -> Result<(), Box<dyn Error>> {
         .replace("[builders.local]\n", "")
         .replace("kind = \"local-docker\"\n", "");
     fs::write(&local, trimmed)?;
-    let output = workspace.build(&["dsv4-runtime", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime", "--dry-run"])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("requires a builder binding"),
@@ -1197,7 +1197,7 @@ fn missing_builder_binding_is_rejected() -> Result<(), Box<dyn Error>> {
 #[test]
 fn image_backed_recipe_runs_from_the_selected_record() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1216,7 +1216,7 @@ fn image_backed_recipe_runs_from_the_selected_record() -> Result<(), Box<dyn Err
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--set",
@@ -1306,7 +1306,7 @@ fn image_backed_recipe_runs_from_the_selected_record() -> Result<(), Box<dyn Err
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--set",
@@ -1360,7 +1360,7 @@ fn image_backed_recipe_runs_from_the_selected_record() -> Result<(), Box<dyn Err
 #[test]
 fn serve_start_from_image_admits_manual_bench_and_stops() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1381,7 +1381,13 @@ fn serve_start_from_image_admits_manual_bench_and_stops() -> Result<(), Box<dyn 
 
     let start = workspace
         .command()
-        .args(["serve", "start", "dsv4-qualify", "--image", record_id])
+        .args([
+            "serve",
+            "start",
+            "deepseek-v4-flash-qualify",
+            "--image",
+            record_id,
+        ])
         .output()?;
     assert!(
         start.status.success(),
@@ -1440,7 +1446,7 @@ fn serve_start_from_image_admits_manual_bench_and_stops() -> Result<(), Box<dyn 
 #[test]
 fn incompatible_image_selections_are_rejected() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1467,11 +1473,11 @@ fn incompatible_image_selections_are_rejected() -> Result<(), Box<dyn Error>> {
     write_synthetic_record(workspace.root.path(), "synthetic-failed", &failed)?;
 
     for (recipe, record) in [
-        ("dsv4-qualify-alt-env", record_id),
-        ("dsv4-qualify-alt-sources", record_id),
-        ("dsv4-qualify", "synthetic-arm"),
-        ("dsv4-qualify", "synthetic-failed"),
-        ("dsv4-qualify", "absent-record"),
+        ("deepseek-v4-flash-qualify-alt-env", record_id),
+        ("deepseek-v4-flash-qualify-alt-sources", record_id),
+        ("deepseek-v4-flash-qualify", "synthetic-arm"),
+        ("deepseek-v4-flash-qualify", "synthetic-failed"),
+        ("deepseek-v4-flash-qualify", "absent-record"),
     ] {
         let output = workspace
             .command()
@@ -1485,7 +1491,7 @@ fn incompatible_image_selections_are_rejected() -> Result<(), Box<dyn Error>> {
 #[test]
 fn image_backed_launch_needs_no_local_environment() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1501,7 +1507,7 @@ fn image_backed_launch_needs_no_local_environment() -> Result<(), Box<dyn Error>
     // identity comparison below.
     let local_dry = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(local_dry.status.success());
     let local_plan = stdout_json(&local_dry)?;
@@ -1522,7 +1528,13 @@ fn image_backed_launch_needs_no_local_environment() -> Result<(), Box<dyn Error>
         // and the ambient environment coincidentally agrees — the container
         // must still receive it.
         .env("FIXTURE_EXPLICIT", "1")
-        .args(["recipe", "run", "dsv4-qualify", "--image", record_id])
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--image",
+            record_id,
+        ])
         .output()?;
     assert!(
         run.status.success(),
@@ -1561,7 +1573,7 @@ fn image_backed_launch_needs_no_local_environment() -> Result<(), Box<dyn Error>
 #[test]
 fn selection_rejections_precede_integration_invocation() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1586,7 +1598,7 @@ fn selection_rejections_precede_integration_invocation() -> Result<(), Box<dyn E
         .args([
             "recipe",
             "run",
-            "dsv4-qualify-alt-env",
+            "deepseek-v4-flash-qualify-alt-env",
             "--image",
             record_id,
             "--dry-run",
@@ -1604,7 +1616,7 @@ fn selection_rejections_precede_integration_invocation() -> Result<(), Box<dyn E
 #[test]
 fn image_backed_capture_is_rejected() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1618,7 +1630,7 @@ fn image_backed_capture_is_rejected() -> Result<(), Box<dyn Error>> {
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--capture",
@@ -1642,7 +1654,7 @@ fn image_backed_capture_is_rejected() -> Result<(), Box<dyn Error>> {
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--dry-run",
@@ -1667,11 +1679,13 @@ fn image_backed_engine_trace_capture_is_rejected() -> Result<(), Box<dyn Error>>
     let manifest = fs::read_to_string(&manifest_path)?;
     fs::write(
         &manifest_path,
-        format!("{manifest}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n"),
+        format!(
+            "{manifest}\n[servers.deepseek-v4-flash-qualify.profiler]\nmechanism = \"engine_trace\"\n"
+        ),
     )?;
     git(workspace.root.path(), &["add", "."])?;
     git(workspace.root.path(), &["commit", "-qm", "engine-trace"])?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1685,7 +1699,7 @@ fn image_backed_engine_trace_capture_is_rejected() -> Result<(), Box<dyn Error>>
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--capture",
@@ -1708,7 +1722,7 @@ fn image_backed_engine_trace_capture_is_rejected() -> Result<(), Box<dyn Error>>
 #[test]
 fn adapter_container_device_is_declared_not_guessed() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1728,7 +1742,7 @@ fn adapter_container_device_is_declared_not_guessed() -> Result<(), Box<dyn Erro
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--dry-run",
@@ -1767,7 +1781,7 @@ fn adapter_container_device_is_declared_not_guessed() -> Result<(), Box<dyn Erro
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--dry-run",
@@ -1793,7 +1807,7 @@ fn adapter_container_device_is_declared_not_guessed() -> Result<(), Box<dyn Erro
 #[test]
 fn structured_rejection_attempts_no_container_removal() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1812,7 +1826,7 @@ fn structured_rejection_attempts_no_container_removal() -> Result<(), Box<dyn Er
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--dry-run",
@@ -1839,6 +1853,33 @@ fn structured_rejection_attempts_no_container_removal() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn external_image_digest_pin_requires_lowercase_hex() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    // Registries canonicalize digests lowercase; an uppercase pin would load
+    // and then never match at pull/verify time.
+    let manifest = WORKSPACE.replace(
+        "example.com/fixture-vllm@sha256:abababababababababababababababababababababababababababababababab",
+        "example.com/fixture-vllm@sha256:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+    );
+    fs::write(
+        workspace.root.path().join(".inferlab/workspace.toml"),
+        manifest,
+    )?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-bare", "--dry-run"])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must be 64 lowercase hexadecimal characters"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"),
+        "the offending pin is named: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn unknown_external_integration_claim_is_rejected_at_load() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     // A syntactically valid claim absent from the workspace's committed
@@ -1848,7 +1889,7 @@ fn unknown_external_integration_claim_is_rejected_at_load() -> Result<(), Box<dy
         workspace.root.path().join(".inferlab/workspace.toml"),
         manifest,
     )?;
-    let output = workspace.build(&["dsv4-runtime-bare", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-bare", "--dry-run"])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
@@ -1866,7 +1907,7 @@ fn zero_adapter_timeout_is_rejected_at_load() -> Result<(), Box<dyn Error>> {
     let mut local = fs::read_to_string(&local_path)?;
     local.push_str("\n[adapter]\nimage_timeout_seconds = 0\n");
     fs::write(&local_path, local)?;
-    let output = workspace.build(&["dsv4-runtime-bare", "--dry-run"])?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-bare", "--dry-run"])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("must be positive"),
@@ -1879,7 +1920,7 @@ fn zero_adapter_timeout_is_rejected_at_load() -> Result<(), Box<dyn Error>> {
 #[test]
 fn timed_out_adapter_container_is_removed() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1903,7 +1944,7 @@ fn timed_out_adapter_container_is_removed() -> Result<(), Box<dyn Error>> {
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--dry-run",
@@ -1942,7 +1983,7 @@ fn timed_out_external_framework_probe_removes_its_container() -> Result<(), Box<
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--external-image",
             "fixture-external",
             "--dry-run",
@@ -1970,7 +2011,7 @@ fn timed_out_external_framework_probe_removes_its_container() -> Result<(), Box<
 #[test]
 fn oversized_adapter_diagnostics_do_not_deadlock() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -1989,7 +2030,7 @@ fn oversized_adapter_diagnostics_do_not_deadlock() -> Result<(), Box<dyn Error>>
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             record_id,
             "--dry-run",
@@ -2014,7 +2055,7 @@ fn external_image_recipe_runs_with_unqualified_evidence() -> Result<(), Box<dyn 
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--external-image",
             "fixture-external",
             "--dry-run",
@@ -2040,7 +2081,7 @@ fn external_image_recipe_runs_with_unqualified_evidence() -> Result<(), Box<dyn 
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--external-image",
             "fixture-external",
         ])
@@ -2103,7 +2144,7 @@ fn incompatible_external_selections_are_rejected() -> Result<(), Box<dyn Error>>
     ] {
         let output = workspace
             .command_with(&scenario)
-            .args(["recipe", "run", "dsv4-qualify"])
+            .args(["recipe", "run", "deepseek-v4-flash-qualify"])
             .args(&args)
             .arg("--dry-run")
             .output()?;
@@ -2121,7 +2162,7 @@ fn incompatible_external_selections_are_rejected() -> Result<(), Box<dyn Error>>
         .args([
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--image",
             "some-record",
             "--external-image",
@@ -2138,9 +2179,9 @@ fn incompatible_external_selections_are_rejected() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// Rewire the fixture onto a two-machine placement: replica 0 serves on the
-/// local machine, replica 1 on an SSH machine whose "remote" workspace is a
-/// sibling directory reached through the fake ssh shim.
+/// Rewire the fixture onto a two-machine placement: the single serve replica's
+/// rank 0 runs on the local machine, rank 1 on an SSH machine whose "remote"
+/// workspace is a sibling directory reached through the fake ssh shim.
 fn enable_pair_placement(workspace: &TestWorkspace) -> Result<u16, Box<dyn Error>> {
     let ports = support::reserve_local_ports(1)?;
     let remote_port = ports.get(0);
@@ -2173,7 +2214,7 @@ fn enable_pair_placement(workspace: &TestWorkspace) -> Result<u16, Box<dyn Error
          ]\n\
          \n\
          [placements.pair.roles.serve]\n\
-         replicas = [\n\
+         ranks = [\n\
            {{ machine = \"local\", devices = [0] }},\n\
            {{ machine = \"remote\", devices = [0] }},\n\
          ]\n",
@@ -2223,7 +2264,7 @@ fn external_two_machine_serving_resolves_per_machine_facts() -> Result<(), Box<d
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
             "--dry-run",
@@ -2281,7 +2322,7 @@ fn external_two_machine_serving_resolves_per_machine_facts() -> Result<(), Box<d
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2355,8 +2396,8 @@ fn external_two_machine_serving_resolves_per_machine_facts() -> Result<(), Box<d
         };
         if content.contains("FIXTURE_PASS HF_TOKEN=fixture-secret") {
             let path = entry.display().to_string();
-            local_flowed |= path.contains("server-0");
-            remote_flowed |= path.contains("server-1");
+            local_flowed |= path.contains("server-rank-000");
+            remote_flowed |= path.contains("server-rank-001");
         }
     }
     assert!(local_flowed, "the value flowed into the local container");
@@ -2400,7 +2441,7 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2415,7 +2456,7 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
     let log = fs::read_to_string(&docker_log)?;
     assert!(
         log.lines()
-            .any(|line| line.starts_with("rm -f inferlab-server-1-")),
+            .any(|line| line.starts_with("rm -f inferlab-server-rank-001-")),
         "the launch failure removed the remote container: {log}"
     );
     // The record carries structured removal evidence — the actual container
@@ -2434,7 +2475,7 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
         .find(|removal| {
             removal["container"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("inferlab-server-1-"))
+                .is_some_and(|name| name.starts_with("inferlab-server-rank-001-"))
         })
         .ok_or("structured container removal evidence for the failed remote launch")?;
     assert_eq!(
@@ -2475,7 +2516,7 @@ fn unconfirmed_launch_removal_never_claims_verified_cleanup() -> Result<(), Box<
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2506,7 +2547,7 @@ fn unconfirmed_launch_removal_never_claims_verified_cleanup() -> Result<(), Box<
         .find(|removal| {
             removal["container"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("inferlab-server-1-"))
+                .is_some_and(|name| name.starts_with("inferlab-server-rank-001-"))
         })
         .ok_or("structured container removal evidence for the failed remote launch")?;
     assert_eq!(removal["confirmed"], false);
@@ -2531,7 +2572,7 @@ fn hung_remote_removal_expires_with_deadline_evidence() -> Result<(), Box<dyn Er
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2561,7 +2602,8 @@ fn hung_remote_removal_expires_with_deadline_evidence() -> Result<(), Box<dyn Er
 }
 
 /// The structured container-removal evidence of the failed remote launch
-/// (server-1), located across every process's cleanup entries.
+/// (the pair replica's rank 1 process), located across every process's
+/// cleanup entries.
 fn failed_remote_removal(server: &Value) -> Option<serde_json::Map<String, Value>> {
     server["process_evidence"]
         .as_object()?
@@ -2571,7 +2613,7 @@ fn failed_remote_removal(server: &Value) -> Option<serde_json::Map<String, Value
         .find(|removal| {
             removal["container"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("inferlab-server-1-"))
+                .is_some_and(|name| name.starts_with("inferlab-server-rank-001-"))
         })
 }
 
@@ -2585,7 +2627,7 @@ fn failed_remote_cleanup_verified(server: &Value) -> Option<bool> {
         .find(|entry| {
             entry["container_removal"]["container"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("inferlab-server-1-"))
+                .is_some_and(|name| name.starts_with("inferlab-server-rank-001-"))
         })
         .and_then(|entry| entry["verified"].as_bool())
 }
@@ -2607,7 +2649,7 @@ fn confirmed_removal_with_failed_process_cleanup_is_not_verified() -> Result<(),
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2651,7 +2693,7 @@ fn docker_exit_removal_reason_is_distinct_from_the_deadline() -> Result<(), Box<
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2689,7 +2731,7 @@ fn in_progress_removal_confirms_by_observed_disappearance() -> Result<(), Box<dy
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2726,7 +2768,7 @@ fn lingering_in_progress_removal_stays_unconfirmed() -> Result<(), Box<dyn Error
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
         ])
@@ -2759,7 +2801,7 @@ fn external_image_missing_on_a_machine_rejects_naming_the_pull() -> Result<(), B
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--external-image",
             "fixture-external",
             "--dry-run",
@@ -2783,7 +2825,7 @@ fn external_image_missing_on_a_machine_rejects_naming_the_pull() -> Result<(), B
 fn image_backed_multi_machine_is_rejected_at_the_distribution_boundary()
 -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let build = workspace.build(&["dsv4-runtime-bare"])?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
     assert!(
         build.status.success(),
         "bare image build failed: {}",
@@ -2797,7 +2839,7 @@ fn image_backed_multi_machine_is_rejected_at_the_distribution_boundary()
         .args([
             "recipe",
             "run",
-            "dsv4-pair",
+            "deepseek-v4-flash-pair",
             "--image",
             record_id,
             "--dry-run",

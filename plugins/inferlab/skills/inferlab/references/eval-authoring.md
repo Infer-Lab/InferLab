@@ -1,15 +1,14 @@
 # Eval tasks, datasets, and inference requests
 
 Start with the smallest definition that expresses the workload. The built-in
-OpenAI smoke defaults to prompt `Hello`, 16 maximum output tokens, and a
-60-second timeout:
+OpenAI smoke needs only its kind:
 
 ```toml
 [evals.smoke]
 kind = "openai-smoke"
 ```
 
-These are authoring defaults, not hidden execution state.
+The smoke carries authoring defaults, not hidden execution state.
 `inferlab workspace show --json` renders the effective smoke values
 explicitly, and existing explicit forms remain valid. Serving Benches are
 covered by [bench-authoring.md](bench-authoring.md).
@@ -125,21 +124,6 @@ preserved in dry-run and record evidence.
 
 ## Source preparation
 
-Non-synthetic measurement sources are prepared before a recipe launches its
-server. Release-catalog and AgentX sources must close and verify their immutable
-content; a task-owned lm-eval source that cannot expose its complete closure is
-recorded explicitly as opaque and non-reproducible. Source preparation is
-separate from lm-eval, AIPerf, or InferLab population materialization, so its
-time and cache outcome are not charged to an arbitrary measurement case.
-
-For a workspace lm-eval YAML using a file-backed `json`, `csv`, `parquet`,
-`text`, or `arrow` loader, InferLab snapshots the YAML include closure and
-workspace-local `data_files` before serving starts. Exact paths, lists, split
-mappings, and file globs are expanded into the recorded ordered closure, and
-the Eval client receives a generated task YAML bound only to the read-only
-snapshot. Remote selectors, paths outside the workspace, and task function
-references remain explicit opaque sources because preparation cannot bind
-their complete file closure.
-
-The cold-to-warm preparation verification procedure is shared with
-serving sources; see [bench-authoring.md](bench-authoring.md#source-preparation-and-cold-to-warm-verification).
+Source preparation semantics and the cold-to-warm verification procedure are
+shared with serving sources; see
+[bench-authoring.md](bench-authoring.md#source-preparation-and-cold-to-warm-verification).

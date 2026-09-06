@@ -1,0 +1,115 @@
+{
+  "status": "ok",
+  "protocol_version": "10",
+  "result": {
+    "operation": "plan_serve",
+    "output": {
+      "gateway": {
+        "backend": "smg",
+        "co_rendering": {
+          "process_role": "gateway"
+        },
+        "effective_settings": {
+          "worker_protocol": "tokenspeed_scheduler_v1",
+          "policy": "least_load",
+          "retries": false,
+          "circuit_breaker": false
+        },
+        "endpoint": {
+          "prefix_cache_conditioning": {
+            "method": "post",
+            "path": "/prime_prefix_cache"
+          },
+          "prefix_cache_reset": {
+            "method": "post",
+            "path": "/flush_cache"
+          },
+          "prompt_cache_read_zero_representation": "explicit",
+          "protocol": "http",
+          "server_metrics": {
+            "path": "/metrics",
+            "port": "prometheus"
+          }
+        },
+        "implementation": "tokenspeed-smg",
+        "implementation_version": "fixture-frontend-version",
+        "ports": [
+          "prometheus"
+        ],
+        "readiness": {
+          "kind": "http",
+          "path": "/readiness"
+        },
+        "render_inputs": [],
+        "render_source": "integration",
+        "targets": [
+          {
+            "kind": "engine",
+            "role": "serve"
+          }
+        ]
+      },
+      "integration": {
+        "adapter_id": "inferlab-specialized-engine",
+        "adapter_version": "fixture-adapter-version",
+        "framework": "specialized-engine",
+        "framework_version": "0.9.0"
+      },
+      "links": [
+        {
+          "kind": "request_routing",
+          "source": "gateway",
+          "targets": [
+            "serve"
+          ]
+        }
+      ],
+      "replicas": [
+        {
+          "device_count": 2,
+          "id": "server",
+          "ports": [],
+          "primary_ports": [],
+          "primary_readiness": {
+            "kind": "process_alive"
+          },
+          "replica_index": 0,
+          "role_id": "serve",
+          "worker_readiness": {
+            "kind": "process_alive"
+          }
+        }
+      ],
+      "roles": [
+        {
+          "declared_replica_count": 1,
+          "effective_parallelism": {
+            "attention": {
+              "context_parallel_size": 1,
+              "data_parallel_size": 1,
+              "tensor_parallel_size": 2
+            },
+            "experts": {
+              "data_parallel_size": 1,
+              "dense_tensor_parallel_size": 2,
+              "expert_parallel_size": 1,
+              "tensor_parallel_size": 2
+            },
+            "outer": {
+              "pipeline_parallel_size": 1,
+              "tensor_parallel_size": 2
+            }
+          },
+          "effective_replica_count": 1,
+          "effective_settings": {
+            "default_max_output_tokens": 3,
+            "max_num_batched_tokens": 12000
+          },
+          "id": "serve",
+          "kind": "serve",
+          "render_inputs": []
+        }
+      ]
+    }
+  }
+}

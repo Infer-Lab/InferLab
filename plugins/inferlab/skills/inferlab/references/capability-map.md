@@ -42,33 +42,19 @@ run and diagnose the resolved definitions; they do not define a second schema.
 
 ## Measurement Coverage
 
-The [eval-authoring](eval-authoring.md) and [bench-authoring](bench-authoring.md)
-references own exact definition semantics. Supported areas are lm-eval and
-smoke workloads, static and adaptive serving load, deterministic synthetic and
-pinned dataset sources, dependent sessions, prompt authority and prefix
-geometry, normalized metrics, server exports, SLOs, and the closed
-SemiAnalysis AgentX trace-replay profiles. AgentX uses AIPerf's release-pinned
-tree scheduler; it does not add a
-general InferLab DAG runtime.
-
 Prefix geometry describes the frozen request population. Cache-read metrics
-describe observed server behavior; neither substitutes for the other.
+describe observed server behavior; neither substitutes for the other. The
+SemiAnalysis AgentX trace-replay profiles use AIPerf's release-pinned tree
+scheduler; they do not add a general InferLab DAG runtime.
 
 ## Parallelism And Capture Mechanisms
 
-- Attention context parallelism: declare `attention.context_parallel_size`;
-  vLLM lowers `single`/`decode` roles to decode CP and `prefill_decode`
-  prefill roles to device-multiplying prefill CP, while SGLang lowers
-  `single`/`prefill` roles to prefill CP and `decode` roles to `--dcp-size`.
-  CP on `single` never adds devices; applicability remains the engine's
-  launch-time verdict. Authoring: [Workspace definitions and placement](workspace-definition.md#context-parallelism).
-- Workload capture mechanisms: `managed_collection` (default; InferLab wraps
-  each captured rank with Nsight Systems) and `engine_trace` (the framework
-  profiler writes per-device traces into an InferLab-assigned record-owned
-  directory; local, non-containerized vLLM and SGLang placements only;
-  TensorRT-LLM, TokenSpeed, and Specialized Engine reject it with a typed
-  error). Authoring: [Execution authoring](execution-authoring.md#workload-profiling);
-  lifecycle and evidence: [Profiling](profiling.md).
+- Attention context parallelism (`parallelism.attention`), per-backend
+  lowering, and device rules:
+  [Workspace definitions and placement](workspace-definition.md#context-parallelism).
+- Workload capture mechanisms and per-backend support:
+  [Execution authoring](execution-authoring.md#workload-profiling);
+  capture lifecycle and evidence: [Profiling](profiling.md).
 
 ## Cross-Cutting Workflows
 

@@ -139,29 +139,17 @@ pub(crate) fn default_one() -> u32 {
     1
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WindowControlKind {
-    FrameworkRange,
-}
-
+/// The window-control facts of a profiled target as recorded plan evidence
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): framework-range windows are opened and
+/// closed through HTTP actions on the control process's endpoint.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum ProfilerLaunch {
-    Local,
-    Ssh { target: String },
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum ProfilerControl {
-    Http {
-        window_control_endpoint: CaptureWindowControlEndpointPlan,
-        process_id: String,
-        endpoint: EndpointAssignment,
-        start: CaptureWindowActionPlan,
-        stop: CaptureWindowActionPlan,
-    },
+#[serde(deny_unknown_fields)]
+pub struct ProfilerControl {
+    pub window_control_endpoint: CaptureWindowControlEndpointPlan,
+    pub process_id: String,
+    pub endpoint: EndpointAssignment,
+    pub start: CaptureWindowActionPlan,
+    pub stop: CaptureWindowActionPlan,
 }
 
 pub struct PreparedProcess {
@@ -188,7 +176,7 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
                 process_id: input.process_id.to_owned(),
                 control_process_id: requirement.control_process_id.clone(),
             })?;
-    let control = ProfilerControl::Http {
+    let control = ProfilerControl {
         window_control_endpoint: requirement.window_control_endpoint,
         process_id: requirement.control_process_id.clone(),
         endpoint: EndpointAssignment {
@@ -198,12 +186,7 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
         start: requirement.start.clone(),
         stop: requirement.stop.clone(),
     };
-    let launch = match input.launch {
-        LaunchPlan::Local => ProfilerLaunch::Local,
-        LaunchPlan::Ssh { target } => ProfilerLaunch::Ssh {
-            target: target.clone(),
-        },
-    };
+    let launch = input.launch.clone();
     if requirement.mechanism == CaptureMechanism::EngineTrace {
         // Engine-trace ranks run unwrapped: the framework's internal profiler
         // writes into the control-plane-assigned trace directory directly, and
@@ -232,7 +215,6 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
                 launch,
                 finalization: ProfilerFinalization::EngineTraceFlush,
                 control,
-                supported_window_controls: vec![WindowControlKind::FrameworkRange],
                 command_cwd: input.command.cwd.clone(),
                 launch_prefix: Vec::new(),
                 escapes: NsysEscapes::default(),
@@ -285,14 +267,10 @@ pub fn prepare_process(input: ProcessPreparation<'_>) -> Result<PreparedProcess,
             launch,
             finalization: ProfilerFinalization::NsysStop,
             control,
-            supported_window_controls: vec![WindowControlKind::FrameworkRange],
             command_cwd: input.command.cwd.clone(),
             runtime_root: input
                 .command
-                .cwd
-                .join("runtime")
-                .join(input.record_id)
-                .join(input.process_id)
+                .runtime_dir(input.record_id, input.process_id)
                 .join("profiles"),
             launch_prefix,
             escapes,
@@ -360,17 +338,9 @@ pub(crate) fn compile_plan(
     if targets.is_empty() {
         return Err(ProfilerError::NoTargets);
     }
-    if targets.iter().any(|target| {
-        !target
-            .supported_window_controls
-            .contains(&WindowControlKind::FrameworkRange)
-    }) {
-        return Err(ProfilerError::UnsupportedWindowControl);
-    }
     if window_ids.is_empty() {
         return Err(ProfilerError::NoStaticWindows);
     }
-    let control = WindowControlKind::FrameworkRange;
     // Range indexes are a managed-collection concept; engine-trace windows
     // keep only their semantic identity.
     let range_backed = targets
@@ -428,7 +398,6 @@ pub(crate) fn compile_plan(
         server_record_id: server_record_id.to_owned(),
         workload_id: workload_id.to_owned(),
         deadlines,
-        control,
         windows,
         targets,
     })

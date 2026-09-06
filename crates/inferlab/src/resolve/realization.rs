@@ -9,6 +9,7 @@ use crate::execution::{
     ProcessCommandSource, ProcessIdentityPlan, ProcessPlan, RolePlan, RoleReplicaPlan,
     ServerMetricsEndpointPlan,
 };
+use crate::record::STATE_DIR;
 use crate::workspace::{LaunchBinding, LoadedWorkspace};
 use inferlab_profiler::plan::{
     CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, ProcessCapturePlan,
@@ -20,7 +21,7 @@ use inferlab_runtime::plan::{CommandPlan, ProcessEndpointPlan};
 use inferlab_serve_domain::{
     PendingCaptureWindowActionPlan, PlannedServeStage, ProcessRequirement,
     ProcessRequirementIdentity, RenderedServeStage, ResolvedProcessAllocation,
-    RuntimeRealizationParts, RuntimeRealizationStage,
+    RuntimeRealizationParts,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,7 +110,7 @@ pub(super) fn realize_runtime(
     effective: &EffectiveServerInput,
     planned_stage: &PlannedServeStage,
     rendered_stage: &RenderedServeStage,
-) -> Result<RuntimeRealizationStage, InferlabError> {
+) -> Result<RuntimeRealizationParts, InferlabError> {
     let planned = planned_stage.planned();
     let requirements = planned_stage.requirements();
     let public_process = planned_stage.public_process();
@@ -212,7 +213,7 @@ pub(super) fn realize_runtime(
                 )
             }
             _ => {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {:?} rendered process {:?} with an identity different from allocation {:?}",
                         selection.stack.integration,
@@ -223,7 +224,7 @@ pub(super) fn realize_runtime(
             }
         };
         if command.argv.is_empty() {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} rendered an empty argv for process {:?}",
                     selection.stack.integration,
@@ -232,7 +233,7 @@ pub(super) fn realize_runtime(
             });
         }
         if command.env.contains_key("CUDA_VISIBLE_DEVICES") {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} attempted to select devices for process {:?}",
                     selection.stack.integration,
@@ -263,7 +264,7 @@ pub(super) fn realize_runtime(
             .workspace
             .clone()
             .unwrap_or_else(|| workspace.root.clone());
-        let runtime_cwd = workspace_root.join(".inferlab");
+        let runtime_cwd = workspace_root.join(STATE_DIR);
         let mut env = match machine.launch {
             LaunchBinding::Local => current_environment()?,
             LaunchBinding::Ssh { .. } => BTreeMap::new(),
@@ -303,7 +304,7 @@ pub(super) fn realize_runtime(
                         allocation
                             .ports()
                             .get(name)
-                            .ok_or_else(|| InferlabError::InvalidConfig {
+                            .ok_or_else(|| InferlabError::AdapterSemantics {
                                 message: format!(
                                     "integration {:?} selected undeclared server-metrics port {name:?}",
                                     selection.stack.integration
@@ -353,6 +354,7 @@ pub(super) fn realize_runtime(
                 devices: allocation.devices().to_vec(),
                 model_locator: allocation.model_locator().map(str::to_owned),
                 model_locator_source: allocation.model_locator_source(),
+                auxiliary_model_locators: allocation.auxiliary_model_locators(),
                 ports: allocation.ports().clone(),
                 runtime_cache: allocation.runtime_cache().clone(),
                 communication_interface: None,
@@ -381,7 +383,7 @@ pub(super) fn realize_runtime(
             capture_target: resolve_capture_target(requirement, gateway_process_id, allocations)?,
         });
     }
-    let public_endpoint = public_endpoint.ok_or_else(|| InferlabError::InvalidConfig {
+    let public_endpoint = public_endpoint.ok_or_else(|| InferlabError::AdapterSemantics {
         message: format!(
             "integration {:?} did not plan a public endpoint",
             selection.stack.integration
@@ -425,7 +427,7 @@ pub(super) fn realize_runtime(
             BTreeMap::new(),
         )
     };
-    Ok(RuntimeRealizationStage::new(RuntimeRealizationParts {
+    Ok(RuntimeRealizationParts {
         processes,
         public_endpoint,
         device_count,
@@ -438,7 +440,7 @@ pub(super) fn realize_runtime(
         network,
         remote_workspaces,
         remote_containers,
-    }))
+    })
 }
 
 pub(super) fn assemble_process_hierarchy(
@@ -463,13 +465,13 @@ pub(super) fn assemble_process_hierarchy(
         .roles
         .iter()
         .map(|role| {
-            let resolution = effective
-                .role_resolutions
+            let role_input = effective
+                .roles
                 .iter()
-                .find(|resolution| resolution.input.id == role.id);
-            if let Some(resolution) = resolution {
+                .find(|role_input| role_input.id == role.id);
+            if let Some(role_input) = role_input {
                 validate_effective_settings(
-                    &resolution.input.settings,
+                    &role_input.settings,
                     &role.effective_settings,
                     integration,
                 )?;
@@ -535,12 +537,12 @@ pub(super) fn assemble_process_hierarchy(
                 kind: role.kind,
                 declared_replica_count: role.declared_replica_count,
                 effective_replica_count: role.effective_replica_count,
-                declared_parallelism: resolution
-                    .map(|resolution| resolution.input.parallelism.clone())
+                declared_parallelism: role_input
+                    .map(|role_input| role_input.parallelism.clone())
                     .unwrap_or_default(),
                 effective_parallelism: role.effective_parallelism.clone(),
-                declared_settings: resolution
-                    .map(|resolution| resolution.input.settings.clone())
+                declared_settings: role_input
+                    .map(|role_input| role_input.settings.clone())
                     .unwrap_or_default(),
                 effective_settings: role.effective_settings.clone(),
                 public_endpoint: role.public_endpoint.clone(),

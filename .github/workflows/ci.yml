@@ -15,6 +15,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The one spelling of the just pin shared by the gate jobs.
+  JUST_VERSION: "1.58.0"
 
 jobs:
   rust:
@@ -22,32 +24,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          components: rustfmt, clippy
+      # rustup natively installs the toolchain, components, and profile
+      # selected by rust-toolchain.toml — the one spelling of the pin. The
+      # existence check keeps a deleted pin file loud: bare rustup show would
+      # silently fall back to the runner's default stable.
+      - run: test -f rust-toolchain.toml && rustup show
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
-      - run: cargo fmt --all --check
-      - run: cargo build --workspace
-      - run: cargo test --workspace --all-targets
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test -p inferlab-fake-engine --all-targets --features smg-transport
-      - run: cargo clippy -p inferlab-fake-engine --all-targets --features smg-transport -- -D warnings
-      - run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-      - run: cargo doc -p inferlab-fake-engine --features smg-transport --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
+      # The gate composition lives in the justfile, shared with local runs
+      # and the governance guard.
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: ${{ env.JUST_VERSION }}
+      - run: just verify-rust
 
   python:
     name: Python
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # protocol-check regenerates the adapter schema through cargo; the
-      # toolchain is an explicit input, not an ambient runner fact.
-      - uses: dtolnay/rust-toolchain@1.89.0
+      # protocol-check regenerates the adapter schema through cargo; rustup
+      # natively installs the toolchain selected by rust-toolchain.toml.
+      - run: test -f rust-toolchain.toml && rustup show
       - uses: Swatinem/rust-cache@v2
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
@@ -62,8 +60,10 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           cache: true
-      - run: pixi run -e website website-install
-      - run: pixi run -e website website-verify
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: ${{ env.JUST_VERSION }}
+      - run: just verify-website
       - if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v5
         with:

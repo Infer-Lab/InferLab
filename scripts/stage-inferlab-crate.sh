@@ -34,14 +34,9 @@ fi
   | tar -C "${root}" --null --files-from=- -cf - \
   | tar -C "${stage}" -xf -
 
-copy_tree() {
-  local source="$1"
-  local destination="$2"
-  mkdir -p "${destination}"
-  tar -C "${source}" -cf - . | tar -C "${destination}" -xf -
-}
-
-copy_python_tree() {
+# Both payload trees copy with the same cache excludes the crate build script
+# applies, so no producer can ship or omit caches differently.
+copy_payload_tree() {
   local source="$1"
   local destination="$2"
   mkdir -p "${destination}"
@@ -50,22 +45,26 @@ copy_python_tree() {
 }
 
 payload="${stage}/crates/inferlab/resources"
-copy_python_tree \
-  "${stage}/python/inferlab-eval-runner/src/inferlab_eval_runner" \
-  "${payload}/toolchain-python/inferlab_eval_runner"
-copy_python_tree \
-  "${stage}/python/inferlab-bench-runner/src/inferlab_bench_runner" \
-  "${payload}/toolchain-python/inferlab_bench_runner"
-copy_python_tree \
-  "${stage}/python/inferlab-measurement-sdk/src/inferlab_measurement_sdk" \
-  "${payload}/toolchain-python/inferlab_measurement_sdk"
+# The member set has one manifest, shared with the crate build script and the
+# packaging test (scripts/toolchain-python-members.txt).
+while IFS= read -r member; do
+  [ -n "${member}" ] || continue
+  source="${member%% *}"
+  package="${member##* }"
+  copy_payload_tree "${stage}/${source}" "${payload}/toolchain-python/${package}"
+done < <(sed 's/[[:space:]]*$//' "${stage}/scripts/toolchain-python-members.txt")
 
+# The member set has one manifest, shared with the crate build script and the
+# release tarball script (scripts/plugin-package-members.txt).
 mkdir -p "${payload}/plugin"
-cp "${stage}/LICENSE" "${payload}/plugin/LICENSE"
-mkdir -p "${payload}/plugin/docs"
-cp "${stage}/docs/backend-support.md" "${payload}/plugin/docs/"
-for directory in .claude-plugin .agents plugins; do
-  copy_tree "${stage}/${directory}" "${payload}/plugin/${directory}"
-done
+while IFS= read -r member; do
+  [ -n "${member}" ] || continue
+  if [ -d "${stage}/${member}" ]; then
+    copy_payload_tree "${stage}/${member}" "${payload}/plugin/${member}"
+  else
+    mkdir -p "$(dirname "${payload}/plugin/${member}")"
+    cp "${stage}/${member}" "${payload}/plugin/${member}"
+  fi
+done < <(sed 's/[[:space:]]*$//' "${stage}/scripts/plugin-package-members.txt")
 
 printf '%s\n' "${stage}"

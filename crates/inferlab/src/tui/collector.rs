@@ -162,7 +162,12 @@ impl Collector {
         }
     }
 
-    pub(super) fn collect(&mut self, root: &Path, force_declared: bool) -> Snapshot {
+    pub(super) fn collect(
+        &mut self,
+        root: &Path,
+        local: Option<&Path>,
+        force_declared: bool,
+    ) -> Snapshot {
         let observed_unix_ms = crate::record::now_unix_ms().unwrap_or(0);
         if self
             .declared_schedule
@@ -170,6 +175,7 @@ impl Collector {
         {
             self.workspace = Some(observe_workspace(
                 root,
+                local,
                 self.workspace.as_ref(),
                 observed_unix_ms,
             ));
@@ -213,7 +219,13 @@ impl Collector {
             |root, id| {
                 crate::server::status_with_bound(root, id, &bound)
                     .map_err(|error| error.to_string())
-                    .and_then(|report| server_probe(report.record.status, &report.processes))
+                    .and_then(|report| {
+                        server_probe(
+                            report.record.status,
+                            report.observed_alive,
+                            &report.processes,
+                        )
+                    })
             },
         );
         let operation_collection = crate::operation::read_all(root);
@@ -240,10 +252,11 @@ impl Collector {
 
 fn observe_workspace(
     root: &Path,
+    local: Option<&Path>,
     previous: Option<&ObjectState<WorkspaceView>>,
     observed_unix_ms: u64,
 ) -> ObjectState<WorkspaceView> {
-    match crate::workspace::workspace_identity(root) {
+    match crate::workspace::workspace_identity(root, local) {
         Ok(identity) => ObjectState {
             state: State::Live,
             value: Some(WorkspaceView {
@@ -392,6 +405,7 @@ fn failed_process_observation(
 
 fn server_probe(
     status: ServerStatus,
+    observed_alive: bool,
     processes: &[ServerProcessStatusReport],
 ) -> Result<ServerProbe, String> {
     if status != ServerStatus::Running {
@@ -435,12 +449,7 @@ fn server_probe(
         .join("; ");
     Ok(ServerProbe {
         status,
-        observed_alive: processes.iter().all(|process| {
-            process
-                .process_status
-                .as_ref()
-                .is_some_and(|status| status.alive)
-        }),
+        observed_alive,
         reason: (!reason.is_empty()).then_some(reason),
     })
 }
@@ -861,6 +870,7 @@ mod tests {
     fn unqueried_process_status_is_an_observation_failure_not_dead() {
         let result = server_probe(
             ServerStatus::Running,
+            false,
             &[ServerProcessStatusReport {
                 id: "server".to_owned(),
                 observed_alive: false,
@@ -882,6 +892,7 @@ mod tests {
     fn queried_identity_mismatch_is_a_dead_process_with_diagnostic_context() {
         let result = server_probe(
             ServerStatus::Running,
+            false,
             &[ServerProcessStatusReport {
                 id: "server".to_owned(),
                 observed_alive: false,

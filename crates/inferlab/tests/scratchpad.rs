@@ -287,3 +287,19 @@ fn show_waits_for_a_concurrent_appender_instead_of_reading_a_torn_line()
     assert!(stdout.contains("whole line"), "{stdout}");
     Ok(())
 }
+
+#[test]
+fn a_corrupt_journal_line_surfaces_the_scratchpad_error_code() -> Result<(), Box<dyn Error>> {
+    let workspace = JournalWorkspace::new()?;
+    let dir = workspace.root.path().join(".inferlab/scratchpads");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("journal.jsonl"), "{\"timestamp\":\n")?;
+
+    let stderr = workspace.fails(&["scratchpad", "show"])?;
+
+    assert!(
+        stderr.contains("error[E6001]"),
+        "journal decode failures carry the registered scratchpad code: {stderr}"
+    );
+    Ok(())
+}

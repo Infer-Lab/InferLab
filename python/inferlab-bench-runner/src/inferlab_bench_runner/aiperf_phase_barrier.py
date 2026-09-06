@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
+# Pinned by protocol/fixtures/aiperf-phase-barrier.json ([[ADR-0031]]).
 PROFILE_BARRIER_ENV = "INFERLAB_AIPERF_PROFILE_BARRIER"
 PROFILE_BARRIER_REQUIRES_WARMUP_ENV = "INFERLAB_AIPERF_PROFILE_BARRIER_REQUIRES_WARMUP"
 PROFILE_READY = b"profiling-ready\n"

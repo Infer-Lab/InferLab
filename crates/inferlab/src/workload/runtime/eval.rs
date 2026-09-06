@@ -9,7 +9,7 @@ use super::client::{
     sweep_stale_client_groups, wait_for_interrupt,
 };
 use super::{
-    AcceptedClient, AdjudicatedClient, ClientCasePaths, ClientRun,
+    AcceptedClient, AdjudicatedClient, CLIENT_RESULT_SCHEMA_VERSION, ClientCasePaths, ClientRun,
     DataAssetMaterializationEvidence, EvalCaseEvidence, EvalCaseRecord, EvalExecutionPlan,
     EvalPlan, ResolvedWorkloadPlan, WorkloadEndpointProtocol, WorkloadKind, WorkloadRecord,
     WorkloadRecordSession, WorkloadStatus, write_json,
@@ -304,7 +304,7 @@ pub(super) fn run_eval_operation(
             ..
         } => {
             let request = EvalClientRequest {
-                protocol_version: ProtocolVersion::V9,
+                protocol_version: ProtocolVersion::CURRENT,
                 workspace_root: workspace_root.to_path_buf(),
                 workspace_source_exclusions: plan.workspace_source_exclusions.clone(),
                 endpoint: wire::endpoint_input(&plan.endpoint),
@@ -457,7 +457,7 @@ pub(super) fn run_openai_smoke(
     }
 
     let result = EvalClientResult {
-        schema_version: 1,
+        schema_version: CLIENT_RESULT_SCHEMA_VERSION,
         status: if error.is_none() {
             ClientStatus::Succeeded
         } else {

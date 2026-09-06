@@ -1,0 +1,218 @@
+{
+  "status": "ok",
+  "protocol_version": "10",
+  "result": {
+    "operation": "plan_serve",
+    "output": {
+      "gateway": {
+        "backend": "vllm-router",
+        "co_rendering": {
+          "process_role": "gateway"
+        },
+        "effective_settings": {},
+        "endpoint": {
+          "protocol": "http"
+        },
+        "implementation": "vllm-router",
+        "implementation_version": "fixture-frontend-version",
+        "ports": [],
+        "readiness": {
+          "kind": "http",
+          "path": "/v1/models"
+        },
+        "render_inputs": [],
+        "render_source": "integration",
+        "targets": [
+          {
+            "kind": "pd_router"
+          }
+        ]
+      },
+      "integration": {
+        "adapter_id": "inferlab-vllm",
+        "adapter_version": "fixture-adapter-version",
+        "framework": "vllm",
+        "framework_version": "unavailable"
+      },
+      "links": [
+        {
+          "kind": "request_routing",
+          "source": "gateway",
+          "targets": [
+            "pd_router"
+          ]
+        },
+        {
+          "kind": "request_routing",
+          "source": "pd_router",
+          "targets": [
+            "prefill",
+            "decode"
+          ]
+        },
+        {
+          "kind": "kv_transfer",
+          "mechanism": "nixl",
+          "source": "prefill",
+          "target": "decode"
+        },
+        {
+          "kind": "side_channel",
+          "port": "side_channel",
+          "source": "prefill",
+          "target": "decode"
+        }
+      ],
+      "pd_router": {
+        "backend": "vllm-router",
+        "co_rendering": {
+          "process_role": "gateway"
+        },
+        "decode_role": "decode",
+        "effective_settings": {},
+        "handoff": "in_process",
+        "implementation": "vllm-router",
+        "implementation_version": "fixture-frontend-version",
+        "policies": {
+          "decode": "round_robin",
+          "prefill": "round_robin"
+        },
+        "ports": [],
+        "prefill_role": "prefill",
+        "readiness": {
+          "kind": "http",
+          "path": "/v1/models"
+        },
+        "render_inputs": [],
+        "render_source": "integration",
+        "target_scheme": "http"
+      },
+      "replicas": [
+        {
+          "capture_target": {
+            "mechanism": "managed_collection",
+            "window_control": {
+              "endpoint": "replica_entry",
+              "start": {
+                "method": "post",
+                "path": "/start_profile"
+              },
+              "stop": {
+                "method": "post",
+                "path": "/stop_profile"
+              }
+            }
+          },
+          "device_count": 2,
+          "id": "prefill",
+          "ports": [
+            "side_channel"
+          ],
+          "primary_ports": [
+            "master"
+          ],
+          "primary_readiness": {
+            "kind": "http",
+            "path": "/v1/models"
+          },
+          "replica_index": 0,
+          "role_id": "prefill",
+          "worker_readiness": {
+            "kind": "process_alive"
+          }
+        },
+        {
+          "capture_target": {
+            "mechanism": "managed_collection",
+            "window_control": {
+              "endpoint": "replica_entry",
+              "start": {
+                "method": "post",
+                "path": "/start_profile"
+              },
+              "stop": {
+                "method": "post",
+                "path": "/stop_profile"
+              }
+            }
+          },
+          "device_count": 2,
+          "id": "decode",
+          "ports": [
+            "side_channel"
+          ],
+          "primary_ports": [
+            "master"
+          ],
+          "primary_readiness": {
+            "kind": "http",
+            "path": "/v1/models"
+          },
+          "replica_index": 0,
+          "role_id": "decode",
+          "worker_readiness": {
+            "kind": "process_alive"
+          }
+        }
+      ],
+      "roles": [
+        {
+          "declared_replica_count": 1,
+          "effective_parallelism": {
+            "attention": {
+              "context_parallel_size": 1,
+              "data_parallel_size": 1,
+              "tensor_parallel_size": 2
+            },
+            "experts": {
+              "data_parallel_size": 1,
+              "dense_tensor_parallel_size": 1,
+              "expert_parallel_size": 1,
+              "tensor_parallel_size": 2
+            },
+            "outer": {
+              "pipeline_parallel_size": 1,
+              "tensor_parallel_size": 2
+            }
+          },
+          "effective_replica_count": 1,
+          "effective_settings": {
+            "trust_remote_code": true,
+            "enable_prompt_tokens_details": false
+          },
+          "id": "prefill",
+          "kind": "prefill",
+          "render_inputs": []
+        },
+        {
+          "declared_replica_count": 1,
+          "effective_parallelism": {
+            "attention": {
+              "context_parallel_size": 1,
+              "data_parallel_size": 1,
+              "tensor_parallel_size": 2
+            },
+            "experts": {
+              "data_parallel_size": 1,
+              "dense_tensor_parallel_size": 1,
+              "expert_parallel_size": 1,
+              "tensor_parallel_size": 2
+            },
+            "outer": {
+              "pipeline_parallel_size": 1,
+              "tensor_parallel_size": 2
+            }
+          },
+          "effective_replica_count": 1,
+          "effective_settings": {
+            "trust_remote_code": true,
+            "enable_prompt_tokens_details": false
+          },
+          "id": "decode",
+          "kind": "decode",
+          "render_inputs": []
+        }
+      ]
+    }
+  }
+}

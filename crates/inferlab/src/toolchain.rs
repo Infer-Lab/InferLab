@@ -1,4 +1,5 @@
 use crate::InferlabError;
+use crate::environment::{PIXI_ENVS_DIR, PIXI_LOCK, PIXI_MANIFEST};
 use crate::progress::{Phase, Progress};
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
@@ -450,8 +451,8 @@ fn create_dir_all(path: &Path) -> Result<(), InferlabError> {
 }
 
 fn write_release_files(path: &Path) -> Result<(), InferlabError> {
-    write(path.join("pixi.toml"), MANIFEST)?;
-    write(path.join("pixi.lock"), LOCK)?;
+    write(path.join(PIXI_MANIFEST), MANIFEST)?;
+    write(path.join(PIXI_LOCK), LOCK)?;
     for (relative, contents) in TOOLCHAIN_PYTHON_FILES {
         write(path.join("runner").join(relative), contents)?;
     }
@@ -473,7 +474,7 @@ fn write(path: PathBuf, contents: &str) -> Result<(), InferlabError> {
 }
 
 fn install_locked(path: &Path) -> Result<(), InferlabError> {
-    let manifest = path.join("pixi.toml");
+    let manifest = path.join(PIXI_MANIFEST);
     let argv = vec![
         OsString::from("pixi"),
         OsString::from("install"),
@@ -722,8 +723,8 @@ fn common_identity_matches(
 }
 
 fn release_files_match(path: &Path) -> bool {
-    let manifest = fs::read(path.join("pixi.toml")).ok();
-    let lock = fs::read(path.join("pixi.lock")).ok();
+    let manifest = fs::read(path.join(PIXI_MANIFEST)).ok();
+    let lock = fs::read(path.join(PIXI_LOCK)).ok();
     let python_payload_matches = TOOLCHAIN_PYTHON_FILES.iter().all(|(relative, contents)| {
         fs::read(path.join("runner").join(relative))
             .is_ok_and(|installed| installed == contents.as_bytes())
@@ -738,11 +739,11 @@ fn release_files_match(path: &Path) -> bool {
 }
 
 fn eval_python_path(path: &Path) -> PathBuf {
-    path.join(".pixi/envs/eval/bin/python")
+    path.join(PIXI_ENVS_DIR).join("eval/bin/python")
 }
 
 fn bench_python_path(path: &Path) -> PathBuf {
-    path.join(".pixi/envs/bench/bin/python")
+    path.join(PIXI_ENVS_DIR).join("bench/bin/python")
 }
 
 fn eval_runner_path(path: &Path) -> PathBuf {
@@ -911,6 +912,25 @@ mod tests {
         if !holders.iter().any(|h| h.starts_with(&format!("{pid} "))) {
             return Err(format!(
                 "holder scan missed pid {pid} with cwd under the path: {holders:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The qualification catalog's AIPerf evidence version must equal the pin
+    /// the embedded toolchain manifest installs; the runner's own copy fails
+    /// loudly at bench time, this one has no other tripwire.
+    #[test]
+    fn agentx_qualification_matches_the_embedded_aiperf_pin() -> Result<(), String> {
+        let catalog =
+            crate::bench_agentic_catalog::resolve("semianalysis_agentx_062126_256k", "inferencex")
+                .map_err(|error| error.to_string())?;
+        let expected =
+            super::pinned_pypi_version("bench", "aiperf").map_err(|error| error.to_string())?;
+        if catalog.qualification.aiperf_version != expected {
+            return Err(format!(
+                "qualification catalog records AIPerf {} but the embedded toolchain manifest pins {expected}",
+                catalog.qualification.aiperf_version
             ));
         }
         Ok(())

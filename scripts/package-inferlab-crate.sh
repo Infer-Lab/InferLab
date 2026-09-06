@@ -37,9 +37,13 @@ fi
 artifact="${artifacts[0]}"
 archive_list="$(tar -tzf "${artifact}")"
 grep -q '/resources/bench-agentic-sources.toml$' <<< "${archive_list}"
-grep -q '/resources/toolchain-python/inferlab_eval_runner/__init__.py$' <<< "${archive_list}"
-grep -q '/resources/toolchain-python/inferlab_bench_runner/__init__.py$' <<< "${archive_list}"
-grep -q '/resources/toolchain-python/inferlab_measurement_sdk/__init__.py$' <<< "${archive_list}"
+# The toolchain member set has one manifest
+# (scripts/toolchain-python-members.txt), shared with the build script, the
+# staging script, and the packaging test.
+while IFS= read -r member; do
+  [ -n "${member}" ] || continue
+  grep -q "/resources/toolchain-python/${member##* }/__init__.py$" <<< "${archive_list}"
+done < "${root}/scripts/toolchain-python-members.txt"
 grep -q '/resources/plugin/plugins/inferlab/skills/inferlab/SKILL.md$' <<< "${archive_list}"
 grep -q '/resources/plugin/plugins/inferlab/skills/inferlab/references/capability-map.md$' <<< "${archive_list}"
 grep -q '/resources/plugin/plugins/inferlab/skills/inferlab/references/workspace-authoring.md$' <<< "${archive_list}"

@@ -8,17 +8,17 @@ integration = "vllm"
 pixi_environment = "vllm"
 source_paths = ["vendor/vllm", "vendor/flashinfer"]
 
-[servers.dsv4-qualify]
+[servers.deepseek-v4-flash-qualify]
 stack = "vllm"
 model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 900
 default_case = "tp2"
 
-[servers.dsv4-qualify.parallelism.outer]
+[servers.deepseek-v4-flash-qualify.parallelism.outer]
 pipeline_parallel_size = 1
 
-[servers.dsv4-qualify.settings]
+[servers.deepseek-v4-flash-qualify.settings]
 max_model_len = 65536
 kv_cache_dtype = "fp8"
 gpu_memory_utilization = 0.95
@@ -26,19 +26,19 @@ trust_remote_code = true
 compilation_config = { cudagraph_mode = "FULL_AND_PIECEWISE", custom_ops = ["all"] }
 extra_args = ["--max-num-seqs", "64", "--language-model-only"]
 
-[servers.dsv4-qualify.roles.serve.parallelism.attention]
+[servers.deepseek-v4-flash-qualify.roles.serve.parallelism.attention]
 context_parallel_size = 1
 
-[servers.dsv4-qualify.roles.serve.settings]
+[servers.deepseek-v4-flash-qualify.roles.serve.settings]
 block_size = 16
 
-[servers.dsv4-qualify.cases.tp2.parallelism.outer]
+[servers.deepseek-v4-flash-qualify.cases.tp2.parallelism.outer]
 tensor_parallel_size = 2
 
-[servers.dsv4-qualify.cases.tp4.settings]
+[servers.deepseek-v4-flash-qualify.cases.tp4.settings]
 extra_args = ["--max-num-seqs", "128", "--enable-prefix-caching"]
 
-[servers.dsv4-qualify.cases.tp4.parallelism.outer]
+[servers.deepseek-v4-flash-qualify.cases.tp4.parallelism.outer]
 tensor_parallel_size = 4
 
 [evals.smoke]
@@ -91,6 +91,6 @@ evals = ["smoke", "gsm8k"]
 gate = "gsm8k"
 benches = ["c8k1k", "adaptive-c8k1k"]
 
-[recipes.dsv4-qualify]
-server = "dsv4-qualify"
+[recipes.deepseek-v4-flash-qualify]
+server = "deepseek-v4-flash-qualify"
 workload_suite = "qualify"

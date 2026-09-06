@@ -475,6 +475,7 @@ fn finite_remaining(bound: &OperationBound) -> Result<std::time::Duration, Cache
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolve::topology::{CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH};
     use crate::workload::domain::{WorkloadEndpointProtocol, WorkloadHttpMethod};
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
@@ -505,8 +506,8 @@ mod tests {
                 protocol: WorkloadEndpointProtocol::Http,
                 host: address.ip().to_string(),
                 port: address.port(),
-                completions_path: "/v1/completions".to_owned(),
-                chat_completions_path: "/v1/chat/completions".to_owned(),
+                completions_path: COMPLETIONS_PATH.to_owned(),
+                chat_completions_path: CHAT_COMPLETIONS_PATH.to_owned(),
                 server_metrics: None,
                 prompt_cache_read_zero_representation: None,
             },

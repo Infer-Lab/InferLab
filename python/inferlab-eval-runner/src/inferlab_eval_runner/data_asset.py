@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    HUGGINGFACE_HUB_CACHE_PURPOSE,
+    SCHEMA_VERSION,
     ClientStatus,
     EvalDefinitionInputLmEval,
     EvalTaskSourceInputBuiltIn,
@@ -95,7 +97,7 @@ def _reported_huggingface_cache_stores() -> list[MeasurementDataAssetCacheStore]
         stores.append(
             MeasurementDataAssetCacheStore(
                 authority="huggingface_hub",
-                purpose="repository_files",
+                purpose=HUGGINGFACE_HUB_CACHE_PURPOSE,
                 path=None,
                 outcome=MeasurementDataAssetCacheOutcome.unavailable,
             )
@@ -105,7 +107,7 @@ def _reported_huggingface_cache_stores() -> list[MeasurementDataAssetCacheStore]
         stores.append(
             MeasurementDataAssetCacheStore(
                 authority="huggingface_hub",
-                purpose="repository_files",
+                purpose=HUGGINGFACE_HUB_CACHE_PURPOSE,
                 path=str(hub_cache_path),
                 outcome=local_outcome(hub_cache_path),
             )
@@ -249,7 +251,7 @@ def prepare_eval_data_asset(
         if local_plan is None:
             raise ValueError("workspace Eval source did not resolve to a closable local file set")
         return MeasurementDataAssetPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.succeeded,
             effective_selection=MeasurementDataAssetEffectiveSelection(root=selection),
             readiness=MeasurementDataAssetReadiness(
@@ -266,7 +268,7 @@ def prepare_eval_data_asset(
         readiness = _bundled_readiness(task_source)
     elif local_plan is not None:
         return MeasurementDataAssetPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.succeeded,
             effective_selection=MeasurementDataAssetEffectiveSelection(root=selection),
             readiness=None,
@@ -291,7 +293,7 @@ def prepare_eval_data_asset(
             deferred_source_access=True,
         )
     return MeasurementDataAssetPreparationResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         effective_selection=MeasurementDataAssetEffectiveSelection(root=selection),
         readiness=MeasurementDataAssetReadiness(root=readiness),

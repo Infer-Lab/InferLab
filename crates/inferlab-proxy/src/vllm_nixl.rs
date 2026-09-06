@@ -1,5 +1,5 @@
 use crate::core::{
-    self, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response, join_path,
+    self, ProxyHealthcheckResponse, ProxyHttpError, forward_response, join_path,
     outbound_authorization,
 };
 use crate::error::ProxyError;
@@ -13,21 +13,17 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Identity recorded in `BuiltinProxy` evidence for the NIXL proxy.
-pub const ID: &str = "inferlab-vllm-nixl-proxy";
-/// Evidence version for the NIXL proxy identity.
 pub const VERSION: u32 = 1;
+
+pub const HEALTHCHECK_PATH: &str = "/healthcheck";
+pub const RESET_PREFIX_CACHE_PATH: &str = "/reset_prefix_cache";
+pub const PRIME_PREFIX_CACHE_PATH: &str = "/prime_prefix_cache";
+
+pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "vLLM NIXL proxy";
-
-/// Owned identity of the built-in NIXL proxy.
-pub fn meta() -> ProxyMeta {
-    ProxyMeta {
-        id: ID,
-        version: VERSION,
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -60,12 +56,12 @@ pub async fn run_async(config: Config) -> Result<(), ProxyError> {
 
 fn router(state: ProxyState) -> Router {
     Router::new()
-        .route("/healthcheck", get(healthcheck))
+        .route(HEALTHCHECK_PATH, get(healthcheck))
         .route("/v1/models", get(models))
-        .route("/v1/completions", post(completions))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/reset_prefix_cache", post(reset_prefix_cache))
-        .route("/prime_prefix_cache", post(prime_prefix_cache))
+        .route(COMPLETIONS_PATH, post(completions))
+        .route(CHAT_COMPLETIONS_PATH, post(chat_completions))
+        .route(RESET_PREFIX_CACHE_PATH, post(reset_prefix_cache))
+        .route(PRIME_PREFIX_CACHE_PATH, post(prime_prefix_cache))
         .with_state(state)
 }
 
@@ -178,7 +174,7 @@ async fn completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    completion_route(state, headers, body, "/v1/completions").await
+    completion_route(state, headers, body, COMPLETIONS_PATH).await
 }
 
 async fn chat_completions(
@@ -186,7 +182,7 @@ async fn chat_completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    completion_route(state, headers, body, "/v1/chat/completions").await
+    completion_route(state, headers, body, CHAT_COMPLETIONS_PATH).await
 }
 
 async fn completion_route(
@@ -341,7 +337,7 @@ async fn prime_flow(
     let client = state.client();
     let prefill_response = core::send_json_post_status(
         client.clone(),
-        join_path(&prefill.url, "/v1/completions"),
+        join_path(&prefill.url, COMPLETIONS_PATH),
         &prefill_body,
         Some(&request_id),
         authorization.as_deref(),
@@ -368,7 +364,7 @@ async fn prime_flow(
     let decode_url = state.next_decode_url();
     let decode_response = core::send_json_post_status(
         client,
-        join_path(&decode_url, "/v1/completions"),
+        join_path(&decode_url, COMPLETIONS_PATH),
         &decode_body,
         Some(&request_id),
         authorization.as_deref(),
@@ -467,17 +463,6 @@ mod tests {
     use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
 
-    #[test]
-    fn meta_exports_byte_stable_proxy_identity() {
-        // AC4: the NIXL proxy owns and exports its own id+version. These exact
-        // strings/numbers are persisted in BuiltinProxy evidence, so they must stay
-        // byte-stable.
-        assert_eq!(ID, "inferlab-vllm-nixl-proxy");
-        assert_eq!(VERSION, 1);
-        assert_eq!(meta().id, ID);
-        assert_eq!(meta().version, VERSION);
-    }
-
     fn prefill_target(url: String) -> PrefillTarget {
         PrefillTarget {
             url,
@@ -533,7 +518,7 @@ mod tests {
             state.clone(),
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello"}),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         )
         .await
         {
@@ -676,7 +661,7 @@ mod tests {
             state,
             HeaderMap::new(),
             request.clone(),
-            "/v1/chat/completions",
+            CHAT_COMPLETIONS_PATH,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -703,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_decode_reaches_both_public_routes_before_terminal_event() -> Result<()> {
-        for path in ["/v1/completions", "/v1/chat/completions"] {
+        for path in [COMPLETIONS_PATH, CHAT_COMPLETIONS_PATH] {
             let terminal_gate = Arc::new(Notify::new());
             let prefill_backend = StreamingBackend::prefill(terminal_gate.clone());
             let decode_backend = StreamingBackend::decode(terminal_gate.clone());
@@ -717,7 +702,7 @@ mod tests {
                 decode: vec![decode],
             })?;
             state.set_ready();
-            let request = if path == "/v1/completions" {
+            let request = if path == COMPLETIONS_PATH {
                 json!({"model": "m", "prompt": "hello", "stream": true})
             } else {
                 json!({
@@ -782,7 +767,7 @@ mod tests {
                 "stream": true,
                 "mode": "pre-header-error"
             }),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         )
         .await
         {
@@ -800,7 +785,7 @@ mod tests {
                 "stream": true,
                 "mode": "post-header-error"
             }),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

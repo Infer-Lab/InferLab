@@ -1,11 +1,13 @@
+use super::selection::ResolvedAuxiliaryWeight;
 use crate::InferlabError;
 use crate::execution::{
     ModelLocatorSource, RuntimeCacheNamespacePlan, RuntimeCachePlan, RuntimeCacheRootSource,
 };
+use crate::record::{CACHE_DIR, RUNTIME_DIR};
 use crate::workspace::{LaunchBinding, LoadedWorkspace, PlacementBinding};
 use inferlab_protocol::{
-    AllocationLaunch, CaptureMechanism, EndpointAssignment, ReadinessProbe, ServeProcessAllocation,
-    ServeRoleKind, TargetEndpointScheme,
+    AllocationLaunch, AuxiliaryModelLocator, CaptureMechanism, EndpointAssignment, ReadinessProbe,
+    ServeProcessAllocation, ServeRoleKind, TargetEndpointScheme,
 };
 use inferlab_runtime::plan::{LaunchPlan, ReadinessPlan, TargetRegistryExpectedTarget};
 use inferlab_serve_domain::{
@@ -84,6 +86,7 @@ pub(super) fn allocate_processes(
     placement_id: &str,
     placement: &crate::workspace::PlacementBinding,
     weight: &crate::workspace::ModelWeightBinding,
+    auxiliary_weights: &[ResolvedAuxiliaryWeight<'_>],
     pixi_environment: &str,
     image_identity: Option<&str>,
     requirements: &[ProcessRequirement],
@@ -95,7 +98,7 @@ pub(super) fn allocate_processes(
 
     for requirement in requirements {
         if requirement.id().is_empty() || !process_ids.insert(requirement.id().to_owned()) {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration returned invalid or duplicate process id {:?}",
                     requirement.id()
@@ -114,7 +117,7 @@ pub(super) fn allocate_processes(
             .iter()
             .any(|name| name.is_empty() || !port_names.insert(name))
         {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration returned invalid or duplicate port requirements for process {:?}",
                     requirement.id()
@@ -192,6 +195,32 @@ pub(super) fn allocate_processes(
                 });
             }
             None => {
+                // When every candidate lacks the devices, the failure is
+                // device-dominated and reports as InsufficientDevices like
+                // the single-candidate path; port-dominated or mixed
+                // shortfalls keep the generic classification.
+                let free_devices = |machine_id: &String| {
+                    workspace
+                        .local
+                        .machines
+                        .get(machine_id)
+                        .map_or(0, |machine| {
+                            free_device_count(machine, usage.get(machine_id))
+                        })
+                };
+                if let Some(machine) = candidates
+                    .iter()
+                    .max_by_key(|machine_id| free_devices(machine_id))
+                    && candidates.iter().all(|machine_id| {
+                        free_devices(machine_id) < requirement.device_count() as usize
+                    })
+                {
+                    return Err(InferlabError::InsufficientDevices {
+                        machine: machine.clone(),
+                        required: requirement.device_count(),
+                        available: free_devices(machine),
+                    });
+                }
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
                         "placement {placement_id:?} has no machine with {} free devices and {} free ports for process {:?} in role {placement_role:?}",
@@ -318,7 +347,7 @@ pub(super) fn allocate_processes(
                 target: target.clone(),
             },
         };
-        let (wire, model_locator_source) = match requirement.identity() {
+        let (wire, model_locator_source, auxiliary_locator_sources) = match requirement.identity() {
             ProcessRequirementIdentity::ModelRank {
                 role_id,
                 role_kind,
@@ -344,6 +373,31 @@ pub(super) fn allocate_processes(
                         ),
                     });
                 };
+                let mut auxiliary_model_locators = Vec::new();
+                let mut auxiliary_sources = Vec::new();
+                for auxiliary in auxiliary_weights {
+                    let (locator, auxiliary_source) = if let Some(locator) =
+                        auxiliary.weight.machine_locators.get(&machine_id)
+                    {
+                        (locator.clone(), ModelLocatorSource::Machine)
+                    } else if let Some(locator) = &auxiliary.weight.locator {
+                        (locator.clone(), ModelLocatorSource::Fallback)
+                    } else {
+                        return Err(InferlabError::InvalidConfig {
+                            message: format!(
+                                "auxiliary kind {:?} (model {:?}) has no locator for Engine process {:?} on machine {machine_id:?}",
+                                auxiliary.kind.as_str(),
+                                auxiliary.model_id,
+                                requirement.id()
+                            ),
+                        });
+                    };
+                    auxiliary_sources.push((auxiliary.kind.to_wire(), auxiliary_source));
+                    auxiliary_model_locators.push(AuxiliaryModelLocator {
+                        kind: auxiliary.kind.to_wire(),
+                        locator,
+                    });
+                }
                 let rank_count = u32::try_from(
                     requirements
                         .iter()
@@ -375,7 +429,8 @@ pub(super) fn allocate_processes(
                             .clone()
                             .unwrap_or_else(|| workspace.root.clone());
                         let directory = root
-                            .join(".inferlab/runtime/engine-trace")
+                            .join(RUNTIME_DIR)
+                            .join("engine-trace")
                             .join(sanitize_path_segment(server_id))
                             .join(sanitize_path_segment(replica_id));
                         Some(
@@ -402,6 +457,7 @@ pub(super) fn allocate_processes(
                         machine: machine_id.clone(),
                         devices,
                         model_locator,
+                        auxiliary_model_locators,
                         endpoint: Some(endpoint),
                         ports: named_ports,
                         cache,
@@ -414,6 +470,7 @@ pub(super) fn allocate_processes(
                         render_inputs: render_inputs.clone(),
                     },
                     Some(source),
+                    auxiliary_sources,
                 )
             }
             ProcessRequirementIdentity::Frontend {
@@ -447,6 +504,7 @@ pub(super) fn allocate_processes(
                         render_inputs: render_inputs.clone(),
                     },
                     None,
+                    Vec::new(),
                 )
             }
         };
@@ -454,6 +512,7 @@ pub(super) fn allocate_processes(
             wire,
             runtime_cache,
             model_locator_source,
+            auxiliary_locator_sources,
         ));
     }
     Ok(allocations)
@@ -527,7 +586,7 @@ fn runtime_cache_plan(
         || {
             let workspace_root = machine.workspace.as_ref().unwrap_or(&workspace.root);
             (
-                workspace_root.join(".inferlab/cache/runtime"),
+                workspace_root.join(CACHE_DIR).join("runtime"),
                 RuntimeCacheRootSource::WorkspaceDefault,
             )
         },
@@ -728,6 +787,7 @@ mod tests {
                         rank_count: if role_id == "prefill" { 2 } else { 1 },
                         machine: "node".to_owned(),
                         model_locator: "/models/example".to_owned(),
+                        auxiliary_model_locators: Vec::new(),
                         devices: vec![0],
                         endpoint: Some(EndpointAssignment {
                             host: "node.example".to_owned(),
@@ -756,6 +816,7 @@ mod tests {
                         path: PathBuf::from(format!("/cache/{process_id}")),
                     },
                     Some(ModelLocatorSource::Fallback),
+                    Vec::new(),
                 )
             };
         let allocations = vec![

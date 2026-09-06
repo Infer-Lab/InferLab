@@ -46,17 +46,12 @@ pub enum EngineError {
     EmptyPrompt,
 }
 
-/// Minimal execution contract shared by the fixture core and its transports.
-pub trait TokenEngine {
-    fn generate(&self, request: &GenerateRequest) -> Result<GenerateOutput, EngineError>;
-}
-
 /// A deterministic Engine used to pin the token execution boundary.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EchoEngine;
 
-impl TokenEngine for EchoEngine {
-    fn generate(&self, request: &GenerateRequest) -> Result<GenerateOutput, EngineError> {
+impl EchoEngine {
+    pub fn generate(&self, request: &GenerateRequest) -> Result<GenerateOutput, EngineError> {
         if request.prompt_token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
         }

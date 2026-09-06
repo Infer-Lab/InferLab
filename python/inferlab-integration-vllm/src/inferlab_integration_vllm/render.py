@@ -5,6 +5,7 @@ from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
+    JsonValue,
     KvTransferMechanism,
     ParallelismAttention,
     ParallelismExperts,
@@ -27,10 +28,10 @@ from inferlab_adapter_sdk import (
     split_serve_allocations,
 )
 
+from .auxiliary import splice_draft_model
 from .plan import _identity
 from .settings import (
     _INFERLAB_OWNED_OPTIONS,
-    JsonValue,
     VllmServeSettings,
     _settings,
 )
@@ -50,6 +51,7 @@ def _render_process(
     rank: int,
 ) -> RenderedServeProcess:
     settings = _settings(allocation.effective_settings)
+    splice_draft_model(settings, allocation, input.auxiliary_models)
     outer = allocation.effective_parallelism.outer or ParallelismOuter()
     attention = allocation.effective_parallelism.attention or ParallelismAttention()
     experts = allocation.effective_parallelism.experts or ParallelismExperts()
@@ -192,6 +194,13 @@ def _render_process(
             process_env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = side_channel.host
             process_env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_channel.port)
     node_count = len(role_allocations)
+    if node_count != allocation.rank_count:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"allocation {allocation.process!r} declares rank count "
+            f"{allocation.rank_count} but the render input carries {node_count} "
+            "rank allocations for its replica",
+        )
     if node_count > 1:
         primary = next((candidate for candidate in role_allocations if candidate.rank == 0), None)
         master = None if primary is None else primary.ports.get("master")

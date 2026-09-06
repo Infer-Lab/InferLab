@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v9",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v10",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -240,6 +240,50 @@
         }
       ]
     },
+    "AuxiliaryModelInput": {
+      "description": "A logical auxiliary weight identity supplied during serving planning and\nrendering: its governed kind plus the referenced logical model\n([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/AuxiliaryModelKind"
+        },
+        "model": {
+          "$ref": "#/$defs/ServeModelInput"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "model"
+      ]
+    },
+    "AuxiliaryModelKind": {
+      "description": "The governed auxiliary weight artifact kinds a serve declaration may attach\n([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
+      "oneOf": [
+        {
+          "description": "Separate weights the operator's framework speculative decoding\nconfiguration consumes as its draft.",
+          "type": "string",
+          "const": "draft-model"
+        }
+      ]
+    },
+    "AuxiliaryModelLocator": {
+      "description": "A machine-resolved auxiliary weight locator on a model-rank allocation\n([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/AuxiliaryModelKind"
+        },
+        "locator": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "locator"
+      ]
+    },
     "CaptureMechanism": {
       "description": "The workload-attached capture mechanism selected for a profiled serving\ntopology ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
       "oneOf": [
@@ -355,26 +399,10 @@
         "port"
       ]
     },
-    "EndpointProtocol": {
-      "description": "The application protocol a workload endpoint speaks.",
-      "oneOf": [
-        {
-          "description": "HTTP.",
-          "type": "string",
-          "const": "http"
-        }
-      ]
-    },
-    "EndpointRequirement": {
-      "description": "The workload endpoint's protocol and named OpenAI paths, plus an optional\nprefix-cache-reset action a Bench case can invoke between runs.",
+    "EndpointDeclaration": {
+      "description": "The plan-response endpoint capability declaration\n([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]): the protocol plus the\nintegration-owned capability members (server metrics, prefix-cache\nactions, and the cache-read representation). The control plane owns the\nroute paths, so this declaration carries no path values and rejects them\nas unknown fields.",
       "type": "object",
       "properties": {
-        "chat_completions_path": {
-          "type": "string"
-        },
-        "completions_path": {
-          "type": "string"
-        },
         "prefix_cache_conditioning": {
           "description": "A Gateway-backend conditioning fan-out action: the frontend routes one\nconditioning request per prefill replica and attention data-parallel\nrank ([[RFC-0004:C-BENCH-CACHE-STATE]]).",
           "anyOf": [
@@ -422,9 +450,17 @@
       },
       "additionalProperties": false,
       "required": [
-        "protocol",
-        "completions_path",
-        "chat_completions_path"
+        "protocol"
+      ]
+    },
+    "EndpointProtocol": {
+      "description": "The application protocol a workload endpoint speaks.",
+      "oneOf": [
+        {
+          "description": "HTTP.",
+          "type": "string",
+          "const": "http"
+        }
       ]
     },
     "FrontendCoRendering": {
@@ -441,7 +477,7 @@
       ]
     },
     "FrontendComponents": {
-      "description": "The only two frontend bindings protocol v9 accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
+      "description": "The only two frontend bindings the adapter protocol accepts. Tuple representation\ndeliberately serializes as the closed ordered arrays `[\"gateway\"]` and\n`[\"gateway\", \"pd_router\"]` rather than as an open component list.",
       "anyOf": [
         {
           "$ref": "#/$defs/GatewayFrontendBinding"
@@ -473,7 +509,7 @@
       ]
     },
     "FrontendProcessRole": {
-      "description": "The one canonical process role available to a protocol-v9 frontend.",
+      "description": "The one canonical process role available to a frontend.",
       "type": "string",
       "enum": [
         "gateway"
@@ -519,7 +555,7 @@
           }
         },
         "endpoint": {
-          "$ref": "#/$defs/EndpointRequirement"
+          "$ref": "#/$defs/EndpointDeclaration"
         },
         "implementation": {
           "type": "string"
@@ -920,6 +956,13 @@
       "description": "The requested serve shape a `PlanServe` operation lowers into a topology.",
       "type": "object",
       "properties": {
+        "auxiliary_models": {
+          "description": "The auxiliary model declaration when the serve declaration carries\none ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuxiliaryModelInput"
+          }
+        },
         "gateway_backend": {
           "type": [
             "string",
@@ -962,6 +1005,10 @@
             "$ref": "#/$defs/ServeRoleInput"
           }
         },
+        "state_dir": {
+          "description": "The control-plane-owned state directory spelling,\nworkspace-root-relative, that the integration resolves operator-declared\nrelative paths against when reading them through the workspace\nfilesystem and when declaring the supplied render-input source paths\nthose reads produce.",
+          "type": "string"
+        },
         "synthetic_acceptance": {
           "description": "The synthetic acceptance declaration when the serve declaration\ncarries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
           "anyOf": [
@@ -981,6 +1028,7 @@
       "required": [
         "model",
         "topology",
+        "state_dir",
         "roles"
       ]
     },
@@ -1081,12 +1129,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `9` (serialized as the\nstring `\"9\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `10` (serialized as the\nstring `\"10\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 9.",
+          "description": "Protocol version 10.",
           "type": "string",
-          "const": "9"
+          "const": "10"
         }
       ]
     },
@@ -1208,6 +1256,13 @@
             "$ref": "#/$defs/ServeProcessAllocation"
           }
         },
+        "auxiliary_models": {
+          "description": "The auxiliary model declaration when the serve declaration carries\none ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuxiliaryModelInput"
+          }
+        },
         "gateway_backend": {
           "type": [
             "string",
@@ -1244,6 +1299,10 @@
             }
           ]
         },
+        "state_dir": {
+          "description": "The control-plane-owned state directory spelling,\nworkspace-root-relative, that the integration resolves operator-declared\nrelative paths against when matching them to supplied render-input\nsource paths.",
+          "type": "string"
+        },
         "synthetic_acceptance": {
           "description": "The synthetic acceptance declaration when the serve declaration\ncarries one ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
           "anyOf": [
@@ -1263,6 +1322,7 @@
       "required": [
         "model",
         "topology",
+        "state_dir",
         "allocations"
       ]
     },
@@ -1408,6 +1468,13 @@
         {
           "type": "object",
           "properties": {
+            "auxiliary_model_locators": {
+              "description": "The machine-resolved auxiliary weight locators for each declared\nkind ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AuxiliaryModelLocator"
+              }
+            },
             "cache": {
               "type": "string"
             },
@@ -1876,10 +1943,10 @@
           "$ref": "#/$defs/ServeRoleKind"
         },
         "public_endpoint": {
-          "description": "The public endpoint contract for a direct `single` Engine. Gateway-\nbacked shapes leave this absent and carry the contract on Gateway.",
+          "description": "The public endpoint capability declaration for a direct `single`\nEngine. Gateway-backed shapes leave this absent and carry the\ndeclaration on Gateway.",
           "anyOf": [
             {
-              "$ref": "#/$defs/EndpointRequirement"
+              "$ref": "#/$defs/EndpointDeclaration"
             },
             {
               "type": "null"

@@ -1,4 +1,6 @@
+import json
 import sys
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -23,11 +25,19 @@ from inferlab_adapter_sdk import (
     ServeRoleLinkKvTransfer,
     ServeTopology,
     SettingValue,
+    handle_request,
 )
 from inferlab_integration_tokenspeed import plan_serve, render_serve
 
+ROOT = Path(__file__).parents[3]
+FIXTURES = ROOT / "protocol" / "fixtures"
 
-def _dsv4_parallelism() -> Parallelism:
+
+def load_json(path: Path) -> dict[str, object]:
+    return cast(dict[str, object], json.loads(path.read_text()))
+
+
+def _deepseek_v4_flash_parallelism() -> Parallelism:
     return Parallelism(
         outer=ParallelismOuter(tensor_parallel_size=4),
         attention=ParallelismAttention(data_parallel_size=4),
@@ -35,7 +45,7 @@ def _dsv4_parallelism() -> Parallelism:
     )
 
 
-def _dsv4_settings() -> dict[str, SettingValue]:
+def _deepseek_v4_flash_settings() -> dict[str, SettingValue]:
     return {
         "max_model_len": SettingValue(root=80_000),
         "kv_cache_dtype": SettingValue(root="fp8_e4m3"),
@@ -51,8 +61,10 @@ def _dsv4_settings() -> dict[str, SettingValue]:
 
 
 def _plan_input(**overrides: object) -> PlanServeInput:
-    parallelism = cast(Parallelism, overrides.pop("parallelism", _dsv4_parallelism()))
-    settings = cast(dict[str, SettingValue], overrides.pop("settings", _dsv4_settings()))
+    parallelism = cast(Parallelism, overrides.pop("parallelism", _deepseek_v4_flash_parallelism()))
+    settings = cast(
+        dict[str, SettingValue], overrides.pop("settings", _deepseek_v4_flash_settings())
+    )
     roles = overrides.pop(
         "roles",
         [
@@ -66,8 +78,9 @@ def _plan_input(**overrides: object) -> PlanServeInput:
         ],
     )
     base: dict[str, object] = {
-        "model": ServeModelInput(id="dsv4", served_name="dsv4-flash"),
+        "model": ServeModelInput(id="deepseek-v4-flash", served_name="deepseek-v4-flash"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -78,7 +91,7 @@ def _plan_input(**overrides: object) -> PlanServeInput:
     return PlanServeInput.model_validate(base)
 
 
-def test_plan_dsv4_dp_ep_shape_and_endpoint_contract() -> None:
+def test_plan_deepseek_v4_flash_dp_ep_shape_and_endpoint_contract() -> None:
     result = plan_serve(_plan_input())
 
     assert result.integration.framework == "tokenspeed"
@@ -94,8 +107,6 @@ def test_plan_dsv4_dp_ep_shape_and_endpoint_contract() -> None:
     role = result.roles[0]
     endpoint = role.public_endpoint
     assert endpoint is not None
-    assert endpoint.completions_path == "/v1/completions"
-    assert endpoint.chat_completions_path == "/v1/chat/completions"
     assert endpoint.prefix_cache_reset is not None
     assert endpoint.prefix_cache_reset.path == "/flush_cache"
     assert role.effective_settings["enable_prefix_caching"].root is True
@@ -158,7 +169,7 @@ def _prefill_decode_plan_input(
         outer=ParallelismOuter(tensor_parallel_size=2),
         experts=ParallelismExperts(expert_parallel_size=2),
     )
-    settings = _dsv4_settings()
+    settings = _deepseek_v4_flash_settings()
     if extra_args is not None:
         settings["extra_args"] = SettingValue.model_validate(extra_args)
     return _plan_input(
@@ -239,8 +250,6 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
     }
     assert result.gateway.backend == "tokenspeed-smg"
     assert result.gateway.render_source == RenderSource.integration
-    assert result.gateway.endpoint.completions_path == "/v1/completions"
-    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
     assert result.gateway.endpoint.prefix_cache_reset is not None
     assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
     assert result.pd_router.backend == "tokenspeed-smg"
@@ -263,8 +272,8 @@ def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
             _plan_input(
                 synthetic_acceptance={
                     "curve": {
-                        "model_key": "dsv4",
-                        "text": "dsv4:\n  - 3: 2.49\n",
+                        "model_key": "deepseek-v4-flash",
+                        "text": "deepseek-v4-flash:\n  - 3: 2.49\n",
                         "sha256": "f" * 64,
                     }
                 }
@@ -317,8 +326,8 @@ def test_plan_rejects_a_zero_replica_count() -> None:
                         id="serve",
                         kind=ServeRoleKind.serve,
                         replica_count=0,
-                        parallelism=_dsv4_parallelism(),
-                        settings=_dsv4_settings(),
+                        parallelism=_deepseek_v4_flash_parallelism(),
+                        settings=_deepseek_v4_flash_settings(),
                     )
                 ]
             )
@@ -342,8 +351,9 @@ def _render_input(**overrides: object) -> RenderServeInput:
         overrides.pop("settings", plan.roles[0].effective_settings),
     )
     base: dict[str, object] = {
-        "model": ServeModelInput(id="dsv4", served_name="dsv4-flash"),
+        "model": ServeModelInput(id="deepseek-v4-flash", served_name="deepseek-v4-flash"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": None,
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -359,7 +369,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
                     "rank": 0,
                     "rank_count": 1,
                     "machine": "local",
-                    "model_locator": "/models/dsv4",
+                    "model_locator": "/models/deepseek-v4-flash",
                     "devices": [0, 1, 2, 3],
                     "endpoint": {"host": "127.0.0.1", "port": 8000},
                     "ports": {
@@ -410,7 +420,7 @@ def _prefill_decode_render_input() -> RenderServeInput:
                     "rank": 0,
                     "rank_count": 1,
                     "machine": f"node-{index}",
-                    "model_locator": "/models/dsv4",
+                    "model_locator": "/models/deepseek-v4-flash",
                     "devices": [index * 2, index * 2 + 1],
                     "endpoint": {
                         "host": f"node-{index}.example",
@@ -453,6 +463,7 @@ def _prefill_decode_render_input() -> RenderServeInput:
     return RenderServeInput(
         model=plan_input.model,
         topology=plan_input.topology,
+        state_dir=plan_input.state_dir,
         gateway_backend=plan_input.gateway_backend,
         pd_router_backend=plan_input.pd_router_backend,
         kv_transfer=plan_input.kv_transfer,
@@ -461,18 +472,18 @@ def _prefill_decode_render_input() -> RenderServeInput:
     )
 
 
-def test_render_launches_tokenspeed_with_the_effective_dsv4_shape() -> None:
+def test_render_launches_tokenspeed_with_the_effective_deepseek_v4_flash_shape() -> None:
     result = render_serve(_render_input())
 
     assert len(result.processes) == 1
     argv = result.processes[0].root.command.argv
-    assert argv[:5] == ["python3", "-m", "tokenspeed.cli", "serve", "/models/dsv4"]
+    assert argv[:5] == ["python3", "-m", "tokenspeed.cli", "serve", "/models/deepseek-v4-flash"]
     expected_options = {
         "--host": "127.0.0.1",
         "--port": "8000",
         "--control-port": "8001",
         "--dist-init-addr": "127.0.0.1:8002",
-        "--served-model-name": "dsv4-flash",
+        "--served-model-name": "deepseek-v4-flash",
         "--world-size": "4",
         "--nprocs-per-node": "4",
         "--nnodes": "1",
@@ -504,7 +515,7 @@ def test_render_launches_tokenspeed_with_the_effective_dsv4_shape() -> None:
 
 
 def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
-    settings = _dsv4_settings()
+    settings = _deepseek_v4_flash_settings()
     settings["extra_args"] = SettingValue.model_validate(["--model", "/models/shadow"])
 
     with pytest.raises(AdapterOperationError, match="--model"):
@@ -512,7 +523,7 @@ def test_plan_rejects_inferlab_owned_option_in_extra_args() -> None:
 
 
 def test_render_passes_through_unrecognized_extra_args() -> None:
-    settings = _dsv4_settings()
+    settings = _deepseek_v4_flash_settings()
     settings["extra_args"] = SettingValue.model_validate(["--log-level", "debug"])
     plan = plan_serve(_plan_input(settings=settings))
     result = render_serve(_render_input(settings=plan.roles[0].effective_settings))
@@ -522,7 +533,7 @@ def test_render_passes_through_unrecognized_extra_args() -> None:
 
 
 def test_render_can_explicitly_disable_prefix_caching() -> None:
-    settings = _dsv4_settings()
+    settings = _deepseek_v4_flash_settings()
     settings["enable_prefix_caching"] = SettingValue(root=False)
     plan = plan_serve(_plan_input(settings=settings))
 
@@ -561,7 +572,7 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
         assert process.command.env["TOKENSPEED_SKIP_GRPC_WARMUP"] == "1"
     prefill = result.processes[0].root.command.argv
     expected_options = {
-        "--model": "/models/dsv4",
+        "--model": "/models/deepseek-v4-flash",
         "--host": "node-0.example",
         "--port": "8000",
         "--dist-init-addr": "node-0.example:8100",
@@ -587,7 +598,7 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
 
     gateway = result.processes[-1].root.command.argv
     assert gateway[:4] == ["python3", "-m", "smg", "launch"]
-    assert gateway[gateway.index("--host") + 1] == "0.0.0.0"
+    assert gateway[gateway.index("--host") + 1] == "gateway.example"
     assert [gateway[index + 1] for index, arg in enumerate(gateway) if arg == "--prefill"] == [
         "grpc://node-0.example:8000",
         "grpc://node-1.example:8000",
@@ -631,3 +642,14 @@ def test_render_requires_allocated_control_and_dist_init_ports_and_one_process()
     first = ServeProcessAllocation.model_validate({**base, "rank_count": 2})
     with pytest.raises(AdapterOperationError):
         render_serve(_render_input(allocations=[first, second]))
+
+
+def test_plan_rejects_a_declared_draft_model() -> None:
+    """The TokenSpeed integration consumes no auxiliary kind, so the declared
+    draft-model fails at plan time with a typed error naming the kind."""
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    response = handle_request(json.dumps(payload), plan_serve)
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert "draft-model" in response.root.error.message
+    assert "does not consume" in response.root.error.message

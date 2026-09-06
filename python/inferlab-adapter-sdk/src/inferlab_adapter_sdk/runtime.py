@@ -22,7 +22,8 @@ from ._generated import (
     AdapterResult,
     AdapterResultPlanServe,
     AdapterResultRenderServe,
-    EndpointRequirement,
+    AuxiliaryModelInput,
+    EndpointDeclaration,
     FrontendCoRendering,
     FrontendHandoff,
     FrontendProcessRole,
@@ -52,6 +53,7 @@ from ._generated import (
     ServeRoleInput,
     ServeRoleKind,
     SettingValue,
+    SyntheticAcceptanceOutcome,
     TargetEndpointScheme,
 )
 
@@ -60,7 +62,7 @@ type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
 type ServeAllocation = ServeProcessAllocationModelRank | ServeProcessAllocationFrontend
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-PROTOCOL_V9 = ProtocolVersion()
+PROTOCOL_V10 = ProtocolVersion()
 
 # Inferlab owns readiness; the router's internal guard must not expire first.
 ROUTER_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
@@ -169,7 +171,7 @@ def fused_pd_frontend_plans(
     implementation: str,
     implementation_version: str,
     render_source: RenderSource,
-    endpoint: EndpointRequirement,
+    endpoint: EndpointDeclaration,
     gateway_readiness: ReadinessProbe,
     pd_router_readiness: ReadinessProbe,
     policies: PdRoutingPolicies,
@@ -379,6 +381,46 @@ def merge_serve_args(
     return merged
 
 
+def last_option_value(
+    extra_args: list[str],
+    flag: str,
+    *,
+    context: str,
+    purpose: str,
+) -> tuple[int, bool, str] | None:
+    """Locate the effective value of an extra-args option.
+
+    Engine last-wins parsing makes the last occurrence of either spelling —
+    ``--flag value`` or ``--flag=value`` — the effective one. Returns
+    ``(index, inline, value)`` where ``inline`` marks the ``--flag=value``
+    spelling, or ``None`` when the flag never appears. A trailing
+    separate-token spelling without its value fails as ``invalid_settings``:
+    the operator declared the option, so the missing value is a settings
+    error named for ``purpose``, not an absent signal.
+    """
+    target: tuple[int, bool] | None = None
+    index = 0
+    while index < len(extra_args):
+        argument = extra_args[index]
+        if argument == flag:
+            if index + 1 >= len(extra_args):
+                raise AdapterOperationError(
+                    AdapterErrorCode.invalid_settings,
+                    f"{context} extra_args entry {flag!r} is missing its value; {purpose} needs it",
+                )
+            target = (index + 1, False)
+            index += 2
+            continue
+        if argument.startswith(f"{flag}="):
+            target = (index, True)
+        index += 1
+    if target is None:
+        return None
+    index, inline = target
+    token = extra_args[index]
+    return index, inline, token.partition("=")[2] if inline else token
+
+
 class AdapterOperationError(Exception):
     def __init__(self, code: AdapterErrorCode, message: str) -> None:
         super().__init__(message)
@@ -481,16 +523,78 @@ def resolve_golden_acceptance_length(
     return float(value)
 
 
+def resolve_draft_model_locator(
+    allocation: ServeProcessAllocationModelRank,
+    declared: list[AuxiliaryModelInput] | None,
+) -> str | None:
+    """Resolve the one draft-model locator a model-rank allocation must carry.
+
+    Shared protocol semantics of the draft-model auxiliary
+    ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]): the declaration resolves exactly
+    one locator per model-rank allocation. Returns ``None`` when the request
+    declares no draft-model auxiliary and the allocation carries no locator;
+    raises ``invalid_request`` when the declaration has no locator on this
+    allocation or when the allocation carries more than one. The wire
+    vocabulary holds only ``draft-model`` today, so the kind filters cannot
+    drop anything; they are where a second auxiliary kind would be
+    discriminated.
+    """
+    locators = [
+        entry
+        for entry in allocation.auxiliary_model_locators or []
+        if entry.kind.root == "draft-model"
+    ]
+    if not locators:
+        if any(entry.kind.root == "draft-model" for entry in declared or []):
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_request,
+                f"allocation {allocation.process!r} carries no draft-model locator "
+                "though the serve request declares the draft-model auxiliary; "
+                "the declaration resolves one locator per model-rank allocation",
+            )
+        return None
+    if len(locators) != 1:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"allocation {allocation.process!r} carries {len(locators)} draft-model "
+            "locators; expected exactly one",
+        )
+    return locators[0].locator
+
+
+def consistent_acceptance_outcome(
+    prefill_outcome: SyntheticAcceptanceOutcome | None,
+    decode_outcome: SyntheticAcceptanceOutcome | None,
+) -> SyntheticAcceptanceOutcome | None:
+    """The single plan-level synthetic acceptance outcome of a P/D plan.
+
+    The plan response carries one effective acceptance length
+    ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]), so the prefill and decode
+    roles must resolve the same outcome — acceptance length and draft count.
+    A disagreement fails as ``invalid_settings``; agreement (including both
+    roles carrying no synthetic acceptance) returns the shared outcome.
+    """
+    if prefill_outcome != decode_outcome:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the prefill and decode roles resolve different synthetic acceptance "
+            f"outcomes ({prefill_outcome} vs {decode_outcome}); the plan response "
+            "carries one effective acceptance length, so both roles must determine "
+            "the same draft count",
+        )
+    return prefill_outcome
+
+
 def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     return AdapterResponse(
         root=AdapterResponseError(
-            protocol_version=PROTOCOL_V9,
+            protocol_version=PROTOCOL_V10,
             error=AdapterError(code=code, message=message),
         )
     )
 
 
-SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V9.root
+SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V10.root
 
 
 def handle_request(
@@ -541,7 +645,7 @@ def handle_request(
 
     return AdapterResponse(
         root=AdapterResponseOk(
-            protocol_version=PROTOCOL_V9,
+            protocol_version=PROTOCOL_V10,
             result=AdapterResult(root=result),
         )
     )

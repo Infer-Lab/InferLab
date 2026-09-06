@@ -1,6 +1,6 @@
 //! Runtime-image and immutable external-image definition validation.
 
-use super::{invalid, require_id, require_nonempty, require_reference};
+use super::{invalid, require_id, require_nonempty, require_reference, validate_expected_digest};
 use crate::InferlabError;
 use crate::workspace::definitions::WorkspaceConfig;
 use crate::workspace::source::is_safe_relative;
@@ -89,22 +89,22 @@ pub(super) fn validate(config: &WorkspaceConfig) -> Result<(), InferlabError> {
             ));
         }
         // Digest pinning makes a committed baseline mean one artifact
-        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
-        let digest_pinned =
-            external
-                .reference
-                .rsplit_once("@sha256:")
-                .is_some_and(|(repository, digest)| {
-                    !repository.is_empty()
-                        && digest.len() == 64
-                        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-                });
-        if !digest_pinned {
-            return invalid(format!(
-                "external image {id:?} reference {:?} must carry its immutable digest \
-                 (repository[:tag]@sha256:<64 hex>)",
-                external.reference
-            ));
+        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). Registries canonicalize digests
+        // lowercase, so the pin digest follows validate_expected_digest; an
+        // uppercase pin would load and then mismatch at pull/verify time.
+        match external.reference.rsplit_once("@sha256:") {
+            Some((repository, digest)) if !repository.is_empty() => validate_expected_digest(
+                &format!("external image {id:?}"),
+                &format!("reference digest {digest:?}"),
+                digest,
+            )?,
+            _ => {
+                return invalid(format!(
+                    "external image {id:?} reference {:?} must carry its immutable digest \
+                     (repository[:tag]@sha256:<64 hex>)",
+                    external.reference
+                ));
+            }
         }
         if external.integration.is_empty()
             || !external

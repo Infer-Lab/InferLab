@@ -12,18 +12,30 @@ fn packaged_licenses_match_the_repository_notice() -> Result<(), Box<dyn Error>>
     let root = crate_dir.join("../..");
 
     let repository_license = fs::read(root.join("LICENSE"))?;
-    for crate_name in [
-        "inferlab",
-        "inferlab-runtime",
-        "inferlab-profiler",
-        "inferlab-protocol",
-        "inferlab-proxy",
-    ] {
-        let copy = fs::read(root.join("crates").join(crate_name).join("LICENSE"))?;
-        assert_eq!(
-            copy, repository_license,
-            "crates/{crate_name}/LICENSE drifted from the repository LICENSE"
-        );
+    // The covered set derives from the workspace layout, so a new crate or
+    // Python package cannot escape the comparison by missing a manual list;
+    // absence fails loudly too, naming the member.
+    for group in ["crates", "python"] {
+        let mut members = fs::read_dir(root.join(group))?.collect::<Result<Vec<_>, _>>()?;
+        members.sort_by_key(|entry| entry.file_name());
+        for member in members {
+            if !member.file_type()?.is_dir() {
+                continue;
+            }
+            let copy = member.path().join("LICENSE");
+            let bytes = fs::read(&copy).map_err(|source| {
+                format!(
+                    "{}: every {group}/ member must carry the repository LICENSE: {source}",
+                    member.path().display()
+                )
+            })?;
+            assert_eq!(
+                bytes,
+                repository_license,
+                "{} drifted from the repository LICENSE",
+                copy.strip_prefix(&root)?.display()
+            );
+        }
     }
     let embedded = Command::new(env!("CARGO_BIN_EXE_inferlab"))
         .args(["license"])
@@ -66,31 +78,31 @@ fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn E
         "the staged plugin must not carry an aggregate workspace-authoring copy"
     );
 
-    assert_tree_in_archive(
-        &root.join("python/inferlab-eval-runner/src/inferlab_eval_runner"),
-        Path::new("resources/toolchain-python/inferlab_eval_runner"),
-        &files,
-    )?;
-    assert_tree_in_archive(
-        &root.join("python/inferlab-bench-runner/src/inferlab_bench_runner"),
-        Path::new("resources/toolchain-python/inferlab_bench_runner"),
-        &files,
-    )?;
-    assert_tree_in_archive(
-        &root.join("python/inferlab-measurement-sdk/src/inferlab_measurement_sdk"),
-        Path::new("resources/toolchain-python/inferlab_measurement_sdk"),
-        &files,
-    )?;
+    // The member set has one manifest, shared with the crate build script and
+    // the crate staging script (scripts/toolchain-python-members.txt).
+    let manifest = fs::read_to_string(root.join("scripts/toolchain-python-members.txt"))?;
+    for member in manifest.lines().filter(|line| !line.is_empty()) {
+        let (source, package) = member.split_once(' ').ok_or_else(|| {
+            format!("toolchain Python manifest member has no package name: {member}")
+        })?;
+        assert_tree_in_archive(
+            &root.join(source),
+            &Path::new("resources/toolchain-python").join(package),
+            &files,
+        )?;
+    }
 
-    let mut plugin_sources = vec![
-        (PathBuf::from("LICENSE"), root.join("LICENSE")),
-        (
-            PathBuf::from("docs/backend-support.md"),
-            root.join("docs/backend-support.md"),
-        ),
-    ];
-    for top in [".claude-plugin", ".agents", "plugins"] {
-        collect_source_files(&root, &root.join(top), &mut plugin_sources)?;
+    // The member set has one manifest, shared with the crate build script and
+    // the release scripts (scripts/plugin-package-members.txt).
+    let manifest = fs::read_to_string(root.join("scripts/plugin-package-members.txt"))?;
+    let mut plugin_sources = Vec::new();
+    for member in manifest.lines().filter(|line| !line.is_empty()) {
+        let source = root.join(member);
+        if source.is_dir() {
+            collect_source_files(&root, &source, &mut plugin_sources)?;
+        } else {
+            plugin_sources.push((PathBuf::from(member), source));
+        }
     }
     for (relative, source) in plugin_sources {
         let packaged = Path::new("resources/plugin").join(&relative);
@@ -102,6 +114,55 @@ fn staged_crate_contains_the_canonical_product_payload() -> Result<(), Box<dyn E
         );
     }
     Ok(())
+}
+
+/// The agent-install payload (build.rs embeds it) and the release asset
+/// (scripts/pack-plugin.sh produces it) are two producers of one artifact;
+/// the shared fixed mtime exists so they can agree. Compare the entry
+/// surface — names, modes, contents, and mtimes — so a one-sided edit to
+/// either producer fails here instead of forking the distributables.
+#[test]
+fn embedded_and_release_plugin_tarballs_carry_identical_entries() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let embedded = Path::new(env!("OUT_DIR")).join("inferlab-plugin.tar.gz");
+
+    let output_dir = tempfile::tempdir()?;
+    let release = output_dir.path().join("plugin.tar.gz");
+    let status = Command::new(root.join("scripts/pack-plugin.sh"))
+        .arg(&release)
+        .current_dir(&root)
+        .status()?;
+    assert!(status.success(), "pack-plugin.sh failed");
+
+    let embedded_entries = plugin_tarball_entries(&embedded)?;
+    let release_entries = plugin_tarball_entries(&release)?;
+    assert_eq!(
+        embedded_entries, release_entries,
+        "the embedded plugin tarball and the release tarball diverge in member set, modes, contents, or mtimes"
+    );
+    Ok(())
+}
+
+/// File entries of a plugin tarball as path → (mtime, mode, contents) — the
+/// surface on which the two plugin artifact producers must agree.
+type PluginEntries = BTreeMap<PathBuf, (u64, u32, Vec<u8>)>;
+
+fn plugin_tarball_entries(path: &Path) -> Result<PluginEntries, Box<dyn Error>> {
+    let decoder = GzDecoder::new(fs::File::open(path)?);
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = BTreeMap::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let mtime = entry.header().mtime()?;
+        let mode = entry.header().mode()?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        entries.insert(entry.path()?.into_owned(), (mtime, mode, bytes));
+    }
+    Ok(entries)
 }
 
 fn crate_archive_files(path: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn Error>> {

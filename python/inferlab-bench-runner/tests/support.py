@@ -64,7 +64,7 @@ def request(
     effective_prompt = resolved_prompt_input(prompt)
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -81,7 +81,7 @@ def request(
                     else None
                 ),
             },
-            "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
+            "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "definition": {
                 "request_source": effective_source,
                 "prompt": effective_prompt,

@@ -8,6 +8,7 @@ use super::topology::{
 };
 use crate::InferlabError;
 use crate::adapter::{AdapterClient, AdapterLowering};
+use crate::record::STATE_DIR;
 use crate::workspace::LoadedWorkspace;
 use inferlab_protocol::{
     FrontendComponents, FrontendProcessRole, GatewayPlan, KvTransferMechanism,
@@ -15,6 +16,7 @@ use inferlab_protocol::{
     RenderServeInput, RenderSource, RenderedServeProcess, ServeModelInput, ServeProcessAllocation,
     SuppliedRenderInput,
 };
+use inferlab_proxy::registry::{BuiltinProxyKind, BuiltinProxySpec, builtin_proxy_by_wire_name};
 use inferlab_runtime::plan::LaunchFilePlan;
 use inferlab_serve_domain::{
     FixedDeviceAssignment, LoweringEvidence, PlannedServeStage, ProcessRequirement,
@@ -24,36 +26,21 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BuiltinProxyKind {
-    VllmMooncake,
-    VllmNixl,
-    Sglang,
-    Trtllm,
-}
-
-impl BuiltinProxyKind {
-    const fn command_name(self) -> &'static str {
-        match self {
-            Self::VllmMooncake => "vllm-mooncake",
-            Self::VllmNixl => "vllm-nixl",
-            Self::Sglang => "sglang",
-            Self::Trtllm => "trtllm",
-        }
-    }
-}
-
-fn builtin_proxy_kind(
+/// The built-in proxy serving a framework and KV-transfer mechanism, resolved
+/// through the proxy crate's registry ([[RFC-0006:C-INTEGRATIONS]]).
+fn builtin_proxy_spec(
     framework: &str,
     transport: Option<KvTransferMechanism>,
-) -> Result<BuiltinProxyKind, InferlabError> {
+) -> Result<&'static BuiltinProxySpec, InferlabError> {
     match (framework, transport) {
-        ("vllm", Some(KvTransferMechanism::Mooncake)) => Ok(BuiltinProxyKind::VllmMooncake),
-        ("vllm", Some(KvTransferMechanism::Nixl)) => Ok(BuiltinProxyKind::VllmNixl),
-        ("sglang", Some(KvTransferMechanism::Mooncake | KvTransferMechanism::Nixl)) => {
-            Ok(BuiltinProxyKind::Sglang)
+        ("vllm", Some(KvTransferMechanism::Mooncake)) => {
+            Ok(&inferlab_proxy::registry::VLLM_MOONCAKE)
         }
-        ("tensorrt-llm", Some(KvTransferMechanism::Nixl)) => Ok(BuiltinProxyKind::Trtllm),
+        ("vllm", Some(KvTransferMechanism::Nixl)) => Ok(&inferlab_proxy::registry::VLLM_NIXL),
+        ("sglang", Some(KvTransferMechanism::Mooncake | KvTransferMechanism::Nixl)) => {
+            Ok(&inferlab_proxy::registry::SGLANG)
+        }
+        ("tensorrt-llm", Some(KvTransferMechanism::Nixl)) => Ok(&inferlab_proxy::registry::TRTLLM),
         (_, None) => Err(InferlabError::InvalidConfig {
             message: "built-in prefill/decode proxy requires a KV-transfer mechanism".to_owned(),
         }),
@@ -112,22 +99,19 @@ fn render_builtin_frontend(
             message: "built-in proxy requires prefill and decode replica entry points".to_owned(),
         });
     }
-    let proxy_kind = builtin_proxy_kind(framework, transport)?;
-    let declared_kind = match gateway.implementation.as_str() {
-        "vllm_mooncake" => BuiltinProxyKind::VllmMooncake,
-        "vllm_nixl" => BuiltinProxyKind::VllmNixl,
-        "sglang" => BuiltinProxyKind::Sglang,
-        "trtllm" => BuiltinProxyKind::Trtllm,
-        implementation => {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "integration returned unknown control-plane frontend implementation {implementation:?}"
-                ),
-            });
+    let proxy_spec = builtin_proxy_spec(framework, transport)?;
+    let declared = builtin_proxy_by_wire_name(&gateway.implementation).ok_or_else(|| {
+        InferlabError::AdapterSemantics {
+            message: format!(
+                "integration returned unknown control-plane frontend implementation {:?}",
+                gateway.implementation
+            ),
         }
-    };
-    if proxy_kind != declared_kind || pd_router.implementation != gateway.implementation {
-        return Err(InferlabError::InvalidConfig {
+    })?;
+    if declared.wire_name != proxy_spec.wire_name
+        || pd_router.implementation != gateway.implementation
+    {
+        return Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration returned control-plane frontend implementation {:?}, which is incompatible with framework {framework:?} and transport {transport:?}",
                 gateway.implementation
@@ -147,7 +131,7 @@ fn render_builtin_frontend(
         executable.to_string_lossy().into_owned(),
         "__internal".to_owned(),
         "proxy".to_owned(),
-        proxy_kind.command_name().to_owned(),
+        proxy_spec.command_name.to_owned(),
         "--host".to_owned(),
         proxy_endpoint.host.clone(),
         "--port".to_owned(),
@@ -161,7 +145,7 @@ fn render_builtin_frontend(
             })?;
         argv.extend(["--prefill".to_owned(), endpoint_url(endpoint)]);
         if matches!(
-            proxy_kind,
+            proxy_spec.kind,
             BuiltinProxyKind::VllmMooncake | BuiltinProxyKind::Sglang
         ) {
             let bootstrap =
@@ -174,7 +158,7 @@ fn render_builtin_frontend(
                             replica.process()
                         ),
                     })?;
-            match proxy_kind {
+            match proxy_spec.kind {
                 BuiltinProxyKind::VllmMooncake => argv.push(endpoint_url(bootstrap)),
                 BuiltinProxyKind::Sglang => {
                     argv.extend([bootstrap.host.clone(), bootstrap.port.to_string()]);
@@ -188,7 +172,7 @@ fn render_builtin_frontend(
         // ([[RFC-0004:C-BENCH-CACHE-STATE]]). The Mooncake proxy discovers
         // its ranks and engine ids from the bootstrap query instead.
         if matches!(
-            proxy_kind,
+            proxy_spec.kind,
             BuiltinProxyKind::VllmNixl | BuiltinProxyKind::Sglang
         ) {
             argv.extend([
@@ -280,7 +264,7 @@ pub(super) fn validate_launch_file_declarations(
                 _ => None,
             };
             let Some(name) = name else {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} rendered launch file {:?} for process \
                          {process_id:?} without canonical path \
@@ -291,7 +275,7 @@ pub(super) fn validate_launch_file_declarations(
             };
             let canonical = format!("launch-files/{}/{name}", declaration.sha256);
             if declaration.relative_path != canonical {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} rendered launch file {:?} for process \
                          {process_id:?} without canonical path \
@@ -302,7 +286,7 @@ pub(super) fn validate_launch_file_declarations(
             }
             let actual_sha256 = format!("{:x}", Sha256::digest(declaration.text.as_bytes()));
             if declaration.sha256 != actual_sha256 {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} rendered launch file {:?} for process \
                          {process_id:?} with content digest {:?}, expected {actual_sha256:?}",
@@ -315,7 +299,7 @@ pub(super) fn validate_launch_file_declarations(
                 resolved_path.strip_prefix(runtime_cache_root),
                 Ok(path) if path == relative_path
             ) {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} rendered launch file {:?} outside process \
                          {process_id:?} runtime cache {:?}",
@@ -331,7 +315,7 @@ pub(super) fn validate_launch_file_declarations(
             if !process.argv.iter().any(|argument| argument == resolved)
                 && !process.env.values().any(|value| value == resolved)
             {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} rendered launch file {resolved_path:?} for \
                          process {process_id:?} without an exact argv or environment reference"
@@ -384,15 +368,17 @@ pub(super) fn plan_integration<C: AdapterClient>(
                 served_name,
             },
             topology: effective.topology,
+            state_dir: STATE_DIR.to_owned(),
             gateway_backend: effective.gateway_backend.clone(),
             pd_router_backend: effective.pd_router_backend.clone(),
             kv_transfer: effective.kv_transfer,
-            roles: effective.role_inputs.clone(),
+            roles: effective.roles.clone(),
             profiling: effective.profiling,
             synthetic_acceptance: effective
                 .synthetic_acceptance
                 .as_ref()
                 .map(|resolved| resolved.input.clone()),
+            auxiliary_models: effective.auxiliary_models.clone(),
         },
     )?;
     let (planned, evidence) = split_lowering(lowering);
@@ -408,27 +394,27 @@ pub(super) fn plan_integration<C: AdapterClient>(
     validate_serve_graph(
         &stack.integration,
         effective.topology,
-        &effective.role_inputs,
+        &effective.roles,
         effective.gateway_backend.as_deref(),
         effective.pd_router_backend.as_deref(),
         effective.kv_transfer,
         &planned,
     )?;
-    for resolution in &effective.role_resolutions {
+    for role_input in &effective.roles {
         let role = planned
             .roles
             .iter()
-            .find(|role| role.id == resolution.input.id)
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .find(|role| role.id == role_input.id)
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} omitted Engine role {:?}",
-                    stack.integration, resolution.input.id
+                    stack.integration, role_input.id
                 ),
             })?;
         validate_effective_parallelism(
             &stack.integration,
-            &format!("role {:?}", resolution.input.id),
-            &resolution.input.parallelism,
+            &format!("role {:?}", role_input.id),
+            &role_input.parallelism,
             &role.effective_parallelism,
         )?;
     }
@@ -547,7 +533,7 @@ pub(super) fn plan_integration<C: AdapterClient>(
             .roles
             .iter()
             .find(|role| role.public_endpoint.is_some())
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} did not select a direct public Engine",
                     stack.integration
@@ -567,7 +553,7 @@ pub(super) fn plan_integration<C: AdapterClient>(
                 )
             })
             .map(|requirement| requirement.id().to_owned())
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} selected unknown direct public Engine role {:?}",
                     stack.integration, role.id
@@ -611,6 +597,7 @@ pub(super) fn render_integration<C: AdapterClient>(
         &selection.placement_id,
         selection.placement,
         selection.weight,
+        &selection.auxiliary_weights,
         &stack.pixi_environment,
         request
             .image
@@ -644,6 +631,7 @@ pub(super) fn render_integration<C: AdapterClient>(
                 served_name: selection.model.served_name.clone(),
             },
             topology: effective.topology,
+            state_dir: STATE_DIR.to_owned(),
             gateway_backend: effective.gateway_backend.clone(),
             pd_router_backend: effective.pd_router_backend.clone(),
             kv_transfer: effective.kv_transfer,
@@ -653,11 +641,12 @@ pub(super) fn render_integration<C: AdapterClient>(
                 .synthetic_acceptance
                 .as_ref()
                 .map(|resolved| resolved.input.clone()),
+            auxiliary_models: effective.auxiliary_models.clone(),
         },
     )?;
     let (rendered, evidence) = split_lowering(lowering);
     if rendered.integration != planned.integration {
-        return Err(InferlabError::InvalidConfig {
+        return Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {:?} changed identity between serve planning and rendering",
                 stack.integration
@@ -665,7 +654,7 @@ pub(super) fn render_integration<C: AdapterClient>(
         });
     }
     if rendered.processes.len() != planned_stage.integration_rendered_process_ids().len() {
-        return Err(InferlabError::InvalidConfig {
+        return Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {:?} rendered {} processes for {} integration-rendered allocations",
                 stack.integration,
@@ -682,7 +671,7 @@ pub(super) fn render_integration<C: AdapterClient>(
             .contains(&id)
             || rendered_by_id.insert(id.clone(), process).is_some()
         {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} returned duplicate or unknown process {id:?}",
                     stack.integration

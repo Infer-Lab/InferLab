@@ -45,27 +45,15 @@ The sole `tp2` case is selected automatically, so this server does not need a
 multiple cases must declare `default_case`; the operator may always select a
 different one with `--case`.
 
-`readiness_timeout_seconds` owns the complete ordinary server-readiness wait.
-Each blocking process-status or HTTP attempt within that wait is capped by
-`readiness_attempt_timeout_seconds`, which defaults to 30 seconds. Profiled
-servers use separate budgets for preparing and arming all targets, controlling
-one framework capture window, and finalizing all reports:
-
-```toml
-[servers.example]
-readiness_attempt_timeout_seconds = 30
-capture_arm_deadline_seconds = 60
-capture_control_deadline_seconds = 60
-capture_finalization_deadline_seconds = 300
-```
-
-These values may be declared on the server, patched by a selected server case,
-or overridden for one invocation with paths such as
-`--set server.readiness_attempt_timeout_seconds=45`. Capture-armed readiness
-remains unbounded overall but retains the bounded attempt deadline so process
-exit and operator interruption can be observed. Cleanup grace and polling
-cadence are product policy rather than workspace settings; SSH connection and
-keepalive policy remain in the selected OpenSSH target configuration.
+`readiness_timeout_seconds` owns the complete ordinary server-readiness wait;
+each blocking process-status or HTTP attempt within that wait is capped by
+`readiness_attempt_timeout_seconds`, patchable for one invocation as
+`--set server.readiness_attempt_timeout_seconds=45`. Profiled servers use
+separate capture budgets owned by
+[Profiling authoring](execution-authoring.md#workload-profiling). Cleanup grace
+and polling cadence are product policy rather than workspace settings; SSH
+connection and keepalive policy remain in the selected OpenSSH target
+configuration.
 
 Framework settings belong under `settings`, either on the server or on a
 canonical role. Integrations validate their typed fields. `extra_args` is the
@@ -94,12 +82,13 @@ the selected case, and invocation overrides:
 
 For speculative-decoding benchmarks that must use a controlled acceptance
 length (for example InferenceX AgentX golden-AL policy), declare
-`synthetic_acceptance` on the server or a case. The speculative method, draft
-model, and method-specific flags stay in framework settings as usual —
-InferLab only overlays the resolved acceptance length onto that operator-owned
-configuration, and planning fails with a typed error when no speculative
-configuration exists to overlay. A case-level declaration replaces the
-server-level declaration wholesale.
+`synthetic_acceptance` on the server or a case. The speculative method and
+method-specific flags stay in framework settings as usual, and a separate
+draft model is declared through `auxiliary_models` (see below) rather than
+spelled into those settings — InferLab only overlays the resolved acceptance
+length onto that operator-owned configuration, and planning fails with a
+typed error when no speculative configuration exists to overlay. A case-level
+declaration replaces the server-level declaration wholesale.
 
 ```toml
 # Explicit acceptance length:
@@ -111,7 +100,7 @@ acceptance_length = 2.49
 path = "curves/deepseek_mtp.yaml"
 expected_sha256 = "<64 lowercase hex of the file bytes>"
 model_key = "deepseek-v4-pro"
-thinking_mode = "thinking_on"     # optional; defaults to thinking_on for matrix curves
+thinking_mode = "thinking_on"     # optional for matrix curves
 # No draft count is declared: the integration reads it from the operator's
 # speculative configuration and resolves the effective acceptance length.
 ```
@@ -127,11 +116,36 @@ against a variant without the declaration. Per-backend overlay support is
 listed in the
 [backend support matrix](../../../../../docs/backend-support.md).
 
-A stack selects one integration and Pixi environment. Its `source_paths` name
-workspace-relative framework sources; declared checks verify the realized
-environment, and optional image postprocessing belongs to the stack rather
-than an image definition. Use [Workspaces and stacks](workspaces-and-stacks.md)
-for installation, confirmation, and lock operations.
+## Auxiliary model weights
+
+A launch that consumes additional weight artifacts beyond the served model —
+today only a separate speculative-decoding draft model — declares them on the
+server under `auxiliary_models`, keyed by the governed artifact kind and
+referencing an ordinary workspace model:
+
+```toml
+[models.example-draft]
+served_name = "example-draft"
+
+[servers.example.auxiliary_models]
+draft-model = "example-draft"
+```
+
+The kind vocabulary names the artifact's role, not a speculative method; the
+method and its flags stay in the operator's framework settings. The
+referenced model resolves its weights through the same `model_weights`
+bindings as the served model, including per-machine `machine_locators`, and
+the resolved locator rides each model-rank allocation into the rendered
+command and the serve record. The declaration is the single authority for
+the artifact: planning fails with a typed error when the operator's
+speculative configuration already names the draft weights or offers no
+splice target. The declaration is server-level only — cases must not declare
+or override it. Per-backend consumption support is listed in the
+[backend support matrix](../../../../../docs/backend-support.md).
+
+Optional image postprocessing belongs to the stack rather than an image
+definition. Use [Workspaces and stacks](workspaces-and-stacks.md) for
+installation, confirmation, and lock operations.
 
 ## Prefill/decode servers
 
@@ -259,11 +273,12 @@ container startup costs vary by site. The two paths remain independent:
 
 ```toml
 [adapter]
-timeout_seconds = 30       # process-backed plan/render; default 30
-image_timeout_seconds = 120 # image-backed plan/render; default 120
+timeout_seconds = 30        # process-backed plan/render
+image_timeout_seconds = 120 # image-backed plan/render
 ```
 
-Both values must be positive when declared. `image_device` is a separate,
+Both values must be positive when declared; when omitted, the control plane's
+built-in defaults apply. `image_device` is a separate,
 optional workaround for container runtimes that cannot create a device-less
 adapter container; it does not affect process-backed lowering.
 
@@ -427,8 +442,6 @@ history for each release lives in the changelog.
 
 Workspaces upgrading from an older release that still declared the former
 `routing_backend` field must replace it; the current control plane no longer
-interprets it.
-A direct `single` server declares neither frontend backend; a routed `single`
-declares `gateway_backend`; and a `prefill_decode` server declares both
-`gateway_backend` and `pd_router_backend`. The control plane rejects the old
-combined field rather than guessing how to divide its ownership.
+interprets it. The per-topology declaration rule lives under
+[Prefill/decode servers](#prefilldecode-servers); the control plane rejects the
+old combined field rather than guessing how to divide its ownership.

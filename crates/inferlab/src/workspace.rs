@@ -1,6 +1,7 @@
 //! Workspace aggregate facade. Portable definitions, machine-local bindings,
 //! composition, realization checks, and source identity keep separate owners.
 
+pub(crate) mod auxiliary_models;
 mod catalog_validation;
 mod composition;
 mod definitions;
@@ -12,7 +13,9 @@ pub(crate) mod synthetic_acceptance;
 
 use crate::InferlabError;
 
-pub(crate) use catalog_validation::{validate_bench, validate_eval, validate_eval_task_source};
+pub(crate) use catalog_validation::{
+    validate_bench, validate_eval, validate_eval_task_source, validate_finite_json_value,
+};
 pub(crate) use composition::{
     discover_workspace, load_workspace, load_workspace_config, workspace_summary,
 };
@@ -22,10 +25,10 @@ pub(crate) use definitions::BenchRandomShape;
 pub(crate) use definitions::{
     AggregateSlo, BenchAgenticSource, BenchArtifactLevel, BenchCacheStart, BenchDefinition,
     BenchRequestSource, BenchSessionSource, BenchTokenSelector, BenchTpotApplicability,
-    EvalDefinition, EvalPrompt, EvalTaskSource, JsonValue, ModelDefinition, RecipeDefinition,
-    RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition, StackDefinition,
-    SyntheticAcceptanceCurveDefinition, SyntheticAcceptanceDefinition, WorkloadSuiteDefinition,
-    WorkspaceConfig,
+    EvalDefinition, EvalPrompt, EvalTaskSource, ImplicitCaseSelection, JsonValue, ModelDefinition,
+    RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition,
+    StackDefinition, SyntheticAcceptanceCurveDefinition, SyntheticAcceptanceDefinition,
+    WorkloadSuiteDefinition, WorkspaceConfig, effective_lm_eval_base_seed,
 };
 pub(crate) use definitions::{
     BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,

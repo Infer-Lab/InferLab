@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
     AdapterOperationError,
     AdapterRequest,
     AdapterRequestPlanServe,
@@ -81,8 +82,6 @@ def test_plan_serve_matches_the_shared_vllm_fixture() -> None:
     assert result.gateway.implementation_version == package_version
     assert result.pd_router.implementation_version == package_version
     assert result.integration.framework_version == "unavailable"
-    assert result.gateway.endpoint.completions_path == "/v1/completions"
-    assert result.gateway.endpoint.chat_completions_path == "/v1/chat/completions"
     assert result.gateway.endpoint.server_metrics is None
     assert result.gateway.endpoint.prefix_cache_reset is None
     assert result.gateway.endpoint.prefix_cache_conditioning is None
@@ -640,6 +639,21 @@ def test_vllm_router_targets_replica_entrypoints_and_defers_startup_timeout() ->
     assert argv[argv.index("--worker-startup-timeout-secs") + 1] == "2147483647"
 
 
+def test_render_rejects_a_truncated_multi_node_allocation_set() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    # The replica declares two ranks but the input carries only rank 0: the
+    # render must fail instead of lowering --nnodes to the partial set.
+    allocations[0]["rank_count"] = 2
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+
+    with pytest.raises(AdapterOperationError, match="rank count") as caught:
+        render_serve(request.root.input)
+    assert caught.value.code == AdapterErrorCode.invalid_request
+
+
 def single_plan_payload(parallelism: dict[str, object]) -> dict[str, object]:
     payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
@@ -899,7 +913,7 @@ def patched_speculative_configs(result: PlanServeResult) -> list[dict[str, objec
 
 
 def test_plan_overlays_the_curve_form_onto_the_operator_speculative_config() -> None:
-    # The shared fixture declares the curve form: model dsv4, thinking_on,
+    # The shared fixture declares the curve form: model deepseek-v4-flash, thinking_on,
     # whose text holds draft count 4 -> acceptance length 3.5.
     payload = synthetic_plan_payload({"method": "mtp", "num_speculative_tokens": 4})
 
@@ -1002,9 +1016,9 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
     payload = synthetic_plan_payload(None)
     input_payload = cast(dict[str, object], payload["input"])
     curve = {
-        "model_key": "dsv4",
+        "model_key": "deepseek-v4-flash",
         "thinking_mode": "thinking_on",
-        "text": "dsv4:\n  thinking_on:\n    3: 2.6\n    4: 3.5\n",
+        "text": "deepseek-v4-flash:\n  thinking_on:\n    3: 2.6\n    4: 3.5\n",
         "sha256": "f" * 64,
     }
     input_payload["synthetic_acceptance"] = {"curve": curve}
@@ -1017,7 +1031,9 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
 
     message = synthetic_error(payload)
 
-    assert "different synthetic acceptance outcomes" in message
+    # The consistency message text is owned by the adapter SDK; assert the
+    # typed code (in synthetic_error) and a stable concept fragment.
+    assert "synthetic acceptance" in message
 
 
 def test_plan_rejects_an_operator_restated_synthetic_rejection_sampling() -> None:
@@ -1032,3 +1048,104 @@ def test_plan_rejects_an_operator_restated_synthetic_rejection_sampling() -> Non
     message = synthetic_error(payload)
 
     assert "rejection_sample_method" in message
+
+
+def auxiliary_plan_payload(speculative_config: object) -> dict[str, object]:
+    """The auxiliary-models plan fixture with the role's speculative config
+    replaced by the given spelling (None removes the target entirely)."""
+    payload = load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    settings = cast(dict[str, object], roles[0]["settings"])
+    if speculative_config is None:
+        settings.pop("extra_args", None)
+    else:
+        settings["extra_args"] = [
+            "--speculative-config",
+            speculative_config
+            if isinstance(speculative_config, str)
+            else json.dumps(speculative_config),
+        ]
+    return payload
+
+
+def auxiliary_error(payload: dict[str, object]) -> str:
+    response = handle_request(json.dumps(payload), plan_serve)
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    return response.root.error.message
+
+
+def test_plan_accepts_a_declared_draft_model_with_a_splice_target() -> None:
+    request = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    )
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+    assert [role.id for role in result.roles] == ["serve"]
+
+
+def test_plan_rejects_a_draft_model_without_a_splice_target() -> None:
+    message = auxiliary_error(auxiliary_plan_payload(None))
+    assert "--speculative-config" in message
+    assert "draft-model" in message
+
+
+def test_plan_rejects_an_operator_spelling_of_the_draft_artifact() -> None:
+    message = auxiliary_error(
+        auxiliary_plan_payload({"model": "/other/draft", "num_speculative_tokens": 2})
+    )
+    assert "'model'" in message
+    assert "single" in message
+    assert "authority" in message
+
+
+def test_render_splices_the_resolved_draft_model_locator() -> None:
+    request = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "render-serve-request-auxiliary-models.json")
+    )
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    argv = result.processes[0].root.command.argv
+    index = argv.index("--speculative-config")
+    config = json.loads(argv[index + 1])
+    assert config["model"] == "/models/deepseek-v4-flash-draft"
+    assert config["method"] == "dspark"
+    assert config["num_speculative_tokens"] == 2
+
+
+def test_render_rejects_a_declaration_without_an_allocation_locator() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request-auxiliary-models.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    allocations[0].pop("auxiliary_model_locators")
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+
+    with pytest.raises(AdapterOperationError) as caught:
+        render_serve(request.root.input)
+    assert caught.value.code == AdapterErrorCode.invalid_request
+    assert "draft-model" in caught.value.message
+
+
+def test_plan_composes_synthetic_acceptance_with_a_declared_draft_model() -> None:
+    # The overlay and the auxiliary declaration own disjoint keys of the same
+    # speculative config: composing them on one server must apply both.
+    payload = auxiliary_plan_payload({"method": "dspark", "num_speculative_tokens": 2})
+    cast(dict[str, object], payload["input"])["synthetic_acceptance"] = {
+        "explicit": {"acceptance_length": 1.75}
+    }
+
+    result = plan_synthetic(payload)
+
+    configs = patched_speculative_configs(result)
+    assert len(configs) == 1
+    assert configs[0]["synthetic_acceptance_length"] == 1.75
+    assert configs[0]["rejection_sample_method"] == "synthetic"
+    # The draft artifact stays with the declaration: the overlay neither
+    # invents nor rewrites the config's `model` key.
+    assert "model" not in configs[0]
+    outcome = result.synthetic_acceptance
+    assert outcome is not None
+    assert outcome.acceptance_length == 1.75

@@ -238,7 +238,7 @@ pub(crate) fn apply_external(
         adapter.image_timeout(),
         &framework,
     )?;
-    containerize(execution, &external.reference, machines, true);
+    containerize(execution, &external.reference, machines, true)?;
     execution.server.external_image = Some(ExternalImagePlan {
         framework_version: Some(probe.version),
         framework_probe_timing: Some(probe.timing),
@@ -256,7 +256,7 @@ pub(crate) fn apply(
     machines: &std::collections::BTreeMap<String, crate::workspace::MachineBinding>,
 ) -> Result<(), InferlabError> {
     gate_capture(execution.server.processes())?;
-    containerize(execution, &image.image_id, machines, false);
+    containerize(execution, &image.image_id, machines, false)?;
     execution.server.image = Some(image.clone());
     Ok(())
 }
@@ -304,15 +304,15 @@ fn reject(message: String) -> InferlabError {
 }
 
 fn load_record(root: &Path, record_id: &str) -> Result<ImageRecord, InferlabError> {
-    let plain = !matches!(record_id, "" | "." | "..")
-        && record_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
-    if !plain {
-        return Err(InferlabError::ImageSelection {
-            message: format!("invalid image build record id {record_id:?}"),
-        });
-    }
+    // The shared record discipline: the same id grammar as every record
+    // family, and the schema-version gate before the strict parse so a
+    // record from before a hard cut surfaces the version error rather than a
+    // bare serde variant error ([[RFC-0005:C-EVIDENCE]]).
+    // The shared grammar, remapped into the image-selection error class
+    // (E4003) the call site owns — the same remap the scratchpad applies
+    // ([[RFC-0001:C-ERROR-CODES]]).
+    crate::record::validate_record_id("image build record", record_id)
+        .map_err(|error| reject(error.to_string()))?;
     let path = root
         .join(super::record::RECORDS_DIR)
         .join(record_id)
@@ -323,12 +323,29 @@ fn load_record(root: &Path, record_id: &str) -> Result<ImageRecord, InferlabErro
             path.display()
         ),
     })?;
+    let header: crate::record::SchemaVersionHeader =
+        serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode {
+            path: path.clone(),
+            source,
+        })?;
+    if header.schema_version != ImageRecord::SCHEMA_VERSION {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "image build record {record_id:?} has unsupported schema version {}; expected {}",
+                header.schema_version,
+                ImageRecord::SCHEMA_VERSION
+            ),
+        });
+    }
     serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode { path, source })
 }
 
 /// The launching host's OCI platform. The container runs on the invoking
 /// host, so the process architecture is the architecture an assembly must
-/// declare to run here.
+/// declare to run here. This is the selection question — which recorded
+/// assembly runs here — answered without invoking a builder; the build-side
+/// key those assemblies are recorded under is the daemon-reported platform
+/// observed by `crate::image::tool::DockerBuilderTool::host_platform`.
 fn host_platform() -> String {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
@@ -336,6 +353,49 @@ fn host_platform() -> String {
         other => other,
     };
     format!("{}/{arch}", std::env::consts::OS)
+}
+
+/// The weight locators a containerized launch exposes at their host paths,
+/// in mount order: the served model first, then each auxiliary artifact,
+/// deduplicated, absolute host paths only
+/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+fn weight_mount_locators<'a>(
+    model_locator: Option<&'a str>,
+    auxiliary: impl IntoIterator<Item = &'a str>,
+) -> Vec<&'a str> {
+    let mut locators: Vec<&str> = Vec::new();
+    for locator in model_locator.into_iter().chain(auxiliary) {
+        if locator.starts_with('/') && !locators.contains(&locator) {
+            locators.push(locator);
+        }
+    }
+    locators
+}
+
+/// The pixi-wrap separator an integration-rendered command must carry for the
+/// containerized substitution: everything after `--` is the container's
+/// command. A process missing the seam would launch on the host while the
+/// record claims an image-backed launch, so it is an image-selection
+/// rejection, not a silent skip (E4003: an image-substitution precondition,
+/// not a response validation, which is the E2001 family).
+fn containerization_seam<'a>(
+    process_id: &str,
+    argv: &'a [String],
+) -> Result<&'a [String], InferlabError> {
+    let Some(separator) = argv.iter().position(|arg| arg == "--") else {
+        return Err(reject(format!(
+            "server process {process_id:?} rendered a command without the containerization \
+             seam (no `--` separator) the image-backed launch requires"
+        )));
+    };
+    let inner = &argv[separator + 1..];
+    if inner.is_empty() {
+        return Err(reject(format!(
+            "server process {process_id:?} rendered an empty command behind the \
+             containerization seam"
+        )));
+    }
+    Ok(inner)
 }
 
 /// Substitute the built image for the locally installed serving environment:
@@ -348,7 +408,7 @@ pub(crate) fn containerize(
     image_id: &str,
     machines: &std::collections::BTreeMap<String, crate::workspace::MachineBinding>,
     explicit_entrypoint: bool,
-) {
+) -> Result<(), InferlabError> {
     let remote = execution.server.placement.remote_containers.clone();
     // One nonce per resolution: the container name is the cleanup handle —
     // a container is a daemon-owned object the process-group kill never
@@ -375,13 +435,7 @@ pub(crate) fn containerize(
             inferlab_runtime::plan::LaunchPlan::Ssh { .. } => remote.get(&process.machine),
             inferlab_runtime::plan::LaunchPlan::Local => None,
         };
-        let Some(separator) = argv.iter().position(|arg| arg == "--") else {
-            continue;
-        };
-        let inner: Vec<String> = argv[separator + 1..].to_vec();
-        if inner.is_empty() {
-            continue;
-        }
+        let inner = containerization_seam(&process.id, argv)?.to_vec();
         let container_name = format!("inferlab-{}-{nonce}", process.id);
         let mut container = vec![
             "docker".to_owned(),
@@ -430,19 +484,20 @@ pub(crate) fn containerize(
                 container.push(capability.clone());
             }
         }
-        if let Some(locator) = process
-            .allocation
-            .model_locator
-            .as_deref()
-            .filter(|locator| locator.starts_with('/'))
-        {
-            // The explicit --mount form, not the -v shorthand: at least one
-            // site docker proxy mis-parses the shorthand's `:ro` suffix on
-            // same-path binds and silently drops the mount (verified on real
-            // hardware), while the long form passes through.
-            container.push("--mount".to_owned());
-            container.push(format!(
-                "type=bind,source={locator},target={locator},readonly"
+        // Auxiliary weights resolve through the same machine-local bindings
+        // as the served model, so the container exposes them at the same
+        // host paths the rendered command references
+        // ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+        for locator in weight_mount_locators(
+            process.allocation.model_locator.as_deref(),
+            process
+                .allocation
+                .auxiliary_model_locators
+                .iter()
+                .map(|entry| entry.locator.as_str()),
+        ) {
+            container.extend(inferlab_runtime::container::docker_bind_mount_readonly(
+                locator, locator,
             ));
         }
         let cache = process.allocation.runtime_cache.path.display().to_string();
@@ -547,5 +602,102 @@ pub(crate) fn containerize(
             name: container_name,
             image: image_id.to_owned(),
         });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::weight_mount_locators;
+
+    #[test]
+    fn containerize_requires_the_containerization_seam() -> Result<(), Box<dyn std::error::Error>> {
+        for argv in [
+            vec!["python".to_owned(), "-m".to_owned(), "serve".to_owned()],
+            vec!["pixi".to_owned(), "run".to_owned(), "--".to_owned()],
+        ] {
+            let error = super::containerization_seam("server-0", &argv)
+                .err()
+                .ok_or("argv without the containerization seam must be rejected")?;
+            assert_eq!(error.code(), "E4003", "{error}");
+            assert!(error.to_string().contains("\"server-0\""), "{error}");
+        }
+        let wrapped = [
+            "pixi".to_owned(),
+            "run".to_owned(),
+            "--".to_owned(),
+            "serve".to_owned(),
+        ];
+        let inner = super::containerization_seam("server-0", &wrapped)?;
+        assert_eq!(inner, ["serve"]);
+        Ok(())
+    }
+
+    #[test]
+    fn weight_mounts_cover_the_model_and_each_auxiliary_once() {
+        let locators = weight_mount_locators(
+            Some("/models/served"),
+            [
+                "/models/draft",
+                // A duplicate of the served locator mounts once.
+                "/models/served",
+                // A relative locator is not a host path the container can
+                // expose at itself; only absolute locators mount.
+                "relative/draft",
+            ],
+        );
+        assert_eq!(locators, ["/models/served", "/models/draft"]);
+    }
+
+    #[test]
+    fn weight_mounts_tolerate_a_missing_model_locator() {
+        let locators = weight_mount_locators(None, ["/models/draft"]);
+        assert_eq!(locators, ["/models/draft"]);
+    }
+
+    #[test]
+    fn image_record_read_rejects_a_malformed_id() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let error = super::load_record(temp.path(), "../escape")
+            .err()
+            .ok_or("a malformed id must be rejected")?;
+        assert!(
+            error
+                .to_string()
+                .contains("invalid image build record id \"../escape\""),
+            "{error}"
+        );
+        // The error class, not just the text: consumers may branch on it
+        // ([[RFC-0001:C-ERROR-CODES]]).
+        assert_eq!(error.code(), "E4003");
+        Ok(())
+    }
+
+    #[test]
+    fn image_record_read_gates_the_schema_version_before_strict_decode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let dir = temp
+            .path()
+            .join(crate::record::RECORDS_DIR)
+            .join("legacy-record");
+        std::fs::create_dir_all(&dir)?;
+        // A record from before the current schema: body content no longer
+        // matches the strict shape, and the version gate must fire first.
+        std::fs::write(
+            dir.join(crate::record::RECORD_FILE),
+            "{\"schema_version\":1,\"legacy\":true}\n",
+        )?;
+
+        let error = super::load_record(temp.path(), "legacy-record")
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            error.as_deref().is_some_and(|error| error.contains(
+                "image build record \"legacy-record\" has unsupported schema version 1; expected 2"
+            )),
+            "{error:?}"
+        );
+        Ok(())
     }
 }

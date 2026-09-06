@@ -26,20 +26,20 @@ inferlab-token-engine smg-worker \
   --listen <host:port> \
   --model <model-locator> \
   --served-model-name <public-name> \
-  --tensor-parallel-size <N> \
-  --default-max-output-tokens <count> \
-  --max-num-batched-tokens <count>
+  --tensor-parallel-size <N>
 ```
 
-It also accepts these memory and prefix-cache options. InferLab passes each one
-only when the serve role declares it, so an omitted setting leaves the Engine's
-own default in force rather than restating it:
+It also accepts these token-budget, memory, and prefix-cache options. InferLab
+passes each one only when the serve role declares it, so an omitted setting
+leaves the Engine's own default in force rather than restating it:
 
 ```text
-  --gpu-memory-utilization-percent <1-100>      # default 100
-  --workspace-reserve-mib <count>               # default 0
-  --prefix-cache-gpu-entries <count>            # per rank, default 8
-  --prefix-cache-host-memory-percent <1-100>    # default 75
+  --default-max-output-tokens <count>
+  --max-num-batched-tokens <count>
+  --gpu-memory-utilization-percent <1-100>
+  --workspace-reserve-mib <count>
+  --prefix-cache-gpu-entries <count>            # per rank
+  --prefix-cache-host-memory-percent <1-100>
   --prefix-cache-cpu-bytes-per-rank <bytes>     # repeated once per rank
   --prefix-cache-numa-node-per-rank <node>      # repeated once per rank
 ```
@@ -108,12 +108,9 @@ model locator and placement, process outcomes, and cleanup. The generic
 integration identity therefore describes the contract; the workspace source
 evidence identifies its concrete implementation.
 
-Grout Qwen3-4B on SM120 is the first real baseline. Grout supplies
-`inferlab-token-engine`; there is intentionally no
-`inferlab-integration-grout` package. The retained initial-contract record
-qualifies its exact TP1 source baseline only. The `0.2.0` package candidate and
-wider single-process TP widths remain unqualified until an exact downstream
-route produces a real record.
+Grout supplies `inferlab-token-engine`; there is intentionally no
+`inferlab-integration-grout` package. The backend support matrix tracks the
+present qualification state.
 
 ## Failure and cleanup
 

@@ -3,6 +3,7 @@
 import json
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     BenchAgenticResultEvidence,
     BenchAgenticSourceVerification,
     BenchArtifactLevelInput,
@@ -71,7 +72,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         )
         if acquisition.error is not None:
             return BenchClientResult(
-                schema_version=1,
+                schema_version=SCHEMA_VERSION,
                 status=ClientStatus.failed,
                 completed_requests=0,
                 failed_requests=0,
@@ -94,7 +95,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         )
     except OSError as launch_error:
         return BenchClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             completed_requests=0,
             failed_requests=0,
@@ -243,7 +244,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         if agentic_error is not None and agentic_error != reason:
             reason = f"{reason}; {agentic_error}"
         return BenchClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             completed_requests=completed_requests,
             failed_requests=failed_requests,
@@ -299,7 +300,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
     )
     result_error = "; ".join(errors) or None
     return BenchClientResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.failed if result_error else ClientStatus.succeeded,
         completed_requests=completed_requests,
         failed_requests=failed_requests,

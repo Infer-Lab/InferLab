@@ -1,5 +1,6 @@
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
+use crate::record::state_dir;
 use crate::workspace::StackDefinition;
 use inferlab_runtime::interrupt;
 use serde::{Deserialize, Serialize};
@@ -13,8 +14,8 @@ use std::process::Command;
 
 pub(crate) mod status;
 
-const PIXI_MANIFEST: &str = "pixi.toml";
-const PIXI_LOCK: &str = "pixi.lock";
+pub(crate) const PIXI_MANIFEST: &str = "pixi.toml";
+pub(crate) const PIXI_LOCK: &str = "pixi.lock";
 pub(crate) const PIXI_ENVS_DIR: &str = ".pixi/envs";
 
 /// The on-disk prefix Pixi installs `environment` into — the same
@@ -443,22 +444,30 @@ pub(crate) fn check_environment(
     Ok(EnvironmentCheck::NotUsable(diagnostics))
 }
 
+/// The one spelling of the pixi usability probe's argument words
+/// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]): the local gate executes them
+/// directly and the remote preflight interpolates them into its script, so
+/// "the probe succeeded" means the same probe on both sides.
+pub(crate) fn pixi_usability_probe_words(environment: &str) -> [&str; 8] {
+    [
+        "run",
+        "--locked",
+        "--no-install",
+        "--executable",
+        "-e",
+        environment,
+        "--",
+        "true",
+    ]
+}
+
 /// The raw pixi usability probe, with no confirmation-marker involvement:
 /// `None` on success, `Some(diagnostics)` on failure. The one place either
 /// usability path actually shells out to pixi.
 fn probe_pixi_usable(root: &Path, environment: &str) -> Result<Option<String>, InferlabError> {
     let output = Command::new("pixi")
         .current_dir(root)
-        .args([
-            "run",
-            "--locked",
-            "--no-install",
-            "--executable",
-            "-e",
-            environment,
-            "--",
-            "true",
-        ])
+        .args(pixi_usability_probe_words(environment))
         .output()
         .map_err(|source| InferlabError::LaunchPixi {
             action: "environment check",
@@ -473,8 +482,64 @@ fn probe_pixi_usable(root: &Path, environment: &str) -> Result<Option<String>, I
     }
 }
 
-pub(crate) const CONFIRMATION_CACHE_DIR: &str = ".inferlab/cache/environments";
+pub(crate) const CONFIRMATION_CACHE_DIR: &str = concat!(state_dir!(), "/cache/environments");
 const CONFIRMATION_SCHEMA_VERSION: u32 = 1;
+
+// The marker field names are shared by the serde shape below, the canonical
+// byte template, and the remote shell fragment — one vocabulary, three
+// renderings ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
+const CONFIRMATION_SCHEMA_FIELD: &str = "schema_version";
+const CONFIRMATION_MANIFEST_FIELD: &str = "pixi_manifest_sha256";
+const CONFIRMATION_LOCK_FIELD: &str = "pixi_lock_sha256";
+
+/// The marker file name, shared by the local cache path and the remote
+/// preflight's shell fragment.
+pub(crate) const CONFIRMATION_MARKER_FILE: &str = "confirmed.json";
+
+/// The canonical marker text with `%s` placeholders for the two digests: the
+/// local writer substitutes them, the remote shell writer feeds them to
+/// `printf`, so both sides produce byte-identical content.
+fn confirmation_marker_template() -> String {
+    format!(
+        "{{\"{CONFIRMATION_SCHEMA_FIELD}\":{CONFIRMATION_SCHEMA_VERSION},\"{CONFIRMATION_MANIFEST_FIELD}\":\"%s\",\"{CONFIRMATION_LOCK_FIELD}\":\"%s\"}}"
+    )
+}
+
+fn confirmation_marker_bytes(manifest_sha256: &str, lock_sha256: &str) -> Vec<u8> {
+    let text = confirmation_marker_template()
+        .replacen("%s", manifest_sha256, 1)
+        .replacen("%s", lock_sha256, 1);
+    format!("{text}\n").into_bytes()
+}
+
+/// The remote confirmation check as a shell condition over the preflight
+/// script's `$marker`, `$manifest`, and `$lock` variables, rendered from the
+/// same constants the local reader uses. A missing, malformed, or
+/// stale-version marker fails the condition and falls through to the real
+/// probe exactly as a local miss does.
+pub(crate) fn confirmation_marker_check_shell() -> String {
+    let extract = |field: &str| {
+        format!("$(sed -n 's/.*\"{field}\": *\"\\([^\"]*\\)\".*/\\1/p' \"$marker\" 2>/dev/null)")
+    };
+    let schema = format!(
+        "$(sed -n 's/.*\"{CONFIRMATION_SCHEMA_FIELD}\": *\\([0-9][0-9]*\\).*/\\1/p' \"$marker\" 2>/dev/null)"
+    );
+    format!(
+        "test -f \"$marker\" && [ \"{schema}\" = \"{CONFIRMATION_SCHEMA_VERSION}\" ] && [ \"{}\" = \"$manifest\" ] && [ \"{}\" = \"$lock\" ]",
+        extract(CONFIRMATION_MANIFEST_FIELD),
+        extract(CONFIRMATION_LOCK_FIELD),
+    )
+}
+
+/// The remote marker write, rendered from the canonical template so the
+/// remote side publishes exactly the local byte shape under the preflight
+/// script's `$marker`, `$manifest`, and `$lock` variables.
+pub(crate) fn confirmation_marker_write_shell() -> String {
+    let template = confirmation_marker_template();
+    format!(
+        "mkdir -p \"$(dirname \"$marker\")\" && printf '{template}\\n' \"$manifest\" \"$lock\" > \"$marker.tmp.$$\" && mv \"$marker.tmp.$$\" \"$marker\""
+    )
+}
 
 #[derive(Deserialize, Serialize)]
 struct ConfirmationMarker {
@@ -486,7 +551,7 @@ struct ConfirmationMarker {
 fn confirmation_marker_path(root: &Path, environment: &str) -> PathBuf {
     root.join(CONFIRMATION_CACHE_DIR)
         .join(environment)
-        .join("confirmed.json")
+        .join(CONFIRMATION_MARKER_FILE)
 }
 
 /// A missing, malformed, or wrong-schema-version marker is indistinguishable
@@ -515,14 +580,11 @@ fn write_confirmation_marker(
         operation: "create environment confirmation cache directory",
         source,
     })?;
-    let marker = ConfirmationMarker {
-        schema_version: CONFIRMATION_SCHEMA_VERSION,
-        pixi_manifest_sha256: manifest_sha256.to_owned(),
-        pixi_lock_sha256: lock_sha256.to_owned(),
-    };
-    let bytes = serde_json::to_vec_pretty(&marker)
-        .map_err(|source| InferlabError::EncodeOutput { source })?;
-    atomic_write(&path, &bytes, None)
+    atomic_write(
+        &path,
+        &confirmation_marker_bytes(manifest_sha256, lock_sha256),
+        None,
+    )
 }
 
 pub(crate) fn lock_workspace_with_progress(
@@ -815,4 +877,114 @@ fn atomic_write(
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    const MANIFEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const LOCK: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Run the remote check fragment exactly as the preflight script would,
+    /// over a real marker file.
+    fn remote_check_accepts(marker: &Path, manifest: &str, lock: &str) -> bool {
+        let script = format!(
+            "marker={}; manifest={manifest}; lock={lock}; if {}; then exit 0; else exit 1; fi",
+            marker.display(),
+            confirmation_marker_check_shell(),
+        );
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn write_marker(
+        root: &Path,
+        environment: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = confirmation_marker_path(root, environment);
+        fs::create_dir_all(path.parent().ok_or("marker path has no parent")?)?;
+        fs::write(&path, bytes)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn remote_check_accepts_what_the_local_writer_produces()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let marker = write_marker(
+            temp.path(),
+            "vllm",
+            &confirmation_marker_bytes(MANIFEST, LOCK),
+        )?;
+
+        assert!(remote_check_accepts(&marker, MANIFEST, LOCK));
+        // The local reader round-trips the canonical bytes.
+        let marker = read_confirmation_marker(temp.path(), "vllm")
+            .ok_or("local reader rejected the canonical marker")?;
+        assert_eq!(marker.pixi_manifest_sha256, MANIFEST);
+        assert_eq!(marker.pixi_lock_sha256, LOCK);
+        Ok(())
+    }
+
+    /// Run the remote write fragment exactly as the preflight script would,
+    /// then confirm both the remote check and the local reader accept the
+    /// marker it produced.
+    #[test]
+    fn remote_write_produces_a_marker_both_sides_accept() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let marker = confirmation_marker_path(temp.path(), "vllm");
+        let script = format!(
+            "marker={}; manifest={MANIFEST}; lock={LOCK}; {}",
+            marker.display(),
+            confirmation_marker_write_shell(),
+        );
+        let status = Command::new("sh").arg("-c").arg(script).status()?;
+        assert!(status.success(), "remote marker write failed: {status}");
+
+        assert!(remote_check_accepts(&marker, MANIFEST, LOCK));
+        let written = read_confirmation_marker(temp.path(), "vllm")
+            .ok_or("local reader rejected the remote-written marker")?;
+        assert_eq!(written.pixi_manifest_sha256, MANIFEST);
+        assert_eq!(written.pixi_lock_sha256, LOCK);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_check_rejects_stale_and_mismatched_markers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        // The retired two-line text format.
+        let legacy = write_marker(
+            temp.path(),
+            "vllm",
+            format!("{MANIFEST}\n{LOCK}\n").as_bytes(),
+        )?;
+        assert!(!remote_check_accepts(&legacy, MANIFEST, LOCK));
+        // A future format version is stale, never trusted.
+        let future = write_marker(
+            temp.path(),
+            "vllm",
+            format!(
+                "{{\"schema_version\":2,\"pixi_manifest_sha256\":\"{MANIFEST}\",\"pixi_lock_sha256\":\"{LOCK}\"}}\n"
+            )
+            .as_bytes(),
+        )?;
+        assert!(!remote_check_accepts(&future, MANIFEST, LOCK));
+        // A digest mismatch is a miss, never a hit.
+        let marker = write_marker(
+            temp.path(),
+            "vllm",
+            &confirmation_marker_bytes(MANIFEST, LOCK),
+        )?;
+        assert!(!remote_check_accepts(&marker, LOCK, MANIFEST));
+        Ok(())
+    }
 }

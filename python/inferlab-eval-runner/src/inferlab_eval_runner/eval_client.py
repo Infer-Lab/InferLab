@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     CaseDeadline,
     ClientStatus,
     EvalClientRequest,
@@ -14,11 +15,11 @@ from inferlab_measurement_sdk import (
     EvalFailureKind,
     MeasurementDataAssetPreparationRequest,
     MeasurementDataAssetPreparationResult,
-    MeasurementDataAssetRemoteMetadataOutcome,
-    MeasurementDataAssetSourceBytesOutcome,
     RawArtifact,
+    failed_data_asset_preparation_result,
     load_json_object,
     parse_args,
+    write_result,
 )
 
 from inferlab_eval_runner import (
@@ -29,6 +30,7 @@ from inferlab_eval_runner import (
     task_resolution,
 )
 from inferlab_eval_runner.task_resolution import (
+    failed_task_resolution_evidence,
     lm_eval_task_argument,
 )
 
@@ -63,12 +65,7 @@ def run_lm_eval(
     except (AttributeError, ImportError, OSError, TypeError, ValueError) as error:
         resolution_path.write_text(
             json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": "failed",
-                    "task_source": lm_eval_task_argument(definition),
-                    "error": str(error),
-                },
+                failed_task_resolution_evidence(lm_eval_task_argument(definition), str(error)),
                 indent=2,
                 sort_keys=True,
             )
@@ -76,7 +73,7 @@ def run_lm_eval(
             encoding="utf-8",
         )
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics={},
             native_command=[],
@@ -98,7 +95,7 @@ def run_lm_eval(
         raw_artifacts.extend(probe.raw_artifacts)
         if probe.failure_kind is not None:
             return EvalClientResult(
-                schema_version=1,
+                schema_version=SCHEMA_VERSION,
                 status=ClientStatus.failed,
                 metrics={},
                 native_command=[],
@@ -133,7 +130,7 @@ def run_lm_eval(
     if publisher.callback is not None:
         publisher.publish(
             EvalClientResult(
-                schema_version=1,
+                schema_version=SCHEMA_VERSION,
                 status=ClientStatus.failed,
                 metrics={},
                 native_command=command,
@@ -160,7 +157,7 @@ def run_lm_eval(
             native_execution.sample_file_artifacts(normalization.lm_eval_sample_files(raw_dir))
         )
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics={},
             native_command=command,
@@ -180,7 +177,7 @@ def run_lm_eval(
         if attempt.returncode == 0:
             message = "lm-eval produced no results JSON"
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics={},
             native_command=command,
@@ -192,7 +189,7 @@ def run_lm_eval(
         )
     if len(result_paths) != 1:
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics={},
             native_command=command,
@@ -213,7 +210,7 @@ def run_lm_eval(
         trial_summary = None
     except (OSError, TypeError, ValueError) as error:
         return EvalClientResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             metrics={},
             native_command=command,
@@ -224,7 +221,7 @@ def run_lm_eval(
             error=f"lm-eval result normalization failed: {error}",
         )
     return EvalClientResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         metrics=metrics,
         normalized_metrics=normalized_metrics,
@@ -251,20 +248,12 @@ def execute(
     raise TypeError(f"unsupported Eval definition {type(definition).__name__}")
 
 
-def write_client_result(
-    path: Path, result: EvalClientResult | MeasurementDataAssetPreparationResult
-) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-    temporary.replace(path)
-
-
 def handle_eval_execution(input_text: str, output: Path) -> EvalClientResult:
     request = EvalClientRequest.model_validate_json(input_text)
     deadline = CaseDeadline(request.case_budget_seconds)
     result = execute(
         request,
-        lambda checkpoint: write_client_result(output, checkpoint),
+        lambda checkpoint: write_result(output, checkpoint),
         deadline,
     )
     if result.status == ClientStatus.succeeded:
@@ -303,16 +292,7 @@ def main() -> int:
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
         if args.prepare_source:
-            result = MeasurementDataAssetPreparationResult(
-                schema_version=1,
-                status=ClientStatus.failed,
-                effective_selection=None,
-                readiness=None,
-                cache_stores=[],
-                remote_metadata=MeasurementDataAssetRemoteMetadataOutcome.unavailable,
-                source_bytes=MeasurementDataAssetSourceBytesOutcome.unavailable,
-                error=str(error),
-            )
+            result = failed_data_asset_preparation_result(error)
         else:
             try:
                 result = EvalClientResult.model_validate_json(output.read_text(encoding="utf-8"))
@@ -320,7 +300,7 @@ def main() -> int:
                 result.error = f"{result.error}; Eval runner failed: {error}"
             except (OSError, ValueError):
                 result = EvalClientResult(
-                    schema_version=1,
+                    schema_version=SCHEMA_VERSION,
                     status=ClientStatus.failed,
                     metrics={},
                     native_command=[],
@@ -328,7 +308,7 @@ def main() -> int:
                     failure_kind=None,
                     error=str(error),
                 )
-    write_client_result(output, result)
+    write_result(output, result)
     return 0
 
 

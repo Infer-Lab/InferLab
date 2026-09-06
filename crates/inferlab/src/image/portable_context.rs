@@ -66,9 +66,9 @@ mod tests {
     fn guarded_workspace() -> LoadedWorkspace {
         let mut model_weights = BTreeMap::new();
         model_weights.insert(
-            "dsv4".to_owned(),
+            "deepseek-v4-flash".to_owned(),
             ModelWeightBinding {
-                locator: Some("/secret/weights/dsv4".to_owned()),
+                locator: Some("/secret/weights/deepseek-v4-flash".to_owned()),
                 machine_locators: BTreeMap::new(),
             },
         );
@@ -88,7 +88,7 @@ mod tests {
             },
         );
         LoadedWorkspace {
-            root: PathBuf::from("/work/dsv4-workspace"),
+            root: PathBuf::from("/work/deepseek-v4-flash-workspace"),
             config: WorkspaceConfig {
                 external_images: BTreeMap::new(),
                 schema_version: 2,
@@ -125,10 +125,10 @@ mod tests {
     fn guard_rejects_machine_private_facts_in_portable_text() {
         let workspace = guarded_workspace();
         for leak in [
-            "FROM base\nCOPY /secret/weights/dsv4 /weights\n",
+            "FROM base\nCOPY /secret/weights/deepseek-v4-flash /weights\n",
             "LABEL host=gpu-node-7\n",
             "ENV TARGET=operator@gpu-node-7\n",
-            "WORKDIR /work/dsv4-workspace\n",
+            "WORKDIR /work/deepseek-v4-flash-workspace\n",
             "ENV STRAY=/home/operator/data\n",
         ] {
             assert!(

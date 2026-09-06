@@ -107,22 +107,17 @@ fn toolchain_python_sources(
     }
 
     let repository = manifest_dir.join("../..");
-    let packages = [
-        (
-            "inferlab_eval_runner",
-            "python/inferlab-eval-runner/src/inferlab_eval_runner",
-        ),
-        (
-            "inferlab_bench_runner",
-            "python/inferlab-bench-runner/src/inferlab_bench_runner",
-        ),
-        (
-            "inferlab_measurement_sdk",
-            "python/inferlab-measurement-sdk/src/inferlab_measurement_sdk",
-        ),
-    ];
+    // The toolchain Python payload membership has one manifest, shared with
+    // the crate staging script and the packaging test
+    // (scripts/toolchain-python-members.txt).
+    let manifest = repository.join("scripts/toolchain-python-members.txt");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let members = std::fs::read_to_string(&manifest)?;
     let mut sources = Vec::new();
-    for (package, relative) in packages {
+    for member in members.lines().filter(|line| !line.is_empty()) {
+        let (relative, package) = member.split_once(' ').ok_or_else(|| {
+            format!("toolchain Python manifest member has no package name: {member}")
+        })?;
         let root = repository.join(relative);
         println!("cargo:rerun-if-changed={}", root.display());
         sources.extend(collect_source_tree(&root, &root, Some(Path::new(package)))?);
@@ -139,17 +134,20 @@ fn plugin_sources(manifest_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dy
     }
 
     let repository = manifest_dir.join("../..");
-    let mut sources = vec![
-        (PathBuf::from("LICENSE"), repository.join("LICENSE")),
-        (
-            PathBuf::from("docs/backend-support.md"),
-            repository.join("docs/backend-support.md"),
-        ),
-    ];
-    for top in [".claude-plugin", ".agents", "plugins"] {
-        let root = repository.join(top);
-        println!("cargo:rerun-if-changed={}", root.display());
-        sources.extend(collect_source_tree(&repository, &root, None)?);
+    // The plugin payload membership has one manifest, shared with the release
+    // tarball and the crate staging scripts (scripts/plugin-package-members.txt).
+    let manifest = repository.join("scripts/plugin-package-members.txt");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let members = std::fs::read_to_string(&manifest)?;
+    let mut sources = Vec::new();
+    for member in members.lines().filter(|line| !line.is_empty()) {
+        let source = repository.join(member);
+        println!("cargo:rerun-if-changed={}", source.display());
+        if source.is_dir() {
+            sources.extend(collect_source_tree(&repository, &source, None)?);
+        } else {
+            sources.push((PathBuf::from(member), source));
+        }
     }
     sources.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(sources)

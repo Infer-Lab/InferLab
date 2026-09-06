@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-pub(crate) const WORKSPACE: &str = include_str!("../fixtures/dsv4-workspace.toml");
+pub(crate) const WORKSPACE: &str = include_str!("../fixtures/deepseek-v4-flash-workspace.toml");
 
 pub(crate) fn resolved_ranks(
     server: &Value,
@@ -79,7 +79,10 @@ impl TestWorkspace {
         // ensure_usable checks this prefix exists on disk before shelling
         // out to pixi at all.
         fs::create_dir_all(root.path().join(".pixi/envs/vllm"))?;
-        fs::write(root.path().join(".gitignore"), ".inferlab/local.toml\n")?;
+        fs::write(
+            root.path().join(".gitignore"),
+            ".inferlab/local.toml\n.inferlab/ssh-events.log\n",
+        )?;
         fs::write(
             inferlab.join("local.toml"),
             format!(
@@ -101,6 +104,7 @@ impl TestWorkspace {
         write_executable(&bin.join("pixi"), PIXI)?;
         write_executable(&bin.join("inferlab-adapter-vllm"), ADAPTER)?;
         write_executable(&bin.join("fixture-server"), FIXTURE_SERVER)?;
+        write_executable(&bin.join("ssh"), SSH)?;
         write_executable(&bin.join("nsys"), NSYS)?;
         write_executable(&bin.join("fixture-eval-client"), EVAL_CLIENT)?;
         write_executable(&bin.join("fixture-bench-client"), BENCH_CLIENT)?;
@@ -154,6 +158,10 @@ impl TestWorkspace {
             .current_dir(self.root.path().join("vendor/vllm"))
             .env("PATH", path)
             .env("XDG_DATA_HOME", &self.data_home)
+            .env(
+                "FAKE_SSH_EVENTS",
+                self.root.path().join(".inferlab/ssh-events.log"),
+            )
             .env("FIXTURE_BENCH_MARKER", &self.bench_marker)
             .env("FIXTURE_EVAL_MARKER", &self.eval_marker)
             .env("FIXTURE_CAPTURE_EVENTS", &self.capture_events)
@@ -172,7 +180,7 @@ impl TestWorkspace {
     pub(crate) fn run(&self) -> Result<Output, Box<dyn Error>> {
         Ok(self
             .command()
-            .args(["recipe", "run", "dsv4-qualify"])
+            .args(["recipe", "run", "deepseek-v4-flash-qualify"])
             .output()?)
     }
 
@@ -196,18 +204,18 @@ impl TestWorkspace {
                 1,
             )
             .replacen(
-                "[servers.dsv4-qualify.roles.serve.parallelism.attention]\n",
-                "[servers.dsv4-qualify.roles.prefill]\nreplicas = 2\n\n[servers.dsv4-qualify.roles.prefill.parallelism.attention]\n",
+                "[servers.deepseek-v4-flash-qualify.roles.serve.parallelism.attention]\n",
+                "[servers.deepseek-v4-flash-qualify.roles.prefill]\nreplicas = 2\n\n[servers.deepseek-v4-flash-qualify.roles.prefill.parallelism.attention]\n",
                 1,
             )
             .replacen(
-                "[servers.dsv4-qualify.roles.serve.settings]\n",
-                "[servers.dsv4-qualify.roles.prefill.settings]\n",
+                "[servers.deepseek-v4-flash-qualify.roles.serve.settings]\n",
+                "[servers.deepseek-v4-flash-qualify.roles.prefill.settings]\n",
                 1,
             )
             .replace(
-                "[servers.dsv4-qualify.cases.tp2.parallelism.outer]",
-                "[servers.dsv4-qualify.roles.decode]\nreplicas = 2\n\n[servers.dsv4-qualify.cases.tp2.parallelism.outer]",
+                "[servers.deepseek-v4-flash-qualify.cases.tp2.parallelism.outer]",
+                "[servers.deepseek-v4-flash-qualify.roles.decode]\nreplicas = 2\n\n[servers.deepseek-v4-flash-qualify.cases.tp2.parallelism.outer]",
             )
             .replace("cache = { start = \"cold\" }", "cache = { start = \"uncontrolled\" }");
         fs::write(self.root.path().join(".inferlab/workspace.toml"), config)?;
@@ -301,6 +309,29 @@ fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
 }
 
 const PIXI: &str = include_str!("../fixtures/bin/pixi.sh");
+
+const SSH: &str = r#"#!/bin/sh
+while [ "$1" != -- ]; do shift; done
+shift
+target="$1"
+shift
+if [ "$1" = cat ]; then
+  printf '%s logs\n' "$target" >> "$FAKE_SSH_EVENTS"
+  eval "exec cat -- $3"
+fi
+command="$3"
+case "$command" in
+  *INFERLAB_LAUNCH_FILE*) operation=materialize ;;
+  *INFERLAB_PREFLIGHT*) operation=preflight ;;
+  *INFERLAB_HANDLE*) operation=launch ;;
+  *INFERLAB_CLEANUP*) operation=cleanup ;;
+  *INFERLAB_HARDWARE*) operation=hardware ;;
+  *) operation=status ;;
+esac
+printf '%s %s\n' "$target" "$operation" >> "$FAKE_SSH_EVENTS"
+printf 'fixture login banner\n'
+eval "exec bash -c $command"
+"#;
 
 const ADAPTER: &str = include_str!("../fixtures/bin/recipe-adapter.py");
 

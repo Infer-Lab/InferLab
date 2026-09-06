@@ -1,4 +1,5 @@
 import asyncio
+import json
 import socket
 import sys
 import threading
@@ -12,6 +13,10 @@ from inferlab_bench_runner.aiperf import (
     prepare_aiperf_execution,
 )
 from inferlab_bench_runner.aiperf_phase_barrier import (
+    CAPTURE_OPEN,
+    PROFILE_BARRIER_ENV,
+    PROFILE_BARRIER_REQUIRES_WARMUP_ENV,
+    PROFILE_READY,
     AiperfAgenticProfileBarrierStrategy,
     AiperfProfileBarrierStrategy,
     PhaseProgress,
@@ -27,6 +32,24 @@ from inferlab_measurement_sdk import (
 from .support import (
     request,
 )
+
+
+def test_phase_barrier_tokens_match_the_shared_fixture() -> None:
+    fixture = Path(__file__).parents[3] / "protocol" / "fixtures" / "aiperf-phase-barrier.json"
+    pinned = cast(dict[str, str], json.loads(fixture.read_text(encoding="utf-8")))
+
+    # The Rust control plane asserts the same four tokens
+    # (workload/runtime/bench/phase_barrier.rs, [[ADR-0031]]).
+    assert set(pinned) == {
+        "profile_barrier_env",
+        "profile_barrier_requires_warmup_env",
+        "profile_ready_message",
+        "capture_open_message",
+    }
+    assert pinned["profile_barrier_env"] == PROFILE_BARRIER_ENV
+    assert pinned["profile_barrier_requires_warmup_env"] == PROFILE_BARRIER_REQUIRES_WARMUP_ENV
+    assert pinned["profile_ready_message"].encode() == PROFILE_READY
+    assert pinned["capture_open_message"].encode() == CAPTURE_OPEN
 
 
 def test_config_maps_native_warmup_before_the_concurrency_profile(tmp_path: Path) -> None:

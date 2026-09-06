@@ -2940,6 +2940,12 @@
           "description": "An lm-eval task run with a pass threshold on the chosen metric.",
           "type": "object",
           "properties": {
+            "base_seed": {
+              "description": "The effective base seed of the trial schedule, resolved by the\ncontrol plane: the declared seed, or the shared fallback when the\ndefinition declared none ([[RFC-0004:C-LM-EVAL]]).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
             "concurrency": {
               "type": [
                 "integer",
@@ -3010,6 +3016,7 @@
               "default": {}
             },
             "seed": {
+              "description": "The seed the definition declared, absent when it omitted one; a\nsingle trial with no declared seed does not invent one.",
               "type": [
                 "integer",
                 "null"
@@ -3040,6 +3047,7 @@
             "kind",
             "task",
             "prompt",
+            "base_seed",
             "trials",
             "metric",
             "threshold",
@@ -3907,12 +3915,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `9` (serialized as the\nstring `\"9\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `10` (serialized as the\nstring `\"10\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 9.",
+          "description": "Protocol version 10.",
           "type": "string",
-          "const": "9"
+          "const": "10"
         }
       ]
     },

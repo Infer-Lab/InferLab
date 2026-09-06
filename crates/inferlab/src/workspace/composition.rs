@@ -4,8 +4,8 @@
 use super::catalog_validation::validate_workspace;
 use super::definitions::{
     BenchDefinition, DEFAULT_LOCAL_FILE, EvalDefinition, ExternalImageDefinition, ImageDefinition,
-    ModelDefinition, RecipeDefinition, ServerDefinition, StackDefinition, WORKSPACE_FILE,
-    WORKSPACE_FRAGMENT_DIR, WorkloadSuiteDefinition, WorkspaceConfig,
+    ImplicitCaseSelection, ModelDefinition, RecipeDefinition, ServerDefinition, StackDefinition,
+    WORKSPACE_FILE, WORKSPACE_FRAGMENT_DIR, WorkloadSuiteDefinition, WorkspaceConfig,
     deserialize_defaulted_bench_definitions,
 };
 use super::invalid;
@@ -14,6 +14,7 @@ use super::realization::validate_pixi;
 use super::source::{git_text, inspect_workspace, symlink_guard, workspace_mutations};
 use super::state::{LoadedWorkspace, WorkspaceIdentity, WorkspaceSnapshot};
 use crate::InferlabError;
+use crate::record::STATE_DIR;
 use inferlab_protocol::ServeTopology;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -54,15 +55,21 @@ struct WorkspaceFragment {
 }
 /// Lightweight projection of the same Git revision and dirty authority used
 /// by resolved execution snapshots. Runtime records, observations, the local
-/// binding file, caches, and scratchpads remain outside source identity.
-pub(crate) fn workspace_identity(root: &Path) -> Result<WorkspaceIdentity, InferlabError> {
-    let exclusions = [
-        PathBuf::from(DEFAULT_LOCAL_FILE),
-        PathBuf::from(".inferlab/cache"),
-        PathBuf::from(".inferlab/records"),
-        PathBuf::from(".inferlab/runtime"),
-        PathBuf::from(".inferlab/scratchpads"),
-    ];
+/// binding file, caches, and scratchpads remain outside source identity. The
+/// exclusion set comes from the shared constructor in `source` so this
+/// verdict can never diverge from the snapshot's.
+pub(crate) fn workspace_identity(
+    root: &Path,
+    local: Option<&Path>,
+) -> Result<WorkspaceIdentity, InferlabError> {
+    // The effective local bindings file, resolved as a run would resolve it:
+    // an explicit selection wins, otherwise the default in-root file. A
+    // missing file still yields its declared path for exclusion purposes.
+    let local_path = local
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join(DEFAULT_LOCAL_FILE));
+    let local_path = fs::canonicalize(&local_path).unwrap_or(local_path);
+    let exclusions = super::source::source_exclusions(root, &local_path);
     Ok(WorkspaceIdentity {
         revision: git_text(root, &["rev-parse", "HEAD"])?,
         dirty: !workspace_mutations(root, &exclusions)?.is_empty(),
@@ -149,7 +156,7 @@ pub(crate) fn load_workspace_config(root: &Path) -> Result<WorkspaceConfig, Infe
     // The shared parent of WORKSPACE_FILE and WORKSPACE_FRAGMENT_DIR: a
     // symlinked `.inferlab` would route every final-node guard below through
     // the link, so the intermediate component is guarded first.
-    symlink_guard(&root.join(".inferlab"), ".inferlab")?;
+    symlink_guard(&root.join(STATE_DIR), STATE_DIR)?;
     let workspace_path = root.join(WORKSPACE_FILE);
     symlink_guard(&workspace_path, WORKSPACE_FILE)?;
     let mut config: WorkspaceConfig = load_toml(&workspace_path)?;
@@ -245,15 +252,13 @@ fn push_catalog_section(
 }
 
 fn case_selection_label(server: &ServerDefinition) -> String {
-    if let Some(default) = &server.default_case {
-        format!("default {default}")
-    } else if server.cases.len() == 1 {
-        server.cases.keys().next().map_or_else(
-            || "base server".to_owned(),
-            |case| format!("sole case {case}"),
-        )
-    } else {
-        "base server".to_owned()
+    match server.implicit_case_selection() {
+        ImplicitCaseSelection::Default(case) => format!("default {case}"),
+        ImplicitCaseSelection::Sole(case) => format!("sole case {case}"),
+        ImplicitCaseSelection::Base => "base server".to_owned(),
+        // Resolution rejects this selection; name it instead of claiming a
+        // base server that would fail to resolve.
+        ImplicitCaseSelection::Ambiguous => "ambiguous (no default case)".to_owned(),
     }
 }
 

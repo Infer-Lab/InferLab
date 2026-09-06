@@ -1,5 +1,5 @@
 use inferlab_fake_engine::{
-    EchoEngine, EngineError, FinishReason, GenerateOutput, GenerateRequest, TokenEngine,
+    EchoEngine, EngineError, FinishReason, GenerateOutput, GenerateRequest,
 };
 
 #[test]

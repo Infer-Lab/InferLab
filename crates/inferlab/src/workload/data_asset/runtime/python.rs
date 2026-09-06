@@ -52,12 +52,7 @@ pub(super) fn run_phase(
         path: directory.clone(),
         source,
     })?;
-    let paths = ClientProcessPaths {
-        request: directory.join("request.json"),
-        result: directory.join("result.json"),
-        stdout: directory.join("stdout.log"),
-        stderr: directory.join("stderr.log"),
-    };
+    let paths = ClientProcessPaths::for_directory(&directory);
     let outcome = run_unbounded_client::<MeasurementDataAssetPreparationResult>(
         command,
         request,
@@ -100,13 +95,8 @@ fn observe(
         path: std::env::temp_dir(),
         source,
     })?;
-    request.artifact_dir = directory.path().join("artifacts");
-    let paths = ClientProcessPaths {
-        request: directory.path().join("request.json"),
-        result: directory.path().join("result.json"),
-        stdout: directory.path().join("stdout.log"),
-        stderr: directory.path().join("stderr.log"),
-    };
+    request.artifact_dir = ClientProcessPaths::artifact_dir(directory.path());
+    let paths = ClientProcessPaths::for_directory(directory.path());
     let outcome = run_unbounded_client::<MeasurementDataAssetPreparationResult>(
         command,
         &request,

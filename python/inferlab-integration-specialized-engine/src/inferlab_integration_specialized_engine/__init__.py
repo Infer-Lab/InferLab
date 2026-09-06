@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated
 
 from inferlab_adapter_sdk import (
+    ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
@@ -11,8 +12,8 @@ from inferlab_adapter_sdk import (
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
     CaptureWindowHttpActionSpec,
+    EndpointDeclaration,
     EndpointProtocol,
-    EndpointRequirement,
     FrontendCoRendering,
     FrontendGatewayComponent,
     FrontendProcessRole,
@@ -59,10 +60,11 @@ from inferlab_adapter_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .auxiliary import reject_auxiliary_locators, validate_auxiliary_models
+
 _ADAPTER_DISTRIBUTION = "inferlab-integration-specialized-engine"
 _GATEWAY_BACKEND = "smg"
 _GATEWAY_IMPLEMENTATION = "tokenspeed-smg"
-_DEFERRED_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
 
 
 class PrefixCacheRank(BaseModel):
@@ -87,8 +89,8 @@ class EngineContractSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    default_max_output_tokens: Annotated[int, Field(ge=1)] = 16
-    max_num_batched_tokens: Annotated[int, Field(ge=1)] = 12_288
+    default_max_output_tokens: Annotated[int, Field(ge=1)] | None = None
+    max_num_batched_tokens: Annotated[int, Field(ge=1)] | None = None
     gpu_memory_utilization_percent: Annotated[int, Field(ge=1, le=100)] | None = None
     workspace_reserve_mib: Annotated[int, Field(ge=0)] | None = None
     prefix_cache_gpu_entries: Annotated[int, Field(ge=1)] | None = None
@@ -190,11 +192,9 @@ def _pure_tp_parallelism(
     return effective, tensor_parallel_size
 
 
-def _public_endpoint() -> EndpointRequirement:
-    return EndpointRequirement(
+def _public_endpoint() -> EndpointDeclaration:
+    return EndpointDeclaration(
         protocol=EndpointProtocol(),
-        completions_path="/v1/completions",
-        chat_completions_path="/v1/chat/completions",
         server_metrics=ServerMetricsEndpointRequirement(path="/metrics", port="prometheus"),
         prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
         # SMG serves the conditioning fan-out at the admin router next to
@@ -209,6 +209,7 @@ def _public_endpoint() -> EndpointRequirement:
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
     """Plan one token Engine behind one SMG Gateway."""
+    validate_auxiliary_models(input)
     if input.topology != ServeTopology.single:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
@@ -399,6 +400,7 @@ def _render_engine(
     input: RenderServeInput,
     allocation: ServeProcessAllocationModelRank,
 ) -> RenderedServeProcess:
+    reject_auxiliary_locators(allocation)
     endpoint = allocation.endpoint
     if endpoint is None:
         raise AdapterOperationError(
@@ -430,12 +432,10 @@ def _render_engine(
         input.model.served_name,
         "--tensor-parallel-size",
         str(tensor_parallel_size),
-        "--default-max-output-tokens",
-        str(settings.default_max_output_tokens),
-        "--max-num-batched-tokens",
-        str(settings.max_num_batched_tokens),
     ]
     for option, value in (
+        ("--default-max-output-tokens", settings.default_max_output_tokens),
+        ("--max-num-batched-tokens", settings.max_num_batched_tokens),
         ("--gpu-memory-utilization-percent", settings.gpu_memory_utilization_percent),
         ("--workspace-reserve-mib", settings.workspace_reserve_mib),
         ("--prefix-cache-gpu-entries", settings.prefix_cache_gpu_entries),
@@ -475,13 +475,13 @@ def _render_gateway(
                 "smg",
                 "launch",
                 "--host",
-                "0.0.0.0",
+                allocation.endpoint.host,
                 "--port",
                 str(allocation.endpoint.port),
                 "--prometheus-port",
                 str(prometheus.port),
                 "--worker-startup-timeout-secs",
-                str(_DEFERRED_WORKER_STARTUP_TIMEOUT_SECS),
+                str(ROUTER_WORKER_STARTUP_TIMEOUT_SECS),
                 "--worker-urls",
                 f"grpc://{engine_endpoint.host}:{engine_endpoint.port}",
                 "--model-path",

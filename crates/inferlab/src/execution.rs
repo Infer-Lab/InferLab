@@ -1,7 +1,7 @@
 use crate::workload::MeasurementPlan;
 use crate::workspace::WorkspaceSnapshot;
 use inferlab_protocol::{
-    CaptureTargetRequirement, EndpointRequirement, GatewayPlan, KvTransferMechanism, Parallelism,
+    CaptureTargetRequirement, EndpointDeclaration, GatewayPlan, KvTransferMechanism, Parallelism,
     PdRouterPlan, ProtocolVersion, ReadinessProbe, RenderInputDeclaration, ServeRoleKind,
     ServeRoleLink, ServeTopology, SettingValue,
 };
@@ -113,6 +113,12 @@ pub(crate) struct ServerPlan {
     /// serve declaration carries no synthetic acceptance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synthetic_acceptance: Option<SyntheticAcceptancePlan>,
+    /// The declared auxiliary weight artifacts with their logical model
+    /// identities ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]); empty when
+    /// undeclared. Effective per-machine locators ride each process
+    /// allocation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_models: Vec<AuxiliaryModelPlan>,
     /// The closed frontend boundary: logical components, their explicit
     /// process bindings, and every concrete process realizing those
     /// components. A routed topology has this section; a direct Engine does
@@ -326,7 +332,7 @@ pub(crate) struct RolePlan {
     pub declared_settings: BTreeMap<String, SettingValue>,
     pub effective_settings: BTreeMap<String, SettingValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_endpoint: Option<EndpointRequirement>,
+    pub public_endpoint: Option<EndpointDeclaration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub render_inputs: Vec<RenderInputDeclaration>,
     pub replicas: Vec<RoleReplicaPlan>,
@@ -351,6 +357,20 @@ pub(crate) struct RoleReplicaPlan {
 pub(crate) struct ModelPlan {
     pub id: String,
     pub served_name: String,
+    /// The weight binding's shared fallback locator, controller-usable by
+    /// declaration; recorded so controller-side measurements can resolve it
+    /// against a fully remote server later ([[RFC-0003:C-RESOLUTION]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_locator: Option<String>,
+}
+
+/// One declared auxiliary weight artifact's logical identity
+/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]); the effective per-machine locators
+/// ride each process allocation's `auxiliary_model_locators`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct AuxiliaryModelPlan {
+    pub kind: inferlab_protocol::AuxiliaryModelKind,
+    pub model: ModelPlan,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -394,4 +414,29 @@ pub(crate) enum PlacementSelectionSource {
     Explicit,
     Default,
     Sole,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelPlan;
+
+    // Records written before the fallback locator existed must still decode:
+    // an absent member is simply no fallback.
+    #[test]
+    fn model_plan_decodes_a_record_written_without_a_fallback_locator()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let legacy: ModelPlan = serde_json::from_str(r#"{"id": "m", "served_name": "m"}"#)?;
+        assert_eq!(legacy.fallback_locator, None);
+
+        let current: ModelPlan = serde_json::from_str(
+            r#"{"id": "m", "served_name": "m", "fallback_locator": "/models/m"}"#,
+        )?;
+        assert_eq!(current.fallback_locator.as_deref(), Some("/models/m"));
+
+        let encoded = serde_json::to_value(&current)?;
+        assert_eq!(encoded["fallback_locator"], "/models/m");
+        let encoded_legacy = serde_json::to_value(&legacy)?;
+        assert!(encoded_legacy.get("fallback_locator").is_none());
+        Ok(())
+    }
 }

@@ -1,0 +1,3 @@
+python/inferlab-eval-runner/src/inferlab_eval_runner inferlab_eval_runner
+python/inferlab-bench-runner/src/inferlab_bench_runner inferlab_bench_runner
+python/inferlab-measurement-sdk/src/inferlab_measurement_sdk inferlab_measurement_sdk

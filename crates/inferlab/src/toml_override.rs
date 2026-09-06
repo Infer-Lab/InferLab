@@ -56,6 +56,56 @@ impl InvocationOverride {
         })
     }
 
+    /// The path parsed as TOML key segments, so a quoted dotted key is one
+    /// segment. The sentinel value keeps this a path-only parse; the TOML
+    /// parser, rather than an Inferlab path parser, owns dotted and
+    /// quoted-key semantics.
+    pub(crate) fn path_segments(&self) -> Result<Vec<String>, InferlabError> {
+        let mut document: toml::Table =
+            toml::from_str(&format!("{} = 0", self.path)).map_err(|error| {
+                invalid_override(&self.raw, format!("invalid TOML key path: {error}"))
+            })?;
+        let mut segments = Vec::new();
+        loop {
+            if document.len() != 1 {
+                return Err(invalid_override(
+                    &self.raw,
+                    "setting path must be one TOML key path".to_owned(),
+                ));
+            }
+            let Some((key, value)) = document.into_iter().next() else {
+                return Err(invalid_override(
+                    &self.raw,
+                    "setting path must not be empty".to_owned(),
+                ));
+            };
+            segments.push(key);
+            match value {
+                toml::Value::Table(next) => document = next,
+                _ => return Ok(segments),
+            }
+        }
+    }
+
+    /// The override with its first `leading` parsed key segments removed; the
+    /// remaining path is re-spelled so dotted segments stay quoted.
+    pub(crate) fn under_segments(&self, leading: usize) -> Option<Self> {
+        let segments = self.path_segments().ok()?;
+        if segments.len() <= leading {
+            return None;
+        }
+        Some(Self {
+            index: self.index,
+            raw: self.raw.clone(),
+            path: segments[leading..]
+                .iter()
+                .map(|segment| spell_key_segment(segment))
+                .collect::<Vec<_>>()
+                .join("."),
+            raw_value: self.raw_value.clone(),
+        })
+    }
+
     pub(crate) fn assignment(&self) -> Result<ExactTomlOverride, InferlabError> {
         ExactTomlOverride::parse(&self.path, &self.raw_value, &self.raw)
     }
@@ -160,6 +210,18 @@ fn invalid_override(raw_override: &str, message: String) -> InferlabError {
     InferlabError::InvalidOverride {
         value: raw_override.to_owned(),
         message,
+    }
+}
+
+fn spell_key_segment(segment: &str) -> String {
+    if !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        segment.to_owned()
+    } else {
+        format!("\"{}\"", segment.replace('\\', "\\\\").replace('"', "\\\""))
     }
 }
 

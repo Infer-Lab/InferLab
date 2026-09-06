@@ -9,7 +9,7 @@ use super::record::{
     AssemblyOutcome, ExportEvidence, ImageRecord, ImageRecordStore, ImageStatus, PackageEvidence,
     ProductManifest, ValidationOutcome,
 };
-use super::tool::{BuilderTool, CommandSink, NativeCommand};
+use super::tool::{BuilderTool, CommandRecorder, NativeCommand};
 use super::{EligibilityPlan, ResolvedImageBuild};
 use super::{entrypoint, materialization, package_closure, portable_context};
 use crate::InferlabError;
@@ -18,7 +18,7 @@ use crate::environment;
 use crate::execution::Workflow;
 use crate::progress::{Phase, Progress};
 use crate::recipe::{self, RecipeStatus};
-use crate::record::{RecordIdentity, new_record_id};
+use crate::record::{CACHE_DIR, RecordIdentity, new_record_id};
 use crate::resolve::{ResolveRequest, resolve};
 use crate::workspace::LoadedWorkspace;
 use inferlab_runtime::interrupt;
@@ -154,18 +154,15 @@ pub(crate) fn run<T: BuilderTool>(
 /// Persists each native command into the durable record before it executes
 /// ([[RFC-0007:C-IMAGE-BUILD]]), so a build killed mid-command still shows
 /// exactly what was launched.
-struct RecordingSink<'a> {
-    store: &'a mut ImageRecordStore,
+fn record_command(
+    store: &mut ImageRecordStore,
     index: usize,
-}
-
-impl CommandSink for RecordingSink<'_> {
-    fn push(&mut self, command: NativeCommand) -> Result<(), InferlabError> {
-        self.store.record_mut().assemblies[self.index]
-            .native_commands
-            .push(command);
-        self.store.rewrite()
-    }
+    command: NativeCommand,
+) -> Result<(), InferlabError> {
+    store.record_mut().assemblies[index]
+        .native_commands
+        .push(command);
+    store.rewrite()
 }
 
 fn assemble<T: BuilderTool>(
@@ -230,7 +227,7 @@ fn assemble<T: BuilderTool>(
     // afterwards and fails the assembly.
     let copy_root = build_dir.join("wheel-build").join("sources");
     let redirects = build_env_redirects(&activation, &resolved.image.source_paths, &copy_root)?;
-    let wheel_cache_root = workspace.root.join(".inferlab/cache/wheels");
+    let wheel_cache_root = workspace.root.join(CACHE_DIR).join("wheels");
     let mut copied: std::collections::BTreeMap<PathBuf, PathBuf> =
         std::collections::BTreeMap::new();
     let mut wheels = Vec::new();
@@ -298,10 +295,7 @@ fn assemble<T: BuilderTool>(
                         &build_path,
                         &build_dir,
                         &redirects,
-                        &mut RecordingSink {
-                            store: &mut *store,
-                            index,
-                        },
+                        &mut |command| record_command(&mut *store, index, command),
                     )
                     .and_then(|wheel| adopt_into_cache(wheel, &cache_dir))?;
                     (wheel, false)
@@ -459,17 +453,13 @@ fn assemble<T: BuilderTool>(
         &platform,
         &tag,
         &format!("{build_name}/docker-build.log"),
-        &mut RecordingSink {
-            store: &mut *store,
-            index,
-        },
+        &mut |command| record_command(&mut *store, index, command),
     ) {
         Ok(built) => built,
         Err(error) => {
-            // The runner framed each executed check's exit into the builder
-            // log; reconstruct that evidence so a failed build still says
-            // which checks ran and how ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
-            // A failure before the check layer leaves no marker and no
+            // Reconstruct check evidence from the builder log (framing per
+            // `render_checks_runner`, [[RFC-0002:C-ENVIRONMENT-CHECKS]]); a
+            // failure before the check layer leaves no marker and no
             // fabricated evidence.
             store.record_mut().assemblies[index].environment_checks = image_check_evidence_from_log(
                 &build_dir.join("docker-build.log"),
@@ -515,13 +505,9 @@ fn assemble<T: BuilderTool>(
         index + 1,
         store.record().resolved.assemblies.len(),
     ))?;
-    let inspected = tool.inspect_image(
-        &built.image_id,
-        &mut RecordingSink {
-            store: &mut *store,
-            index,
-        },
-    )?;
+    let inspected = tool.inspect_image(&built.image_id, &mut |command| {
+        record_command(&mut *store, index, command)
+    })?;
     store.record_mut().assemblies[index].entrypoint = Some(inspected.entrypoint);
 
     if let Some(export_dir) = &resolved.export {
@@ -541,14 +527,9 @@ fn assemble<T: BuilderTool>(
             index + 1,
             store.record().resolved.assemblies.len(),
         ))?;
-        let exported = tool.export_image(
-            &built.image_id,
-            &archive,
-            &mut RecordingSink {
-                store: &mut *store,
-                index,
-            },
-        )?;
+        let exported = tool.export_image(&built.image_id, &archive, &mut |command| {
+            record_command(&mut *store, index, command)
+        })?;
         store.record_mut().assemblies[index].export = Some(ExportEvidence {
             path: archive,
             archive_sha256: exported.archive_sha256,
@@ -1072,7 +1053,7 @@ fn build_wheel(
     build_path: &Path,
     build_dir: &Path,
     env_overrides: &[(String, String)],
-    sink: &mut dyn CommandSink,
+    sink: &mut CommandRecorder<'_>,
 ) -> Result<materialization::BuiltWheel, InferlabError> {
     let wheel_dir = wheel_build_dir(build_dir, wheel_source);
     std::fs::create_dir_all(&wheel_dir).map_err(|source| InferlabError::EnvironmentIo {
@@ -1125,7 +1106,7 @@ fn build_wheel(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "build".to_owned());
     let sanitized = wheel_source.display().to_string().replace(['/', '\\'], "-");
-    sink.push(NativeCommand {
+    sink(NativeCommand {
         argv: argv.clone(),
         log: Some(format!(
             "{build_name}/wheel-build/out/{sanitized}/build.log"

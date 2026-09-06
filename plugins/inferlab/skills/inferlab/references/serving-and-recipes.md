@@ -62,8 +62,5 @@ does not mutate the stored measurement definition.
 ## Image Selection
 
 `serve start` and `recipe run` accept either
-`--image <IMAGE_BUILD_RECORD>` or `--external-image <ID>`, never both. A built
-image must contain a successful host-platform assembly compatible with the
-server stack and local placement. InferLab probes a declared external image on
-every launch machine and does not pull it automatically. Read
-[Images and ad-hoc execution](images-and-run.md) for build and probe workflows.
+`--image <IMAGE_BUILD_RECORD>` or `--external-image <ID>`, never both; see
+[Built and external image selection](images-and-run.md#built-and-external-image-selection).

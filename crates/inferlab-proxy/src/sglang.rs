@@ -2,8 +2,8 @@
 //! [[RFC-0003:C-SGLANG-PREFILL-DECODE]].
 
 use crate::core::{
-    self, OnClientDrop, ProxyHealthcheckResponse, ProxyHttpError, ProxyMeta, forward_response,
-    join_path, outbound_authorization,
+    self, OnClientDrop, ProxyHealthcheckResponse, ProxyHttpError, forward_response, join_path,
+    outbound_authorization,
 };
 use crate::error::ProxyError;
 use async_stream::stream;
@@ -22,18 +22,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
-pub const ID: &str = "inferlab-sglang-proxy";
 pub const VERSION: u32 = 2;
+
+pub const HEALTHCHECK_PATH: &str = "/healthcheck";
+/// Prefix-cache reset route this proxy serves; SGLang's cache-clearing
+/// vocabulary is `flush_cache`.
+pub const RESET_PREFIX_CACHE_PATH: &str = "/flush_cache";
+pub const PRIME_PREFIX_CACHE_PATH: &str = "/prime_prefix_cache";
+
+pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "SGLang proxy";
-
-pub fn meta() -> ProxyMeta {
-    ProxyMeta {
-        id: ID,
-        version: VERSION,
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -68,11 +69,11 @@ pub async fn run_async(config: Config) -> Result<(), ProxyError> {
 
 fn router(state: ProxyState) -> Router {
     Router::new()
-        .route("/healthcheck", get(healthcheck))
-        .route("/v1/completions", post(completions))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/flush_cache", post(flush_cache))
-        .route("/prime_prefix_cache", post(prime_prefix_cache))
+        .route(HEALTHCHECK_PATH, get(healthcheck))
+        .route(COMPLETIONS_PATH, post(completions))
+        .route(CHAT_COMPLETIONS_PATH, post(chat_completions))
+        .route(RESET_PREFIX_CACHE_PATH, post(flush_cache))
+        .route(PRIME_PREFIX_CACHE_PATH, post(prime_prefix_cache))
         .with_state(state)
 }
 
@@ -178,7 +179,7 @@ async fn completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    request_route(state, headers, body, "/v1/completions").await
+    request_route(state, headers, body, COMPLETIONS_PATH).await
 }
 
 async fn chat_completions(
@@ -186,7 +187,7 @@ async fn chat_completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response<Body>, ProxyHttpError> {
-    request_route(state, headers, body, "/v1/chat/completions").await
+    request_route(state, headers, body, CHAT_COMPLETIONS_PATH).await
 }
 
 async fn request_route(
@@ -530,7 +531,7 @@ fn bootstrap_body(
             "OpenAI completion request body must be a JSON object",
         )
     })?;
-    if path == "/v1/completions" && object.get("prompt").is_some_and(Value::is_array) {
+    if path == COMPLETIONS_PATH && object.get("prompt").is_some_and(Value::is_array) {
         return Err(ProxyHttpError::status(
             StatusCode::BAD_REQUEST,
             "SGLang built-in proxy does not support prompt arrays",
@@ -587,13 +588,13 @@ async fn prime_flow(
     body: &Value,
 ) -> Result<u16, core::PrimeFlowFailure> {
     use core::PrimeFlowFailure;
-    let request_body = bootstrap_body(body, prefill, state.next_room(), "/v1/completions")
+    let request_body = bootstrap_body(body, prefill, state.next_room(), COMPLETIONS_PATH)
         .map_err(PrimeFlowFailure::transport)?;
     let decode = state.next_decode();
     let client = state.client();
     let prefill_response = core::send_json_post_status(
         client.clone(),
-        join_path(&prefill.url, "/v1/completions"),
+        join_path(&prefill.url, COMPLETIONS_PATH),
         &request_body,
         None,
         authorization.as_deref(),
@@ -606,7 +607,7 @@ async fn prime_flow(
         core::expect_2xx("prefill conditioning", prefill_response).await?;
     let decode_response = core::send_json_post_status(
         client,
-        join_path(&decode, "/v1/completions"),
+        join_path(&decode, COMPLETIONS_PATH),
         &request_body,
         None,
         authorization.as_deref(),
@@ -795,12 +796,6 @@ mod tests {
         .map_err(Into::into)
     }
 
-    #[test]
-    fn meta_exports_proxy_identity() {
-        assert_eq!(meta().id, "inferlab-sglang-proxy");
-        assert_eq!(meta().version, 2);
-    }
-
     #[tokio::test]
     async fn non_streaming_completion_dispatches_both_roles_and_drains_prefill() -> Result<()> {
         let decode_seen = Arc::new(Notify::new());
@@ -823,7 +818,7 @@ mod tests {
                 state,
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello"}),
-                "/v1/completions",
+                COMPLETIONS_PATH,
             ),
         )
         .await
@@ -888,7 +883,7 @@ mod tests {
             state,
             HeaderMap::new(),
             request.clone(),
-            "/v1/chat/completions",
+            CHAT_COMPLETIONS_PATH,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -922,7 +917,7 @@ mod tests {
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": ["one", "two"]}),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         )
         .await;
         let error = match result {
@@ -966,7 +961,7 @@ mod tests {
                 state,
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello", "stream": true}),
-                "/v1/completions",
+                COMPLETIONS_PATH,
             ),
         )
         .await
@@ -1026,7 +1021,7 @@ mod tests {
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1090,7 +1085,7 @@ mod tests {
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         ));
         wait_until(&prefill_backend.body_polled).await?;
         tokio::task::yield_now().await;
@@ -1122,7 +1117,7 @@ mod tests {
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         ));
         wait_until(&prefill_backend.body_polled).await?;
         tokio::task::yield_now().await;
@@ -1160,7 +1155,7 @@ mod tests {
                 state,
                 HeaderMap::new(),
                 json!({"model": "m", "prompt": "hello", "stream": true}),
-                "/v1/completions",
+                COMPLETIONS_PATH,
             ),
         )
         .await
@@ -1224,7 +1219,7 @@ mod tests {
             state,
             HeaderMap::new(),
             json!({"model": "m", "prompt": "hello", "stream": true}),
-            "/v1/completions",
+            COMPLETIONS_PATH,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

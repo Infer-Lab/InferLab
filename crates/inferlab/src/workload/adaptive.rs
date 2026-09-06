@@ -135,25 +135,11 @@ fn active_bracket(observations: &[Observation]) -> Option<(f64, f64)> {
     Some((lower, upper))
 }
 
-/// Whether `rate` names a probe point already in `observations`. Guards the
-/// planner against re-proposing a measured rate (which would waste a probe or
-/// stall the bisection).
-///
-/// Exact bit-equality is insufficient: the same probe point can reach the
-/// comparison by two arithmetic paths. A bisection `midpoint` is computed as
-/// `(lower + upper) / 2.0`, whereas the stored rate it should
-/// match may be an `initial_rates` literal or a midpoint from an earlier
-/// bracket; those representations can differ by a few ULPs, so `==` would miss
-/// the match and re-probe.
-///
-/// The bound is a relative tolerance of `EPSILON` scaled to the larger
-/// operand's magnitude (i.e. roughly one ULP at that scale), floored at 1.0 to
-/// give an absolute epsilon near zero. The `4.0` factor widens it to about
-/// four ULPs, which empirically absorbs the handful of add/divide roundings
-/// separating the two paths without merging two genuinely distinct bracket
-/// endpoints (the search-step budget, and the `min_rate_resolution` gate
-/// when configured, stop bisection long before rates approach ULP spacing in
-/// practice).
+/// Whether `rate` names a probe point already in `observations`. The same
+/// probe point can arrive by two arithmetic paths (a fresh bisection midpoint
+/// vs. a stored literal or earlier midpoint) differing by a few ULPs, so `==`
+/// would re-probe; the tolerance is about four ULPs relative to the larger
+/// operand, floored at 1.0 near zero.
 fn observed(observations: &[Observation], rate: f64) -> bool {
     observations.iter().any(|observation| {
         (observation.rate - rate).abs()

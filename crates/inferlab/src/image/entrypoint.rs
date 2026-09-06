@@ -1,6 +1,7 @@
 //! Pixi activation projection and the generated runtime entrypoint contract.
 
 use crate::InferlabError;
+use crate::environment::PIXI_MANIFEST;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -85,7 +86,7 @@ pub(super) fn guard_unmodeled_activation(
     pixi_platform: &str,
     environment: &str,
 ) -> Result<(), InferlabError> {
-    let manifest = root.join("pixi.toml");
+    let manifest = root.join(PIXI_MANIFEST);
     let text = fs::read_to_string(&manifest).map_err(|source| InferlabError::Read {
         path: manifest.clone(),
         source,
@@ -135,7 +136,7 @@ pub(super) fn activation_env(
     pixi_platform: &str,
     environment: &str,
 ) -> Result<BTreeMap<String, String>, InferlabError> {
-    let manifest = root.join("pixi.toml");
+    let manifest = root.join(PIXI_MANIFEST);
     let text = fs::read_to_string(&manifest).map_err(|source| InferlabError::Read {
         path: manifest.clone(),
         source,

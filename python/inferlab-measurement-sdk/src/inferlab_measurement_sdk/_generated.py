@@ -712,13 +712,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['9']]):
+class ProtocolVersion(RootModel[Literal['10']]):
     root: Annotated[
-        Literal['9'],
+        Literal['10'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `9` (serialized as the\nstring `"9"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `10` (serialized as the\nstring `"10"`); a mismatch is rejected before lowering.'
         ),
-    ] = '9'
+    ] = '10'
 
 
 class RawArtifact(BaseModel):
@@ -1054,6 +1054,13 @@ class EvalDefinitionInputLmEval(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    base_seed: Annotated[
+        int,
+        Field(
+            description='The effective base seed of the trial schedule, resolved by the\ncontrol plane: the declared seed, or the shared fallback when the\ndefinition declared none ([[RFC-0004:C-LM-EVAL]]).',
+            ge=0,
+        ),
+    ]
     concurrency: Annotated[int | None, Field(ge=0)] = None
     declared_prompt: Annotated[
         EvalPromptInput | None,
@@ -1072,7 +1079,13 @@ class EvalDefinitionInputLmEval(BaseModel):
         Field(description='The prompt rendering authority resolution selected.'),
     ]
     request_body: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
-    seed: Annotated[int | None, Field(ge=0)] = None
+    seed: Annotated[
+        int | None,
+        Field(
+            description='The seed the definition declared, absent when it omitted one; a\nsingle trial with no declared seed does not invent one.',
+            ge=0,
+        ),
+    ] = None
     task: EvalTaskSourceInput
     threshold: float
     timeout_seconds: Annotated[int, Field(ge=0)]

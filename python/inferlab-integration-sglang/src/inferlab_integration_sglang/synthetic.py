@@ -16,6 +16,7 @@ from inferlab_adapter_sdk import (
     SyntheticAcceptanceInput,
     SyntheticAcceptanceInput2,
     SyntheticAcceptanceOutcome,
+    last_option_value,
     resolve_golden_acceptance_length,
 )
 
@@ -45,29 +46,26 @@ def _parse_num_steps(value: str, role_id: str) -> int:
 def _draft_count(extra_args: list[str], role_id: str) -> int:
     """The operator's speculative step count: the curve lookup coordinate.
 
-    Engine last-wins parsing makes the last occurrence the effective one. A
-    present flag with a malformed value is determinable intent, not an absent
-    signal: fail rather than silently skip the determination.
+    The shared last-wins scan resolves the effective value of the two option
+    spellings; a trailing flag without its value is a typed error there. A
+    malformed effective value is determinable intent, not an absent signal:
+    fail rather than silently skip the determination.
     """
-    num_steps: int | None = None
-    index = 0
-    while index < len(extra_args):
-        argument = extra_args[index]
-        if argument == _NUM_STEPS_FLAG and index + 1 < len(extra_args):
-            num_steps = _parse_num_steps(extra_args[index + 1], role_id)
-            index += 2
-            continue
-        if argument.startswith(f"{_NUM_STEPS_FLAG}="):
-            num_steps = _parse_num_steps(argument.partition("=")[2], role_id)
-        index += 1
-    if num_steps is None:
+    target = last_option_value(
+        extra_args,
+        _NUM_STEPS_FLAG,
+        context=f"role {role_id!r}",
+        purpose="the curve form of the synthetic acceptance declaration",
+    )
+    if target is None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
             f"role {role_id!r} extra_args do not determine {_NUM_STEPS_FLAG}; the "
             "curve form of the synthetic acceptance declaration needs it as the "
             "curve lookup coordinate (use the explicit form otherwise)",
         )
-    return num_steps
+    _, _, value = target
+    return _parse_num_steps(value, role_id)
 
 
 def resolve_synthetic_acceptance(

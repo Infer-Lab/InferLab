@@ -30,18 +30,18 @@ integration = "vllm"
 pixi_environment = "vllm"
 source_paths = ["vendor/flashinfer"]
 
-[servers.dsv4-qualify]
+[servers.deepseek-v4-flash-qualify]
 stack = "vllm"
 model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
 
-[servers.dsv4-qualify.roles.serve]
+[servers.deepseek-v4-flash-qualify.roles.serve]
 
-[servers.dsv4-qualify.cases.base]
+[servers.deepseek-v4-flash-qualify.cases.base]
 
-[servers.dsv4-routed]
+[servers.deepseek-v4-flash-routed]
 stack = "vllm"
 model = "deepseek-v4-flash"
 topology = "single"
@@ -49,54 +49,54 @@ gateway_backend = "fixture-gateway"
 readiness_timeout_seconds = 60
 default_case = "base"
 
-[servers.dsv4-routed.roles.serve]
+[servers.deepseek-v4-flash-routed.roles.serve]
 
-[servers.dsv4-routed.cases.base]
+[servers.deepseek-v4-flash-routed.cases.base]
 
-[servers.dsv4b-qualify]
+[servers.deepseek-v4-flashb-qualify]
 stack = "vllm"
 model = "deepseek-v4-pro"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
 
-[servers.dsv4b-qualify.roles.serve]
+[servers.deepseek-v4-flashb-qualify.roles.serve]
 
-[servers.dsv4b-qualify.cases.base]
+[servers.deepseek-v4-flashb-qualify.cases.base]
 
-[servers.dsv4-qualify-alt-env]
+[servers.deepseek-v4-flash-qualify-alt-env]
 stack = "vllm-alt"
 model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
 
-[servers.dsv4-qualify-alt-env.roles.serve]
+[servers.deepseek-v4-flash-qualify-alt-env.roles.serve]
 
-[servers.dsv4-qualify-alt-env.cases.base]
+[servers.deepseek-v4-flash-qualify-alt-env.cases.base]
 
-[servers.dsv4-qualify-alt-sources]
+[servers.deepseek-v4-flash-qualify-alt-sources]
 stack = "flashinfer-only"
 model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "base"
 
-[servers.dsv4-qualify-alt-sources.roles.serve]
+[servers.deepseek-v4-flash-qualify-alt-sources.roles.serve]
 
-[servers.dsv4-qualify-alt-sources.cases.base]
+[servers.deepseek-v4-flash-qualify-alt-sources.cases.base]
 
-[servers.dsv4-pair]
+[servers.deepseek-v4-flash-pair]
 stack = "vllm"
 model = "deepseek-v4-flash"
 topology = "single"
 readiness_timeout_seconds = 60
 default_case = "pair"
 
-[servers.dsv4-pair.roles.serve]
+[servers.deepseek-v4-flash-pair.roles.serve]
 
-[servers.dsv4-pair.cases.pair.roles.serve]
-replicas = 2
+[servers.deepseek-v4-flash-pair.cases.pair.parallelism.outer]
+tensor_parallel_size = 2
 
 [evals.smoke]
 kind = "openai-smoke"
@@ -119,70 +119,70 @@ timeout_seconds = 60
 evals = ["smoke"]
 gate = "smoke"
 
-[recipes.dsv4-qualify]
-server = "dsv4-qualify"
+[recipes.deepseek-v4-flash-qualify]
+server = "deepseek-v4-flash-qualify"
 workload_suite = "smoke-only"
 
-[recipes.dsv4-routed]
-server = "dsv4-routed"
+[recipes.deepseek-v4-flash-routed]
+server = "deepseek-v4-flash-routed"
 workload_suite = "smoke-only"
 
-[recipes.dsv4b-qualify]
-server = "dsv4b-qualify"
+[recipes.deepseek-v4-flashb-qualify]
+server = "deepseek-v4-flashb-qualify"
 workload_suite = "smoke-only"
 
-[recipes.dsv4-qualify-alt-env]
-server = "dsv4-qualify-alt-env"
+[recipes.deepseek-v4-flash-qualify-alt-env]
+server = "deepseek-v4-flash-qualify-alt-env"
 workload_suite = "smoke-only"
 
-[recipes.dsv4-qualify-alt-sources]
-server = "dsv4-qualify-alt-sources"
+[recipes.deepseek-v4-flash-qualify-alt-sources]
+server = "deepseek-v4-flash-qualify-alt-sources"
 workload_suite = "smoke-only"
 
-[recipes.dsv4-pair]
-server = "dsv4-pair"
+[recipes.deepseek-v4-flash-pair]
+server = "deepseek-v4-flash-pair"
 workload_suite = "smoke-only"
 
-[images.dsv4-runtime]
+[images.deepseek-v4-flash-runtime]
 stack = "vllm"
 base_image = "example.com/micromamba:1.0"
 platforms = ["linux/amd64", "linux/arm64"]
 packages = ["vendor/vllm", "vendor/flashinfer"]
 
-[[images.dsv4-runtime.validations]]
-recipe = "dsv4-qualify"
+[[images.deepseek-v4-flash-runtime.validations]]
+recipe = "deepseek-v4-flash-qualify"
 
-[[images.dsv4-runtime.validations]]
-recipe = "dsv4b-qualify"
+[[images.deepseek-v4-flash-runtime.validations]]
+recipe = "deepseek-v4-flashb-qualify"
 
-[images.dsv4-runtime-foreign]
+[images.deepseek-v4-flash-runtime-foreign]
 stack = "vllm"
 base_image = "example.com/micromamba:1.0"
 platforms = ["linux/arm64"]
 
-[images.dsv4-runtime-native]
+[images.deepseek-v4-flash-runtime-native]
 stack = "vllm"
 base_image = "example.com/micromamba:1.0"
 platforms = ["linux/amd64"]
 
-[[images.dsv4-runtime-native.validations]]
-recipe = "dsv4-qualify"
+[[images.deepseek-v4-flash-runtime-native.validations]]
+recipe = "deepseek-v4-flash-qualify"
 
-[[images.dsv4-runtime-native.validations]]
-recipe = "dsv4b-qualify"
+[[images.deepseek-v4-flash-runtime-native.validations]]
+recipe = "deepseek-v4-flashb-qualify"
 
-[images.dsv4-runtime-bare]
+[images.deepseek-v4-flash-runtime-bare]
 stack = "vllm"
 base_image = "example.com/micromamba:1.0"
 platforms = ["linux/amd64"]
 
-[images.dsv4-runtime-routed]
+[images.deepseek-v4-flash-runtime-routed]
 stack = "vllm"
 base_image = "example.com/micromamba:1.0"
 platforms = ["linux/amd64"]
 
-[[images.dsv4-runtime-routed.validations]]
-recipe = "dsv4-routed"
+[[images.deepseek-v4-flash-runtime-routed.validations]]
+recipe = "deepseek-v4-flash-routed"
 
 [external_images.fixture-external]
 reference = "example.com/fixture-vllm@sha256:abababababababababababababababababababababababababababababababab"

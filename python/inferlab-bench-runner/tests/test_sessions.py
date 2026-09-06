@@ -41,7 +41,7 @@ def session_request(tmp_path: Path, artifact_level: str = "diagnostic") -> Bench
     )
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -50,7 +50,7 @@ def session_request(tmp_path: Path, artifact_level: str = "diagnostic") -> Bench
                 "chat_completions_path": "/v1/chat/completions",
                 "server_metrics": None,
             },
-            "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
+            "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "definition": {
                 "session_source": {
                     "dataset": "sharegpt",
@@ -115,8 +115,8 @@ def session_preparation_request(
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "9",
-            "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
+            "protocol_version": "10",
+            "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",
             "session_source": {

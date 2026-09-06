@@ -13,6 +13,7 @@ use super::{
     WorkloadHttpMethod, WorkloadServerMetricsEndpoint,
 };
 use crate::InferlabError;
+use crate::record::STATE_DIR;
 use crate::resolve::current_environment;
 use crate::server::ServerRecord;
 use crate::toml_override::InvocationOverride;
@@ -37,14 +38,6 @@ pub(crate) fn resolve_manual_bench(
     overrides: &[String],
     capture: bool,
 ) -> Result<ManualBenchPlan, InferlabError> {
-    if server.schema_version != ServerRecord::SCHEMA_VERSION {
-        return Err(InferlabError::InvalidConfig {
-            message: format!(
-                "server record {:?} has unsupported schema version {}",
-                server.id, server.schema_version
-            ),
-        });
-    }
     if capture
         && !server
             .process_evidence
@@ -70,20 +63,36 @@ pub(crate) fn resolve_manual_bench(
     let indexed = InvocationOverride::parse_all(overrides)?;
     let (definition, override_plan) =
         apply_bench_overrides(bench_id, declared_definition.clone(), &indexed)?;
-    let model_locator = recorded
-        .server
-        .roles
-        .iter()
-        .flat_map(|role| &role.replicas)
-        .flat_map(|replica| &replica.ranks)
-        .filter(|rank| rank.rank() == Some(0))
-        .find_map(|rank| rank.allocation.model_locator.clone())
-        .ok_or_else(|| InferlabError::InvalidConfig {
-            message: format!(
-                "server record {:?} has no model locator usable by measurements",
-                server.id
-            ),
-        })?;
+    let model_locator = inferlab_serve_domain::measurement_model_locator(
+        recorded
+            .server
+            .roles
+            .iter()
+            .flat_map(|role| &role.replicas)
+            .flat_map(|replica| &replica.ranks)
+            .filter_map(|rank| {
+                let locator = rank.allocation.model_locator.as_deref()?;
+                let controller_local =
+                    matches!(&rank.launch, inferlab_runtime::plan::LaunchPlan::Local);
+                Some((
+                    controller_local,
+                    rank.allocation.model_locator_source,
+                    locator,
+                ))
+            })
+            // The recorded binding fallback is controller-usable by
+            // declaration, exactly as on the recipe path.
+            .chain(recorded.server.model.fallback_locator.as_deref().map(
+                |locator| (false, Some(inferlab_serve_domain::ModelLocatorSource::Fallback), locator),
+            )),
+    )
+    .ok_or_else(|| InferlabError::InvalidConfig {
+        message: format!(
+            "server record {:?} has no model locator usable by measurements on the controller machine (model weight binding {:?})",
+            server.id, recorded.server.model.id
+        ),
+    })?
+    .to_owned();
     let toolchain = toolchain::require_bench()?;
     let command_env = current_environment()?;
     let capture_ids = if capture {
@@ -160,7 +169,7 @@ pub(crate) fn resolve_manual_bench(
             synthetic_acceptance: recorded.server.synthetic_acceptance.is_some(),
             capture_ids: &capture_ids,
             command_env: &command_env,
-            command_cwd: &root.join(".inferlab"),
+            command_cwd: &root.join(STATE_DIR),
         };
     let bench = build_bench_plan(
         bench_id,
@@ -224,7 +233,7 @@ pub(crate) fn resolve_measurements(
             resolve_eval(
                 id,
                 evals,
-                &recipe_measurement_overrides("evals", id, overrides),
+                &recipe_measurement_overrides("evals", &suite.evals, id, overrides),
                 context,
                 eval_toolchain.as_ref(),
             )
@@ -237,7 +246,7 @@ pub(crate) fn resolve_measurements(
             resolve_bench(
                 id,
                 benches,
-                &recipe_measurement_overrides("benches", id, overrides),
+                &recipe_measurement_overrides("benches", &suite.benches, id, overrides),
                 context,
                 bench_toolchain
                     .as_ref()

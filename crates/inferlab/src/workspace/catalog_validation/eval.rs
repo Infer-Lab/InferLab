@@ -4,7 +4,9 @@ use super::{
     invalid, require_nonempty, require_optional_positive, require_positive, validate_request_body,
 };
 use crate::InferlabError;
-use crate::workspace::definitions::{EvalDefinition, EvalPrompt, EvalTaskSource};
+use crate::workspace::definitions::{
+    EvalDefinition, EvalPrompt, EvalTaskSource, effective_lm_eval_base_seed,
+};
 use crate::workspace::source::{is_safe_relative, reject_symlink_components};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -55,7 +57,7 @@ pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(),
             }
             require_optional_positive("limit", id, limit.map(u64::from))?;
             require_positive("trials", id, u64::from(*trials))?;
-            let base_seed = seed.unwrap_or(1234);
+            let base_seed = effective_lm_eval_base_seed(*seed);
             if base_seed.checked_add(u64::from(*trials - 1)).is_none() {
                 return invalid(format!(
                     "eval {id:?} seed schedule exceeds the supported unsigned integer range"

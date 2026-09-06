@@ -124,7 +124,9 @@ pub(crate) struct ImageRecord {
 }
 
 impl ImageRecord {
-    const SCHEMA_VERSION: u32 = 2;
+    /// The current image record schema version; readers gate on it before
+    /// strict decode.
+    pub(crate) const SCHEMA_VERSION: u32 = 2;
 }
 
 /// The shareable-shaped mapping the workflow stops at. Artifact locations are
@@ -256,7 +258,7 @@ impl ImageRecordStore {
     pub(crate) fn rewrite(&self) -> Result<(), InferlabError> {
         let path = self.dir.join(RECORD_FILE);
         let json = serde_json::to_vec_pretty(&self.record)
-            .map_err(|source| InferlabError::EncodeOutput { source })?;
+            .map_err(|source| InferlabError::RecordEncode { source })?;
         fs::write(&path, json).map_err(|source| InferlabError::RecordIo { path, source })
     }
 
@@ -268,7 +270,7 @@ impl ImageRecordStore {
         let manifest = self.product_manifest();
         let path = self.dir.join(MANIFEST_FILE);
         let json = serde_json::to_vec_pretty(&manifest)
-            .map_err(|source| InferlabError::EncodeOutput { source })?;
+            .map_err(|source| InferlabError::RecordEncode { source })?;
         fs::write(&path, json).map_err(|source| InferlabError::RecordIo { path, source })?;
         Ok(manifest)
     }

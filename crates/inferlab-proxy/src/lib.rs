@@ -1,5 +1,6 @@
 pub mod core;
 pub mod error;
+pub mod registry;
 pub mod sglang;
 pub mod trtllm;
 pub mod vllm_mooncake;

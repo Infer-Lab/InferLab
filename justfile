@@ -41,18 +41,26 @@ doc:
 
 # The full Rust gate, exactly what CI's rust job runs
 [group("checks")]
-verify-rust: fmt-check build test clippy doc
+verify-rust: fmt-check build test clippy doc verify-fake-engine-smg
+
+# The smg-transport feature-variant gate for the fake engine
+[group("checks")]
+verify-fake-engine-smg:
+    cargo test -p inferlab-fake-engine --all-targets --features smg-transport
+    cargo clippy -p inferlab-fake-engine --all-targets --features smg-transport -- -D warnings
+    RUSTDOCFLAGS='-D warnings' cargo doc -p inferlab-fake-engine --features smg-transport --no-deps
 
 # The full Python gate, exactly what CI's python job runs
 [group("checks")]
 verify-python:
     pixi run verify-python
 
-# The locked static website gate, exactly what CI's website job runs
+# The locked static website gate, exactly what CI's website job runs; the npm
+# cache lives outside the workspace so verification never dirties it
 [group("checks")]
 verify-website:
-    pixi run -e website website-install
-    pixi run -e website website-verify
+    NPM_CONFIG_CACHE="${TMPDIR:-/tmp}/inferlab-npm-cache" pixi run -e website website-install
+    NPM_CONFIG_CACHE="${TMPDIR:-/tmp}/inferlab-npm-cache" pixi run -e website website-verify
 
 # Everything CI runs
 [group("checks")]

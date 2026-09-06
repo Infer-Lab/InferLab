@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "9",
+  "protocol_version": "10",
   "result": {
     "operation": "render_serve",
     "output": {
@@ -15,7 +15,7 @@
           "rank_count": 1,
           "launch_files": [],
           "command": {
-            "argv": ["python3", "-m", "vllm.entrypoints.cli.main", "serve", "/models/dsv4", "--host", "node-a.example", "--port", "8000"],
+            "argv": ["python3", "-m", "vllm.entrypoints.cli.main", "serve", "/models/deepseek-v4-flash", "--host", "node-a.example", "--port", "8000"],
             "env": {"VLLM_MOONCAKE_BOOTSTRAP_PORT": "29501"}
           }
         },
@@ -28,7 +28,7 @@
           "rank_count": 1,
           "launch_files": [],
           "command": {
-            "argv": ["python3", "-m", "vllm.entrypoints.cli.main", "serve", "/models/dsv4", "--host", "node-b.example", "--port", "8000"],
+            "argv": ["python3", "-m", "vllm.entrypoints.cli.main", "serve", "/models/deepseek-v4-flash", "--host", "node-b.example", "--port", "8000"],
             "env": {}
           }
         },

@@ -294,7 +294,7 @@ fn source_preparation_failure_is_durable_before_server_launch() -> Result<(), Bo
     let output = workspace
         .command()
         .env("FIXTURE_SOURCE_PREPARATION_FAIL", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -339,7 +339,7 @@ fn workspace_eval_uses_the_prepared_local_source_binding() -> Result<(), Box<dyn
     let output = workspace
         .command()
         .env("FIXTURE_LOCAL_SNAPSHOT", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(
@@ -393,7 +393,7 @@ fn release_dataset_preparation_is_cold_then_a_verified_cache_hit() -> Result<(),
             workspace
                 .command()
                 .env("XDG_CACHE_HOME", cache.path())
-                .args(["recipe", "run", "dsv4-qualify"])
+                .args(["recipe", "run", "deepseek-v4-flash-qualify"])
                 .output()?,
         )
     };
@@ -539,7 +539,7 @@ fn replay_dry_run_reports_observed_facts_without_fabrication() -> Result<(), Box
 
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(
         output.status.success(),
@@ -646,7 +646,7 @@ fn primed_replay_conditions_the_cache_from_the_file_prefix() -> Result<(), Box<d
     let output = workspace
         .command()
         .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -683,7 +683,7 @@ fn primed_replay_dry_run_keeps_declared_geometry() -> Result<(), Box<dyn Error>>
     workspace.configure_replay_bench("populations/replay.jsonl", None, true)?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
 
     assert!(
@@ -770,7 +770,7 @@ fn corpus_dry_run_reports_observed_facts_without_fabrication() -> Result<(), Box
 
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(
         output.status.success(),
@@ -853,7 +853,7 @@ fn primed_corpus_conditions_the_cache_from_the_fixed_slice() -> Result<(), Box<d
     let output = workspace
         .command()
         .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -921,7 +921,7 @@ fn legacy_adaptive_target_fields_are_rejected_before_execution() -> Result<(), B
 
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
 
     assert!(!output.status.success());
@@ -943,7 +943,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
     let dry_run = workspace
         .command()
         .env("XDG_DATA_HOME", &missing_data_home)
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     assert!(
         dry_run.status.success(),
@@ -964,7 +964,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
     let output = workspace
         .command()
         .env("XDG_DATA_HOME", &missing_data_home)
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
     assert!(
         output.status.success(),
@@ -1032,7 +1032,7 @@ fn smoke_rejects_an_endpoint_redirect() -> Result<(), Box<dyn Error>> {
         .command()
         .env("XDG_DATA_HOME", workspace.root().join("missing-data"))
         .env("FIXTURE_SMOKE_REDIRECT", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1060,7 +1060,7 @@ fn failed_eval_gate_skips_benches_and_still_stops_the_server() -> Result<(), Box
     let output = workspace
         .command()
         .env("FIXTURE_GATE_SCORE", "0.5")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1087,7 +1087,7 @@ fn unsupported_eval_result_envelope_version_fails_the_case() -> Result<(), Box<d
     let output = workspace
         .command()
         .env("FIXTURE_EVAL_SCHEMA_VERSION", "99")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1112,7 +1112,7 @@ fn successful_eval_envelope_cannot_override_client_process_failure() -> Result<(
     let output = workspace
         .command()
         .env("FIXTURE_EVAL_EXIT_CODE", "7")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1138,7 +1138,7 @@ fn eval_failure_before_native_start_does_not_claim_materialization() -> Result<(
     let output = workspace
         .command()
         .env("FIXTURE_EVAL_NO_RESULT", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1163,7 +1163,7 @@ fn eval_client_deadline_rejects_a_late_result_and_cleans_up_after_timeout()
         .command()
         .env("FIXTURE_EVAL_WAIT", "1")
         .env("FIXTURE_EVAL_NATIVE_CHECKPOINT", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1209,7 +1209,7 @@ fn failed_bench_is_recorded_before_server_cleanup() -> Result<(), Box<dyn Error>
     let output = workspace
         .command()
         .env("FIXTURE_BENCH_FAIL", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1232,7 +1232,7 @@ fn synthetic_population_requires_prompt_targeting_evidence() -> Result<(), Box<d
     let output = workspace
         .command()
         .env("FIXTURE_OMIT_PROMPT_TARGETING", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1257,7 +1257,7 @@ fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(),
     let output = workspace
         .command()
         .env("FIXTURE_RESET_STATUS", "206")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1303,7 +1303,7 @@ fn adaptive_bench_resets_the_prefix_cache_before_every_probe() -> Result<(), Box
     fs::write(manifest, text)?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -1342,7 +1342,7 @@ fn uncontrolled_warmup_failure_never_releases_profiling() -> Result<(), Box<dyn 
     let output = workspace
         .command()
         .env("FIXTURE_BENCH_FAIL_BEFORE_PROFILE", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1369,7 +1369,7 @@ fn invalid_profile_barrier_handshake_is_retained_as_a_failed_case() -> Result<()
     let output = workspace
         .command()
         .env("FIXTURE_BENCH_INVALID_BARRIER", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1402,7 +1402,7 @@ fn primed_dry_run_projects_order_and_conditioning_values() -> Result<(), Box<dyn
     workspace.configure_primed_prefix_bench()?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify", "--dry-run"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
 
     assert!(output.status.success());
@@ -1444,7 +1444,7 @@ fn primed_prefix_preparation_precedes_profiling_and_records_exact_request()
         .command()
         .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
         .env("FIXTURE_RECORD_CLIENT_START", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -1524,7 +1524,7 @@ fn primed_prefix_conditioning_primes_each_data_parallel_rank() -> Result<(), Box
     workspace.configure_attention_data_parallel(2)?;
     let output = workspace
         .command()
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -1582,7 +1582,7 @@ fn primed_prefix_conditioning_rank_failure_fails_the_case_with_evidence()
     let output = workspace
         .command()
         .env("FIXTURE_CONDITIONING_FAIL_RANK", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1630,7 +1630,7 @@ fn primed_bench_requires_server_cache_read_capability() -> Result<(), Box<dyn Er
     let output = workspace
         .command()
         .env("FIXTURE_NO_CACHE_READ_REPORTING", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1653,7 +1653,7 @@ fn primed_cache_start_rejects_gateway_without_conditioning_fanout() -> Result<()
         .command()
         .env("FIXTURE_PD", "mooncake")
         .env("FIXTURE_GATEWAY_NO_CONDITIONING", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1686,7 +1686,7 @@ fn primed_cache_start_allows_single_target_gateway_without_conditioning_fanout()
         .command()
         .env("FIXTURE_PD", "mooncake")
         .env("FIXTURE_GATEWAY_NO_CONDITIONING", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -1742,7 +1742,7 @@ fn primed_prefix_conditioning_fans_out_through_gateway_to_each_replica_and_rank(
         .command()
         .env("FIXTURE_PD", "mooncake")
         .env("FIXTURE_DP_RANKS", "2")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     let recipe: Value = serde_json::from_slice(&output.stdout)?;
@@ -1824,7 +1824,7 @@ fn unsupported_bench_result_envelope_version_fails_the_case() -> Result<(), Box<
     let output = workspace
         .command()
         .env("FIXTURE_BENCH_SCHEMA_VERSION", "99")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1852,7 +1852,7 @@ fn evolved_eval_result_envelope_is_rejected_by_version() -> Result<(), Box<dyn E
     let output = workspace
         .command()
         .env("FIXTURE_EVAL_ENVELOPE_EVOLVED", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1877,7 +1877,7 @@ fn evolved_bench_result_envelope_is_rejected_by_version() -> Result<(), Box<dyn 
     let output = workspace
         .command()
         .env("FIXTURE_BENCH_ENVELOPE_EVOLVED", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());
@@ -1902,7 +1902,7 @@ fn server_start_failure_skips_every_selected_measurement() -> Result<(), Box<dyn
     let output = workspace
         .command()
         .env("FIXTURE_SERVER_START_FAIL", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
 
     assert!(!output.status.success());

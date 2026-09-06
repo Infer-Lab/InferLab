@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
-pub(crate) const WORKSPACE: &str = include_str!("../fixtures/dsv4-workspace.toml");
+pub(crate) const WORKSPACE: &str = include_str!("../fixtures/deepseek-v4-flash-workspace.toml");
 
 use crate::support::{ResolvedProcessProjection, ResolvedRankProjection};
 
@@ -215,8 +215,6 @@ if operation == "plan_serve":
             **({
                 "public_endpoint": {
                     "protocol": "http",
-                    "completions_path": "/v1/completions",
-                    "chat_completions_path": "/v1/chat/completions",
                     "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
                 }
             } if not gateway_backend else {}),
@@ -231,7 +229,7 @@ if operation == "plan_serve":
             "role_id": role["id"],
             "replica_index": 0,
             "device_count": world_size,
-            "ports": [],
+            "ports": ["dup", "dup"] if settings.get("fixture_duplicate_named_port") else [],
             "primary_ports": ["master"],
             "primary_readiness": {"kind": "http", "path": "/v1/models"},
             "worker_readiness": {"kind": "process_alive"},
@@ -277,8 +275,6 @@ if operation == "plan_serve":
                 "effective_settings": {},
                 "endpoint": {
                     "protocol": "http",
-                    "completions_path": "/v1/completions",
-                    "chat_completions_path": "/v1/chat/completions",
                     "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
                 },
                 "readiness": {"kind": "http", "path": "/healthcheck"},
@@ -335,6 +331,8 @@ elif operation == "render_serve":
             "--port", str(allocation["endpoint"]["port"]),
             "--tensor-parallel-size", str(tp),
         ]
+        if settings.get("fixture_render_empty_argv"):
+            argv = []
         if dp > 1:
             argv.extend(["--data-parallel-size", str(dp)])
         if ep > 1:
@@ -389,7 +387,7 @@ else:
     raise ValueError(f"unexpected operation {operation}")
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "9",
+    "protocol_version": "10",
     "result": {
         "operation": operation,
         "output": output,
@@ -514,8 +512,8 @@ print(json.dumps({
 pub(crate) const SPLIT_ROOT: &str = "\
 schema_version = 2
 
-[recipes.dsv4-qualify]
-server = \"dsv4-qualify\"
+[recipes.deepseek-v4-flash-qualify]
+server = \"deepseek-v4-flash-qualify\"
 workload_suite = \"qualify\"
 ";
 
@@ -528,17 +526,17 @@ integration = \"vllm\"
 pixi_environment = \"vllm\"
 source_paths = [\"vendor/vllm\", \"vendor/flashinfer\"]
 
-[servers.dsv4-qualify]
+[servers.deepseek-v4-flash-qualify]
 stack = \"vllm\"
 model = \"deepseek-v4-flash\"
 topology = \"single\"
 readiness_timeout_seconds = 900
 default_case = \"tp2\"
 
-[servers.dsv4-qualify.parallelism.outer]
+[servers.deepseek-v4-flash-qualify.parallelism.outer]
 pipeline_parallel_size = 1
 
-[servers.dsv4-qualify.settings]
+[servers.deepseek-v4-flash-qualify.settings]
 max_model_len = 65536
 kv_cache_dtype = \"fp8\"
 gpu_memory_utilization = 0.95
@@ -546,19 +544,19 @@ trust_remote_code = true
 compilation_config = { cudagraph_mode = \"FULL_AND_PIECEWISE\", custom_ops = [\"all\"] }
 extra_args = [\"--max-num-seqs\", \"64\", \"--language-model-only\"]
 
-[servers.dsv4-qualify.roles.serve.parallelism.attention]
+[servers.deepseek-v4-flash-qualify.roles.serve.parallelism.attention]
 context_parallel_size = 1
 
-[servers.dsv4-qualify.roles.serve.settings]
+[servers.deepseek-v4-flash-qualify.roles.serve.settings]
 block_size = 16
 
-[servers.dsv4-qualify.cases.tp2.parallelism.outer]
+[servers.deepseek-v4-flash-qualify.cases.tp2.parallelism.outer]
 tensor_parallel_size = 2
 
-[servers.dsv4-qualify.cases.tp4.settings]
+[servers.deepseek-v4-flash-qualify.cases.tp4.settings]
 extra_args = [\"--max-num-seqs\", \"128\", \"--enable-prefix-caching\"]
 
-[servers.dsv4-qualify.cases.tp4.parallelism.outer]
+[servers.deepseek-v4-flash-qualify.cases.tp4.parallelism.outer]
 tensor_parallel_size = 4
 ";
 
@@ -693,7 +691,9 @@ if operation == "plan_serve":
         "sglang": "sglang",
         "tensorrt-llm": "trtllm",
     }[framework]
-    implementation_version = "2" if framework == "tensorrt-llm" else "1"
+    # Mirrors the inferlab-proxy module VERSION constants; the control plane
+    # rejects declarations that disagree with the proxy it will run.
+    implementation_version = {"vllm": "1", "sglang": "2", "tensorrt-llm": "2"}[framework]
     co_rendering = {"process_role": "gateway"}
     readiness = {"kind": "http", "path": "/healthcheck"}
     output = {
@@ -718,8 +718,6 @@ if operation == "plan_serve":
             "effective_settings": {},
             "endpoint": {
                 "protocol": "http",
-                "completions_path": "/v1/completions",
-                "chat_completions_path": "/v1/chat/completions",
             },
             "readiness": readiness,
             "ports": [],
@@ -770,7 +768,7 @@ elif operation == "render_serve":
 else:
     raise ValueError(operation)
 
-print(json.dumps({"status": "ok", "protocol_version": "9", "result": {"operation": operation, "output": output}}))
+print(json.dumps({"status": "ok", "protocol_version": "10", "result": {"operation": operation, "output": output}}))
 "#;
 
 pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> String {
@@ -791,17 +789,17 @@ pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> St
             1,
         )
         .replacen(
-            "[servers.dsv4-qualify.roles.serve.parallelism.attention]\n\
+            "[servers.deepseek-v4-flash-qualify.roles.serve.parallelism.attention]\n\
              context_parallel_size = 1\n\n\
-             [servers.dsv4-qualify.roles.serve.settings]\n\
+             [servers.deepseek-v4-flash-qualify.roles.serve.settings]\n\
              block_size = 16",
-            "[servers.dsv4-qualify.roles.prefill.parallelism.attention]\n\
+            "[servers.deepseek-v4-flash-qualify.roles.prefill.parallelism.attention]\n\
              context_parallel_size = 1\n\n\
-             [servers.dsv4-qualify.roles.prefill.settings]\n\
+             [servers.deepseek-v4-flash-qualify.roles.prefill.settings]\n\
              block_size = 16\n\n\
-             [servers.dsv4-qualify.roles.decode.parallelism.attention]\n\
+             [servers.deepseek-v4-flash-qualify.roles.decode.parallelism.attention]\n\
              context_parallel_size = 1\n\n\
-             [servers.dsv4-qualify.roles.decode.settings]\n\
+             [servers.deepseek-v4-flash-qualify.roles.decode.settings]\n\
              block_size = 16",
             1,
         )

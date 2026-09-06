@@ -2,13 +2,13 @@
 
 use crate::InferlabError;
 use crate::atomic_json::AtomicJsonError;
-use crate::record::now_unix_ms;
+use crate::record::{now_unix_ms, state_dir};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-pub(crate) const OBSERVATIONS_DIR: &str = ".inferlab/runtime/observations";
+pub(crate) const OBSERVATIONS_DIR: &str = concat!(state_dir!(), "/runtime/observations");
 const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

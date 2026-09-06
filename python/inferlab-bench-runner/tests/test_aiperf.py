@@ -56,7 +56,7 @@ def test_config_maps_one_concurrency_case_to_headless_aiperf(tmp_path: Path) -> 
         "concurrency": 1,
         "requests": 4,
     }
-    assert tokenizer["name"] == "/models/dsv4"
+    assert tokenizer["name"] == "/models/deepseek-v4-flash"
     assert runtime["ui"] == "none"
 
 
@@ -280,7 +280,7 @@ while [ \"$#\" -gt 0 ]; do
   esac
 done
 if [ \"$metric\" = accept_length ]; then value=2.34; else value=0.67; fi
-printf 'Model,coding,Overall\\ndsv4,%s,%s\\n' \"$value\" \"$value\" > \"$output\"
+printf 'Model,coding,Overall\\ndeepseek-v4-flash,%s,%s\\n' \"$value\" \"$value\" > \"$output\"
 """,
         encoding="utf-8",
     )
@@ -334,7 +334,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "$metric" = accept_length ]; then exit 3; fi
-printf 'Model,coding,Overall\\ndsv4,0.67,0.67\\n' > "$output"
+printf 'Model,coding,Overall\\ndeepseek-v4-flash,0.67,0.67\\n' > "$output"
 """,
         encoding="utf-8",
     )
@@ -355,15 +355,15 @@ printf 'Model,coding,Overall\\ndsv4,0.67,0.67\\n' > "$output"
 def test_speed_report_rejects_duplicate_model_rows_and_invalid_ranges(tmp_path: Path) -> None:
     report = tmp_path / "report.csv"
     report.write_text(
-        "Model,coding,Overall\ndsv4,2.0,2.0\ndsv4,3.0,3.0\n",
+        "Model,coding,Overall\ndeepseek-v4-flash,2.0,2.0\ndeepseek-v4-flash,3.0,3.0\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="exactly one row"):
-        parse_speed_bench_report(report, "dsv4", "coding", "acceptance_length")
+        parse_speed_bench_report(report, "deepseek-v4-flash", "coding", "acceptance_length")
 
-    report.write_text("Model,coding,Overall\ndsv4,1.01,1.01\n", encoding="utf-8")
+    report.write_text("Model,coding,Overall\ndeepseek-v4-flash,1.01,1.01\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"outside \[0, 1\]"):
-        parse_speed_bench_report(report, "dsv4", "coding", "acceptance_rate")
+        parse_speed_bench_report(report, "deepseek-v4-flash", "coding", "acceptance_rate")
 
 
 def test_config_lowers_explicit_request_slo_to_aiperf_metric_tags(tmp_path: Path) -> None:

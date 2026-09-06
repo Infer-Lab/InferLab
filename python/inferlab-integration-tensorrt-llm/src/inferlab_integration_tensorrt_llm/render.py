@@ -30,47 +30,21 @@ from inferlab_adapter_sdk import (
     split_serve_allocations,
 )
 
+from .auxiliary import splice_draft_model
 from .plan import (
     _NATIVE_ROUTING_BACKEND,
     _PREFILL_DECODE_OWNED_OPTIONS,
     _identity,
-    _render_source_path,
     _resolve_synthetic_acceptance,
 )
 from .settings import (
     _INFERLAB_OWNED_OPTIONS,
     TrtllmServeSettings,
-    _merge_yaml_patch,
+    _operator_config,
     _settings,
     _yaml_mapping,
 )
 from .synthetic import synthetic_acceptance_env
-
-
-def _load_worker_config(
-    render_inputs: list[SuppliedRenderInput], path: str | None
-) -> dict[str, object]:
-    if path is None:
-        return {}
-    supplied = next(
-        (item for item in render_inputs if item.source_path == _render_source_path(path)),
-        None,
-    )
-    if supplied is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_request,
-            f"TensorRT-LLM render input {path!r} was not supplied",
-        )
-    try:
-        value: object = yaml.safe_load(supplied.text)
-    except yaml.YAMLError as error:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"cannot parse TensorRT-LLM extra_llm_api_options {path!r}: {error}",
-        ) from error
-    if value is None:
-        return {}
-    return dict(_yaml_mapping(value, repr(path)))
 
 
 def _nested_mapping(config: dict[str, object], key: str) -> dict[str, object]:
@@ -87,10 +61,10 @@ def _worker_launch_text(
     input: RenderServeInput,
     render_inputs: list[SuppliedRenderInput],
     settings: TrtllmServeSettings,
-    kind: ServeRoleKind,
+    allocation: ServeProcessAllocationModelRank,
 ) -> str:
-    config = _load_worker_config(render_inputs, settings.extra_llm_api_options)
-    _merge_yaml_patch(config, settings.extra_llm_api_options_patch or {})
+    config = _operator_config(settings, input.state_dir, render_inputs)
+    splice_draft_model(config, allocation, input.auxiliary_models)
     if input.topology == ServeTopology.prefill_decode:
         config["backend"] = "pytorch"
         transceiver = _nested_mapping(config, "cache_transceiver_config")
@@ -98,7 +72,7 @@ def _worker_launch_text(
         transceiver["transceiver_runtime"] = "PYTHON"
         kv_cache = _nested_mapping(config, "kv_cache_config")
         kv_cache["enable_block_reuse"] = False
-        if kind == ServeRoleKind.prefill:
+        if allocation.role_kind == ServeRoleKind.prefill:
             config["disable_overlap_scheduler"] = True
     return cast(str, yaml.safe_dump(config, sort_keys=False))
 
@@ -164,6 +138,7 @@ def _render_worker(
     if (
         input.topology == ServeTopology.prefill_decode
         or settings.extra_llm_api_options_patch is not None
+        or input.auxiliary_models
     ):
         if input.topology == ServeTopology.prefill_decode and allocation.role_kind not in {
             ServeRoleKind.prefill,
@@ -177,7 +152,7 @@ def _render_worker(
             input,
             allocation.render_inputs,
             settings,
-            allocation.role_kind,
+            allocation,
         )
         launch_file, resolved_path = _launch_file(
             allocation.cache,
@@ -211,6 +186,7 @@ def _render_worker(
             settings,
             input.synthetic_acceptance,
             allocation.role,
+            input.state_dir,
             render_inputs=allocation.render_inputs,
         )
         process_env.update(synthetic_acceptance_env(outcome.acceptance_length))

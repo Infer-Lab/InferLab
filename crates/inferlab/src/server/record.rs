@@ -137,15 +137,10 @@ pub(crate) struct ServerRecord {
 }
 
 impl ServerRecord {
-    /// Version 6 was cut on the protocol-v7 to v8 hard cut (products 0.10 and
-    /// 0.11 predate the separate frontend component evidence and the
-    /// engine-trace capture fields). Version 8 introduces the optional
-    /// synthetic-acceptance evidence member under
-    /// [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]
-    /// ([[RFC-0005:C-EVIDENCE]]); it MUST NOT be encoded under an earlier
-    /// server record version, so older records are stopped by the version
-    /// gate, not by a bare serde variant error.
-    pub(crate) const SCHEMA_VERSION: u32 = 8;
+    /// The recorded model fallback locator ([[RFC-0003:C-RESOLUTION]]) MUST
+    /// NOT be encoded under an earlier server record version, so the version
+    /// gate stops older records before serde does.
+    pub(crate) const SCHEMA_VERSION: u32 = 10;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -340,17 +335,23 @@ impl ServerRecordSession {
     }
 }
 
+/// The evidence labels for the two adapter operations, spelled exactly as
+/// the `AdapterRequest` serde operation tags they describe; the module test
+/// pins them to the wire vocabulary.
+const PLAN_SERVE_OPERATION: &str = "plan_serve";
+const RENDER_SERVE_OPERATION: &str = "render_serve";
+
 fn adapter_operation_evidence(resolved: &ResolvedExecution) -> Vec<AdapterOperationEvidence> {
     let integration = &resolved.server.integration;
     [
         (
-            "plan_serve",
+            PLAN_SERVE_OPERATION,
             &integration.plan_request_sha256,
             &integration.plan_response_sha256,
             integration.plan_timing.as_ref(),
         ),
         (
-            "render_serve",
+            RENDER_SERVE_OPERATION,
             &integration.render_request_sha256,
             &integration.render_response_sha256,
             integration.render_timing.as_ref(),
@@ -379,7 +380,7 @@ pub(super) fn load_record(root: &Path, id: &str) -> Result<ServerRecord, Inferla
     // before a hard schema cut may no longer decode as the current shape at
     // all, and it must still surface the version gate rather than a bare
     // serde variant error.
-    let header: SchemaVersionHeader =
+    let header: crate::record::SchemaVersionHeader =
         serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode {
             path: path.clone(),
             source,
@@ -394,14 +395,6 @@ pub(super) fn load_record(root: &Path, id: &str) -> Result<ServerRecord, Inferla
         });
     }
     serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode { path, source })
-}
-
-/// The lenient version header: only the version, no field policy, so an old
-/// record reaches the version gate even when its body predates the current
-/// record shape.
-#[derive(Deserialize)]
-struct SchemaVersionHeader {
-    schema_version: u32,
 }
 
 fn write_record(root: &Path, record: &ServerRecord) -> Result<(), InferlabError> {
@@ -420,4 +413,64 @@ fn write_record(root: &Path, record: &ServerRecord) -> Result<(), InferlabError>
 
 fn relative_record_path(id: &str, file: &str) -> PathBuf {
     Path::new(RECORDS_DIR).join(id).join(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PLAN_SERVE_OPERATION, RENDER_SERVE_OPERATION};
+    use inferlab_protocol::{
+        AdapterRequest, PlanServeInput, ProtocolVersion, RenderServeInput, ServeModelInput,
+        ServeTopology,
+    };
+
+    fn operation_tag(request: &AdapterRequest) -> Result<String, Box<dyn std::error::Error>> {
+        let value = serde_json::to_value(request)?;
+        value
+            .get("operation")
+            .and_then(|tag| tag.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| "adapter request serialized without an operation tag".into())
+    }
+
+    #[test]
+    fn evidence_operation_labels_match_the_wire_tags() -> Result<(), Box<dyn std::error::Error>> {
+        let model = ServeModelInput {
+            id: "model".to_owned(),
+            served_name: "model".to_owned(),
+        };
+        let plan = AdapterRequest::PlanServe {
+            protocol_version: ProtocolVersion::CURRENT,
+            input: PlanServeInput {
+                model: model.clone(),
+                topology: ServeTopology::Single,
+                state_dir: crate::record::STATE_DIR.to_owned(),
+                gateway_backend: None,
+                pd_router_backend: None,
+                kv_transfer: None,
+                roles: Vec::new(),
+                profiling: None,
+                synthetic_acceptance: None,
+                auxiliary_models: Vec::new(),
+            },
+        };
+        let render = AdapterRequest::RenderServe {
+            protocol_version: ProtocolVersion::CURRENT,
+            input: RenderServeInput {
+                model,
+                topology: ServeTopology::Single,
+                state_dir: crate::record::STATE_DIR.to_owned(),
+                gateway_backend: None,
+                pd_router_backend: None,
+                kv_transfer: None,
+                allocations: Vec::new(),
+                profiling: None,
+                synthetic_acceptance: None,
+                auxiliary_models: Vec::new(),
+            },
+        };
+
+        assert_eq!(operation_tag(&plan)?, PLAN_SERVE_OPERATION);
+        assert_eq!(operation_tag(&render)?, RENDER_SERVE_OPERATION);
+        Ok(())
+    }
 }

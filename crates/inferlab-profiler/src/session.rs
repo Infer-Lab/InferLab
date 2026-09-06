@@ -378,7 +378,7 @@ impl CaptureSession {
         if target.finalization != ProfilerFinalization::EngineTraceFlush {
             return false;
         }
-        let crate::plan::ProfilerControl::Http { process_id, .. } = &target.control;
+        let process_id = &target.control.process_id;
         self.record
             .windows
             .iter()
@@ -422,9 +422,7 @@ impl CaptureSession {
             .windows
             .iter()
             .find(|window| window.id == final_window.id)?;
-        let control_process_id = match &target.control {
-            crate::plan::ProfilerControl::Http { process_id, .. } => process_id,
-        };
+        let control_process_id = &target.control.process_id;
         recorded
             .stop
             .iter()
@@ -445,9 +443,7 @@ impl CaptureSession {
     fn verify_reports(&mut self, bound: &OperationBound) {
         let mut failure = None;
         for (target, target_plan) in self.targets.iter().zip(&self.plan.targets) {
-            let control_process_id = match &target.control {
-                crate::plan::ProfilerControl::Http { process_id, .. } => process_id,
-            };
+            let control_process_id = &target.control.process_id;
             for (window, path) in self.plan.windows.iter().zip(&target_plan.reports) {
                 let wait_for_completion = self
                     .record
@@ -560,13 +556,14 @@ mod tests {
     use crate::plan::{
         CaptureDeadlines, CaptureSelection, CaptureWindowActionPlan,
         CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan, NsysEscapes,
-        ProfilerControl, ProfilerFinalization, ProfilerLaunch, WindowControlKind, compile_plan,
+        ProfilerControl, ProfilerFinalization, compile_plan,
     };
     use crate::record::{CaptureActionRecord, CaptureRecord, CaptureStatus, ProfilerTargetRecord};
     use inferlab_protocol::{CaptureMechanism, EndpointAssignment};
     use inferlab_runtime::operation_bound::{
         OperationBound, OperationBudgetEvidence, OperationTerminalCause,
     };
+    use inferlab_runtime::plan::LaunchPlan;
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -587,9 +584,9 @@ mod tests {
             trace_storage: None,
             session: "inferlab-fixture".to_owned(),
             executable: "true".to_owned(),
-            launch: ProfilerLaunch::Local,
+            launch: LaunchPlan::Local,
             finalization: ProfilerFinalization::NsysStop,
-            control: ProfilerControl::Http {
+            control: ProfilerControl {
                 window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
                 process_id: "serve".to_owned(),
                 endpoint: EndpointAssignment {
@@ -609,7 +606,6 @@ mod tests {
                     effective_url: "http://127.0.0.1:1/stop_profile".to_owned(),
                 },
             },
-            supported_window_controls: vec![WindowControlKind::FrameworkRange],
             command_cwd: temp.path().to_path_buf(),
             runtime_root: temp.path().join("profiles"),
             launch_prefix: Vec::new(),
@@ -703,9 +699,9 @@ mod tests {
             trace_storage: Some(temp.path().join("trace")),
             session: String::new(),
             executable: String::new(),
-            launch: ProfilerLaunch::Local,
+            launch: LaunchPlan::Local,
             finalization: ProfilerFinalization::EngineTraceFlush,
-            control: ProfilerControl::Http {
+            control: ProfilerControl {
                 window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
                 process_id: "serve".to_owned(),
                 endpoint: EndpointAssignment {
@@ -715,7 +711,6 @@ mod tests {
                 start: action("/start_profile"),
                 stop: action("/stop_profile"),
             },
-            supported_window_controls: vec![WindowControlKind::FrameworkRange],
             command_cwd: temp.path().to_path_buf(),
             runtime_root: temp.path().join("profiles"),
             launch_prefix: Vec::new(),

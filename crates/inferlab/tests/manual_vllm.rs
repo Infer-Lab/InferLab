@@ -14,7 +14,8 @@ use std::process::{Command, Output};
 #[ignore = "requires a real vLLM workspace, model weights, and devices"]
 fn manual_vllm_single_role_start_status_stop_record() -> Result<(), Box<dyn Error>> {
     let workspace = PathBuf::from(std::env::var("INFERLAB_E2E_WORKSPACE")?);
-    let recipe = std::env::var("INFERLAB_E2E_RECIPE").unwrap_or_else(|_| "dsv4-qualify".to_owned());
+    let recipe = std::env::var("INFERLAB_E2E_RECIPE")
+        .unwrap_or_else(|_| "deepseek-v4-flash-qualify".to_owned());
     let local = std::env::var_os("INFERLAB_E2E_LOCAL").map(PathBuf::from);
 
     let started = run_json(&workspace, local.as_deref(), &["serve", "start", &recipe])?;
@@ -60,7 +61,8 @@ fn manual_vllm_single_role_start_status_stop_record() -> Result<(), Box<dyn Erro
 #[ignore = "requires a real vLLM workspace, model weights, and devices"]
 fn manual_vllm_recipe_eval_bench_cleanup() -> Result<(), Box<dyn Error>> {
     let workspace = PathBuf::from(std::env::var("INFERLAB_E2E_WORKSPACE")?);
-    let recipe = std::env::var("INFERLAB_E2E_RECIPE").unwrap_or_else(|_| "dsv4-qualify".to_owned());
+    let recipe = std::env::var("INFERLAB_E2E_RECIPE")
+        .unwrap_or_else(|_| "deepseek-v4-flash-qualify".to_owned());
     let local = std::env::var_os("INFERLAB_E2E_LOCAL").map(PathBuf::from);
 
     let aggregate = run_json(&workspace, local.as_deref(), &["recipe", "run", &recipe])?;
@@ -133,7 +135,8 @@ fn manual_vllm_recipe_eval_bench_cleanup() -> Result<(), Box<dyn Error>> {
 fn manual_vllm_two_node_start_logs_stop_record() -> Result<(), Box<dyn Error>> {
     let workspace = PathBuf::from(std::env::var("INFERLAB_E2E_WORKSPACE")?);
     let local = PathBuf::from(std::env::var("INFERLAB_E2E_LOCAL")?);
-    let recipe = std::env::var("INFERLAB_E2E_RECIPE").unwrap_or_else(|_| "dsv4-qualify".to_owned());
+    let recipe = std::env::var("INFERLAB_E2E_RECIPE")
+        .unwrap_or_else(|_| "deepseek-v4-flash-qualify".to_owned());
 
     let started = run_json(
         &workspace,

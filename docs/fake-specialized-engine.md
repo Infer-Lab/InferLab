@@ -18,7 +18,7 @@ text / messages  --->   template + tokenize  --->   prompt token IDs
 OpenAI response  <---   detokenize + format   <---   output token-ID stream
 ```
 
-The Rust `TokenEngine` core owns only token execution. Its current deterministic
+The Rust token core owns only token execution. Its current deterministic
 implementation cycles the prompt token IDs up to `max_output_tokens`. The
 feature-gated `smg` module is a replaceable transport adapter implementing
 SMG's `TokenSpeedScheduler` gRPC service. Health, model metadata, load,
@@ -56,8 +56,8 @@ pixi run pytest python/inferlab-integration-specialized-engine/tests/test_integr
 The default Rust test covers the pure token boundary without compiling the SMG
 stack. The feature-enabled Rust test additionally covers the SMG request/stream
 mapping, the minimum control surface, and a real TCP/gRPC round trip through the
-published SMG client. The shared integration tests cover protocol-v7 planning
-and rendering:
+published SMG client. The shared integration tests cover planning
+and rendering under the current adapter protocol:
 
 - arbitrary pure-TP widths in one `serve` Engine replica and rank process, with
   the fake executable itself limited to one device;
@@ -83,9 +83,7 @@ cargo run -p inferlab-fake-engine --features smg-transport \
   --listen 127.0.0.1:50051 \
   --model <model-locator> \
   --served-model-name fake-model \
-  --tensor-parallel-size 1 \
-  --default-max-output-tokens 16 \
-  --max-num-batched-tokens 12288
+  --tensor-parallel-size 1
 ```
 
 In a second terminal, start a lock-pinned SMG whose
@@ -131,10 +129,7 @@ commands are control-plane allocation facts. The fake core owns no persistent
 state, tokenizer cache, model-weight state, or KV cache. SMG may keep its own
 process-local tokenizer and routing state.
 
-An Engine bind failure terminates the Engine process and prevents SMG from
-becoming ready. A missing tokenizer fails in SMG without entering the Engine
-core. An incompatible gRPC contract prevents worker detection or readiness. A
-request without tokenized input is rejected by the Engine transport as an
+A request without tokenized input is rejected by the Engine transport as an
 invalid argument. In the direct live check, the operator owns both foreground
 processes and cleanup; when the same two commands are launched through an
 Inferlab downstream workspace, Inferlab owns startup order, runtime handles,

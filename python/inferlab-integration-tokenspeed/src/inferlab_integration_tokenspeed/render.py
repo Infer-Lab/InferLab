@@ -186,7 +186,7 @@ def _render_router(
         "smg",
         "launch",
         "--host",
-        "0.0.0.0",
+        endpoint.host,
         "--port",
         str(endpoint.port),
         "--prometheus-port",

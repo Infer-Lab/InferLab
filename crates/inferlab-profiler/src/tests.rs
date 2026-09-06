@@ -2,8 +2,7 @@ use crate::error::ProfilerError;
 use crate::plan::{
     CaptureDeadlines, CaptureWindowActionPlan, CaptureWindowControlEndpointPlan,
     CaptureWindowHttpMethodPlan, NsysEscapes, PreparedProcess, ProcessCapturePlan,
-    ProcessPreparation, ProfilerControl, ProfilerFinalization, WindowControlKind, compile_plan,
-    prepare_process,
+    ProcessPreparation, ProfilerFinalization, compile_plan, prepare_process,
 };
 use crate::record::CaptureActionRecord;
 use crate::transport;
@@ -94,24 +93,24 @@ fn prepares_profiled_process_without_changing_the_serving_command() -> Result<()
         target.runtime_root,
         PathBuf::from("/workspace/.inferlab/runtime/20260701-120000-serve/prefill-0/profiles")
     );
-    let ProfilerControl::Http {
-        window_control_endpoint,
-        process_id,
-        start,
-        stop,
-        ..
-    } = &target.control;
+    let control = &target.control;
     assert_eq!(
-        *window_control_endpoint,
+        control.window_control_endpoint,
         CaptureWindowControlEndpointPlan::ReplicaEntry
     );
-    assert_eq!(process_id, "prefill-0");
-    assert_eq!(start.method, CaptureWindowHttpMethodPlan::Post);
-    assert_eq!(start.path, "/start_profile");
-    assert_eq!(start.effective_url, "http://127.0.0.1:8000/start_profile");
-    assert_eq!(stop.method, CaptureWindowHttpMethodPlan::Post);
-    assert_eq!(stop.path, "/stop_profile");
-    assert_eq!(stop.effective_url, "http://127.0.0.1:8000/stop_profile");
+    assert_eq!(control.process_id, "prefill-0");
+    assert_eq!(control.start.method, CaptureWindowHttpMethodPlan::Post);
+    assert_eq!(control.start.path, "/start_profile");
+    assert_eq!(
+        control.start.effective_url,
+        "http://127.0.0.1:8000/start_profile"
+    );
+    assert_eq!(control.stop.method, CaptureWindowHttpMethodPlan::Post);
+    assert_eq!(control.stop.path, "/stop_profile");
+    assert_eq!(
+        control.stop.effective_url,
+        "http://127.0.0.1:8000/stop_profile"
+    );
     Ok(())
 }
 
@@ -205,7 +204,6 @@ fn static_range_plan_maps_windows_to_one_based_reports() -> Result<(), Box<dyn E
             capture_finalization_deadline_seconds: 300,
         },
     )?;
-    assert_eq!(plan.control, WindowControlKind::FrameworkRange);
     assert_eq!(plan.windows[0].range_index, Some(1));
     assert_eq!(plan.windows[1].range_index, Some(2));
     assert_eq!(plan.targets[0].expected_range_count, Some(2));

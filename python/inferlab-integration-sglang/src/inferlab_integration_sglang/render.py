@@ -24,6 +24,7 @@ from inferlab_adapter_sdk import (
     split_serve_allocations,
 )
 
+from .auxiliary import splice_draft_model
 from .plan import _identity
 from .settings import _INFERLAB_OWNED_OPTIONS, _settings
 from .synthetic import resolve_synthetic_acceptance, synthetic_acceptance_env
@@ -62,6 +63,7 @@ def _render_process(
     allocation: ServeProcessAllocationModelRank,
 ) -> RenderedServeProcess:
     settings = _settings(allocation.effective_settings)
+    splice_draft_model(settings, allocation, input.auxiliary_models)
     outer = allocation.effective_parallelism.outer or ParallelismOuter()
     attention = allocation.effective_parallelism.attention or ParallelismAttention()
     experts = allocation.effective_parallelism.experts or ParallelismExperts()

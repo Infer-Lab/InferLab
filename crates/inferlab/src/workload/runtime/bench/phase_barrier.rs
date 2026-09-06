@@ -7,6 +7,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::{self, ScopedJoinHandle};
 
+// Pinned by protocol/fixtures/aiperf-phase-barrier.json ([[ADR-0031]]).
 pub(super) const PROFILE_BARRIER_ENV: &str = "INFERLAB_AIPERF_PROFILE_BARRIER";
 pub(super) const PROFILE_BARRIER_REQUIRES_WARMUP_ENV: &str =
     "INFERLAB_AIPERF_PROFILE_BARRIER_REQUIRES_WARMUP";
@@ -133,5 +134,38 @@ impl ProfileRelease {
                 operation: "acknowledge the open capture window",
                 source,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PhaseBarrierFixture {
+        profile_barrier_env: String,
+        profile_barrier_requires_warmup_env: String,
+        profile_ready_message: String,
+        capture_open_message: String,
+    }
+
+    // [[ADR-0031]]: the shared fixture spells the phase-barrier vocabulary
+    // once; the Python bench runner asserts the same four tokens.
+    #[test]
+    fn phase_barrier_tokens_match_the_shared_cross_language_fixture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture: PhaseBarrierFixture = serde_json::from_str(include_str!(
+            "../../../../../../protocol/fixtures/aiperf-phase-barrier.json"
+        ))?;
+
+        assert_eq!(PROFILE_BARRIER_ENV, fixture.profile_barrier_env);
+        assert_eq!(
+            PROFILE_BARRIER_REQUIRES_WARMUP_ENV,
+            fixture.profile_barrier_requires_warmup_env
+        );
+        assert_eq!(PROFILE_READY, fixture.profile_ready_message.as_bytes());
+        assert_eq!(CAPTURE_OPEN, fixture.capture_open_message.as_bytes());
+        Ok(())
     }
 }

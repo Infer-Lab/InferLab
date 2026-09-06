@@ -22,6 +22,10 @@ PROMPT_LOGPROB_OUTPUT_TYPES: frozenset[str] = frozenset(
     {"loglikelihood", "loglikelihood_rolling", "multiple_choice"}
 )
 
+# The task-resolution artifact carries its own version counter, deliberately
+# separate from the client-result SCHEMA_VERSION in inferlab_measurement_sdk.
+TASK_RESOLUTION_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class LmEvalRequestTarget:
@@ -62,10 +66,6 @@ def lm_eval_task_argument(definition: EvalDefinitionInputLmEval) -> str:
     if isinstance(source, EvalTaskSourceInputWorkspaceYaml):
         return source.path
     raise TypeError(f"unsupported lm-eval task source {type(source).__name__}")
-
-
-def repeated_base_seed(definition: EvalDefinitionInputLmEval) -> int:
-    return definition.seed if definition.seed is not None else 1234
 
 
 def load_yaml_include_mapping(path: Path) -> object:
@@ -323,6 +323,55 @@ def effective_dataset_selection(config: JsonObject) -> JsonObject:
     }
 
 
+def _task_resolution_evidence_base(status: str, task_source: object) -> JsonObject:
+    return {
+        "schema_version": TASK_RESOLUTION_SCHEMA_VERSION,
+        "status": status,
+        "task_source": task_source,
+    }
+
+
+def resolved_task_resolution_evidence(
+    *,
+    task_source: JsonObject,
+    task_identity: str,
+    output_type: str,
+    emitted_request_types: list[str],
+    reduces_to_one_request_type: bool,
+    observed_request_documents: int | None,
+    include_closure: list[str],
+    effective_task_config: JsonObject,
+    tokenizer_locator: str | None,
+    bundled_assets: JsonObject | None = None,
+) -> JsonObject:
+    evidence: JsonObject = {
+        **_task_resolution_evidence_base("resolved", task_source),
+        "task_identity": task_identity,
+        "output_type": output_type,
+        "emitted_request_types": emitted_request_types,
+        "reduces_to_one_request_type": reduces_to_one_request_type,
+        "observed_request_documents": observed_request_documents,
+        "include_closure": include_closure,
+        "effective_task_config": effective_task_config,
+        "effective_dataset_selection": effective_dataset_selection(effective_task_config),
+        "tokenizer": {
+            "locator": tokenizer_locator,
+            "backend": "huggingface",
+            "tokenized_requests": False,
+        },
+    }
+    if bundled_assets is not None:
+        evidence["bundled_assets"] = bundled_assets
+    return evidence
+
+
+def failed_task_resolution_evidence(task_source: str, error: str) -> JsonObject:
+    return {
+        **_task_resolution_evidence_base("failed", task_source),
+        "error": error,
+    }
+
+
 def resolved_request_types(resolution: JsonObject) -> tuple[str, frozenset[str]]:
     identity = resolution.get("task_identity")
     emitted = resolution.get("emitted_request_types")
@@ -416,24 +465,17 @@ def resolve_lm_eval_data_source(
         task_identity, config, output_type, emitted, observed_documents = load_builtin_lm_eval_task(
             source.name, definition.limit
         )
-        return {
-            "schema_version": 1,
-            "status": "resolved",
-            "task_source": {"kind": "built_in", "name": source.name},
-            "task_identity": task_identity,
-            "output_type": output_type,
-            "emitted_request_types": sorted(emitted),
-            "reduces_to_one_request_type": len(emitted) == 1,
-            "observed_request_documents": observed_documents,
-            "include_closure": [],
-            "effective_task_config": config,
-            "effective_dataset_selection": effective_dataset_selection(config),
-            "tokenizer": {
-                "locator": tokenizer_locator,
-                "backend": "huggingface",
-                "tokenized_requests": False,
-            },
-        }
+        return resolved_task_resolution_evidence(
+            task_source={"kind": "built_in", "name": source.name},
+            task_identity=task_identity,
+            output_type=output_type,
+            emitted_request_types=sorted(emitted),
+            reduces_to_one_request_type=len(emitted) == 1,
+            observed_request_documents=observed_documents,
+            include_closure=[],
+            effective_task_config=config,
+            tokenizer_locator=tokenizer_locator,
+        )
     if isinstance(source, EvalTaskSourceInputBundled):
         task_yaml = Path(source.path).resolve(strict=True)
         root = task_yaml.parent
@@ -486,34 +528,27 @@ def resolve_lm_eval_data_source(
             source.task_identity, config.get("output_type", "generate_until")
         )
         config = {**config, "output_type": output_type}
-        return {
-            "schema_version": 1,
-            "status": "resolved",
-            "task_source": {
+        return resolved_task_resolution_evidence(
+            task_source={
                 "kind": "bundled",
                 "name": source.name,
                 "task_closure_sha256": source.task_closure_sha256,
             },
-            "task_identity": source.task_identity,
-            "output_type": output_type,
-            "emitted_request_types": [output_type],
-            "reduces_to_one_request_type": True,
-            "observed_request_documents": None,
-            "include_closure": [str(path) for path in assets.values()],
-            "bundled_assets": {
+            task_identity=source.task_identity,
+            output_type=output_type,
+            emitted_request_types=[output_type],
+            reduces_to_one_request_type=True,
+            observed_request_documents=None,
+            include_closure=[str(path) for path in assets.values()],
+            effective_task_config=config,
+            tokenizer_locator=tokenizer_locator,
+            bundled_assets={
                 "task_definition_sha256": source.task_definition_sha256,
                 "prompt_asset_sha256": source.prompt_asset_sha256,
                 "dataset_asset_sha256": source.dataset_asset_sha256,
                 "scorer_sha256": source.scorer_sha256,
             },
-            "effective_task_config": config,
-            "effective_dataset_selection": effective_dataset_selection(config),
-            "tokenizer": {
-                "locator": tokenizer_locator,
-                "backend": "huggingface",
-                "tokenized_requests": False,
-            },
-        }
+        )
     if isinstance(source, EvalTaskSourceInputWorkspaceYaml):
         task_yaml = Path(source.path)
         closure = workspace_yaml_include_closure(
@@ -543,30 +578,23 @@ def resolve_lm_eval_data_source(
             )
         )
         config = {**config, "output_type": output_type}
-        return {
-            "schema_version": 1,
-            "status": "resolved",
-            "task_source": {
+        return resolved_task_resolution_evidence(
+            task_source={
                 "kind": "workspace_yaml",
                 "workspace_relative_path": str(
                     resolved_task_yaml.relative_to(resolved_workspace_root)
                 ),
                 "resolved_path": str(resolved_task_yaml),
             },
-            "task_identity": workspace_task_identity,
-            "output_type": output_type,
-            "emitted_request_types": [output_type],
-            "reduces_to_one_request_type": True,
-            "observed_request_documents": None,
-            "include_closure": [str(path) for path in closure],
-            "effective_task_config": config,
-            "effective_dataset_selection": effective_dataset_selection(config),
-            "tokenizer": {
-                "locator": tokenizer_locator,
-                "backend": "huggingface",
-                "tokenized_requests": False,
-            },
-        }
+            task_identity=workspace_task_identity,
+            output_type=output_type,
+            emitted_request_types=[output_type],
+            reduces_to_one_request_type=True,
+            observed_request_documents=None,
+            include_closure=[str(path) for path in closure],
+            effective_task_config=config,
+            tokenizer_locator=tokenizer_locator,
+        )
     raise TypeError(f"unsupported lm-eval task source {type(source).__name__}")
 
 

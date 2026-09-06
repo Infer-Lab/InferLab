@@ -53,11 +53,11 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
     let record: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(record["schema_version"], 4);
     let id = record["id"].as_str().ok_or("missing recipe record id")?;
-    assert_datetime_record_id(id, "recipe-dsv4-qualify-tp2")?;
+    assert_datetime_record_id(id, "recipe-deepseek-v4-flash-qualify-tp2")?;
     let server_id = record["server"]["id"]
         .as_str()
         .ok_or("missing server record id")?;
-    assert_datetime_record_id(server_id, "serve-dsv4-qualify-tp2")?;
+    assert_datetime_record_id(server_id, "serve-deepseek-v4-flash-qualify-tp2")?;
     assert_eq!(record["status"], "succeeded");
     assert_eq!(record["evals"].as_array().map(Vec::len), Some(2));
     assert_eq!(record["benches"].as_array().map(Vec::len), Some(2));
@@ -154,7 +154,7 @@ fn run_pd_recipe(transport: &str) -> Result<(), Box<dyn Error>> {
     let output = workspace
         .command()
         .env("FIXTURE_PD", transport)
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .output()?;
     assert!(
         output.status.success(),
@@ -306,7 +306,7 @@ fn manual_bench_attaches_to_an_explicit_running_server() -> Result<(), Box<dyn E
     let workspace = TestWorkspace::new()?;
     let start = workspace
         .command()
-        .args(["serve", "start", "dsv4-qualify"])
+        .args(["serve", "start", "deepseek-v4-flash-qualify"])
         .output()?;
     assert!(
         start.status.success(),
@@ -405,6 +405,92 @@ fn manual_bench_attaches_to_an_explicit_running_server() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn manual_bench_on_a_remote_server_uses_the_binding_fallback_locator() -> Result<(), Box<dyn Error>>
+{
+    let workspace = TestWorkspace::new()?;
+    let ports = support::reserve_local_ports(3)?;
+    let node_a_port = ports.get(0);
+    let node_b_port = ports.get(1);
+    let master_port = ports.get(2);
+    // Every recorded rank locator is machine-sourced; only the binding's
+    // shared locator is controller-usable.
+    fs::write(
+        workspace.root().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"pair\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = \"/models/deepseek-v4-flash\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash.machine_locators]\n\
+             node-a = \"/node-a/weights/deepseek-v4-flash\"\n\
+             node-b = \"/node-b/weights/deepseek-v4-flash\"\n\
+             \n\
+             [machines.node-a]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [{node_a_port}, {master_port}]\n\
+             devices = [0]\n\
+             workspace = {:?}\n\
+             launch = {{ kind = \"ssh\", target = \"node-a\" }}\n\
+             \n\
+             [machines.node-b]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [{node_b_port}]\n\
+             devices = [1]\n\
+             workspace = {:?}\n\
+             launch = {{ kind = \"ssh\", target = \"node-b\" }}\n\
+             \n\
+             [placements.pair.roles.serve]\n\
+             ranks = [\n\
+               {{ machine = \"node-a\", devices = [0] }},\n\
+               {{ machine = \"node-b\", devices = [1] }},\n\
+             ]\n",
+            workspace.root(),
+            workspace.root(),
+        ),
+    )?;
+    ports.release();
+
+    let started = workspace
+        .command()
+        .args(["serve", "start", "deepseek-v4-flash-qualify"])
+        .output()?;
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let server: Value = serde_json::from_slice(&started.stdout)?;
+    let server_id = server["id"].as_str().ok_or("server record has no id")?;
+
+    let dry_run = workspace
+        .command()
+        .args(["bench", "c8k1k", "--serve", server_id, "--dry-run"])
+        .output()?;
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&dry_run.stdout)?;
+    assert_eq!(
+        plan["bench"]["client"]["model"]["locator"], "/models/deepseek-v4-flash",
+        "the binding fallback locator reaches the controller-side bench plan"
+    );
+
+    let stop = workspace
+        .command()
+        .args(["serve", "stop", server_id])
+        .output()?;
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 fn manual_bench_source_preparation_failure_leaves_target_server_running()
 -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
@@ -422,7 +508,7 @@ timeout_seconds = 60
     fs::write(manifest, config)?;
     let start = workspace
         .command()
-        .args(["serve", "start", "dsv4-qualify"])
+        .args(["serve", "start", "deepseek-v4-flash-qualify"])
         .output()?;
     assert!(
         start.status.success(),

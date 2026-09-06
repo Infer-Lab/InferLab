@@ -1,12 +1,13 @@
 {
   "operation": "plan_serve",
-  "protocol_version": "9",
+  "protocol_version": "10",
   "input": {
     "model": {
-      "id": "dsv4",
-      "served_name": "dsv4"
+      "id": "deepseek-v4-flash",
+      "served_name": "deepseek-v4-flash"
     },
     "topology": "prefill_decode",
+    "state_dir": ".inferlab",
     "gateway_backend": "vllm-router",
     "pd_router_backend": "vllm-router",
     "kv_transfer": "mooncake",
@@ -41,9 +42,9 @@
     "profiling": "managed_collection",
     "synthetic_acceptance": {
       "curve": {
-        "model_key": "dsv4",
+        "model_key": "deepseek-v4-flash",
         "thinking_mode": "thinking_on",
-        "text": "dsv4:\n  thinking_on:\n    4: 3.5\n",
+        "text": "deepseek-v4-flash:\n  thinking_on:\n    4: 3.5\n",
         "sha256": "ffef53d9ea69fae0072145c80b35ed9ba7f852f328dda9786bc2c07fca8ba8e7"
       }
     }

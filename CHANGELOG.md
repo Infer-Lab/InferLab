@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-05
+
+### Added
+
+- The error taxonomy registers E4004 for measurement data-asset acquisition
+  and preparation failures; those conditions previously surfaced E4002, which
+  the registry reserves for server lifecycle, proxy, and profiling failures
+  ([[RFC-0001:C-ERROR-CODES]]). It also registers E3002 for network
+  resolution failures (probe launch, exit, unusable evidence, or no common
+  routable interface); those previously surfaced E1004, which the registry
+  reserves for invalid configuration.
+- Server definitions accept an `auxiliary_models` declaration for additional
+  weight artifacts consumed by the same launch, keyed by a governed artifact
+  kind vocabulary that opens with `draft-model` — the separate weights an
+  operator's framework speculative-decoding configuration drafts with
+  ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]). The declaration references an
+  ordinary workspace model, resolves through the same machine-local
+  `model_weights` bindings (including per-machine locators), and is the
+  single authority for the artifact: the vLLM, SGLang, and TensorRT-LLM
+  integrations splice the machine-resolved locator into the operator's
+  speculative configuration, failing planning with a typed error when that
+  configuration already names the draft weights or offers no splice target,
+  while TokenSpeed and Specialized Engine reject the declaration. The
+  resolved locators are preserved per model-rank allocation in dry-run
+  evidence and the serve record (server record schema 9).
+
+### Changed
+
+- The adapter protocol hard-cuts to version 10 ([[RFC-0006:C-INTEGRATIONS]]),
+  which carries the auxiliary model declaration in `plan_serve` and
+  `render_serve` requests, the resolved locators on model-rank allocations,
+  and the control-plane-owned state-directory spelling for resolving
+  operator-relative paths. Protocol version 9 payloads are rejected rather
+  than partially interpreted; workspace adapter pins must move to adapter SDK
+  `0.10.0` and version `0.9.0` of the framework integrations.
+- The (unreleased) adapter protocol v10 endpoint declaration no longer
+  carries route path values: the control plane owns the pinned
+  `/v1/completions` and `/v1/chat/completions` paths and preserves them in
+  resolved endpoint evidence, dry-run output, and measurement-client inputs,
+  while `plan_serve` responses declare only endpoint capabilities
+  ([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]).
+- The (unreleased) eval measurement-client request now carries the
+  control-plane-resolved `base_seed` alongside the declared `seed`: the
+  fallback evaluation seed is resolved once by the control plane and consumed
+  by the runner, so an omitted definition seed can no longer drift between
+  load-time acceptance and runtime behavior ([[RFC-0004:C-LM-EVAL]]).
+- The Specialized Engine integration's `default_max_output_tokens` and
+  `max_num_batched_tokens` settings are now optional and render only when
+  declared: omission leaves the Engine's own defaults in force instead of
+  InferLab restating the released values, so the effective start command
+  changes for workspaces that omit them.
+- A `single` topology server whose effective serve replica count is not
+  exactly one is rejected at resolution before any launch; the missing
+  replica cardinality validation let a second replica launch unreachable
+  while consuming devices. Cross-machine serving is unaffected: one replica
+  spans machines through explicit rank placement ([[RFC-0003]]).
+- Measurement model-locator selection follows one controller-usable
+  precedence for recipe and manual Bench paths — a controller-local rank's
+  machine-resolved locator, then the binding's shared fallback — and a
+  measurement-bearing workflow whose placement offers neither fails at
+  resolution naming the server and binding, instead of failing at tokenizer
+  load time. The shared fallback locator is now preserved in the serve record
+  (server record schema 10).
+
+### Fixed
+
+- Hand-written public guides no longer restate versioned facts: stale
+  protocol-version and package-candidate claims in the Specialized Engine
+  guides are corrected, and the backend support matrix names integration
+  packages without repeating the versions its correspondence table owns
+  ([[ADR-0045]]).
+- Bundled skill references and operator guides no longer restate code-owned
+  defaults and release-profile scalars (the OpenAI smoke values, eval trials
+  and fallback seed, profiler mechanism, capture-finalization deadlines, the
+  TUI refresh interval, and the AgentX profile timings and corpus sizes);
+  they describe declaration shapes and omission semantics and point at
+  dry-run and `inferlab workspace show --json` for effective values.
+- Every distributed artifact now carries the unified InferLab-contributors
+  copyright notice, and the packaging guard requires a byte-identical LICENSE
+  in every crate and Python package, failing loudly on absence.
+- Bench measurement-client results are written atomically (temporary file
+  plus replace), matching the Eval runner's durability, and the measurement
+  client-result schema version and the Hugging Face cache-store purpose
+  vocabulary each have a single owner shared by both runners
+  ([[RFC-0004:C-MEASUREMENT-DATA-ASSETS]]).
+- Error-code misclassifications are corrected: scratchpad journal failures
+  surface E6001 (previously E5001), semantic `--set` server override
+  rejections surface E1005 naming the offending value (previously E1004),
+  device-dominated multi-candidate placement failures surface E3001, and
+  semantically invalid adapter responses surface E2001 — all matching the
+  registered meanings in [[RFC-0001:C-ERROR-CODES]].
+- Load and selection validation closes silent paths: non-finite floats in
+  server settings (including via `--set`), duplicate bench concurrency or
+  request-rate coordinates, non-canonical placement role-pool names, and
+  uppercase external-image digest pins are rejected with the offender named,
+  and recipe measurement overrides correctly address definition ids
+  containing dots.
+
 ## [0.13.3] - 2026-09-03
 
 ### Added

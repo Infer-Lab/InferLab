@@ -108,7 +108,7 @@ impl AdapterClient for ProcessAdapterClient {
         input: PlanServeInput,
     ) -> Result<AdapterLowering<PlanServeResult>, InferlabError> {
         let request = AdapterRequest::PlanServe {
-            protocol_version: ProtocolVersion::V9,
+            protocol_version: ProtocolVersion::CURRENT,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
@@ -123,7 +123,7 @@ impl AdapterClient for ProcessAdapterClient {
         input: RenderServeInput,
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError> {
         let request = AdapterRequest::RenderServe {
-            protocol_version: ProtocolVersion::V9,
+            protocol_version: ProtocolVersion::CURRENT,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
@@ -193,24 +193,11 @@ impl ImageAdapterClient {
             ));
         }
         if self.explicit_entrypoint {
-            // An external image carries no workspace-side packages, so lowering
-            // runs from the workspace's committed framework-free `adapter` Pixi
-            // environment ([[RFC-0006:C-INTEGRATIONS]]): the adapter version the
-            // workspace pins is the one that lowers. Each package's realized
-            // import directory mounts read-only under one neutral base, and
-            // PYTHONPATH points there so `python -m <module>` imports them.
             for mount in adapter_environment_mounts(workspace_root, integration)? {
-                launcher.extend([
-                    // The explicit --mount form matches the substitution's
-                    // read-only mount convention (the -v shorthand's `:ro`
-                    // suffix is mangled by at least one site docker proxy).
-                    "--mount".to_owned(),
-                    format!(
-                        "type=bind,source={source},target={ADAPTER_MOUNT_BASE}/{name},readonly",
-                        source = mount.source.display(),
-                        name = mount.target_name,
-                    ),
-                ]);
+                launcher.extend(inferlab_runtime::container::docker_bind_mount_readonly(
+                    &mount.source.display().to_string(),
+                    &format!("{ADAPTER_MOUNT_BASE}/{}", mount.target_name),
+                ));
             }
             launcher.extend([
                 "--env".to_owned(),
@@ -425,7 +412,7 @@ impl AdapterClient for ImageAdapterClient {
         input: PlanServeInput,
     ) -> Result<AdapterLowering<PlanServeResult>, InferlabError> {
         let request = AdapterRequest::PlanServe {
-            protocol_version: ProtocolVersion::V9,
+            protocol_version: ProtocolVersion::CURRENT,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, request)?;
@@ -440,7 +427,7 @@ impl AdapterClient for ImageAdapterClient {
         input: RenderServeInput,
     ) -> Result<AdapterLowering<RenderServeResult>, InferlabError> {
         let request = AdapterRequest::RenderServe {
-            protocol_version: ProtocolVersion::V9,
+            protocol_version: ProtocolVersion::CURRENT,
             input,
         };
         let invocation = self.invoke(workspace_root, integration, request)?;
@@ -700,7 +687,7 @@ fn protocol_version_remedy(integration: &str, answered: &str, supported: &str) -
 }
 
 fn wrong_operation<T>(integration: &str) -> Result<T, InferlabError> {
-    Err(InferlabError::InvalidConfig {
+    Err(InferlabError::AdapterSemantics {
         message: format!("integration {integration:?} returned a result for the wrong operation"),
     })
 }
@@ -941,6 +928,37 @@ mod tests {
             invocation.timing.terminal_cause,
             OperationTerminalCause::Succeeded
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_result_for_the_wrong_operation_is_an_adapter_semantics_violation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let response: AdapterResponse = serde_json::from_slice(include_bytes!(
+            "../../../protocol/fixtures/valid/render-serve-response.json"
+        ))?;
+        let AdapterResponse::Ok { result, .. } = response else {
+            return Err("fixture must be an ok response".into());
+        };
+        let invocation = AdapterInvocation {
+            result: *result,
+            request_sha256: "request".to_owned(),
+            response_sha256: "response".to_owned(),
+            timing: OperationBound::finite(Duration::from_secs(30)).timing(
+                "before_adapter_process_launch",
+                OperationTerminalCause::Succeeded,
+            ),
+        };
+
+        let error = plan_lowering("vllm", invocation)
+            .err()
+            .ok_or("a render result must not satisfy a plan lowering")?;
+        assert!(
+            matches!(error, InferlabError::AdapterSemantics { .. }),
+            "{error}"
+        );
+        assert_eq!(error.code(), "E2001");
+        assert!(error.to_string().contains("wrong operation"), "{error}");
         Ok(())
     }
 }

@@ -22,9 +22,7 @@ unique OCI archives, and runs eligible recipe validations. One platform or
 validation failure does not suppress the remaining batch.
 
 Built images remain in local builder storage; this workflow does not push to a
-registry. Portable image contexts and metadata exclude model weights, model
-locators, workspace paths, builder hosts, placements, and other machine-private
-facts.
+registry.
 
 ## Built And External Image Selection
 

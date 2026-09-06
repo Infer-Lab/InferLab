@@ -112,6 +112,13 @@ from ._generated import (
     ServerMetricsEndpointInput,
     SettingValue,
 )
+from .client import (
+    HUGGINGFACE_HUB_CACHE_PURPOSE,
+    SCHEMA_VERSION,
+    ClientResult,
+    failed_data_asset_preparation_result,
+    write_result,
+)
 from .runtime import (
     CaseBudgetExpired,
     CaseDeadline,
@@ -124,6 +131,8 @@ from .runtime import (
 )
 
 __all__ = [
+    "HUGGINGFACE_HUB_CACHE_PURPOSE",
+    "SCHEMA_VERSION",
     "BenchAgenticAcquisitionOutcome",
     "BenchAgenticBranchStats",
     "BenchAgenticCatalogInput",
@@ -190,6 +199,7 @@ __all__ = [
     "CaseBudgetExpired",
     "CaseDeadline",
     "ClientEndpointInput",
+    "ClientResult",
     "ClientStatus",
     "EndpointProtocol",
     "EvalClientRequest",
@@ -241,7 +251,9 @@ __all__ = [
     "ServerMetricsEndpointInput",
     "SettingValue",
     "endpoint_url",
+    "failed_data_asset_preparation_result",
     "load_json_object",
     "parse_args",
     "plain_setting",
+    "write_result",
 ]

@@ -3,10 +3,11 @@ use crate::execution::ProfilerEscapesPlan;
 use crate::workspace::{PlacementBinding, PlacementRoleBinding, ServerDefinition};
 use inferlab_profiler::plan::{CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan};
 use inferlab_protocol::{
-    CaptureMechanism, CaptureWindowControlEndpoint, EndpointAssignment, EndpointRequirement,
-    FrontendComponents, FrontendProcessRole, GatewayTarget, KvTransferMechanism, PlanServeResult,
-    RenderSource, ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink,
-    ServeTopology, SuppliedRenderInput, SyntheticAcceptanceInput, SyntheticAcceptanceOutcome,
+    CaptureMechanism, CaptureWindowControlEndpoint, EndpointAssignment, EndpointDeclaration,
+    EndpointRequirement, FrontendComponents, FrontendProcessRole, GatewayTarget,
+    KvTransferMechanism, PlanServeResult, RenderSource, ServeReplicaRequirement, ServeRoleInput,
+    ServeRoleKind, ServeRoleLink, ServeTopology, SuppliedRenderInput, SyntheticAcceptanceInput,
+    SyntheticAcceptanceOutcome,
 };
 use inferlab_serve_domain::{
     FixedDeviceAssignment, PendingCaptureTargetPlan, PendingCaptureWindowActionPlan,
@@ -14,33 +15,21 @@ use inferlab_serve_domain::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The control-plane-owned OpenAI route paths
+/// ([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]): the plan-response endpoint
+/// declaration carries no path values, so acceptance fills these pinned paths
+/// into the resolved endpoint requirement and every downstream evidence copy.
+pub(crate) const COMPLETIONS_PATH: &str = "/v1/completions";
+pub(crate) const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
+
 pub(super) fn validate_workload_endpoint(
     integration: &str,
-    endpoint: &inferlab_protocol::EndpointRequirement,
+    endpoint: &EndpointDeclaration,
     declared_ports: &[String],
 ) -> Result<(), InferlabError> {
-    const COMPLETIONS_PATH: &str = "/v1/completions";
-    const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
-
-    if endpoint.completions_path != COMPLETIONS_PATH {
-        return Err(InferlabError::InvalidConfig {
-            message: format!(
-                "integration {integration:?} declared completions_path {:?}; expected {COMPLETIONS_PATH:?}",
-                endpoint.completions_path
-            ),
-        });
-    }
-    if endpoint.chat_completions_path != CHAT_COMPLETIONS_PATH {
-        return Err(InferlabError::InvalidConfig {
-            message: format!(
-                "integration {integration:?} declared chat_completions_path {:?}; expected {CHAT_COMPLETIONS_PATH:?}",
-                endpoint.chat_completions_path
-            ),
-        });
-    }
     if let Some(metrics) = &endpoint.server_metrics {
         if !is_absolute_origin_path(&metrics.path) {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} declared server-metrics path {:?}; expected an absolute origin path without scheme, authority, query, or fragment",
                     metrics.path
@@ -53,7 +42,7 @@ pub(super) fn validate_workload_endpoint(
                 .filter(|declared| *declared == port)
                 .count();
             if port.is_empty() || matches != 1 {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} selected server-metrics port {port:?}, but the public process must declare that non-empty named port exactly once"
                     ),
@@ -66,6 +55,77 @@ pub(super) fn validate_workload_endpoint(
 
 pub(super) fn endpoint_url(endpoint: &EndpointAssignment) -> String {
     format!("http://{}:{}", endpoint.host, endpoint.port)
+}
+
+/// Validate an adapter-declared control-plane-rendered frontend component
+/// against the proxy crate's registry ([[RFC-0006:C-INTEGRATIONS]]): version,
+/// readiness route, and declared prefix-cache action routes. A disagreement
+/// fails planning instead of silently falsifying the recorded frontend
+/// evidence.
+fn validate_builtin_proxy_declaration(
+    integration: &str,
+    component: &str,
+    implementation: &str,
+    implementation_version: &str,
+    readiness: &inferlab_protocol::ReadinessProbe,
+    endpoint: Option<&EndpointDeclaration>,
+) -> Result<(), InferlabError> {
+    let Some(spec) = inferlab_proxy::registry::builtin_proxy_by_wire_name(implementation) else {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {integration:?} returned unknown control-plane frontend implementation {implementation:?}"
+            ),
+        });
+    };
+    let expected_version = spec.version.to_string();
+    if implementation_version != expected_version {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {integration:?} declared {component} implementation_version {implementation_version:?}; the control-plane proxy owns version {expected_version:?}"
+            ),
+        });
+    }
+    match readiness {
+        inferlab_protocol::ReadinessProbe::Http { path } if path == spec.healthcheck_path => {}
+        _ => {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {integration:?} declared {component} readiness {readiness:?}; the control-plane proxy serves readiness at {:?}",
+                    spec.healthcheck_path
+                ),
+            });
+        }
+    }
+    if let Some(endpoint) = endpoint {
+        for (capability, action, owned) in [
+            (
+                "prefix_cache_reset",
+                endpoint.prefix_cache_reset.as_ref(),
+                spec.reset_prefix_cache_path,
+            ),
+            (
+                "prefix_cache_conditioning",
+                endpoint.prefix_cache_conditioning.as_ref(),
+                spec.prime_prefix_cache_path,
+            ),
+        ] {
+            match (action, owned) {
+                (Some(action), Some(path))
+                    if action.method == inferlab_protocol::HttpMethod::Post
+                        && action.path == path => {}
+                (None, None) => {}
+                (Some(action), _) => {
+                    return Err(InferlabError::AdapterSemantics {
+                        message: format!(
+                            "integration {integration:?} declared {component} {capability} {action:?}; the control-plane proxy owns {owned:?}"
+                        ),
+                    });
+                }
+                (None, Some(_)) => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_absolute_origin_path(path: &str) -> bool {
@@ -90,7 +150,7 @@ pub(super) fn validate_capture_targets(
             if let Some(mechanism) = profiling
                 && target.mechanism != mechanism
             {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} declared capture mechanism {:?} for replica {:?}, but the effective request mechanism is {mechanism:?}",
                         target.mechanism, replica.id
@@ -100,7 +160,7 @@ pub(super) fn validate_capture_targets(
             if target.window_control.endpoint == CaptureWindowControlEndpoint::Gateway
                 && !has_gateway
             {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} selected Gateway profiling window control without planning a Gateway"
                     ),
@@ -111,7 +171,7 @@ pub(super) fn validate_capture_targets(
                 ("stop", &target.window_control.stop),
             ] {
                 if !is_absolute_origin_path(&action.path) {
-                    return Err(InferlabError::InvalidConfig {
+                    return Err(InferlabError::AdapterSemantics {
                         message: format!(
                             "integration {integration:?} declared capture {operation} path {:?} for replica {:?}; expected an absolute origin path without scheme, authority, query, fragment, backslash, control character, or whitespace",
                             action.path, replica.id
@@ -127,7 +187,7 @@ pub(super) fn validate_capture_targets(
             if replica.device_count == 0 {
                 continue;
             }
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} did not prepare model-serving replica {:?} as a profiling target",
                     replica.id
@@ -293,7 +353,7 @@ pub(super) fn expand_replica_requirements(
             .roles
             .iter()
             .find(|role| role.id == replica.role_id)
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} replica {:?} has no owning Engine role",
                     replica.id
@@ -364,11 +424,7 @@ pub(super) fn expand_replica_requirements(
                     target.mechanism,
                     capture_window_control_endpoint_plan(target.window_control.endpoint),
                     primary_id.clone(),
-                    // Engine-trace coverage is verified against the replica's
-                    // declared whole-replica device count: engine-internal
-                    // profilers write one artifact per worker, which the
-                    // device count bounds, while the rank model counts entry
-                    // processes ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+                    // Baseline rationale: see the profiler record's `expected_artifacts` field.
                     replica.device_count,
                     capture_window_action_plan(&target.window_control.start),
                     capture_window_action_plan(&target.window_control.stop),
@@ -422,11 +478,11 @@ fn process_id(replica_id: &str, rank: u32, rank_count: usize) -> String {
     }
 }
 
-pub(super) fn public_endpoint_requirement<'a>(
+fn public_endpoint_declaration<'a>(
     integration: &str,
     topology: ServeTopology,
     plan: &'a PlanServeResult,
-) -> Result<&'a EndpointRequirement, InferlabError> {
+) -> Result<&'a EndpointDeclaration, InferlabError> {
     if let Some(gateway) = &plan.gateway {
         return Ok(&gateway.endpoint);
     }
@@ -435,14 +491,35 @@ pub(super) fn public_endpoint_requirement<'a>(
             .roles
             .iter()
             .find_map(|role| role.public_endpoint.as_ref())
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} did not declare a direct Engine public endpoint"
                 ),
             });
     }
-    Err(InferlabError::InvalidConfig {
+    Err(InferlabError::AdapterSemantics {
         message: format!("integration {integration:?} did not declare a Gateway public endpoint"),
+    })
+}
+
+/// The accepted endpoint declaration resolved into evidence: the control
+/// plane fills both pinned path values
+/// ([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]); no integration-supplied path
+/// ever reaches the resolved requirement.
+pub(super) fn public_endpoint_requirement(
+    integration: &str,
+    topology: ServeTopology,
+    plan: &PlanServeResult,
+) -> Result<EndpointRequirement, InferlabError> {
+    let declaration = public_endpoint_declaration(integration, topology, plan)?;
+    Ok(EndpointRequirement {
+        protocol: declaration.protocol,
+        completions_path: COMPLETIONS_PATH.to_owned(),
+        chat_completions_path: CHAT_COMPLETIONS_PATH.to_owned(),
+        server_metrics: declaration.server_metrics.clone(),
+        prefix_cache_reset: declaration.prefix_cache_reset.clone(),
+        prefix_cache_conditioning: declaration.prefix_cache_conditioning.clone(),
+        prompt_cache_read_zero_representation: declaration.prompt_cache_read_zero_representation,
     })
 }
 
@@ -459,7 +536,7 @@ fn public_endpoint_ports<'a>(
             .roles
             .iter()
             .find(|role| role.public_endpoint.is_some())
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} did not declare a direct Engine public endpoint"
                 ),
@@ -469,13 +546,13 @@ fn public_endpoint_ports<'a>(
             .iter()
             .find(|replica| replica.role_id == role.id && replica.replica_index == 0)
             .map(|replica| replica.ports.as_slice())
-            .ok_or_else(|| InferlabError::InvalidConfig {
+            .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} did not declare the public Engine replica"
                 ),
             });
     }
-    Err(InferlabError::InvalidConfig {
+    Err(InferlabError::AdapterSemantics {
         message: format!("integration {integration:?} did not declare a Gateway public endpoint"),
     })
 }
@@ -496,7 +573,7 @@ pub(super) fn validate_serve_graph(
             || role.effective_replica_count == 0
             || role_kinds.insert(role.id.as_str(), role.kind).is_some()
         {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} returned a duplicate or empty Engine role id"
                 ),
@@ -512,7 +589,7 @@ pub(super) fn validate_serve_graph(
                 })
         })
     {
-        return Err(InferlabError::InvalidConfig {
+        return Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {integration:?} did not preserve the requested Engine role set"
             ),
@@ -528,7 +605,7 @@ pub(super) fn validate_serve_graph(
     let mut role_replicas = BTreeSet::new();
     for replica in &plan.replicas {
         let Some(replica_count) = role_replica_counts.get(replica.role_id.as_str()) else {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} replica {:?} references unknown Engine role {:?}",
                     replica.id, replica.role_id
@@ -541,7 +618,7 @@ pub(super) fn validate_serve_graph(
             || !replica_ids.insert(replica.id.as_str())
             || !role_replicas.insert((replica.role_id.as_str(), replica.replica_index))
         {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} returned an invalid or duplicate Engine replica"
                 ),
@@ -551,7 +628,7 @@ pub(super) fn validate_serve_graph(
     for role in &plan.roles {
         for index in 0..role.effective_replica_count {
             if !role_replicas.contains(&(role.id.as_str(), index)) {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} omitted replica {index} for Engine role {:?}",
                         role.id
@@ -568,7 +645,7 @@ pub(super) fn validate_serve_graph(
     let routing_source = match topology {
         ServeTopology::Single => {
             if plan.pd_router.is_some() || pd_router_backend.is_some() {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} returned a P/D Router for single topology"
                     ),
@@ -578,7 +655,7 @@ pub(super) fn validate_serve_graph(
                 .roles
                 .iter()
                 .find(|role| role.kind == ServeRoleKind::Serve)
-                .ok_or_else(|| InferlabError::InvalidConfig {
+                .ok_or_else(|| InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} did not return the single Engine role"
                     ),
@@ -593,7 +670,7 @@ pub(super) fn validate_serve_graph(
                             .count()
                             != 1
                     {
-                        return Err(InferlabError::InvalidConfig {
+                        return Err(InferlabError::AdapterSemantics {
                             message: format!(
                                 "integration {integration:?} direct single must expose exactly one Engine endpoint"
                             ),
@@ -609,7 +686,7 @@ pub(super) fn validate_serve_graph(
                             [GatewayTarget::Engine { role }] if role == &serve.id
                         )
                     {
-                        return Err(InferlabError::InvalidConfig {
+                        return Err(InferlabError::AdapterSemantics {
                             message: format!(
                                 "integration {integration:?} returned an incompatible routed-single Gateway"
                             ),
@@ -619,7 +696,7 @@ pub(super) fn validate_serve_graph(
                     "gateway".to_owned()
                 }
                 _ => {
-                    return Err(InferlabError::InvalidConfig {
+                    return Err(InferlabError::AdapterSemantics {
                         message: format!(
                             "integration {integration:?} Gateway plan does not match selected gateway_backend {gateway_backend:?}"
                         ),
@@ -631,13 +708,13 @@ pub(super) fn validate_serve_graph(
             let gateway = plan
                 .gateway
                 .as_ref()
-                .ok_or_else(|| InferlabError::InvalidConfig {
+                .ok_or_else(|| InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} did not return a Gateway for prefill_decode"
                     ),
                 })?;
             let pd_router = plan.pd_router.as_ref().ok_or_else(|| {
-                InferlabError::InvalidConfig {
+                InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} did not return a P/D Router for prefill_decode"
                     ),
@@ -646,7 +723,7 @@ pub(super) fn validate_serve_graph(
             if Some(gateway.backend.as_str()) != gateway_backend
                 || Some(pd_router.backend.as_str()) != pd_router_backend
             {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} frontend backends do not match gateway_backend {gateway_backend:?} and pd_router_backend {pd_router_backend:?}"
                     ),
@@ -662,7 +739,7 @@ pub(super) fn validate_serve_graph(
                 || role_kinds.get(pd_router.prefill_role.as_str()) != Some(&ServeRoleKind::Prefill)
                 || role_kinds.get(pd_router.decode_role.as_str()) != Some(&ServeRoleKind::Decode)
             {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} returned incompatible fused frontend component plans"
                     ),
@@ -676,9 +753,33 @@ pub(super) fn validate_serve_graph(
 
     validate_workload_endpoint(
         integration,
-        public_endpoint_requirement(integration, topology, plan)?,
+        public_endpoint_declaration(integration, topology, plan)?,
         public_endpoint_ports(integration, topology, plan)?,
     )?;
+    if let Some(gateway) = &plan.gateway
+        && gateway.render_source == RenderSource::ControlPlane
+    {
+        validate_builtin_proxy_declaration(
+            integration,
+            "gateway",
+            &gateway.implementation,
+            &gateway.implementation_version,
+            &gateway.readiness,
+            Some(&gateway.endpoint),
+        )?;
+    }
+    if let Some(pd_router) = &plan.pd_router
+        && pd_router.render_source == RenderSource::ControlPlane
+    {
+        validate_builtin_proxy_declaration(
+            integration,
+            "pd_router",
+            &pd_router.implementation,
+            &pd_router.implementation_version,
+            &pd_router.readiness,
+            None,
+        )?;
+    }
     if kv_transfer.is_some()
         && !plan.links.iter().any(|link| {
             matches!(
@@ -687,7 +788,7 @@ pub(super) fn validate_serve_graph(
             )
         })
     {
-        return Err(InferlabError::InvalidConfig {
+        return Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {integration:?} did not link the planned KV-transfer mechanism"
             ),
@@ -730,7 +831,7 @@ pub(super) fn validate_serve_graph(
             }
         };
         if !valid {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} returned a link with unknown component or Engine endpoints"
                 ),
@@ -753,7 +854,7 @@ pub(super) fn validate_serve_graph(
                         if source == "gateway" && targets == &[serve.to_owned()]
                 )
             }) {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} did not link Gateway to its single Engine"
                     ),
@@ -794,7 +895,7 @@ pub(super) fn validate_serve_graph(
                 )
             });
             if !gateway_handoff || !request_routing || !kv_link {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} did not declare the required Gateway, P/D routing, and KV links"
                     ),
@@ -808,7 +909,7 @@ pub(super) fn validate_serve_graph(
                             ServeRoleLink::Bootstrap { .. } | ServeRoleLink::SideChannel { .. }
                         )
                     }) {
-                        return Err(InferlabError::InvalidConfig {
+                        return Err(InferlabError::AdapterSemantics {
                             message: format!(
                                 "integration {integration:?} declared a bootstrap or side-channel link for in-band NIXL transfer"
                             ),
@@ -851,7 +952,7 @@ pub(super) fn validate_serve_graph(
                 (_, None) => false,
             };
             if !transport_link {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} did not declare the required KV transport link and process ports"
                     ),
@@ -878,7 +979,7 @@ pub(super) fn validate_launch_dependencies(
     let mut prior = BTreeSet::new();
     for process in processes {
         if process.id().is_empty() || !prior.insert(process.id()) {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} returned a duplicate or empty process id"
                 ),
@@ -887,7 +988,7 @@ pub(super) fn validate_launch_dependencies(
         let mut dependencies = BTreeSet::new();
         for dependency in process.launch_dependencies() {
             if !dependencies.insert(dependency) || !prior.contains(dependency.as_str()) {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::AdapterSemantics {
                     message: format!(
                         "integration {integration:?} process {:?} has an invalid or unordered launch dependency {dependency:?}",
                         process.id()
@@ -906,7 +1007,7 @@ pub(super) fn validate_integration_identity(
     if actual == expected {
         Ok(())
     } else {
-        Err(InferlabError::InvalidConfig {
+        Err(InferlabError::AdapterSemantics {
             message: format!("integration {expected:?} returned framework identity {actual:?}"),
         })
     }
@@ -923,12 +1024,12 @@ pub(super) fn validate_synthetic_acceptance_outcome(
     outcome: Option<SyntheticAcceptanceOutcome>,
 ) -> Result<(), InferlabError> {
     match (request, outcome) {
-        (Some(_), None) => Err(InferlabError::InvalidConfig {
+        (Some(_), None) => Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {integration:?} omitted the synthetic acceptance outcome although the plan request carried the declaration"
             ),
         }),
-        (None, Some(_)) => Err(InferlabError::InvalidConfig {
+        (None, Some(_)) => Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {integration:?} returned a synthetic acceptance outcome although the plan request carried no declaration"
             ),
@@ -936,7 +1037,7 @@ pub(super) fn validate_synthetic_acceptance_outcome(
         (Some(_), Some(outcome))
             if !outcome.acceptance_length.is_finite() || outcome.acceptance_length < 1.0 =>
         {
-            Err(InferlabError::InvalidConfig {
+            Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} returned synthetic acceptance length {}; it must be a finite number of at least one",
                     outcome.acceptance_length
@@ -946,7 +1047,7 @@ pub(super) fn validate_synthetic_acceptance_outcome(
         (Some(SyntheticAcceptanceInput::Curve(_)), Some(outcome))
             if outcome.draft_count.is_none() =>
         {
-            Err(InferlabError::InvalidConfig {
+            Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} omitted the determined draft count although the plan request carried the curve form"
                 ),
@@ -955,7 +1056,7 @@ pub(super) fn validate_synthetic_acceptance_outcome(
         (Some(SyntheticAcceptanceInput::Explicit { .. }), Some(outcome))
             if outcome.draft_count.is_some() =>
         {
-            Err(InferlabError::InvalidConfig {
+            Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} returned a draft count although the plan request carried the explicit form"
                 ),
@@ -975,12 +1076,8 @@ mod tests {
         TargetEndpointScheme,
     };
 
-    // [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]: the outcome is required with
-    // the declaration, forbidden without it, and always a finite value >= 1;
-    // the curve form additionally requires the determined draft count and the
-    // explicit form forbids it.
     #[test]
-    fn synthetic_acceptance_outcome_matches_the_declaration_and_is_valid() {
+    fn synthetic_acceptance_outcome_matches_the_declaration_and_is_valid() -> Result<(), String> {
         let outcome = |acceptance_length, draft_count| SyntheticAcceptanceOutcome {
             acceptance_length,
             draft_count,
@@ -1048,45 +1145,148 @@ mod tests {
         ] {
             let error = validate_synthetic_acceptance_outcome("fixture", request, value)
                 .err()
-                .map(|error| error.to_string());
-            assert!(
-                error
-                    .as_deref()
-                    .is_some_and(|error| error.contains(expected)),
-                "{expected}: {error:?}"
+                .ok_or_else(|| format!("{expected} was accepted"))?;
+            assert!(error.to_string().contains(expected), "{expected}: {error}");
+            assert_eq!(error.code(), "E2001", "{expected}: {error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_requirement_fills_the_control_plane_owned_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_, plan) = bootstrap_prefill_decode_plan("vllm");
+
+        let endpoint = public_endpoint_requirement("vllm", ServeTopology::PrefillDecode, &plan)?;
+
+        assert_eq!(endpoint.completions_path, COMPLETIONS_PATH);
+        assert_eq!(endpoint.chat_completions_path, CHAT_COMPLETIONS_PATH);
+        Ok(())
+    }
+
+    // [[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]: the control plane pins the
+    // workload route paths into endpoint evidence, so every registered
+    // built-in proxy must serve exactly those paths; a proxy-side rename
+    // fails here instead of silently falsifying recorded endpoint evidence.
+    #[test]
+    fn builtin_proxies_serve_the_control_plane_owned_workload_paths() {
+        for spec in inferlab_proxy::registry::BUILTIN_PROXIES {
+            assert_eq!(
+                spec.completions_path, COMPLETIONS_PATH,
+                "{}",
+                spec.wire_name
+            );
+            assert_eq!(
+                spec.chat_completions_path, CHAT_COMPLETIONS_PATH,
+                "{}",
+                spec.wire_name
             );
         }
     }
 
+    // [[RFC-0006:C-INTEGRATIONS]]: for control-plane-rendered frontends the
+    // proxy crate's registry owns the version and routes; adapter
+    // declarations that disagree fail acceptance instead of falsifying the
+    // record.
     #[test]
-    fn rejects_an_integration_that_rebinds_a_named_workload_path()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let endpoint = EndpointRequirement {
+    fn builtin_proxy_declaration_mismatches_are_rejected() {
+        let nixl = inferlab_proxy::registry::VLLM_NIXL;
+        let sglang = inferlab_proxy::registry::SGLANG;
+        let mut endpoint = EndpointDeclaration {
             protocol: EndpointProtocol::Http,
-            completions_path: "/v1/completions".to_owned(),
-            chat_completions_path: "/v1/completions".to_owned(),
             server_metrics: None,
             prefix_cache_reset: None,
             prefix_cache_conditioning: None,
             prompt_cache_read_zero_representation: None,
         };
-
-        let error = validate_workload_endpoint("fixture", &endpoint, &[])
-            .err()
-            .ok_or("rebound chat-completions path was accepted")?;
-
-        assert!(error.to_string().contains("chat_completions_path"));
-        assert!(error.to_string().contains("/v1/chat/completions"));
-        Ok(())
+        let readiness = ReadinessProbe::Http {
+            path: "/healthcheck".to_owned(),
+        };
+        // The matching declaration passes.
+        assert!(
+            validate_builtin_proxy_declaration(
+                "fixture",
+                "gateway",
+                nixl.wire_name,
+                &nixl.version.to_string(),
+                &readiness,
+                Some(&endpoint),
+            )
+            .is_ok()
+        );
+        // A stale version fails naming the proxy-owned one.
+        let error = validate_builtin_proxy_declaration(
+            "fixture",
+            "gateway",
+            nixl.wire_name,
+            "9",
+            &readiness,
+            Some(&endpoint),
+        )
+        .err()
+        .map(|error| error.to_string());
+        let owned_version = format!(
+            "implementation_version \"9\"; the control-plane proxy owns version \"{}\"",
+            nixl.version
+        );
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains(&owned_version)),
+            "{error:?}"
+        );
+        // A route path the proxy does not serve fails naming the owner.
+        endpoint.prefix_cache_reset = Some(inferlab_protocol::HttpActionSpec {
+            method: inferlab_protocol::HttpMethod::Post,
+            path: "/flush_cache".to_owned(),
+        });
+        let error = validate_builtin_proxy_declaration(
+            "fixture",
+            "gateway",
+            nixl.wire_name,
+            &nixl.version.to_string(),
+            &readiness,
+            Some(&endpoint),
+        )
+        .err()
+        .map(|error| error.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("prefix_cache_reset")),
+            "{error:?}"
+        );
+        // The sglang proxy owns /flush_cache: the same declaration passes
+        // there and a version disagreement is caught per implementation.
+        assert!(
+            validate_builtin_proxy_declaration(
+                "fixture",
+                "gateway",
+                sglang.wire_name,
+                &sglang.version.to_string(),
+                &readiness,
+                Some(&endpoint),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_builtin_proxy_declaration(
+                "fixture",
+                "gateway",
+                sglang.wire_name,
+                &nixl.version.to_string(),
+                &readiness,
+                Some(&endpoint),
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn server_metrics_capability_is_an_origin_path_not_a_concrete_url()
     -> Result<(), Box<dyn std::error::Error>> {
-        let endpoint = |server_metrics_path: Option<&str>| EndpointRequirement {
+        let endpoint = |server_metrics_path: Option<&str>| EndpointDeclaration {
             protocol: EndpointProtocol::Http,
-            completions_path: "/v1/completions".to_owned(),
-            chat_completions_path: "/v1/chat/completions".to_owned(),
             server_metrics: server_metrics_path.map(|path| {
                 inferlab_protocol::ServerMetricsEndpointRequirement {
                     path: path.to_owned(),
@@ -1124,10 +1324,8 @@ mod tests {
     #[test]
     fn server_metrics_named_port_must_belong_to_the_public_process()
     -> Result<(), Box<dyn std::error::Error>> {
-        let endpoint = EndpointRequirement {
+        let endpoint = EndpointDeclaration {
             protocol: EndpointProtocol::Http,
-            completions_path: "/v1/completions".to_owned(),
-            chat_completions_path: "/v1/chat/completions".to_owned(),
             server_metrics: Some(inferlab_protocol::ServerMetricsEndpointRequirement {
                 path: "/metrics".to_owned(),
                 port: Some("prometheus".to_owned()),
@@ -1191,11 +1389,16 @@ mod tests {
                 capture_target: None,
             })
             .collect();
-        let implementation = match framework {
-            "sglang" => "sglang",
-            "tensorrt-llm" => "trtllm",
-            _ => "vllm_nixl",
+        // The proxy crate's registry owns the implementation identity and
+        // version of the selected control-plane-rendered frontend; acceptance
+        // rejects declarations that disagree.
+        let proxy = match framework {
+            "sglang" => inferlab_proxy::registry::SGLANG,
+            "tensorrt-llm" => inferlab_proxy::registry::TRTLLM,
+            _ => inferlab_proxy::registry::VLLM_NIXL,
         };
+        let implementation = proxy.wire_name;
+        let implementation_version = proxy.version.to_string();
         let co_rendering = FrontendCoRendering {
             process_role: FrontendProcessRole::Gateway,
         };
@@ -1235,12 +1438,10 @@ mod tests {
             gateway: Some(GatewayPlan {
                 backend: "builtin".to_owned(),
                 implementation: implementation.to_owned(),
-                implementation_version: "1".to_owned(),
+                implementation_version: implementation_version.clone(),
                 effective_settings: BTreeMap::new(),
-                endpoint: EndpointRequirement {
+                endpoint: EndpointDeclaration {
                     protocol: EndpointProtocol::Http,
-                    completions_path: "/v1/completions".to_owned(),
-                    chat_completions_path: "/v1/chat/completions".to_owned(),
                     server_metrics: None,
                     prefix_cache_reset: None,
                     prefix_cache_conditioning: None,
@@ -1256,7 +1457,7 @@ mod tests {
             pd_router: Some(PdRouterPlan {
                 backend: "builtin".to_owned(),
                 implementation: implementation.to_owned(),
-                implementation_version: "1".to_owned(),
+                implementation_version: implementation_version.clone(),
                 effective_settings: BTreeMap::new(),
                 policies: PdRoutingPolicies {
                     prefill: "round_robin".to_owned(),

@@ -246,13 +246,14 @@ pub(super) fn spawn_ssh(
     let command = render_env_command(spec.command).map_err(LaunchFailure::before_launch)?;
     materialize_ssh_launch_files(target, spec.launch_files).map_err(LaunchFailure::from_error)?;
     let script = format!(
-        "set -eu; mkdir -p {dir} {cache}; cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; printf 'INFERLAB_HANDLE\\t%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
+        "set -eu; mkdir -p {dir} {cache}; cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; printf '{marker}%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
         dir = shell_quote_path(spec.remote_dir),
         cache = shell_quote_path(spec.cache_root),
         cwd = shell_quote_path(&spec.command.cwd),
         stdout = shell_quote_path(&remote_stdout),
         stderr = shell_quote_path(&remote_stderr),
         handle = shell_quote_path(&remote_handle),
+        marker = HANDLE_MARKER,
     );
     let output = ssh_output(target, &script)
         .map_err(ServerLaunchError::from)

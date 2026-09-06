@@ -277,9 +277,8 @@ fn render_dockerfile(inputs: &ContextInputs<'_>) -> String {
     );
     // Postprocess finishes the realization, then the checks gate it, both
     // through the entrypoint so the examined environment equals the runtime
-    // activation ([[RFC-0002:C-ENVIRONMENT-CHECKS]]). A failed check fails
-    // the build before an image identity exists; the generated runner frames
-    // each check's exit into the builder log for attributable evidence.
+    // activation ([[RFC-0002:C-ENVIRONMENT-CHECKS]]); failure framing per
+    // `render_checks_runner`.
     if !inputs.postprocess.is_empty() {
         dockerfile.push_str(&format!(
             "COPY {POSTPROCESS_CONTEXT_DIR}/ {POSTPROCESS_IMAGE_DIR}/\n"

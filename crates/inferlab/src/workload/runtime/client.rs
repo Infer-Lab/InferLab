@@ -6,10 +6,10 @@ mod tests;
 
 use super::{
     AcceptedClient, CLIENT_CLEANUP_STATUS_DEADLINE, CLIENT_HANDLE_FILE, CLIENT_KILL_GRACE,
-    CLIENT_POLL_INTERVAL, CLIENT_TERM_GRACE, ClientCasePaths, ClientCommandPlan, ClientGroupHandle,
-    ClientProcessEvidence, ClientResultEnvelope, ClientRun, ClientTerminationEvidence,
-    ClientTerminationTrigger, PendingClientCleanup, SWEEP_WALK_DEPTH, WorkloadRecordSession,
-    write_json,
+    CLIENT_POLL_INTERVAL, CLIENT_RESULT_SCHEMA_VERSION, CLIENT_TERM_GRACE, ClientCasePaths,
+    ClientCommandPlan, ClientGroupHandle, ClientProcessEvidence, ClientResultEnvelope, ClientRun,
+    ClientTerminationEvidence, ClientTerminationTrigger, PendingClientCleanup, SWEEP_WALK_DEPTH,
+    WorkloadRecordSession, write_json,
 };
 use crate::InferlabError;
 use inferlab_runtime::interrupt;
@@ -171,6 +171,26 @@ pub(crate) struct ClientProcessPaths {
     pub(crate) result: PathBuf,
     pub(crate) stdout: PathBuf,
     pub(crate) stderr: PathBuf,
+}
+
+impl ClientProcessPaths {
+    /// The exchange vocabulary of one client working directory: Inferlab
+    /// writes `request.json`, the client answers in `result.json`, and the
+    /// runtime captures the client's `stdout.log` and `stderr.log`.
+    pub(crate) fn for_directory(directory: &Path) -> Self {
+        Self {
+            request: directory.join("request.json"),
+            result: directory.join("result.json"),
+            stdout: directory.join("stdout.log"),
+            stderr: directory.join("stderr.log"),
+        }
+    }
+
+    /// The directory a client writes its artifacts into under the same
+    /// working directory.
+    pub(crate) fn artifact_dir(directory: &Path) -> PathBuf {
+        directory.join("artifacts")
+    }
 }
 
 fn run_client_at_paths(
@@ -594,7 +614,7 @@ pub(super) fn decode_client_result<T: DeserializeOwned>(
             // does not even yield a version falls through so the strict parse
             // names the precise JSON defect.
             if let Ok(envelope) = serde_json::from_slice::<ClientResultEnvelope>(&bytes)
-                && envelope.schema_version != 1
+                && envelope.schema_version != CLIENT_RESULT_SCHEMA_VERSION
             {
                 let message = format!(
                     "{client} returned unsupported result schema version {}",

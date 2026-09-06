@@ -4,19 +4,9 @@ The website is a static Astro and Starlight project published under the GitHub P
 
 ## Content authority
 
-Product landing pages and category introductions are presentation-only summaries. The build projects the following public repository sources without maintaining editable documentation copies:
+Product landing pages and category introductions are presentation-only summaries. The build projects public repository sources — the top-level README, selected operator documents under `docs/`, selected bundled skill references, and the rendered RFC and ADR documents — without maintaining editable documentation copies. `scripts/content-manifest.mjs` owns the closed projected set.
 
-- `README.md`
-- `plugins/inferlab/skills/inferlab/references/workspace-authoring.md`
-- `plugins/inferlab/skills/inferlab/references/workspace-definition.md`
-- `plugins/inferlab/skills/inferlab/references/execution-authoring.md`
-- `plugins/inferlab/skills/inferlab/references/measurement-authoring.md`
-- `docs/backend-support.md`
-- `docs/tui.md`
-- `docs/rfc/*.md`
-- `docs/adr/*.md`
-
-`scripts/sync-content.mjs` represents each source document's leading H1 as the Starlight page title, adds presentation frontmatter, and mechanically maps relative link destinations to website routes in generated, ignored files. It preserves the remaining authoritative prose, headings, code, tables, and link labels, while omitting the private RFC changelog tail from the public projection. The website consumes only the closed public content set listed above.
+`scripts/sync-content.mjs` represents each source document's leading H1 as the Starlight page title, adds presentation frontmatter, and mechanically maps relative link destinations to website routes in generated, ignored files. It preserves the remaining authoritative prose, headings, code, tables, and link labels, while omitting the private RFC changelog tail from the public projection. The website consumes only the closed public content set the manifest declares.
 
 Human-facing product text uses `InferLab`. Commands, package distribution names, local storage paths, and independently specified protocol or evidence literals retain their defined spelling. Repository and default project-site URLs use the repository's canonical `InferLab` spelling.
 

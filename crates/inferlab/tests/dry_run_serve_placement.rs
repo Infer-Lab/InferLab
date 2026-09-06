@@ -16,7 +16,7 @@ fn unavailable_pixi_environment_reports_the_locked_install_action() -> Result<()
     let output = workspace
         .command()
         .env("FAKE_PIXI_UNAVAILABLE", "1")
-        .args(["serve", "start", "dsv4-qualify", "--dry-run"])
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
 
     assert!(!output.status.success());
@@ -30,13 +30,15 @@ fn unavailable_pixi_environment_reports_the_locked_install_action() -> Result<()
 #[test]
 fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    let serve = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
-    let recipe = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let serve =
+        workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+    let recipe =
+        workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert_eq!(serve["workflow"], "serve-start");
     assert_eq!(recipe["workflow"], "recipe-run");
     assert!(serve.get("recipe").is_none());
-    assert_eq!(recipe["recipe"]["id"], "dsv4-qualify");
+    assert_eq!(recipe["recipe"]["id"], "deepseek-v4-flash-qualify");
     assert_eq!(serve["server"]["case"]["id"], "tp2");
     assert_eq!(serve["server"]["case"]["selection"], "default");
     assert_eq!(serve["server"], recipe["server"]);
@@ -76,7 +78,7 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
     );
     assert_eq!(
         serve["server"]["declarations"][0]["source"],
-        serde_json::json!({"kind": "server", "id": "dsv4-qualify"})
+        serde_json::json!({"kind": "server", "id": "deepseek-v4-flash-qualify"})
     );
     assert_eq!(
         serve["server"]["declarations"][1]["source"],
@@ -305,7 +307,7 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
 fn case_extra_args_merge_per_flag_group_with_the_server_base() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
 
-    let tp2 = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let tp2 = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(
         tp2["server"]["roles"][0]["effective_settings"]["extra_args"],
         serde_json::json!(["--max-num-seqs", "64", "--language-model-only"]),
@@ -315,7 +317,7 @@ fn case_extra_args_merge_per_flag_group_with_the_server_base() -> Result<(), Box
     let tp4 = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--dry-run",
@@ -340,7 +342,7 @@ fn invocation_set_extra_args_merges_after_the_case_layer() -> Result<(), Box<dyn
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--set",
@@ -378,7 +380,7 @@ fn gateway_single_uses_one_process_only_frontend_without_model_coordinates()
         fs::read_to_string(&bindings_path)?.replacen("ports = [8000]", "ports = [8000, 8001]", 1);
     fs::write(bindings_path, bindings)?;
 
-    let plan = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     let server = &plan["server"];
     let engines = resolved_ranks(server)?;
     let frontend = support::resolved_frontend(server)?;
@@ -459,8 +461,8 @@ fn capture_rejects_a_gateway_control_binding_without_a_gateway() -> Result<(), B
     let workspace = TestWorkspace::new()?;
     let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
     let manifest = fs::read_to_string(&manifest_path)?.replacen(
-        "[servers.dsv4-qualify.settings]\n",
-        "[servers.dsv4-qualify.settings]\nfixture_capture_gateway = true\n",
+        "[servers.deepseek-v4-flash-qualify.settings]\n",
+        "[servers.deepseek-v4-flash-qualify.settings]\nfixture_capture_gateway = true\n",
         1,
     );
     fs::write(manifest_path, manifest)?;
@@ -468,7 +470,7 @@ fn capture_rejects_a_gateway_control_binding_without_a_gateway() -> Result<(), B
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--capture",
         "c8k1k",
         "--dry-run",
@@ -488,8 +490,8 @@ fn capture_rejects_a_concrete_window_control_url() -> Result<(), Box<dyn Error>>
     let workspace = TestWorkspace::new()?;
     let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
     let manifest = fs::read_to_string(&manifest_path)?.replacen(
-        "[servers.dsv4-qualify.settings]\n",
-        "[servers.dsv4-qualify.settings]\nfixture_capture_invalid_path = true\n",
+        "[servers.deepseek-v4-flash-qualify.settings]\n",
+        "[servers.deepseek-v4-flash-qualify.settings]\nfixture_capture_invalid_path = true\n",
         1,
     );
     fs::write(manifest_path, manifest)?;
@@ -497,7 +499,7 @@ fn capture_rejects_a_concrete_window_control_url() -> Result<(), Box<dyn Error>>
     let output = workspace.run(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--capture",
         "c8k1k",
         "--dry-run",
@@ -518,7 +520,7 @@ fn invocation_cannot_add_a_gateway_absent_from_the_server_base() -> Result<(), B
     let output = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.gateway_backend=\"fixture-gateway\"",
         "--dry-run",
@@ -526,10 +528,95 @@ fn invocation_cannot_add_a_gateway_absent_from_the_server_base() -> Result<(), B
     let stderr = String::from_utf8(output.stderr)?;
 
     assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
+    assert!(
+        stderr.contains("server.gateway_backend="),
+        "the offending override is identified: {stderr}"
+    );
     assert!(
         stderr.contains(
-            "cannot add gateway_backend because server \"dsv4-qualify\" does not declare a Gateway"
+            "cannot add gateway_backend because server \"deepseek-v4-flash-qualify\" does not declare a Gateway"
         ),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn invocation_cannot_change_server_topology() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.topology=\"prefill_decode\"",
+        "--dry-run",
+    ])?;
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
+    assert!(
+        stderr.contains("server.topology="),
+        "the offending override is identified: {stderr}"
+    );
+    assert!(
+        stderr.contains("invocation overrides must not change server topology"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn invocation_cannot_add_a_pd_router_absent_from_the_server_base() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.pd_router_backend=\"fixture-router\"",
+        "--dry-run",
+    ])?;
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
+    assert!(
+        stderr.contains("server.pd_router_backend="),
+        "the offending override is identified: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "cannot add pd_router_backend because server \"deepseek-v4-flash-qualify\" does not declare a P/D Router"
+        ),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn readiness_timeout_must_be_positive() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.readiness_timeout_seconds=0",
+        "--dry-run",
+    ])?;
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
+    assert!(
+        stderr.contains("server.readiness_timeout_seconds=0"),
+        "the offending override is identified: {stderr}"
+    );
+    assert!(
+        stderr.contains("readiness_timeout_seconds must be nonzero"),
         "{stderr}"
     );
     Ok(())
@@ -543,7 +630,7 @@ fn schema_one_workspace_is_rejected() -> Result<(), Box<dyn Error>> {
         WORKSPACE.replacen("schema_version = 2", "schema_version = 1", 1),
     )?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -557,7 +644,7 @@ fn dry_run_records_launch_files_without_materializing_them() -> Result<(), Box<d
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.settings.fixture_mode=\"launch-file\"",
         "--dry-run",
@@ -590,7 +677,7 @@ fn recipe_capture_selects_one_workload_and_prepares_the_server() -> Result<(), B
     let plan = workspace.run_json(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--capture",
         "c8k1k",
         "--dry-run",
@@ -628,11 +715,123 @@ fn recipe_capture_selects_one_workload_and_prepares_the_server() -> Result<(), B
     Ok(())
 }
 
+// [[RFC-0003:C-SERVE-AUXILIARY-MODELS]]: a declared draft-model auxiliary
+// resolves through the standing model-weight bindings per machine, and the
+// dry-run evidence carries both the declared mapping and each rank's
+// effective locator with its provenance.
+#[test]
+fn auxiliary_draft_model_resolves_per_machine_into_dry_run_evidence() -> Result<(), Box<dyn Error>>
+{
+    let workspace = TestWorkspace::new()?;
+    let draft_fallback = workspace.root.path().join("models/deepseek-v4-flash-draft");
+    let draft_node_b = workspace.root.path().join("node-b/deepseek-v4-flash-draft");
+    workspace.split_workspace(
+        SPLIT_ROOT,
+        &[
+            (
+                "serving.toml",
+                &format!(
+                    "{SPLIT_SERVING}\n\
+                     \n\
+                     [models.deepseek-v4-flash-draft]\n\
+                     served_name = \"deepseek-v4-flash-draft\"\n\
+                     \n\
+                     [servers.deepseek-v4-flash-qualify.auxiliary_models]\n\
+                     draft-model = \"deepseek-v4-flash-draft\"\n"
+                ),
+            ),
+            ("measurements.toml", SPLIT_MEASUREMENTS),
+        ],
+    )?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"pair\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             \n\
+             [model_weights.deepseek-v4-flash-draft]\n\
+             locator = {:?}\n\
+             \n\
+             [model_weights.deepseek-v4-flash-draft.machine_locators]\n\
+             node-b = {:?}\n\
+             \n\
+             [machines.node-a]\n\
+             host = \"node-a.example\"\n\
+             ports = [8000, 29501]\n\
+             devices = [0, 1]\n\
+             \n\
+             [machines.node-b]\n\
+             host = \"node-b.example\"\n\
+             ports = [8000]\n\
+             devices = [4, 5]\n\
+             \n\
+             [placements.pair.roles.serve]\n\
+             ranks = [\n\
+               {{ machine = \"node-a\", devices = [0, 1] }},\n\
+               {{ machine = \"node-b\", devices = [4, 5] }},\n\
+             ]\n",
+            workspace.private_weight,
+            draft_fallback.display().to_string(),
+            draft_node_b.display().to_string(),
+        ),
+    )?;
+
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--case",
+        "tp4",
+        "--dry-run",
+    ])?;
+
+    assert_eq!(
+        plan["server"]["auxiliary_models"],
+        serde_json::json!([{
+            "kind": "draft-model",
+            "model": {
+                "id": "deepseek-v4-flash-draft",
+                "served_name": "deepseek-v4-flash-draft",
+            }
+        }])
+    );
+    let ranks = plan["server"]["roles"][0]["replicas"][0]["ranks"]
+        .as_array()
+        .ok_or("missing resolved ranks")?;
+    let rank = |id: &str| -> Result<serde_json::Value, Box<dyn Error>> {
+        match ranks.iter().find(|rank| rank["id"] == id) {
+            Some(rank) => Ok(rank.clone()),
+            None => Err(format!("missing rank {id:?}").into()),
+        }
+    };
+    let first: serde_json::Value = rank("server-rank-000")?;
+    let second: serde_json::Value = rank("server-rank-001")?;
+    assert_eq!(
+        first["auxiliary_model_locators"],
+        serde_json::json!([{
+            "kind": "draft-model",
+            "locator": draft_fallback.display().to_string(),
+            "source": "fallback",
+        }])
+    );
+    assert_eq!(
+        second["auxiliary_model_locators"],
+        serde_json::json!([{
+            "kind": "draft-model",
+            "locator": draft_node_b.display().to_string(),
+            "source": "machine",
+        }])
+    );
+    Ok(())
+}
+
 #[test]
 fn ordered_two_node_placement_is_allocated_before_process_rendering() -> Result<(), Box<dyn Error>>
 {
     let workspace = TestWorkspace::new()?;
-    let node_b_weight = workspace.root.path().join("node-b/dsv4");
+    let node_b_weight = workspace.root.path().join("node-b/deepseek-v4-flash");
     fs::write(
         workspace.root.path().join(".inferlab/local.toml"),
         format!(
@@ -667,7 +866,7 @@ fn ordered_two_node_placement_is_allocated_before_process_rendering() -> Result<
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--dry-run",
@@ -737,7 +936,7 @@ fn device_groups_can_place_multiple_ranks_on_one_machine() -> Result<(), Box<dyn
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--dry-run",
@@ -807,7 +1006,7 @@ fn static_npmd_on_one_machine_allocates_disjoint_replicas_and_a_public_proxy()
     let plan = workspace.run_json(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.roles.prefill.replicas=2",
         "--set",
@@ -1011,7 +1210,7 @@ fn heterogeneous_pd_parallelism_places_one_prefill_replica_across_nodes()
     let plan = workspace.run_json(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.roles.prefill.parallelism.outer.tensor_parallel_size=4",
         "--set",
@@ -1085,7 +1284,7 @@ fn single_replica_list_placement_is_rejected() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -1143,7 +1342,7 @@ fn sglang_builtin_proxy_dry_run_preserves_prefill_bootstrap_triples() -> Result<
         let plan = workspace.run_json(&[
             "recipe",
             "run",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--set",
             "server.roles.prefill.replicas=2",
             "--set",
@@ -1263,7 +1462,7 @@ fn trtllm_builtin_proxy_dry_run_uses_rank_zero_worker_urls_without_auxiliary_por
     let plan = workspace.run_json(&[
         "recipe",
         "run",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.roles.prefill.replicas=2",
         "--set",
@@ -1390,7 +1589,7 @@ fn built_in_proxy_prefers_the_local_machine_in_a_remote_first_placement()
         ),
     )?;
 
-    let plan = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     let processes = resolved_ranks(&plan["server"])?;
     let frontend = support::resolved_frontend(&plan["server"])?;
 
@@ -1425,7 +1624,7 @@ fn machine_binding_selects_runtime_cache_storage_root() -> Result<(), Box<dyn Er
         ),
     )?;
 
-    let plan = workspace.run_json(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     let process = resolved_rank(&plan["server"], "server")?;
     let cache = &process.runtime_cache;
     assert_eq!(cache.storage_root_source, "machine-binding");
@@ -1471,7 +1670,7 @@ fn two_node_resolution_rejects_placements_without_a_common_routable_interface()
         .args([
             "serve",
             "start",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--case",
             "tp4",
             "--dry-run",
@@ -1491,7 +1690,7 @@ fn explicit_case_and_server_override_preserve_ordered_declarations() -> Result<(
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--set",
@@ -1538,7 +1737,7 @@ fn explicit_case_and_server_override_preserve_ordered_declarations() -> Result<(
     assert_eq!(declarations.len(), 6);
     assert_eq!(
         declarations[0]["source"],
-        serde_json::json!({"kind": "server", "id": "dsv4-qualify"})
+        serde_json::json!({"kind": "server", "id": "deepseek-v4-flash-qualify"})
     );
     assert_eq!(
         declarations[0]["common"]["parallelism"]["outer"]["pipeline_parallel_size"],
@@ -1594,16 +1793,16 @@ fn runtime_deadlines_use_the_server_case_and_invocation_patch_precedence()
     let workspace = TestWorkspace::new()?;
     let path = workspace.root.path().join(".inferlab/workspace.toml");
     let config = fs::read_to_string(&path)?.replace(
-        "[servers.dsv4-qualify.cases.tp4.parallelism.outer]",
-        "[servers.dsv4-qualify.cases.tp4]\nreadiness_timeout_seconds = 1200\nreadiness_attempt_timeout_seconds = 45\ncapture_arm_deadline_seconds = 46\ncapture_control_deadline_seconds = 47\ncapture_finalization_deadline_seconds = 48\n\n\
-         [servers.dsv4-qualify.cases.tp4.parallelism.outer]",
+        "[servers.deepseek-v4-flash-qualify.cases.tp4.parallelism.outer]",
+        "[servers.deepseek-v4-flash-qualify.cases.tp4]\nreadiness_timeout_seconds = 1200\nreadiness_attempt_timeout_seconds = 45\ncapture_arm_deadline_seconds = 46\ncapture_control_deadline_seconds = 47\ncapture_finalization_deadline_seconds = 48\n\n\
+         [servers.deepseek-v4-flash-qualify.cases.tp4.parallelism.outer]",
     );
     fs::write(path, config)?;
 
     let case_plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--dry-run",
@@ -1644,7 +1843,7 @@ fn runtime_deadlines_use_the_server_case_and_invocation_patch_precedence()
     let invocation_plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--case",
         "tp4",
         "--set",
@@ -1713,16 +1912,22 @@ fn readiness_attempt_timeout_must_be_positive() -> Result<(), Box<dyn Error>> {
     let output = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--set",
         "server.readiness_attempt_timeout_seconds=0",
         "--dry-run",
     ])?;
 
     assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E1005]"), "{stderr}");
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("readiness_attempt_timeout_seconds must be nonzero")
+        stderr.contains("server.readiness_attempt_timeout_seconds=0"),
+        "the offending override is identified: {stderr}"
+    );
+    assert!(
+        stderr.contains("readiness_attempt_timeout_seconds must be nonzero"),
+        "{stderr}"
     );
     Ok(())
 }
@@ -1735,7 +1940,7 @@ fn local_adapter_timeout_must_be_positive() -> Result<(), Box<dyn Error>> {
     bindings.push_str("\n[adapter]\ntimeout_seconds = 0\n");
     fs::write(local, bindings)?;
 
-    let output = workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let diagnostics = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1757,7 +1962,7 @@ fn local_adapter_timeout_bounds_the_process_invocation() -> Result<(), Box<dyn E
     let output = workspace
         .command()
         .env("FIXTURE_ADAPTER_HANG", "1")
-        .args(["serve", "start", "dsv4-qualify", "--dry-run"])
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
         .output()?;
     let elapsed = started.elapsed();
 
@@ -1783,15 +1988,22 @@ fn profiler_deadlines_must_be_positive() -> Result<(), Box<dyn Error>> {
         let output = workspace.run(&[
             "serve",
             "start",
-            "dsv4-qualify",
+            "deepseek-v4-flash-qualify",
             "--set",
             &format!("server.{field}=0"),
             "--dry-run",
         ])?;
 
         assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("error[E1005]"), "{field}: {stderr}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains(&format!("{field} must be nonzero"))
+            stderr.contains(&format!("server.{field}=0")),
+            "the offending override is identified: {field}: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("{field} must be nonzero")),
+            "{field}: {stderr}"
         );
     }
     Ok(())
@@ -1808,14 +2020,14 @@ fn engine_trace_dry_run_preserves_mechanism_and_assigned_trace_storage()
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.profiler]\nmechanism = \"engine_trace\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -1839,7 +2051,7 @@ fn engine_trace_dry_run_preserves_mechanism_and_assigned_trace_storage()
     let expected = workspace
         .root
         .path()
-        .join(".inferlab/runtime/engine-trace/dsv4-qualify/server");
+        .join(".inferlab/runtime/engine-trace/deepseek-v4-flash-qualify/server");
     assert_eq!(
         target.capture_storage.as_deref(),
         expected.to_str(),
@@ -1855,7 +2067,7 @@ fn engine_trace_dry_run_preserves_mechanism_and_assigned_trace_storage()
     let plan = invocation.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -1888,14 +2100,14 @@ fn engine_trace_finalization_default_is_mechanism_aware() -> Result<(), Box<dyn 
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.profiler]\nmechanism = \"engine_trace\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
     let plan = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -1908,7 +2120,7 @@ fn engine_trace_finalization_default_is_mechanism_aware() -> Result<(), Box<dyn 
     let overridden = workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -1932,14 +2144,14 @@ fn engine_trace_mechanism_resolves_from_case_and_role_scopes() -> Result<(), Box
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.cases.tp2.profiler]\nmechanism = \"engine_trace\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.cases.tp2.profiler]\nmechanism = \"engine_trace\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
     let plan = case_workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -1960,14 +2172,14 @@ fn engine_trace_mechanism_resolves_from_case_and_role_scopes() -> Result<(), Box
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.roles.serve.profiler]\nmechanism = \"engine_trace\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.roles.serve.profiler]\nmechanism = \"engine_trace\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
     let plan = role_workspace.run_json(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -1995,11 +2207,11 @@ fn engine_trace_rejects_nsys_escape_inputs() -> Result<(), Box<dyn Error>> {
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.profiler]\nmechanism = \"engine_trace\"\n\n[servers.dsv4-qualify.profiler.nsys]\nsampling = \"cpu\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.profiler]\nmechanism = \"engine_trace\"\n\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\nsampling = \"cpu\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
-    let output = loaded.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output = loaded.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
@@ -2013,14 +2225,14 @@ fn engine_trace_rejects_nsys_escape_inputs() -> Result<(), Box<dyn Error>> {
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.profiler.nsys]\nsampling = \"cpu\"\n\n[servers.dsv4-qualify.cases.tp2.profiler]\nmechanism = \"engine_trace\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\nsampling = \"cpu\"\n\n[servers.deepseek-v4-flash-qualify.cases.tp2.profiler]\nmechanism = \"engine_trace\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
     let output = composed.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -2043,7 +2255,7 @@ fn profiler_declarations_require_profiling_enabled() -> Result<(), Box<dyn Error
     let output = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiler.mechanism=\"engine_trace\"",
@@ -2061,11 +2273,12 @@ fn profiler_declarations_require_profiling_enabled() -> Result<(), Box<dyn Error
     fs::write(
         &manifest,
         format!(
-            "{}\n[servers.dsv4-qualify.profiler.nsys]\nsampling = \"cpu\"\n",
+            "{}\n[servers.deepseek-v4-flash-qualify.profiler.nsys]\nsampling = \"cpu\"\n",
             fs::read_to_string(&manifest)?,
         ),
     )?;
-    let output = nsys_workspace.run(&["serve", "start", "dsv4-qualify", "--dry-run"])?;
+    let output =
+        nsys_workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -2077,7 +2290,7 @@ fn profiler_declarations_require_profiling_enabled() -> Result<(), Box<dyn Error
     let output = nsys_workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--set",
         "server.profiling=true",
@@ -2106,7 +2319,7 @@ fn engine_trace_rejects_a_non_local_placement() -> Result<(), Box<dyn Error>> {
     let output = workspace.run(&[
         "serve",
         "start",
-        "dsv4-qualify",
+        "deepseek-v4-flash-qualify",
         "--dry-run",
         "--placement",
         "remote",
@@ -2262,7 +2475,8 @@ fn synthetic_acceptance_curve_evidence_case_replacement_and_eval_exclusion()
 
     // Positive control: evals against a server without synthetic acceptance
     // plan fine.
-    let control = workspace.run_json(&["recipe", "run", "dsv4-qualify", "--dry-run"])?;
+    let control =
+        workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     assert_eq!(control["measurements"]["evals"][0]["id"], "smoke");
     assert!(control["server"].get("synthetic_acceptance").is_none());
     Ok(())

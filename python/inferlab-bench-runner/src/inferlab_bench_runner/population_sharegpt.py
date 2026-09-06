@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     BenchPopulationInput,
     BenchPopulationPreparationRequest,
     BenchPopulationPreparationResult,
@@ -298,7 +299,7 @@ def prepare_sharegpt_population(
     ineligible_entries = candidate_entries - admitted_entries
     if admitted_entries < required:
         return BenchPopulationPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             materialization_identity=source.catalog.materialization_identity,
             requested_entries=required,
@@ -349,7 +350,7 @@ def prepare_sharegpt_population(
     input_counts = [entry.input_tokens for entry in ordered]
     output_counts = [entry.output_tokens for entry in ordered]
     return BenchPopulationPreparationResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         materialization_identity=source.catalog.materialization_identity,
         requested_entries=required,
@@ -411,7 +412,7 @@ def prepare_sharegpt_session_population(
     ineligible_entries = candidate_entries - admitted_entries
     if admitted_entries < required:
         return BenchPopulationPreparationResult(
-            schema_version=1,
+            schema_version=SCHEMA_VERSION,
             status=ClientStatus.failed,
             materialization_identity=source.catalog.materialization_identity,
             requested_entries=required,
@@ -490,7 +491,7 @@ def prepare_sharegpt_session_population(
     input_counts = [session.first_turn_input_tokens for session in ordered]
     output_counts = [turn.output_tokens for session in ordered for turn in session.turns]
     return BenchPopulationPreparationResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         status=ClientStatus.succeeded,
         materialization_identity=source.catalog.materialization_identity,
         requested_entries=required,

@@ -2,13 +2,13 @@
 
 use super::{
     invalid, require_id, require_nonempty, require_reference, validate_expected_digest,
-    validate_workspace_relative_source_path,
+    validate_finite_json_value, validate_workspace_relative_source_path,
 };
 use crate::InferlabError;
 use crate::workspace::definitions::{
     JsonValue, ProfilerEscapes, SyntheticAcceptanceDefinition, WorkspaceConfig,
 };
-use inferlab_protocol::{CaptureMechanism, Parallelism, ServeTopology};
+use inferlab_protocol::{CaptureMechanism, Parallelism, ServeRoleKind, ServeTopology};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -63,13 +63,19 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
             require_nonempty("server P/D Router backend", id, backend)?;
         }
         validate_parallelism("server", id, &server.parallelism)?;
+        crate::workspace::auxiliary_models::validate_auxiliary_models(
+            &format!("server {id:?}"),
+            &server.model,
+            &server.auxiliary_models,
+            config,
+        )?;
         validate_synthetic_acceptance(
             root,
             &format!("server {id:?}"),
             &server.synthetic_acceptance,
         )?;
         validate_profiler_escapes(&format!("server {id:?}"), &server.profiler)?;
-        validate_extra_args(&format!("server {id:?}"), &server.settings)?;
+        validate_settings(&format!("server {id:?}"), &server.settings)?;
         for (role_id, role) in &server.roles {
             require_id("serve role", role_id)?;
             validate_server_role(id, server.topology, role_id)?;
@@ -80,7 +86,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
             }
             validate_parallelism("serve role", role_id, &role.parallelism)?;
             validate_profiler_escapes(&format!("server {id:?} role {role_id:?}"), &role.profiler)?;
-            validate_extra_args(&format!("server {id:?} role {role_id:?}"), &role.settings)?;
+            validate_settings(&format!("server {id:?} role {role_id:?}"), &role.settings)?;
         }
         if let Some(default_case) = &server.default_case
             && !server.cases.contains_key(default_case)
@@ -154,7 +160,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
                 &format!("server case {case_id:?}"),
                 &case.synthetic_acceptance,
             )?;
-            validate_extra_args(&format!("server case {case_id:?}"), &case.settings)?;
+            validate_settings(&format!("server case {case_id:?}"), &case.settings)?;
             for (role_id, role) in &case.roles {
                 require_id("server case role", role_id)?;
                 validate_server_role(id, server.topology, role_id)?;
@@ -164,7 +170,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
                     ));
                 }
                 validate_parallelism("server case role", role_id, &role.parallelism)?;
-                validate_extra_args(
+                validate_settings(
                     &format!("server case {case_id:?} role {role_id:?}"),
                     &role.settings,
                 )?;
@@ -172,6 +178,19 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
         }
     }
     Ok(())
+}
+
+/// Settings maps cross the adapter boundary as structured JSON, where a
+/// non-finite float would collapse to null; finiteness is checked for every
+/// layer before the extra_args segmentation gate.
+fn validate_settings(
+    context: &str,
+    settings: &BTreeMap<String, JsonValue>,
+) -> Result<(), InferlabError> {
+    for (key, value) in settings {
+        validate_finite_json_value(context, &format!("settings.{key}"), value)?;
+    }
+    validate_extra_args(context, settings)
 }
 
 /// [[RFC-0003:C-RESOLUTION]] extra_args segmentation is a workspace-load
@@ -269,8 +288,12 @@ fn validate_server_role(
     role: &str,
 ) -> Result<(), InferlabError> {
     let valid = match topology {
-        ServeTopology::Single => role == "serve",
-        ServeTopology::PrefillDecode => matches!(role, "prefill" | "decode"),
+        ServeTopology::Single => role == ServeRoleKind::Serve.as_str(),
+        ServeTopology::PrefillDecode => [
+            ServeRoleKind::Prefill.as_str(),
+            ServeRoleKind::Decode.as_str(),
+        ]
+        .contains(&role),
     };
     if valid {
         Ok(())
@@ -287,71 +310,7 @@ fn validate_parallelism(
     id: &str,
     parallelism: &Parallelism,
 ) -> Result<(), InferlabError> {
-    let values = [
-        (
-            "outer.tensor_parallel_size",
-            parallelism
-                .outer
-                .as_ref()
-                .and_then(|outer| outer.tensor_parallel_size),
-        ),
-        (
-            "outer.pipeline_parallel_size",
-            parallelism
-                .outer
-                .as_ref()
-                .and_then(|outer| outer.pipeline_parallel_size),
-        ),
-        (
-            "attention.tensor_parallel_size",
-            parallelism
-                .attention
-                .as_ref()
-                .and_then(|attention| attention.tensor_parallel_size),
-        ),
-        (
-            "attention.data_parallel_size",
-            parallelism
-                .attention
-                .as_ref()
-                .and_then(|attention| attention.data_parallel_size),
-        ),
-        (
-            "attention.context_parallel_size",
-            parallelism
-                .attention
-                .as_ref()
-                .and_then(|attention| attention.context_parallel_size),
-        ),
-        (
-            "experts.tensor_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|experts| experts.tensor_parallel_size),
-        ),
-        (
-            "experts.data_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|experts| experts.data_parallel_size),
-        ),
-        (
-            "experts.expert_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|experts| experts.expert_parallel_size),
-        ),
-        (
-            "experts.dense_tensor_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|experts| experts.dense_tensor_parallel_size),
-        ),
-    ];
+    let values = parallelism.field_values();
     if let Some((field, _)) = values.into_iter().find(|(_, value)| *value == Some(0)) {
         return invalid(format!(
             "{owner} {id:?} parallelism.{field} must be nonzero"
@@ -360,22 +319,13 @@ fn validate_parallelism(
     Ok(())
 }
 
-/// Escape options that name a managed profiler fact are rejected at load
-/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): session identity, report
-/// storage/export/overwrite lifecycle, capture-range mechanics, launch
-/// wait, and the free-list forms of the dedicated trace, sampling, and
-/// context-switch fields — in long, short, and attached short-option-value
-/// forms, because nsys 2026.3.1 parses -tnone as --trace=none. Shorthands
-/// follow that nsys: launch carries -t for --trace; start carries -o, -f,
-/// -c, and -s. Launch's -w is --show-output and -e is --env-var, so neither
-/// is rejected. Environment keys must be POSIX identifiers so no key can be
-/// parsed as an option of the environment utility.
 /// The managed and dedicated-field option names of the profiler escape gate
-/// ([[RFC-0004:C-WORKLOAD-PROFILING]]). The strict-prefix abbreviation rule
-/// was checked against the qualified nsys 2026.3.1 launch and start option
-/// surfaces at qualification (no legitimate option is a strict prefix of a
-/// managed name); re-check by hand when the qualified nsys version changes
-/// ([[ADR-0006]]).
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Attached short-option forms are
+/// rejected alongside the long names because nsys 2026.3.1 parses them
+/// (-tnone is --trace=none), as are strict-prefix abbreviations of a managed
+/// name; launch's -w (--show-output) and -e (--env-var) stay allowed. The
+/// surface was checked against nsys 2026.3.1 at qualification; re-check by
+/// hand when the qualified nsys version changes ([[ADR-0006]]).
 const MANAGED_ESCAPE_OPTIONS: &[&str] = &[
     "--session",
     "--session-new",
@@ -395,6 +345,17 @@ const MANAGED_ESCAPE_OPTIONS: &[&str] = &[
     "--cpuctxsw",
 ];
 
+/// The short-option subset of the managed escape vocabulary: the
+/// single-dash entries of [`MANAGED_ESCAPE_OPTIONS`], so adding a short form
+/// to the parent list extends the attached-form rejection without a second
+/// hand-synced list.
+fn managed_short_options() -> impl Iterator<Item = &'static str> {
+    MANAGED_ESCAPE_OPTIONS
+        .iter()
+        .copied()
+        .filter(|option| !option.starts_with("--"))
+}
+
 pub(in crate::workspace) fn validate_profiler_escapes(
     context: &str,
     escapes: &ProfilerEscapes,
@@ -409,7 +370,6 @@ pub(in crate::workspace) fn validate_profiler_escapes(
         ));
     }
     const MANAGED: &[&str] = MANAGED_ESCAPE_OPTIONS;
-    const MANAGED_SHORT: &[&str] = &["-t", "-o", "-f", "-c", "-s"];
     for (field, options) in [
         ("launch_options", &escapes.nsys.launch_options),
         ("start_options", &escapes.nsys.start_options),
@@ -426,8 +386,7 @@ pub(in crate::workspace) fn validate_profiler_escapes(
             }
             let name = option.split('=').next().unwrap_or(option.as_str());
             let attached = !name.starts_with("--")
-                && MANAGED_SHORT
-                    .iter()
+                && managed_short_options()
                     .any(|short| name.starts_with(short) && name.len() > short.len());
             // The qualified nsys resolves GNU-style abbreviations, so any
             // strict prefix of a managed long name either resolves to the
@@ -467,7 +426,127 @@ fn is_posix_identifier(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inferlab_profiler::plan::NsysEscapes;
+    use inferlab_profiler::plan::{
+        CaptureDeadlines, CaptureSelection, CaptureWindowActionPlan,
+        CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan, NsysEscapes,
+        ProcessCapturePlan, ProcessPreparation, prepare_process,
+    };
+    use inferlab_profiler::record::CaptureActionRecord;
+    use inferlab_profiler::session::CaptureSession;
+    use inferlab_runtime::plan::{CommandPlan, LaunchPlan, ProcessEndpointPlan};
+    use std::error::Error;
+
+    // The short subset is derived from the managed vocabulary, not restated;
+    // pin the derivation so a future short form enters the attached-form
+    // rejection by extending the parent list alone.
+    #[test]
+    fn managed_short_options_are_the_short_forms_of_the_managed_vocabulary() {
+        let mut derived: Vec<&str> = managed_short_options().collect();
+        derived.sort_unstable();
+        assert_eq!(derived, ["-c", "-f", "-o", "-s", "-t"]);
+    }
+
+    // The managed option vocabulary is spelled twice with no mechanical tie:
+    // here as the escape reject list, and inline in inferlab-profiler's
+    // launch and start argv rendering ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    // Render one representative managed capture through the profiler's public
+    // planning and session APIs and require every emitted long option to be
+    // gated; the direction is subset because the gate also lists short forms
+    // and configuration-dependent options. A producer-side vocabulary
+    // addition fails this pin until the gate learns it.
+    #[test]
+    fn managed_escape_options_cover_the_emitted_nsys_vocabulary() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let action = CaptureWindowActionPlan {
+            method: CaptureWindowHttpMethodPlan::Post,
+            path: "/profile".to_owned(),
+            body: None,
+            effective_url: "http://127.0.0.1:1/profile".to_owned(),
+        };
+        let command = CommandPlan {
+            argv: vec!["serve-engine".to_owned()],
+            env: BTreeMap::new(),
+            explicit_env: Vec::new(),
+            pass_env: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+        };
+        let capture = ProcessCapturePlan {
+            mechanism: CaptureMechanism::ManagedCollection,
+            capture_storage: None,
+            window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
+            control_process_id: "serve-0".to_owned(),
+            device_count: 1,
+            start: action.clone(),
+            stop: action,
+            // The no-op executable lets the recorded session arm render the
+            // real start argv without an Nsight Systems installation.
+            escapes: NsysEscapes {
+                executable: Some("true".to_owned()),
+                ..NsysEscapes::default()
+            },
+        };
+        let prepared = prepare_process(ProcessPreparation {
+            record_id: "serve",
+            role_id: "serve",
+            replica_id: "serve",
+            replica_index: 0,
+            process_id: "serve-0",
+            rank: Some(0),
+            rank_count: Some(1),
+            command: &command,
+            launch: &LaunchPlan::Local,
+            capture: Some(&capture),
+            control_endpoint: Some(&ProcessEndpointPlan {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+            }),
+        })?;
+        let target = prepared.target.ok_or("missing profiler target")?;
+        let session = CaptureSession::open(
+            "serve",
+            "bench",
+            &["w1".to_owned()],
+            CaptureSelection {
+                targets: vec![target.clone()],
+                deadlines: CaptureDeadlines {
+                    capture_arm_deadline_seconds: 60,
+                    capture_control_deadline_seconds: 60,
+                    capture_finalization_deadline_seconds: 60,
+                },
+            },
+        )
+        .map_err(|record| format!("capture arming failed: {record:?}"))?;
+        let start_argv = session
+            .finish()
+            .arm
+            .into_iter()
+            .find_map(|action| match action {
+                CaptureActionRecord::Command {
+                    operation, argv, ..
+                } if operation == "start-range-collection" => Some(argv),
+                _ => None,
+            })
+            .ok_or("capture arm recorded no start-range-collection action")?;
+
+        for (phase, argv) in [("launch", &target.launch_prefix), ("start", &start_argv)] {
+            let emitted: Vec<&str> = argv
+                .iter()
+                .filter(|token| token.starts_with("--"))
+                .map(|token| token.split('=').next().unwrap_or(token.as_str()))
+                .collect();
+            assert!(!emitted.is_empty(), "{phase} argv rendered no long options");
+            let ungated: Vec<&str> = emitted
+                .into_iter()
+                .filter(|name| !MANAGED_ESCAPE_OPTIONS.contains(name))
+                .collect();
+            assert!(
+                ungated.is_empty(),
+                "{phase} argv emits managed options missing from MANAGED_ESCAPE_OPTIONS: \
+                 {ungated:?}; extend the escape reject list"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn managed_and_dedicated_escape_options_are_rejected_in_both_lists() {

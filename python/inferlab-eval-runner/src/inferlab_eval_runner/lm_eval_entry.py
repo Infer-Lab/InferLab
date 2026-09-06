@@ -117,6 +117,7 @@ class RepeatedTrialState:
         return len(token_ids)
 
 
+# Pinned by protocol/fixtures/reserved-request-members.json ([[RFC-0004:C-INFERENCE-REQUESTS]]).
 STRUCTURAL_REQUEST_MEMBERS = frozenset(
     {
         "model",
@@ -225,7 +226,8 @@ def install_request_body(
         messages: object,
         generate: bool = False,
         gen_kwargs: dict[str, object] | None = None,
-        seed: int = 1234,
+        *,
+        seed: int,
         eos: object = None,
         **kwargs: object,
     ) -> JsonObject:
@@ -260,7 +262,8 @@ def install_request_body(
         messages: object,
         generate: bool = False,
         gen_kwargs: dict[str, object] | None = None,
-        seed: int = 1234,
+        *,
+        seed: int,
         eos: object = None,
         **kwargs: object,
     ) -> JsonObject:
@@ -581,7 +584,7 @@ def main() -> None:
         raise ValueError("inference request config has no definition_request_body object")
     evidence_path = Path(options.request_evidence)
     raw_trials = config.get("trials", 1)
-    raw_seed = config.get("base_seed", 1234)
+    raw_seed = config.get("base_seed")
     if (
         not isinstance(raw_trials, int)
         or isinstance(raw_trials, bool)

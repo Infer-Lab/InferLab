@@ -1,13 +1,11 @@
-use crate::plan::{
-    CaptureWindowActionPlan, CaptureWindowHttpMethodPlan, ProfilerControl, ProfilerLaunch,
-    env_prefix,
-};
+use crate::plan::{CaptureWindowActionPlan, CaptureWindowHttpMethodPlan, env_prefix};
 use crate::poll::{Poll, poll_until};
 use crate::record::{
     ARM_START_BOUNDARY, CONTROL_START_BOUNDARY, CaptureActionRecord, CaptureHttpFailureKind,
     MEASUREMENT_FINALIZATION_START, ProfilerTargetRecord,
 };
 use inferlab_runtime::operation_bound::{OperationBound, OperationTerminalCause, Remaining};
+use inferlab_runtime::plan::LaunchPlan;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Output;
@@ -141,9 +139,7 @@ pub(crate) fn start_windows(
 ) -> Vec<CaptureActionRecord> {
     let process_ids = targets
         .iter()
-        .map(|target| match &target.control {
-            ProfilerControl::Http { process_id, .. } => process_id.as_str(),
-        })
+        .map(|target| target.control.process_id.as_str())
         .collect::<BTreeSet<_>>();
     window_actions_for(targets, true, &process_ids, deadline_seconds)
 }
@@ -162,8 +158,7 @@ pub(crate) fn stop_windows(
 /// the shared budget rather than a per-action control budget. A delivery
 /// failure (transport error or a prompt error status) is window-closing
 /// control failure evidence; a slow or absent response is neutral
-/// flush-pending evidence, and coverage verification is the sole completion
-/// verdict.
+/// flush-pending evidence.
 pub(crate) fn close_engine_trace_windows(
     targets: &[&ProfilerTargetRecord],
     process_ids: &BTreeSet<&str>,
@@ -172,13 +167,12 @@ pub(crate) fn close_engine_trace_windows(
     let mut seen = BTreeSet::new();
     targets
         .iter()
-        .filter_map(|target| match &target.control {
-            ProfilerControl::Http {
-                process_id, stop, ..
-            } if process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone()) => {
-                Some(engine_trace_close_action(process_id, stop, bound))
-            }
-            _ => None,
+        .filter(|target| {
+            let process_id = &target.control.process_id;
+            process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone())
+        })
+        .map(|target| {
+            engine_trace_close_action(&target.control.process_id, &target.control.stop, bound)
         })
         .collect()
 }
@@ -275,22 +269,19 @@ fn window_actions_for(
     let mut seen = BTreeSet::new();
     targets
         .iter()
-        .filter_map(|target| match &target.control {
-            ProfilerControl::Http {
-                process_id,
-                start: start_action,
-                stop: stop_action,
-                ..
-            } if process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone()) => {
-                let action = if start { start_action } else { stop_action };
-                Some(http_action(
-                    process_id,
-                    if start { "start-range" } else { "stop-range" },
-                    action,
-                    deadline_seconds,
-                ))
-            }
-            _ => None,
+        .filter(|target| {
+            let process_id = &target.control.process_id;
+            process_ids.contains(process_id.as_str()) && seen.insert(process_id.clone())
+        })
+        .map(|target| {
+            let control = &target.control;
+            let action = if start { &control.start } else { &control.stop };
+            http_action(
+                &control.process_id,
+                if start { "start-range" } else { "stop-range" },
+                action,
+                deadline_seconds,
+            )
         })
         .collect()
 }
@@ -572,8 +563,8 @@ pub(crate) fn target_output(
 ) -> Result<Output, TargetCommandError> {
     let local_argv;
     let (command, cwd, env_remove): (&[String], Option<&Path>, &[&str]) = match &target.launch {
-        ProfilerLaunch::Local => (argv, Some(target.command_cwd.as_path()), &[]),
-        ProfilerLaunch::Ssh { target: ssh_target } => {
+        LaunchPlan::Local => (argv, Some(target.command_cwd.as_path()), &[]),
+        LaunchPlan::Ssh { target: ssh_target } => {
             let script = ssh_control_script(&target.command_cwd, argv);
             local_argv = inferlab_runtime::ssh::ssh_argv(ssh_target, &script);
             (
@@ -657,7 +648,7 @@ mod tests {
     };
     use crate::plan::{
         CaptureWindowActionPlan, CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan,
-        NsysEscapes, ProfilerControl, ProfilerFinalization, ProfilerLaunch, WindowControlKind,
+        NsysEscapes, ProfilerControl, ProfilerFinalization,
     };
     use crate::record::{
         ARM_START_BOUNDARY, CaptureActionRecord, CaptureHttpFailureKind,
@@ -667,6 +658,7 @@ mod tests {
     use inferlab_runtime::operation_bound::{
         OperationBound, OperationBudgetEvidence, OperationTerminalCause,
     };
+    use inferlab_runtime::plan::LaunchPlan;
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -692,9 +684,9 @@ mod tests {
             trace_storage: None,
             session: "inferlab-serve-prefill-0".to_owned(),
             executable: "nsys".to_owned(),
-            launch: ProfilerLaunch::Local,
+            launch: LaunchPlan::Local,
             finalization: ProfilerFinalization::NsysStop,
-            control: ProfilerControl::Http {
+            control: ProfilerControl {
                 window_control_endpoint: CaptureWindowControlEndpointPlan::ReplicaEntry,
                 process_id: "prefill-0".to_owned(),
                 endpoint: EndpointAssignment {
@@ -704,7 +696,6 @@ mod tests {
                 start: action.clone(),
                 stop: action,
             },
-            supported_window_controls: vec![WindowControlKind::FrameworkRange],
             command_cwd,
             runtime_root: PathBuf::from("profiles"),
             launch_prefix: Vec::new(),

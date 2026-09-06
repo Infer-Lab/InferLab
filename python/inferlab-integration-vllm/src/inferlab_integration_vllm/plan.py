@@ -5,8 +5,8 @@ from inferlab_adapter_sdk import (
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
     CaptureWindowHttpActionSpec,
+    EndpointDeclaration,
     EndpointProtocol,
-    EndpointRequirement,
     HttpActionSpec,
     HttpMethod,
     IntegrationIdentity,
@@ -36,6 +36,7 @@ from inferlab_adapter_sdk import (
     ServeTopology,
     SyntheticAcceptanceOutcome,
     TargetEndpointScheme,
+    consistent_acceptance_outcome,
     effective_settings,
     fused_pd_frontend_plans,
     integration_identity,
@@ -43,6 +44,7 @@ from inferlab_adapter_sdk import (
     require_role,
 )
 
+from .auxiliary import validate_auxiliary_models
 from .settings import _settings
 from .synthetic import apply_synthetic_acceptance
 
@@ -57,27 +59,17 @@ def _identity() -> IntegrationIdentity:
 
 
 def _effective_parallelism(declared: Parallelism, role_kind: ServeRoleKind) -> Parallelism:
-    """The vLLM algebra: attention runs tensor-parallel across
-    `outer.tensor_parallel_size` and data-parallel across
-    `attention.data_parallel_size`, so the MoE layers span the product of both
-    (`moe_world_size = outer.tensor_parallel_size * attention.data_parallel_size`)
-    — every attention rank hosts experts. That world is decomposed one of two
-    ways: with expert parallelism the experts shard across it
+    """The vLLM algebra: MoE layers span `moe_world_size =
+    outer.tensor_parallel_size * attention.data_parallel_size` (times the
+    context-parallel factor for the `prefill` role), so every attention rank
+    hosts experts. With expert parallelism the experts shard across that world
     (expert_ep = moe_world_size, expert_tp = 1); otherwise they are
     tensor-parallel across it (expert_tp = moe_world_size, expert_ep = 1).
-    vLLM supports neither independent expert data parallelism nor a separate
-    dense tensor-parallel size, so both stay 1.
-
-    `attention.context_parallel_size` lowers per role. For the `prefill` role
-    it is prefill context parallelism (`--prefill-context-parallel-size`):
-    it multiplies the role's device count and joins the MoE expert world
-    (moe_world_size gains a context-parallel factor), and it excludes attention
-    data parallelism. For the `serve` and `decode` roles it is decode context
-    parallelism (`--decode-context-parallel-size`): it splits KV inside the
-    existing TP group, so it must divide `outer.tensor_parallel_size`, and it
-    neither changes the device count nor enters the expert world. Model-level
-    applicability (attention architecture, head counts, backend selection) is
-    owned by vLLM itself and surfaces as a launch failure."""
+    Decode context parallelism (`--decode-context-parallel-size`, the
+    non-prefill roles) splits KV inside the existing TP group: it must divide
+    `outer.tensor_parallel_size` and neither changes the device count nor
+    enters the expert world. Model-level applicability is vLLM's own call and
+    surfaces as a launch failure."""
     outer = declared.outer or ParallelismOuter()
     attention = declared.attention or ParallelismAttention()
     experts = declared.experts or ParallelismExperts()
@@ -256,10 +248,8 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas, outcome = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
-    role_result.public_endpoint = EndpointRequirement(
+    role_result.public_endpoint = EndpointDeclaration(
         protocol=EndpointProtocol(),
-        completions_path="/v1/completions",
-        chat_completions_path="/v1/chat/completions",
         server_metrics=ServerMetricsEndpointRequirement(path="/metrics"),
         prefix_cache_reset=HttpActionSpec(
             method=HttpMethod(),
@@ -309,14 +299,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     decode_ports = [] if transport == KvTransferMechanism.mooncake else ["side_channel"]
     prefill_result, prefill_replicas, prefill_outcome = _plan_role(input, prefill, prefill_ports)
     decode_result, decode_replicas, decode_outcome = _plan_role(input, decode, decode_ports)
-    if prefill_outcome != decode_outcome:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "the prefill and decode roles resolve different synthetic acceptance "
-            f"outcomes ({prefill_outcome} vs {decode_outcome}); the plan response "
-            "carries one effective acceptance length, so both roles must determine "
-            "the same draft count",
-        )
+    outcome = consistent_acceptance_outcome(prefill_outcome, decode_outcome)
     roles = [prefill_result, decode_result]
     replicas = [*prefill_replicas, *decode_replicas]
     links = [
@@ -377,10 +360,8 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             and _settings(decode_result.effective_settings).enable_prompt_tokens_details
             else None
         )
-        frontend_endpoint = EndpointRequirement(
+        frontend_endpoint = EndpointDeclaration(
             protocol=EndpointProtocol(),
-            completions_path="/v1/completions",
-            chat_completions_path="/v1/chat/completions",
             prefix_cache_reset=HttpActionSpec(
                 method=HttpMethod(),
                 path="/reset_prefix_cache",
@@ -396,10 +377,8 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         implementation_version = _identity().adapter_version
         render_source = RenderSource.integration
         frontend_readiness = ReadinessProbe(root=ReadinessProbeHttp(path="/v1/models"))
-        frontend_endpoint = EndpointRequirement(
+        frontend_endpoint = EndpointDeclaration(
             protocol=EndpointProtocol(),
-            completions_path="/v1/completions",
-            chat_completions_path="/v1/chat/completions",
         )
 
     gateway, pd_router = fused_pd_frontend_plans(
@@ -424,11 +403,12 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         links=links,
         gateway=gateway,
         pd_router=pd_router,
-        synthetic_acceptance=prefill_outcome,
+        synthetic_acceptance=outcome,
     )
 
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
+    validate_auxiliary_models(input)
     if input.topology == ServeTopology.single:
         return _plan_single(input)
     return _plan_prefill_decode(input)

@@ -5,9 +5,6 @@ on:
     tags:
       - "v*"
 
-env:
-  RUST_VERSION: "1.89.0"
-
 jobs:
   # Cross-compilation goes through cargo-zigbuild: zig's libc shims build the
   # pure-Rust workspace on both musl triples without target-specific runners.
@@ -31,9 +28,12 @@ jobs:
         run: scripts/check-product-release-version.sh "${GITHUB_REF_NAME}"
       - name: Toolchain + target
         run: |
+          # The pinned toolchain has one spelling: rust-toolchain.toml.
+          version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          echo "RUST_VERSION=${version}" >> "$GITHUB_ENV"
           rustup set profile minimal
-          rustup toolchain install "${RUST_VERSION}" --profile minimal --no-self-update
-          rustup target add --toolchain "${RUST_VERSION}" "${{ matrix.target }}"
+          rustup toolchain install "${version}" --profile minimal --no-self-update
+          rustup target add --toolchain "${version}" "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}

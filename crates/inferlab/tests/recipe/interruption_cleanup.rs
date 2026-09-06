@@ -16,7 +16,7 @@ fn interruption_records_remaining_measurements_and_cleans_up() -> Result<(), Box
         .command()
         .env("FIXTURE_EVAL_WAIT", "1")
         .env("FIXTURE_EVAL_NATIVE_CHECKPOINT", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .stdout(stdout.reopen()?)
         .stderr(stderr.reopen()?)
         .spawn()?;
@@ -108,7 +108,7 @@ fn interruption_during_builtin_smoke_preserves_the_interrupted_terminal_cause()
         .command()
         .env("FIXTURE_SMOKE_DELAY_SECONDS", "60")
         .env("FIXTURE_SMOKE_MARKER", &marker)
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .stdout(stdout.reopen()?)
         .stderr(stderr.reopen()?)
         .spawn()?;
@@ -154,7 +154,7 @@ fn interrupted_bench_preserves_native_evidence_and_cleans_its_group() -> Result<
     let mut child = workspace
         .command()
         .env("FIXTURE_BENCH_INTERRUPT_WAIT", "1")
-        .args(["recipe", "run", "dsv4-qualify"])
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
         .stdout(stdout.reopen()?)
         .stderr(stderr.reopen()?)
         .spawn()?;

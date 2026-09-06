@@ -11,6 +11,7 @@ use crate::workload::domain::{
     BenchAgenticCatalog, BenchDatasetCatalog, BenchSessionDatasetCatalog, ResolvedBenchPrompt,
     ResolvedBenchRandomShape, WorkloadHttpMethod,
 };
+use crate::workload::runtime::ClientProcessPaths;
 use crate::workload::{BenchPlan, ResolvedWorkloadPlan};
 use crate::workspace::{
     BenchCacheStart, BenchPrefixSharing, BenchSharedSystemContent, BenchTokenSelector, JsonValue,
@@ -758,12 +759,16 @@ impl WorkloadRecordSession {
             path: absolute_dir.clone(),
             source,
         })?;
+        // The record stores the exchange files root-relative; the client
+        // receives the artifact directory as an absolute path
+        // ([[RFC-0004:C-MEASUREMENTS]]).
+        let paths = ClientProcessPaths::for_directory(&relative_dir);
         Ok(ClientCasePaths {
-            request: relative_dir.join("request.json"),
-            result: relative_dir.join("result.json"),
-            stdout: relative_dir.join("stdout.log"),
-            stderr: relative_dir.join("stderr.log"),
-            artifact_dir: absolute_dir.join("artifacts"),
+            request: paths.request,
+            result: paths.result,
+            stdout: paths.stdout,
+            stderr: paths.stderr,
+            artifact_dir: ClientProcessPaths::artifact_dir(&absolute_dir),
         })
     }
 

@@ -1,19 +1,11 @@
 //! Shared black-box test-harness machinery: leak-free fixture process groups
 //! and parallel-safe local port allocation.
 //!
-//! Production spawns serve processes as detached process groups on purpose;
-//! the suites must therefore guarantee cleanup themselves. Two cooperating
-//! pieces do that here:
-//!
-//! * A cross-process registry of fixture-owned process groups. The
-//!   `fixture-server` shims register themselves at startup (see the format
-//!   contract below), a [`ServeReaper`] guard on each `TestWorkspace` kills
-//!   its workspace's surviving groups on drop (normal return and panic
-//!   alike), and a once-per-binary startup sweep reclaims groups whose owning
-//!   suite process died without dropping its guards.
-//! * Three-layer port allocation: an OS-chosen bind whose listener is held
-//!   until the port number has been handed off, an in-process never-released
-//!   claim set, and a cross-process lease file with dead-owner reclaim.
+//! Production spawns serve processes as detached process groups on purpose,
+//! so the suites guarantee cleanup themselves: a cross-process registry of
+//! fixture-owned process groups (reaper guards plus a startup sweep; format
+//! contract below) and a three-layer port allocation scheme (held bind,
+//! in-process claim set, cross-process lease file).
 //!
 //! # Registry format contract
 //!

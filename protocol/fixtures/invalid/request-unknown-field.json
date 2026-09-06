@@ -1,12 +1,13 @@
 {
   "operation": "plan_serve",
-  "protocol_version": "9",
+  "protocol_version": "10",
   "input": {
     "model": {
-      "id": "dsv4",
-      "served_name": "dsv4"
+      "id": "deepseek-v4-flash",
+      "served_name": "deepseek-v4-flash"
     },
     "topology": "single",
+    "state_dir": ".inferlab",
     "roles": [],
     "unexpected": true
   }

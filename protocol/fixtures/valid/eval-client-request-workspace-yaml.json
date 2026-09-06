@@ -1,5 +1,5 @@
 {
-  "protocol_version": "9",
+  "protocol_version": "10",
   "workspace_root": "/workspace",
   "workspace_source_exclusions": [
     ".inferlab/cache",
@@ -15,8 +15,8 @@
     "chat_completions_path": "/v1/chat/completions"
   },
   "model": {
-    "locator": "/models/dsv4",
-    "served_name": "dsv4"
+    "locator": "/models/deepseek-v4-flash",
+    "served_name": "deepseek-v4-flash"
   },
   "definition": {
     "kind": "lm_eval",
@@ -27,6 +27,7 @@
     "limit": 8,
     "few_shot": null,
     "seed": 1,
+    "base_seed": 1,
     "trials": 3,
     "max_tokens": 256,
     "concurrency": 4,

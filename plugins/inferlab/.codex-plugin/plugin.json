@@ -1,12 +1,12 @@
 {
   "name": "inferlab",
-  "version": "0.13.3",
+  "version": "0.14.0",
   "description": "Agent Skill for operating the InferLab CLI: reproducible LLM inference experiments with file-first evidence.",
   "author": {
     "name": "Zihua Wu"
   },
-  "homepage": "https://github.com/Infer-Lab/inferlab",
-  "repository": "https://github.com/Infer-Lab/inferlab",
+  "homepage": "https://github.com/Infer-Lab/InferLab",
+  "repository": "https://github.com/Infer-Lab/InferLab",
   "license": "MIT",
   "keywords": [
     "llm",

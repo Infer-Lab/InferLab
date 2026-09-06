@@ -4,7 +4,7 @@ use inferlab_profiler::plan::{
     CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan, NsysEscapes, ProcessCapturePlan,
 };
 use inferlab_protocol::{
-    CaptureMechanism, EndpointAssignment, EndpointProtocol, FrontendComponents,
+    AuxiliaryModelKind, CaptureMechanism, EndpointAssignment, EndpointProtocol, FrontendComponents,
     FrontendProcessRole, GatewayPlan, Parallelism, PdRouterPlan, PlanServeResult, ReadinessProbe,
     RenderedServeProcess, ServeProcessAllocation, ServeRoleKind, ServeRoleLink, SettingValue,
     SuppliedRenderInput,
@@ -151,10 +151,23 @@ pub struct AllocationPlan {
     pub model_locator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_locator_source: Option<ModelLocatorSource>,
+    /// The machine-resolved auxiliary weight locators with their resolution
+    /// provenance ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_model_locators: Vec<AuxiliaryModelLocatorPlan>,
     pub ports: BTreeMap<String, EndpointAssignment>,
     pub runtime_cache: RuntimeCachePlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub communication_interface: Option<String>,
+}
+
+/// One machine-resolved auxiliary weight locator with its resolution
+/// provenance ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AuxiliaryModelLocatorPlan {
+    pub kind: AuxiliaryModelKind,
+    pub locator: String,
+    pub source: ModelLocatorSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -162,6 +175,27 @@ pub struct AllocationPlan {
 pub enum ModelLocatorSource {
     Machine,
     Fallback,
+}
+
+/// The model locator a measurement reads ([[RFC-0003:C-RESOLUTION]]).
+/// Measurements execute on the controller machine, so a controller-local
+/// rank's machine-resolved locator wins — it is the path an engine on that
+/// machine serves; otherwise the binding's shared fallback locator
+/// (controller-usable by declaration) applies. Anything else means the
+/// placement offers no measurement-usable locator and resolution must reject.
+pub fn measurement_model_locator<'a>(
+    candidates: impl IntoIterator<Item = (bool, Option<ModelLocatorSource>, &'a str)>,
+) -> Option<&'a str> {
+    let mut fallback = None;
+    for (controller_local, source, locator) in candidates {
+        if controller_local {
+            return Some(locator);
+        }
+        if fallback.is_none() && matches!(source, Some(ModelLocatorSource::Fallback)) {
+            fallback = Some(locator);
+        }
+    }
+    fallback
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -420,6 +454,7 @@ pub struct ResolvedProcessAllocation {
     wire: ServeProcessAllocation,
     runtime_cache: RuntimeCachePlan,
     model_locator_source: Option<ModelLocatorSource>,
+    auxiliary_locator_sources: Vec<(AuxiliaryModelKind, ModelLocatorSource)>,
 }
 
 impl ResolvedProcessAllocation {
@@ -427,11 +462,13 @@ impl ResolvedProcessAllocation {
         wire: ServeProcessAllocation,
         runtime_cache: RuntimeCachePlan,
         model_locator_source: Option<ModelLocatorSource>,
+        auxiliary_locator_sources: Vec<(AuxiliaryModelKind, ModelLocatorSource)>,
     ) -> Self {
         Self {
             wire,
             runtime_cache,
             model_locator_source,
+            auxiliary_locator_sources,
         }
     }
     pub fn wire(&self) -> &ServeProcessAllocation {
@@ -442,6 +479,31 @@ impl ResolvedProcessAllocation {
     }
     pub const fn model_locator_source(&self) -> Option<ModelLocatorSource> {
         self.model_locator_source
+    }
+    pub fn auxiliary_model_locators(&self) -> Vec<AuxiliaryModelLocatorPlan> {
+        let ServeProcessAllocation::ModelRank {
+            auxiliary_model_locators,
+            ..
+        } = &self.wire
+        else {
+            return Vec::new();
+        };
+        auxiliary_model_locators
+            .iter()
+            .map(|entry| {
+                let source = self
+                    .auxiliary_locator_sources
+                    .iter()
+                    .find(|(kind, _)| *kind == entry.kind)
+                    .map(|(_, source)| *source)
+                    .unwrap_or(ModelLocatorSource::Fallback);
+                AuxiliaryModelLocatorPlan {
+                    kind: entry.kind,
+                    locator: entry.locator.clone(),
+                    source,
+                }
+            })
+            .collect()
     }
     pub fn process(&self) -> &str {
         match &self.wire {
@@ -581,16 +643,6 @@ impl RenderedServeStage {
     }
 }
 
-pub struct RuntimeRealizationStage {
-    processes: Vec<ProcessPlan>,
-    public_endpoint: EndpointPlan,
-    device_count: u32,
-    selected_machines: Vec<String>,
-    network: Option<NetworkPlan>,
-    remote_workspaces: BTreeMap<String, RemoteWorkspacePlan>,
-    remote_containers: BTreeMap<String, RemoteContainerFacts>,
-}
-
 pub struct RuntimeRealizationParts {
     pub processes: Vec<ProcessPlan>,
     pub public_endpoint: EndpointPlan,
@@ -599,29 +651,4 @@ pub struct RuntimeRealizationParts {
     pub network: Option<NetworkPlan>,
     pub remote_workspaces: BTreeMap<String, RemoteWorkspacePlan>,
     pub remote_containers: BTreeMap<String, RemoteContainerFacts>,
-}
-
-impl RuntimeRealizationStage {
-    pub fn new(parts: RuntimeRealizationParts) -> Self {
-        Self {
-            processes: parts.processes,
-            public_endpoint: parts.public_endpoint,
-            device_count: parts.device_count,
-            selected_machines: parts.selected_machines,
-            network: parts.network,
-            remote_workspaces: parts.remote_workspaces,
-            remote_containers: parts.remote_containers,
-        }
-    }
-    pub fn into_parts(self) -> RuntimeRealizationParts {
-        RuntimeRealizationParts {
-            processes: self.processes,
-            public_endpoint: self.public_endpoint,
-            device_count: self.device_count,
-            selected_machines: self.selected_machines,
-            network: self.network,
-            remote_workspaces: self.remote_workspaces,
-            remote_containers: self.remote_containers,
-        }
-    }
 }

@@ -4,9 +4,9 @@ use inferlab_protocol::{
     EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
     EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID,
     MeasurementDataAssetPreparationRequest, MeasurementDataAssetPreparationResult,
-    MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID, ProtocolVersion, ReadinessProbe,
-    RenderInputDeclaration, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
-    measurement_schema, protocol_schema,
+    MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID, Parallelism, ParallelismAttention,
+    ParallelismExperts, ParallelismOuter, ProtocolVersion, ReadinessProbe, RenderInputDeclaration,
+    SettingValue, SuppliedRenderInput, TargetEndpointScheme, measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -43,10 +43,31 @@ const INVALID_RESPONSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/invalid/response-wrong-shape.json"
 ));
-const INVALID_PROTOCOL_V8_REQUEST: &str = include_str!(concat!(
+const INVALID_PROTOCOL_V9_REQUEST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/fixtures/invalid/request-protocol-version-8.json"
+    "/../../protocol/fixtures/invalid/request-protocol-version-9.json"
 ));
+const VALID_PLAN_REQUEST_AUXILIARY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/plan-serve-request-auxiliary-models.json"
+));
+const VALID_RENDER_REQUEST_AUXILIARY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/render-serve-request-auxiliary-models.json"
+));
+const VALID_PLAN_RESPONSE_NIXL_SIDE_CHANNEL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/plan-serve-response-nixl-side-channel.json"
+));
+const VALID_PLAN_RESPONSE_ROUTED_SINGLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/plan-serve-response-routed-single.json"
+));
+const VALID_RENDER_REQUEST_ROUTED_SINGLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/render-serve-request-routed-single.json"
+));
+
 const VALID_HTTP_TARGET_REGISTRY_READINESS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/http-target-registry-readiness.json"
@@ -66,6 +87,10 @@ const VALID_EVAL_CLIENT_REQUEST_WORKSPACE_YAML: &str = include_str!(concat!(
 const VALID_EVAL_CLIENT_REQUEST_BUNDLED: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/eval-client-request-bundled.json"
+));
+const VALID_EVAL_CLIENT_REQUEST_FALLBACK_SEED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/eval-client-request-fallback-seed.json"
 ));
 const VALID_EVAL_CLIENT_RESULT_PROBE_FAILURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -109,7 +134,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v9.schema.json"
+    "/../../protocol/schema/adapter-protocol-v10.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -133,11 +158,151 @@ fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
 }
 
 #[test]
-fn protocol_v8_requests_are_rejected_instead_of_partially_interpreted() {
-    // The fixture is a well-formed protocol-v8 plan request carrying the
-    // synthetic acceptance member; protocol v9 MUST reject it outright rather
+fn protocol_v9_requests_are_rejected_instead_of_partially_interpreted() {
+    // The fixture is a well-formed protocol-v9 plan request carrying the
+    // synthetic acceptance member; protocol v10 MUST reject it outright rather
     // than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
-    assert!(serde_json::from_str::<AdapterRequest>(INVALID_PROTOCOL_V8_REQUEST).is_err());
+    assert!(serde_json::from_str::<AdapterRequest>(INVALID_PROTOCOL_V9_REQUEST).is_err());
+}
+/// The auxiliary-model fixtures: planning carries the logical identities and
+/// each model-rank rendering allocation carries the machine-resolved locator
+/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]], [[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn auxiliary_model_fixtures_carry_identities_and_resolved_locators() -> Result<(), Box<dyn Error>> {
+    let plan_request: AdapterRequest = serde_json::from_str(VALID_PLAN_REQUEST_AUXILIARY)?;
+    let AdapterRequest::PlanServe { input, .. } = &plan_request else {
+        return Err("auxiliary plan fixture did not contain a plan request".into());
+    };
+    assert_eq!(
+        input.auxiliary_models,
+        vec![inferlab_protocol::AuxiliaryModelInput {
+            kind: inferlab_protocol::AuxiliaryModelKind::DraftModel,
+            model: inferlab_protocol::ServeModelInput {
+                id: "deepseek-v4-flash-draft".to_owned(),
+                served_name: "deepseek-v4-flash-draft".to_owned(),
+            },
+        }]
+    );
+
+    let render_request: AdapterRequest = serde_json::from_str(VALID_RENDER_REQUEST_AUXILIARY)?;
+    let AdapterRequest::RenderServe { input, .. } = &render_request else {
+        return Err("auxiliary render fixture did not contain a render request".into());
+    };
+    assert_eq!(input.auxiliary_models.len(), 1);
+    let allocation = input
+        .allocations
+        .first()
+        .ok_or("auxiliary render fixture carried no allocation")?;
+    let inferlab_protocol::ServeProcessAllocation::ModelRank {
+        auxiliary_model_locators,
+        ..
+    } = allocation
+    else {
+        return Err("auxiliary render fixture's first allocation was not a model rank".into());
+    };
+    assert_eq!(
+        auxiliary_model_locators,
+        &vec![inferlab_protocol::AuxiliaryModelLocator {
+            kind: inferlab_protocol::AuxiliaryModelKind::DraftModel,
+            locator: "/models/deepseek-v4-flash-draft".to_owned(),
+        }]
+    );
+    Ok(())
+}
+
+/// Wire spellings no other fixture pins end to end: the vLLM NIXL
+/// `side_channel` role link, the Specialized Engine routed-single
+/// `["gateway"]` frontend binding, and the `engine` Gateway target
+/// ([[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn side_channel_and_routed_single_fixtures_preserve_wire_spellings() -> Result<(), Box<dyn Error>> {
+    let nixl: AdapterResponse = serde_json::from_str(VALID_PLAN_RESPONSE_NIXL_SIDE_CHANNEL)?;
+    let AdapterResponse::Ok { result, .. } = &nixl else {
+        return Err("NIXL fixture did not contain a successful response".into());
+    };
+    let AdapterResult::PlanServe { output } = result.as_ref() else {
+        return Err("NIXL fixture did not contain plan output".into());
+    };
+    for replica in &output.replicas {
+        assert_eq!(replica.ports, vec!["side_channel".to_owned()]);
+    }
+    let Some(inferlab_protocol::ServeRoleLink::SideChannel {
+        source,
+        target,
+        port,
+    }) = output.links.last()
+    else {
+        return Err("NIXL fixture did not end in a side-channel link".into());
+    };
+    assert_eq!(
+        (source.as_str(), target.as_str(), port.as_str()),
+        ("prefill", "decode", "side_channel")
+    );
+
+    let routed: AdapterResponse = serde_json::from_str(VALID_PLAN_RESPONSE_ROUTED_SINGLE)?;
+    let AdapterResponse::Ok { result, .. } = &routed else {
+        return Err("routed-single fixture did not contain a successful response".into());
+    };
+    let AdapterResult::PlanServe { output } = result.as_ref() else {
+        return Err("routed-single fixture did not contain plan output".into());
+    };
+    let gateway = output
+        .gateway
+        .as_ref()
+        .ok_or("routed-single fixture did not contain a Gateway")?;
+    assert_eq!(
+        gateway.targets,
+        vec![inferlab_protocol::GatewayTarget::Engine {
+            role: "serve".to_owned()
+        }]
+    );
+    assert!(output.pd_router.is_none());
+
+    let render: AdapterRequest = serde_json::from_str(VALID_RENDER_REQUEST_ROUTED_SINGLE)?;
+    let AdapterRequest::RenderServe { input, .. } = &render else {
+        return Err("routed-single fixture did not contain a render request".into());
+    };
+    let Some(inferlab_protocol::ServeProcessAllocation::Frontend {
+        components,
+        gateway,
+        pd_router,
+        ..
+    }) = input.allocations.last()
+    else {
+        return Err("routed-single render fixture did not end in a frontend allocation".into());
+    };
+    assert_eq!(
+        components,
+        &inferlab_protocol::FrontendComponents::gateway()
+    );
+    assert!(!components.includes_pd_router());
+    assert_eq!(
+        gateway.targets,
+        vec![inferlab_protocol::GatewayTarget::Engine {
+            role: "serve".to_owned()
+        }]
+    );
+    assert!(pd_router.is_none());
+    // The closed binding serializes as the literal ordered array.
+    let render_json = serde_json::to_value(input)?;
+    assert_eq!(
+        render_json["allocations"][1].get("components"),
+        Some(&serde_json::json!(["gateway"]))
+    );
+
+    assert_eq!(
+        serde_json::from_str::<AdapterResponse>(&serde_json::to_string(&nixl)?)?,
+        nixl
+    );
+    assert_eq!(
+        serde_json::from_str::<AdapterResponse>(&serde_json::to_string(&routed)?)?,
+        routed
+    );
+    assert_eq!(
+        serde_json::from_str::<AdapterRequest>(&serde_json::to_string(&render)?)?,
+        render
+    );
+    Ok(())
 }
 
 #[test]
@@ -299,7 +464,7 @@ fn failed_agentic_source_fixture_preserves_partial_evidence() -> Result<(), Box<
 }
 
 #[test]
-fn protocol_v9_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
+fn protocol_v10_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     let capture_target = response
         .pointer_mut("/result/output/replicas/0/capture_target")
@@ -312,14 +477,14 @@ fn protocol_v9_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box
     });
 
     let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
-        return Err("protocol v9 accepted the pre-binding capture-control shape".into());
+        return Err("the current protocol accepted the pre-binding capture-control shape".into());
     };
     assert!(error.to_string().contains("unknown field `control`"));
     Ok(())
 }
 
 #[test]
-fn protocol_v9_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
+fn protocol_v10_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["replicas"][0]["capture_target"]["window_control"]["start"]["body"] =
         serde_json::json!({"activities": ["CUDA_PROFILER"]});
@@ -344,8 +509,8 @@ fn protocol_v9_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn protocol_v9_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>>
-{
+fn protocol_v10_does_not_attach_capture_bodies_to_prefix_cache_actions()
+-> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["roles"][0]["public_endpoint"]["prefix_cache_reset"] = serde_json::json!({
         "method": "post",
@@ -354,7 +519,7 @@ fn protocol_v9_does_not_attach_capture_bodies_to_prefix_cache_actions() -> Resul
     });
 
     let Err(error) = serde_json::from_value::<AdapterResponse>(response) else {
-        return Err("protocol v9 accepted a capture body on a prefix-cache action".into());
+        return Err("the current protocol accepted a capture body on a prefix-cache action".into());
     };
     assert!(error.to_string().contains("unknown field `body`"));
     Ok(())
@@ -383,16 +548,16 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let launch_file_response: AdapterResponse = serde_json::from_str(VALID_LAUNCH_FILE_RESPONSE)?;
     let error_response: AdapterResponse = serde_json::from_str(VALID_ERROR_RESPONSE)?;
 
-    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V9);
-    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V9);
-    assert_eq!(render_request.protocol_version(), ProtocolVersion::V9);
-    assert_eq!(render_response.protocol_version(), ProtocolVersion::V9);
-    assert_eq!(error_response.protocol_version(), ProtocolVersion::V9);
+    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V10);
+    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V10);
+    assert_eq!(render_request.protocol_version(), ProtocolVersion::V10);
+    assert_eq!(render_response.protocol_version(), ProtocolVersion::V10);
+    assert_eq!(error_response.protocol_version(), ProtocolVersion::V10);
 
     // The projected string form must stay identical to the wire spelling.
     assert_eq!(
         ProtocolVersion::CURRENT.as_str(),
-        serde_json::to_value(ProtocolVersion::V9)?
+        serde_json::to_value(ProtocolVersion::V10)?
             .as_str()
             .ok_or("protocol version must serialize as a string")?
     );
@@ -407,12 +572,12 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
         plan_input.profiling,
         Some(inferlab_protocol::CaptureMechanism::ManagedCollection)
     );
-    let curve_text = "dsv4:\n  thinking_on:\n    4: 3.5\n";
+    let curve_text = "deepseek-v4-flash:\n  thinking_on:\n    4: 3.5\n";
     assert_eq!(
         plan_input.synthetic_acceptance,
         Some(inferlab_protocol::SyntheticAcceptanceInput::Curve(
             inferlab_protocol::SyntheticAcceptanceCurveInput {
-                model_key: "dsv4".to_owned(),
+                model_key: "deepseek-v4-flash".to_owned(),
                 thinking_mode: Some("thinking_on".to_owned()),
                 text: curve_text.to_owned(),
                 sha256: "ffef53d9ea69fae0072145c80b35ed9ba7f852f328dda9786bc2c07fca8ba8e7"
@@ -441,10 +606,11 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
         .as_ref()
         .ok_or("plan fixture did not contain Gateway")?;
     assert_eq!(gateway.backend, "vllm-router");
-    assert_eq!(gateway.endpoint.completions_path, "/v1/completions");
+    // [[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]: the plan declaration carries
+    // no route paths; the control plane owns the pinned path values.
     assert_eq!(
-        gateway.endpoint.chat_completions_path,
-        "/v1/chat/completions"
+        gateway.endpoint.protocol,
+        inferlab_protocol::EndpointProtocol::Http
     );
     let pd_router = output
         .pd_router
@@ -641,7 +807,7 @@ fn eval_client_fixture_preserves_workspace_yaml_task_source() -> Result<(), Box<
         return Err("fixture did not contain a workspace YAML task source".into());
     };
 
-    assert_eq!(request.protocol_version, ProtocolVersion::V9);
+    assert_eq!(request.protocol_version, ProtocolVersion::V10);
     assert_eq!(request.endpoint.completions_path, "/v1/completions");
     assert_eq!(
         request.endpoint.chat_completions_path,
@@ -681,6 +847,25 @@ fn eval_client_fixture_preserves_bundled_task_identity() -> Result<(), Box<dyn E
     assert_eq!(name, "estonia");
     assert_eq!(task_identity, "inferlab_estonia");
     assert_eq!(task_closure_sha256.len(), 64);
+    Ok(())
+}
+
+#[test]
+fn eval_client_fixture_preserves_the_control_plane_resolved_base_seed() -> Result<(), Box<dyn Error>>
+{
+    let request: EvalClientRequest = serde_json::from_str(VALID_EVAL_CLIENT_REQUEST_FALLBACK_SEED)?;
+    let EvalDefinitionInput::LmEval {
+        seed, base_seed, ..
+    } = request.definition
+    else {
+        return Err("fixture did not contain an lm-eval definition".into());
+    };
+
+    // The definition declared no seed; the control plane resolved the shared
+    // fallback base seed, and the client consumes it without re-deriving it
+    // ([[RFC-0004:C-LM-EVAL]]).
+    assert_eq!(seed, None);
+    assert_eq!(base_seed, 1234);
     Ok(())
 }
 
@@ -726,12 +911,39 @@ fn invalid_fixtures_are_rejected() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// [[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]: the plan-response endpoint
+// declaration carries no path values, so a response spelling the legacy
+// integration-supplied path fields is rejected as unknown fields.
+#[test]
+fn plan_response_rejects_legacy_endpoint_path_fields() -> Result<(), Box<dyn Error>> {
+    let mut payload: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
+    let endpoint = payload
+        .pointer_mut("/result/output/gateway/endpoint")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("plan fixture lost its Gateway endpoint")?;
+    endpoint.insert(
+        "completions_path".to_owned(),
+        serde_json::Value::from("/v1/completions"),
+    );
+    endpoint.insert(
+        "chat_completions_path".to_owned(),
+        serde_json::Value::from("/v1/chat/completions"),
+    );
+
+    let error = serde_json::from_value::<AdapterResponse>(payload)
+        .err()
+        .ok_or("a plan response with legacy path fields was accepted")?;
+
+    assert!(error.to_string().contains("unknown field"), "{error}");
+    Ok(())
+}
+
 #[test]
 fn data_asset_preparation_fixtures_preserve_opaque_readiness() -> Result<(), Box<dyn Error>> {
     let request = serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
         VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL,
     )?;
-    assert_eq!(request.protocol_version, ProtocolVersion::V9);
+    assert_eq!(request.protocol_version, ProtocolVersion::V10);
     let result = serde_json::from_str::<MeasurementDataAssetPreparationResult>(
         VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE,
     )?;
@@ -829,5 +1041,47 @@ fn generated_schemas_are_current_versioned_and_disjoint() -> Result<(), Box<dyn 
     assert!(GENERATED_ADAPTER_SCHEMA.contains("render_inputs"));
     assert!(GENERATED_MEASUREMENT_SCHEMA.contains("random_mixture"));
     assert!(GENERATED_MEASUREMENT_SCHEMA.contains("prefix_sharing"));
+    Ok(())
+}
+
+// [[RFC-0003:C-SERVE-PARALLELISM]]: the field projection is the single
+// authority both validators consume; the exhaustive construction below fails
+// compilation when a wire field appears without the projection covering it.
+#[test]
+fn parallelism_field_projection_covers_every_wire_field() -> Result<(), Box<dyn Error>> {
+    let parallelism = Parallelism {
+        outer: Some(ParallelismOuter {
+            tensor_parallel_size: Some(1),
+            pipeline_parallel_size: Some(1),
+        }),
+        attention: Some(ParallelismAttention {
+            tensor_parallel_size: Some(1),
+            data_parallel_size: Some(1),
+            context_parallel_size: Some(1),
+        }),
+        experts: Some(ParallelismExperts {
+            tensor_parallel_size: Some(1),
+            data_parallel_size: Some(1),
+            expert_parallel_size: Some(1),
+            dense_tensor_parallel_size: Some(1),
+        }),
+    };
+    let projected: std::collections::BTreeSet<String> = parallelism
+        .field_values()
+        .into_iter()
+        .map(|(name, _)| name.to_owned())
+        .collect();
+    let serialized = serde_json::to_value(&parallelism)?;
+    let mut wire_names = std::collections::BTreeSet::new();
+    for (component, value) in serialized.as_object().ok_or("parallelism is an object")? {
+        for field in value
+            .as_object()
+            .ok_or("parallelism component is an object")?
+            .keys()
+        {
+            wire_names.insert(format!("{component}.{field}"));
+        }
+    }
+    assert_eq!(projected, wire_names);
     Ok(())
 }

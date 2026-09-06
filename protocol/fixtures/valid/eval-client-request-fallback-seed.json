@@ -1,0 +1,35 @@
+{
+  "protocol_version": "10",
+  "workspace_root": "/workspace",
+  "workspace_source_exclusions": [],
+  "endpoint": {
+    "protocol": "http",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "completions_path": "/v1/completions",
+    "chat_completions_path": "/v1/chat/completions"
+  },
+  "model": {
+    "locator": "/models/deepseek-v4-flash",
+    "served_name": "deepseek-v4-flash"
+  },
+  "definition": {
+    "kind": "lm_eval",
+    "task": {
+      "kind": "built_in",
+      "name": "gsm8k"
+    },
+    "request_body": {},
+    "limit": 1,
+    "base_seed": 1234,
+    "trials": 3,
+    "metric": "exact_match",
+    "threshold": 0.9,
+    "timeout_seconds": 300,
+    "prompt": {
+      "kind": "flat"
+    }
+  },
+  "case_budget_seconds": 299.0,
+  "artifact_dir": "/records/eval/artifacts"
+}

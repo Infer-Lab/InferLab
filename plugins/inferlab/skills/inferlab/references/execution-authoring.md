@@ -20,7 +20,7 @@ managed collection:
 
 ```toml
 [servers.example.profiler]
-mechanism = "engine_trace"   # default is "managed_collection"
+mechanism = "engine_trace"
 ```
 
 Managed collection wraps each captured rank process tree with Nsight Systems.
@@ -47,16 +47,10 @@ coverage across all targets. Capture-armed readiness is unbounded overall but
 retains `readiness_attempt_timeout_seconds` on every blocking attempt, so
 process exit and operator interruption remain observable.
 
-Engine-trace window closing does not draw the per-action control budget. The
-close request is dispatched when the measured phase ends, and its response
-consumption, the artifact flush wait, and coverage verification share the one
-global finalization budget without restarting it. A slow or absent stop
-response records neutral flush-pending evidence on the closing action rather
-than failing the capture; coverage still decides success. The undeclared
-finalization default follows the resolved mechanism: 300 seconds for managed
-collection and 3600 seconds for engine trace, because engine stop calls block
-until worker traces serialize — vLLM `stop_profile` has been observed to take
-over ten minutes on a TP2 27B capture.
+The undeclared finalization default follows the resolved mechanism and is
+larger for engine trace, because engine stop calls block until worker traces
+serialize — vLLM `stop_profile` has been observed to take over ten minutes on
+a TP2 27B capture. The resolved plan and dry-run render the effective deadline.
 
 Managed Nsight Systems defaults use the `nsys` executable and the `cuda,nvtx`
 trace set. A server may replace the dedicated fields or add launch/start
@@ -88,12 +82,9 @@ general cure for startup or finalization timing. Select it explicitly in
 `trace` and size the lifecycle deadlines for its additional capture cost.
 
 Request capture with repeatable `recipe run --capture <WORKLOAD_ID>` or with
-`bench --capture` against a server started with profiling enabled. A positive
-AIPerf warmup drains before the framework capture window opens. The window
-closes at client completion, and complete report coverage may establish a
-successful capture even when a framework stop action failed. Image-backed
-server launches reject profiling because InferLab has no in-container profiler
-contract.
+`bench --capture` against a server started with profiling enabled. Complete
+report coverage may establish a successful capture even when a framework stop
+action failed.
 
 ## Runtime images and ad-hoc execution
 
@@ -157,8 +148,7 @@ Select a successful build record with `--image` or the declared artifact with
 machine and are not pulled automatically. Use `inferlab run` for unrecorded
 stack or image probes; container mode exposes no mount or device implicitly,
 so declare repeatable `--mount PATH[:rw]` and `--devices INDEX[,INDEX...]` as
-needed. Never invoke a binary directly through `.pixi/envs/<env>/bin/`, which
-would bypass the activation used by product launches.
+needed.
 
 ## Invocation patches
 
@@ -185,8 +175,9 @@ by that recipe's workload suite. They cannot change identities, kinds, suite
 membership, the gate, or the selected server.
 
 An lm-eval definition may set `trials` for repeated evaluation of one resolved
-single-sample `generate_until` task. Its default is `1`. The definition seed
-is the repeated base seed; when it is absent, repeated evaluation uses `1234`.
+single-sample `generate_until` task; omission evaluates once. The definition
+seed is the repeated base seed; when it is absent, the control plane applies
+its built-in fallback seed.
 Trial `i` uses `base_seed + i - 1`. The existing `concurrency` field controls
 those requests, and `request_body.seed` is rejected because the definition owns
 the seed schedule. Each trial repeats the complete resolved Eval; InferLab does

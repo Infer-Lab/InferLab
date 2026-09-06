@@ -12,9 +12,9 @@ use crate::workspace::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,
     DEFAULT_CAPTURE_FINALIZATION_DEADLINE_SECONDS,
     DEFAULT_ENGINE_TRACE_CAPTURE_FINALIZATION_DEADLINE_SECONDS,
-    DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS, JsonValue, LoadedWorkspace, ModelDefinition,
-    ModelWeightBinding, PlacementBinding, RecipeDefinition, ServerCaseDefinition, ServerDefinition,
-    StackDefinition, WorkloadSuiteDefinition,
+    DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS, ImplicitCaseSelection, JsonValue, LoadedWorkspace,
+    ModelDefinition, ModelWeightBinding, PlacementBinding, RecipeDefinition, ServerCaseDefinition,
+    ServerDefinition, StackDefinition, WorkloadSuiteDefinition,
 };
 use inferlab_protocol::{
     CaptureMechanism, KvTransferMechanism, Parallelism, ServeRoleInput, ServeRoleKind,
@@ -65,10 +65,6 @@ pub(super) struct ServerRoleOverridePatch {
     pub(super) settings: BTreeMap<String, JsonValue>,
 }
 
-pub(super) struct ResolvedRoleInput {
-    pub(super) input: ServeRoleInput,
-}
-
 /// Selected public definitions and local bindings. `LoadedWorkspace` already
 /// owns loading, semantic validation, and source identity; this stage only
 /// selects the exact workflow inputs and never reconstructs those facts.
@@ -84,9 +80,21 @@ pub(super) struct WorkflowSelection<'a> {
     pub(super) case: Option<&'a ServerCaseDefinition>,
     pub(super) case_selection: Option<CaseSelectionSource>,
     pub(super) weight: &'a ModelWeightBinding,
+    /// The resolved auxiliary weight bindings declared by the server, in
+    /// declaration order ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+    pub(super) auxiliary_weights: Vec<ResolvedAuxiliaryWeight<'a>>,
     pub(super) placement_id: String,
     pub(super) placement_selection: PlacementSelectionSource,
     pub(super) placement: &'a PlacementBinding,
+}
+
+/// One declared auxiliary weight artifact with its selected model definition
+/// and machine-local weight binding ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+pub(super) struct ResolvedAuxiliaryWeight<'a> {
+    pub(super) kind: crate::workspace::auxiliary_models::AuxiliaryModelKind,
+    pub(super) model_id: String,
+    pub(super) model: &'a ModelDefinition,
+    pub(super) weight: &'a ModelWeightBinding,
 }
 
 /// Effective server input after case and invocation precedence, before the
@@ -107,13 +115,15 @@ pub(super) struct EffectiveServerInput {
     /// and effective thinking mode ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]);
     /// `None` when the composed server declaration carries none.
     pub(super) synthetic_acceptance: Option<ResolvedSyntheticAcceptance>,
+    /// The logical auxiliary weight identities declared by the server
+    /// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]); empty when undeclared.
+    pub(super) auxiliary_models: Vec<inferlab_protocol::AuxiliaryModelInput>,
     pub(super) capture_arm_deadline_seconds: u64,
     pub(super) capture_control_deadline_seconds: u64,
     pub(super) capture_finalization_deadline_seconds: u64,
     pub(super) override_patches: Vec<IndexedServerOverride>,
-    pub(super) role_resolutions: Vec<ResolvedRoleInput>,
+    pub(super) roles: Vec<ServeRoleInput>,
     pub(super) declarations: Vec<ServerDeclarationPlan>,
-    pub(super) role_inputs: Vec<ServeRoleInput>,
 }
 
 fn role_declarations(
@@ -126,7 +136,7 @@ fn role_declarations(
     };
     let declarations = required
         .iter()
-        .map(|kind| (kind_name(*kind).to_owned(), *kind))
+        .map(|kind| (kind.as_str().to_owned(), *kind))
         .collect::<Vec<_>>();
     for role in server.roles.keys() {
         if !declarations.iter().any(|(id, _)| id == role) {
@@ -140,18 +150,10 @@ fn role_declarations(
     Ok(declarations)
 }
 
-const fn kind_name(kind: ServeRoleKind) -> &'static str {
-    match kind {
-        ServeRoleKind::Serve => "serve",
-        ServeRoleKind::Prefill => "prefill",
-        ServeRoleKind::Decode => "decode",
-    }
-}
-
 fn resolve_role_inputs(
     server: &ServerDefinition,
     topology: ServeTopology,
-) -> Result<Vec<ResolvedRoleInput>, InferlabError> {
+) -> Result<Vec<ServeRoleInput>, InferlabError> {
     let declarations = role_declarations(server, topology)?;
     declarations
         .into_iter()
@@ -172,14 +174,26 @@ fn resolve_role_inputs(
                     message: format!("role {id:?} replica count must be nonzero"),
                 });
             }
-            Ok(ResolvedRoleInput {
-                input: ServeRoleInput {
-                    id,
-                    kind,
-                    replica_count,
-                    parallelism,
-                    settings,
-                },
+            // A single topology has no routing authority beyond the sole
+            // serve replica's rank-zero endpoint; a second replica would
+            // launch unreachable. Cross-machine serving spans machines
+            // through rank placement, not replicas ([[RFC-0003]]).
+            if topology == ServeTopology::Single
+                && kind == ServeRoleKind::Serve
+                && replica_count != 1
+            {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "single topology requires exactly one serve replica; role {id:?} requests {replica_count}"
+                    ),
+                });
+            }
+            Ok(ServeRoleInput {
+                id,
+                kind,
+                replica_count,
+                parallelism,
+                settings,
             })
         })
         .collect()
@@ -445,32 +459,27 @@ pub(super) fn select_workflow<'a>(
             ),
             Some(CaseSelectionSource::Explicit),
         ),
-        None => {
-            if let Some(selected) = server.default_case.as_deref() {
-                (
-                    Some(selected.to_owned()),
-                    Some(&server.cases[selected]),
-                    Some(CaseSelectionSource::Default),
-                )
-            } else {
-                match (server.cases.iter().next(), server.cases.iter().nth(1)) {
-                    (None, _) => (None, None, None),
-                    (Some((id, definition)), None) => (
-                        Some(id.clone()),
-                        Some(definition),
-                        Some(CaseSelectionSource::Sole),
+        None => match server.implicit_case_selection() {
+            ImplicitCaseSelection::Default(selected) => (
+                Some(selected.to_owned()),
+                Some(&server.cases[selected]),
+                Some(CaseSelectionSource::Default),
+            ),
+            ImplicitCaseSelection::Sole(selected) => (
+                Some(selected.to_owned()),
+                Some(&server.cases[selected]),
+                Some(CaseSelectionSource::Sole),
+            ),
+            ImplicitCaseSelection::Base => (None, None, None),
+            ImplicitCaseSelection::Ambiguous => {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "server {server_id:?} declares multiple cases {:?}; select one with --case or set default_case",
+                        server.cases.keys().collect::<Vec<_>>()
                     ),
-                    (Some(_), Some(_)) => {
-                        return Err(InferlabError::InvalidConfig {
-                            message: format!(
-                                "server {server_id:?} declares multiple cases {:?}; select one with --case or set default_case",
-                                server.cases.keys().collect::<Vec<_>>()
-                            ),
-                        });
-                    }
-                }
+                });
             }
-        }
+        },
     };
     let weight = workspace
         .local
@@ -479,6 +488,30 @@ pub(super) fn select_workflow<'a>(
         .ok_or_else(|| InferlabError::InvalidConfig {
             message: format!("missing model weight binding {:?}", server.model),
         })?;
+    let mut auxiliary_weights = Vec::new();
+    for (kind, model_id) in &server.auxiliary_models {
+        let kind = crate::workspace::auxiliary_models::AuxiliaryModelKind::parse(
+            &format!("server {server_id:?}"),
+            kind,
+        )?;
+        let model = lookup("auxiliary model", model_id, &workspace.config.models)?;
+        let weight = workspace
+            .local
+            .model_weights
+            .get(model_id)
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "missing model weight binding {model_id:?} for auxiliary kind {:?} on server {server_id:?}",
+                    kind.as_str(),
+                ),
+            })?;
+        auxiliary_weights.push(ResolvedAuxiliaryWeight {
+            kind,
+            model_id: model_id.clone(),
+            model,
+            weight,
+        });
+    }
     let (placement_id, placement_selection) = if let Some(selected) = request.placement {
         (selected, PlacementSelectionSource::Explicit)
     } else if let Some(selected) = workspace.local.default_placement.as_deref() {
@@ -526,6 +559,7 @@ pub(super) fn select_workflow<'a>(
         case,
         case_selection,
         weight,
+        auxiliary_weights,
         placement_id: placement_id.to_owned(),
         placement_selection,
         placement,
@@ -561,13 +595,30 @@ pub(super) fn resolve_effective_server_input(
             })?;
         let assignment = invocation.assignment()?;
         let patch = parse_server_override(&invocation, &assignment)?;
+        // Load validation walks committed settings for finite values; an
+        // invocation override bypasses that gate, so the patched values are
+        // checked here before adapter projection.
+        for (key, value) in &patch.settings {
+            validate_override_finite(item.raw(), format!("server.settings.{key}"), value)?;
+        }
+        for (role_id, role) in &patch.roles {
+            for (key, value) in &role.settings {
+                validate_override_finite(
+                    item.raw(),
+                    format!("server.roles.{role_id}.settings.{key}"),
+                    value,
+                )?;
+            }
+        }
         if patch.topology.is_some() {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
                 message: "invocation overrides must not change server topology".to_owned(),
             });
         }
         if patch.gateway_backend.is_some() && server.gateway_backend.is_none() {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
                 message: format!(
                     "cannot add gateway_backend because server {:?} does not declare a Gateway",
                     selection.server_id
@@ -575,7 +626,8 @@ pub(super) fn resolve_effective_server_input(
             });
         }
         if patch.pd_router_backend.is_some() && server.pd_router_backend.is_none() {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
                 message: format!(
                     "cannot add pd_router_backend because server {:?} does not declare a P/D Router",
                     selection.server_id
@@ -583,12 +635,14 @@ pub(super) fn resolve_effective_server_input(
             });
         }
         if patch.readiness_timeout_seconds == Some(0) {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
                 message: "readiness_timeout_seconds must be nonzero".to_owned(),
             });
         }
         if patch.readiness_attempt_timeout_seconds == Some(0) {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
                 message: "readiness_attempt_timeout_seconds must be nonzero".to_owned(),
             });
         }
@@ -607,14 +661,16 @@ pub(super) fn resolve_effective_server_input(
             ),
         ] {
             if value == Some(0) {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::InvalidOverride {
+                    value: item.raw().to_owned(),
                     message: format!("{name} must be nonzero"),
                 });
             }
         }
         for id in patch.roles.keys() {
             if !selected_roles.contains(id) {
-                return Err(InferlabError::InvalidConfig {
+                return Err(InferlabError::InvalidOverride {
+                    value: item.raw().to_owned(),
                     message: format!(
                         "invocation configures role {id:?}, which is not part of the selected topology"
                     ),
@@ -719,7 +775,7 @@ pub(super) fn resolve_effective_server_input(
     }
 
     let case_id = selection.case_id.as_deref();
-    let role_resolutions = resolve_role_inputs(&effective_server, topology)?;
+    let roles = resolve_role_inputs(&effective_server, topology)?;
     let declarations = server_declarations(
         &selection.server_id,
         server,
@@ -727,9 +783,16 @@ pub(super) fn resolve_effective_server_input(
         case,
         &override_patches,
     )?;
-    let role_inputs = role_resolutions
+    let auxiliary_models = selection
+        .auxiliary_weights
         .iter()
-        .map(|role| role.input.clone())
+        .map(|auxiliary| inferlab_protocol::AuxiliaryModelInput {
+            kind: auxiliary.kind.to_wire(),
+            model: inferlab_protocol::ServeModelInput {
+                id: auxiliary.model_id.clone(),
+                served_name: auxiliary.model.served_name.clone(),
+            },
+        })
         .collect();
     Ok(EffectiveServerInput {
         topology,
@@ -740,19 +803,19 @@ pub(super) fn resolve_effective_server_input(
         kv_transfer,
         profiling,
         synthetic_acceptance,
+        auxiliary_models,
         capture_arm_deadline_seconds,
         capture_control_deadline_seconds,
         capture_finalization_deadline_seconds,
         override_patches,
-        role_resolutions,
+        roles,
         declarations,
-        role_inputs,
     })
 }
 
 /// The effective capture mechanism under [[RFC-0003:C-RESOLUTION]]: role
 /// declarations replace the server's scalar, every role must resolve to the
-/// same mechanism because protocol version 9 carries one effective mechanism
+/// same mechanism because the adapter protocol carries one effective mechanism
 /// per plan request, and an engine-trace target must not declare nsys escape
 /// inputs ([[RFC-0004:C-WORKLOAD-PROFILING]]).
 fn resolve_capture_mechanism(
@@ -778,8 +841,8 @@ fn resolve_capture_mechanism(
     }
     if mechanisms.len() > 1 {
         return Err(InferlabError::InvalidConfig {
-            message: "capture mechanism declarations differ across roles; protocol version 9 \
-                      carries one effective capture mechanism per server"
+            message: "capture mechanism declarations differ across roles; the adapter \
+                      protocol carries one effective capture mechanism per server"
                 .to_owned(),
         });
     }
@@ -832,18 +895,20 @@ pub(super) fn validate_effective_parallelism(
     declared: &Parallelism,
     effective: &Parallelism,
 ) -> Result<(), InferlabError> {
-    if let Some((field, value)) = parallelism_values(effective)
+    if let Some((field, value)) = effective
+        .field_values()
         .into_iter()
         .find(|(_, value)| !value.is_some_and(|value| value > 0))
     {
         return non_concrete_parallelism(integration, scope, field, value);
     }
-    for ((field, declared), (_, effective)) in parallelism_values(declared)
+    for ((field, declared), (_, effective)) in declared
+        .field_values()
         .into_iter()
-        .zip(parallelism_values(effective))
+        .zip(effective.field_values())
     {
         if declared.is_some() && declared != effective {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} changed explicitly declared {scope} parallelism.{field} from {declared:?} to {effective:?}"
                 ),
@@ -853,81 +918,13 @@ pub(super) fn validate_effective_parallelism(
     Ok(())
 }
 
-fn parallelism_values(parallelism: &Parallelism) -> [(&'static str, Option<u32>); 9] {
-    [
-        (
-            "outer.tensor_parallel_size",
-            parallelism
-                .outer
-                .as_ref()
-                .and_then(|value| value.tensor_parallel_size),
-        ),
-        (
-            "outer.pipeline_parallel_size",
-            parallelism
-                .outer
-                .as_ref()
-                .and_then(|value| value.pipeline_parallel_size),
-        ),
-        (
-            "attention.tensor_parallel_size",
-            parallelism
-                .attention
-                .as_ref()
-                .and_then(|value| value.tensor_parallel_size),
-        ),
-        (
-            "attention.data_parallel_size",
-            parallelism
-                .attention
-                .as_ref()
-                .and_then(|value| value.data_parallel_size),
-        ),
-        (
-            "attention.context_parallel_size",
-            parallelism
-                .attention
-                .as_ref()
-                .and_then(|value| value.context_parallel_size),
-        ),
-        (
-            "experts.tensor_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|value| value.tensor_parallel_size),
-        ),
-        (
-            "experts.data_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|value| value.data_parallel_size),
-        ),
-        (
-            "experts.expert_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|value| value.expert_parallel_size),
-        ),
-        (
-            "experts.dense_tensor_parallel_size",
-            parallelism
-                .experts
-                .as_ref()
-                .and_then(|value| value.dense_tensor_parallel_size),
-        ),
-    ]
-}
-
 fn non_concrete_parallelism(
     integration: &str,
     scope: &str,
     field: &str,
     value: Option<u32>,
 ) -> Result<(), InferlabError> {
-    Err(InferlabError::InvalidConfig {
+    Err(InferlabError::AdapterSemantics {
         message: format!(
             "integration {integration:?} returned non-concrete effective {scope} parallelism.{field}={value:?}"
         ),
@@ -948,6 +945,23 @@ fn parse_server_override(
         })
 }
 
+// An override value is the failing input, so the shared load-time walk's
+// keyed message is recategorized from the configuration variant to the
+// override variant carrying the raw `--set` text.
+fn validate_override_finite(
+    raw: &str,
+    path: String,
+    value: &JsonValue,
+) -> Result<(), InferlabError> {
+    match crate::workspace::validate_finite_json_value("invocation override", &path, value) {
+        Err(InferlabError::InvalidConfig { message }) => Err(InferlabError::InvalidOverride {
+            value: raw.to_owned(),
+            message,
+        }),
+        other => other,
+    }
+}
+
 pub(super) fn validate_effective_settings(
     requested: &BTreeMap<String, SettingValue>,
     effective: &BTreeMap<String, SettingValue>,
@@ -957,7 +971,7 @@ pub(super) fn validate_effective_settings(
     let effective = flattened_settings(effective);
     for path in requested.keys() {
         if !effective.contains_key(path) {
-            return Err(InferlabError::InvalidConfig {
+            return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} omitted effective server setting {path:?}"
                 ),
@@ -1005,7 +1019,10 @@ fn lookup<'a, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_role_settings, validate_effective_parallelism};
+    use super::{
+        effective_role_settings, validate_effective_parallelism, validate_effective_settings,
+    };
+    use crate::InferlabError;
     use crate::workspace::JsonValue;
     use inferlab_protocol::{
         Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, SettingValue,
@@ -1066,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_parallelism_preserves_explicit_role_components() {
+    fn effective_parallelism_preserves_explicit_role_components() -> Result<(), String> {
         let declared = Parallelism {
             outer: Some(ParallelismOuter {
                 tensor_parallel_size: Some(4),
@@ -1092,14 +1109,39 @@ mod tests {
             }),
         };
 
-        let result =
-            validate_effective_parallelism("fixture", "role \"prefill\"", &declared, &effective);
-
-        assert!(result.is_err());
-        assert!(
-            result
+        let error =
+            validate_effective_parallelism("fixture", "role \"prefill\"", &declared, &effective)
                 .err()
-                .is_some_and(|error| error.to_string().contains("outer.tensor_parallel_size"))
+                .ok_or_else(|| "changed declared parallelism was accepted".to_owned())?;
+        assert!(
+            error.to_string().contains("outer.tensor_parallel_size"),
+            "{error}"
         );
+        assert_eq!(error.code(), "E2001", "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn integration_response_drift_is_an_adapter_semantics_violation() -> Result<(), String> {
+        let non_concrete = validate_effective_parallelism(
+            "fixture",
+            "role \"serve\"",
+            &Parallelism::default(),
+            &Parallelism::default(),
+        );
+        let omitted = validate_effective_settings(
+            &BTreeMap::from([("max_model_len".to_owned(), SettingValue::Integer(65536))]),
+            &BTreeMap::new(),
+            "fixture",
+        );
+        for result in [non_concrete, omitted] {
+            let error = result.err().ok_or("response drift was accepted")?;
+            assert!(
+                matches!(error, InferlabError::AdapterSemantics { .. }),
+                "{error}"
+            );
+            assert_eq!(error.code(), "E2001", "{error}");
+        }
+        Ok(())
     }
 }

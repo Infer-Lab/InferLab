@@ -37,7 +37,7 @@ from .support import resolved_prompt_input
 def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchClientRequest:
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -54,7 +54,7 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
                     else None
                 ),
             },
-            "model": {"locator": "/models/dsv4", "served_name": "dsv4"},
+            "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "definition": {
                 "agentic_source": {
                     "dataset": "semianalysis_agentx_062126_256k",
@@ -152,7 +152,7 @@ def test_agentic_source_preparation_closes_the_release_qualified_file(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "phase": {
                 "kind": "acquire",
                 "resolved_revision": source.catalog.revision,
@@ -186,7 +186,7 @@ def test_agentic_source_resolution_uses_the_release_revision_not_mutable_main(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "9",
+            "protocol_version": "10",
             "phase": {"kind": "resolve"},
             "source": {"kind": "agentic", "source": source.model_dump()},
             "artifact_dir": str(tmp_path / "assets"),

@@ -25,6 +25,10 @@ pub(super) const PERFORMANCE_AGENTIC_UNAVAILABLE_DIMENSIONS: [&str; 3] = [
     "warmup_source_coordinate_records",
 ];
 
+/// The normalization-schema tag a Bench client result must declare; the Bench
+/// runner owns the producer spelling as `NORMALIZATION_SCHEMA`.
+const BENCH_NORMALIZATION_SCHEMA: &str = "aiperf-summary-v1";
+
 pub(super) struct BenchResultExpectations<'a> {
     pub(super) tpot_applicable: bool,
     pub(super) speed_bench_server_metrics: bool,
@@ -87,7 +91,7 @@ pub(super) fn bench_result_error(
                 .unwrap_or_else(|| "Bench client reported failure".to_owned()),
         );
     }
-    if result.normalization_schema != "aiperf-summary-v1" {
+    if result.normalization_schema != BENCH_NORMALIZATION_SCHEMA {
         return Some(format!(
             "Bench client returned unsupported normalization schema {:?}",
             result.normalization_schema

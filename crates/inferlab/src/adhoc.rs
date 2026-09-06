@@ -127,7 +127,7 @@ fn local_argv(
         "--as-is".to_owned(),
         "--executable".to_owned(),
         "--manifest-path".to_owned(),
-        root.join("pixi.toml").display().to_string(),
+        root.join(environment::PIXI_MANIFEST).display().to_string(),
         "-e".to_owned(),
         definition.pixi_environment.clone(),
         "--".to_owned(),
@@ -163,15 +163,21 @@ fn container_argv(
         argv.extend(inferlab_runtime::container::docker_device_args(spec));
     }
     for mount in mounts {
-        // The explicit --mount form, not the -v shorthand: at least one site
-        // docker proxy silently drops the shorthand's `:ro` suffix on
-        // same-path binds (verified on real hardware).
-        argv.push("--mount".to_owned());
-        argv.push(format!(
-            "type=bind,source={path},target={path}{readonly}",
-            path = mount.path,
-            readonly = if mount.writable { "" } else { ",readonly" }
-        ));
+        if mount.writable {
+            // The writable sibling of the shared read-only spelling
+            // (docker_bind_mount_readonly); both use the explicit --mount
+            // long form for the reason documented there.
+            argv.push("--mount".to_owned());
+            argv.push(format!(
+                "type=bind,source={path},target={path}",
+                path = mount.path
+            ));
+        } else {
+            argv.extend(inferlab_runtime::container::docker_bind_mount_readonly(
+                &mount.path,
+                &mount.path,
+            ));
+        }
     }
     if external {
         argv.push("--entrypoint".to_owned());

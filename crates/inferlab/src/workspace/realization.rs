@@ -3,11 +3,12 @@
 use super::definitions::WorkspaceConfig;
 use super::invalid;
 use crate::InferlabError;
+use crate::environment::{PIXI_LOCK, PIXI_MANIFEST};
 use std::fs;
 use std::path::Path;
 
 pub(super) fn validate_pixi(root: &Path, config: &WorkspaceConfig) -> Result<(), InferlabError> {
-    let manifest_path = root.join("pixi.toml");
+    let manifest_path = root.join(PIXI_MANIFEST);
     let manifest_text =
         fs::read_to_string(&manifest_path).map_err(|source| InferlabError::Read {
             path: manifest_path.clone(),
@@ -54,7 +55,7 @@ pub(super) fn validate_pixi(root: &Path, config: &WorkspaceConfig) -> Result<(),
         }
     }
 
-    let lock_path = root.join("pixi.lock");
+    let lock_path = root.join(PIXI_LOCK);
     let lock_text = fs::read_to_string(&lock_path).map_err(|source| InferlabError::Read {
         path: lock_path.clone(),
         source,

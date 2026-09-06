@@ -7,15 +7,17 @@ set -eu
 
 OUT="${1:?usage: pack-plugin.sh <out.tar.gz>}"
 
+# The member set has one manifest, shared with the crate build script and the
+# crate staging script (scripts/plugin-package-members.txt).
+members=$(sed 's/[[:space:]]*$//' "$(dirname "$0")/plugin-package-members.txt" | grep -v '^$' || true)
+
+# shellcheck disable=SC2086 # the manifest lists whitespace-free members
 tar --sort=name \
     --owner=root --group=root --numeric-owner \
     --mtime='2026-01-01 00:00:00 UTC' \
+    --exclude='__pycache__' --exclude='*.pyc' \
     -cf - \
-    LICENSE \
-    docs/backend-support.md \
-    .claude-plugin/ \
-    .agents/ \
-    plugins/ \
+    $members \
   | gzip -n > "$OUT"
 
 # License retention (RFC-0001:C-LICENSE-RETENTION): the plugin package packs

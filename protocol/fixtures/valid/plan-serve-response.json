@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "9",
+  "protocol_version": "10",
   "result": {
     "operation": "plan_serve",
     "output": {
@@ -169,9 +169,7 @@
         "implementation_version": "fixture-frontend-version",
         "effective_settings": {},
         "endpoint": {
-          "protocol": "http",
-          "completions_path": "/v1/completions",
-          "chat_completions_path": "/v1/chat/completions"
+          "protocol": "http"
         },
         "readiness": {
           "kind": "http",

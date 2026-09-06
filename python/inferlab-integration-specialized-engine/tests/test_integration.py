@@ -1,10 +1,15 @@
+import json
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import inferlab_integration_specialized_engine as integration
 import pytest
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
     AdapterOperationError,
+    AuxiliaryModelKind,
+    AuxiliaryModelLocator,
     CaptureMechanism,
     GatewayTargetEngine,
     Parallelism,
@@ -20,6 +25,7 @@ from inferlab_adapter_sdk import (
     ServeRoleLinkRequestRouting,
     ServeTopology,
     SettingValue,
+    handle_request,
 )
 from inferlab_integration_specialized_engine import plan_serve, render_serve
 
@@ -33,6 +39,7 @@ def _plan_input(
     base: dict[str, object] = {
         "model": ServeModelInput(id="fixture-model", served_name="fixture-model"),
         "topology": ServeTopology.single,
+        "state_dir": ".inferlab",
         "gateway_backend": "smg",
         "pd_router_backend": None,
         "kv_transfer": None,
@@ -106,8 +113,8 @@ def test_plan_rejects_the_synthetic_acceptance_overlay() -> None:
             _plan_input(
                 synthetic_acceptance={
                     "curve": {
-                        "model_key": "dsv4",
-                        "text": "dsv4:\n  - 3: 2.49\n",
+                        "model_key": "deepseek-v4-flash",
+                        "text": "deepseek-v4-flash:\n  - 3: 2.49\n",
                         "sha256": "f" * 64,
                     }
                 }
@@ -208,10 +215,14 @@ def test_plan_rejects_non_contract_topologies_and_engine_specific_settings() -> 
 def _render_input(
     tensor_parallel_size: int = 1,
     engine_settings: dict[str, object] | None = None,
+    omit_engine_defaults: bool = False,
 ) -> RenderServeInput:
     plan_input = _plan_input(
         Parallelism.model_validate({"outer": {"tensor_parallel_size": tensor_parallel_size}})
     )
+    if omit_engine_defaults:
+        del plan_input.roles[0].settings["default_max_output_tokens"]
+        del plan_input.roles[0].settings["max_num_batched_tokens"]
     for name, value in (engine_settings or {}).items():
         plan_input.roles[0].settings[name] = SettingValue.model_validate(value)
     plan = plan_serve(plan_input)
@@ -264,6 +275,7 @@ def _render_input(
     return RenderServeInput(
         model=plan_input.model,
         topology=plan_input.topology,
+        state_dir=plan_input.state_dir,
         gateway_backend=plan_input.gateway_backend,
         pd_router_backend=plan_input.pd_router_backend,
         kv_transfer=plan_input.kv_transfer,
@@ -295,13 +307,22 @@ def test_render_uses_only_the_canonical_tp2_worker_contract_and_smg() -> None:
         "12000",
     ]
     gateway = result.processes[1].root.command.argv
-    assert gateway[:4] == ["smg", "launch", "--host", "0.0.0.0"]
+    assert gateway[:4] == ["smg", "launch", "--host", "gateway.example"]
     assert gateway[gateway.index("--worker-urls") + 1] == "grpc://engine.example:50051"
     assert gateway[gateway.index("--worker-startup-timeout-secs") + 1] == "2147483647"
     assert gateway[gateway.index("--tokenizer-path") + 1] == "/models/fixture-model"
     assert gateway[gateway.index("--policy") + 1] == "least_load"
     assert "--pd-disaggregation" not in gateway
     assert all("grout" not in argument and "sm120" not in argument for argument in engine)
+
+
+def test_render_defers_omitted_engine_defaults_to_the_worker() -> None:
+    engine = render_serve(_render_input(tensor_parallel_size=2, omit_engine_defaults=True))
+    argv = engine.processes[0].root.command.argv
+
+    # The worker's own defaults govern; InferLab does not restate them.
+    assert "--default-max-output-tokens" not in argv
+    assert "--max-num-batched-tokens" not in argv
 
 
 def test_plan_records_declared_engine_settings_without_inventing_omitted_ones() -> None:
@@ -425,3 +446,40 @@ def test_specialized_engine_is_one_workspace_side_integration_package() -> None:
 
     assert inventory.count("inferlab-integration-specialized-engine") == 1
     assert not any(package == "inferlab-integration-grout" for package in inventory)
+
+
+AUXILIARY_PLAN_FIXTURE = (
+    ROOT / "protocol" / "fixtures" / "valid" / "plan-serve-request-auxiliary-models.json"
+)
+
+
+def test_plan_rejects_a_declared_draft_model_auxiliary() -> None:
+    # The Specialized Engine contract has no splice target for auxiliary
+    # weights, so a declaration fails planning with a typed error naming the
+    # kind ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+    payload = cast(dict[str, object], json.loads(AUXILIARY_PLAN_FIXTURE.read_text()))
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert "'draft-model'" in response.root.error.message
+
+
+def test_render_rejects_an_allocation_carrying_a_draft_model_locator() -> None:
+    # Planning refuses the declaration, so an allocation that still carries a
+    # resolved locator must not render — the command would drop the declared
+    # artifact from the record silently.
+    render_input = _render_input()
+    engine = render_input.allocations[0].root
+    assert isinstance(engine, ServeProcessAllocationModelRank)
+    engine.auxiliary_model_locators = [
+        AuxiliaryModelLocator(
+            kind=AuxiliaryModelKind(root="draft-model"), locator="/models/deepseek-v4-flash-draft"
+        )
+    ]
+
+    with pytest.raises(AdapterOperationError, match="draft-model") as error:
+        render_serve(render_input)
+
+    assert error.value.code == AdapterErrorCode.invalid_request

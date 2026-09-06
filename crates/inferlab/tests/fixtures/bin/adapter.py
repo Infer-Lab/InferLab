@@ -24,7 +24,7 @@ if fault.get("adapter_reject"):
         json.dumps(
             {
                 "status": "error",
-                "protocol_version": "9",
+                "protocol_version": "10",
                 "error": {"code": "invalid_settings", "message": "fixture rejection"},
             }
         )
@@ -39,15 +39,21 @@ if operation == "plan_serve":
     gateway_backend = input.get("gateway_backend")
     settings = dict(role["settings"])
     settings.setdefault("trust_remote_code", False)
+    declared = role["parallelism"]
+    outer = declared.get("outer") or {}
+    attention = declared.get("attention") or {}
+    tp = outer.get("tensor_parallel_size") or 1
+    pp = outer.get("pipeline_parallel_size") or 1
+    dp = attention.get("data_parallel_size") or 1
     parallelism = {
-        "outer": {"tensor_parallel_size": 1, "pipeline_parallel_size": 1},
+        "outer": {"tensor_parallel_size": tp, "pipeline_parallel_size": pp},
         "attention": {
-            "tensor_parallel_size": 1,
-            "data_parallel_size": 1,
+            "tensor_parallel_size": tp,
+            "data_parallel_size": dp,
             "context_parallel_size": 1,
         },
         "experts": {
-            "tensor_parallel_size": 1,
+            "tensor_parallel_size": tp * dp,
             "data_parallel_size": 1,
             "expert_parallel_size": 1,
             "dense_tensor_parallel_size": 1,
@@ -74,8 +80,6 @@ if operation == "plan_serve":
                     else {
                         "public_endpoint": {
                             "protocol": "http",
-                            "completions_path": "/v1/completions",
-                            "chat_completions_path": "/v1/chat/completions",
                         }
                     }
                 ),
@@ -91,7 +95,7 @@ if operation == "plan_serve":
                 "id": "server" if role["replica_count"] == 1 else f"server-{index}",
                 "role_id": role["id"],
                 "replica_index": index,
-                "device_count": 1,
+                "device_count": tp * pp * dp,
                 "ports": [],
                 "primary_ports": ["master"],
                 "primary_readiness": {"kind": "http", "path": "/v1/models"},
@@ -140,8 +144,6 @@ if operation == "plan_serve":
                     "effective_settings": {},
                     "endpoint": {
                         "protocol": "http",
-                        "completions_path": "/v1/completions",
-                        "chat_completions_path": "/v1/chat/completions",
                     },
                     "readiness": {"kind": "http", "path": "/health"},
                     "ports": [],
@@ -242,7 +244,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "9",
+            "protocol_version": "10",
             "result": {"operation": operation, "output": output},
         }
     )

@@ -7,18 +7,20 @@ import traceback
 from pathlib import Path
 
 from inferlab_measurement_sdk import (
+    SCHEMA_VERSION,
     BenchClientRequest,
     BenchClientResult,
     BenchPopulationPreparationRequest,
     BenchPopulationPreparationResult,
     CaseBudgetExpired,
     CaseDeadline,
+    ClientResult,
     ClientStatus,
     MeasurementDataAssetPreparationRequest,
     MeasurementDataAssetPreparationResult,
-    MeasurementDataAssetRemoteMetadataOutcome,
-    MeasurementDataAssetSourceBytesOutcome,
+    failed_data_asset_preparation_result,
     parse_args,
+    write_result,
 )
 
 from inferlab_bench_runner.data_asset import prepare_agentic_data_asset
@@ -66,9 +68,7 @@ def main() -> int:
     if args.input is None or args.output is None:
         raise ValueError("--input and --output are required")
     output = Path(args.output)
-    result: (
-        BenchPopulationPreparationResult | BenchClientResult | MeasurementDataAssetPreparationResult
-    )
+    result: ClientResult
     try:
         input_text = Path(args.input).read_text(encoding="utf-8")
         if args.prepare_source:
@@ -80,19 +80,10 @@ def main() -> int:
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
         if args.prepare_source:
-            result = MeasurementDataAssetPreparationResult(
-                schema_version=1,
-                status=ClientStatus.failed,
-                effective_selection=None,
-                readiness=None,
-                cache_stores=[],
-                remote_metadata=MeasurementDataAssetRemoteMetadataOutcome.unavailable,
-                source_bytes=MeasurementDataAssetSourceBytesOutcome.unavailable,
-                error=str(error),
-            )
+            result = failed_data_asset_preparation_result(error)
         elif args.prepare:
             result = BenchPopulationPreparationResult(
-                schema_version=1,
+                schema_version=SCHEMA_VERSION,
                 status=ClientStatus.failed,
                 materialization_identity="unknown",
                 requested_entries=0,
@@ -108,7 +99,7 @@ def main() -> int:
             )
         else:
             result = BenchClientResult(
-                schema_version=1,
+                schema_version=SCHEMA_VERSION,
                 status=ClientStatus.failed,
                 completed_requests=0,
                 failed_requests=0,
@@ -119,7 +110,7 @@ def main() -> int:
                 raw_artifacts=[],
                 error=str(error),
             )
-    output.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    write_result(output, result)
     return 0
 
 

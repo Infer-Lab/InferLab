@@ -247,7 +247,7 @@ fn nvidia_smi_script(devices: &[u32]) -> String {
          --query-gpu=index,name,memory.total,uuid,driver_version \
          --format=csv,noheader,nounits); \
          printf '%s\\n' \"$out\" | while IFS= read -r line; \
-         do printf 'INFERLAB_HARDWARE\\t%s\\n' \"$line\"; done"
+         do printf '{HARDWARE_MARKER}%s\\n' \"$line\"; done"
     )
 }
 
@@ -350,13 +350,28 @@ pub(super) fn preflight_targets(
         root.pop();
         let source_digest = source_digest_script(&workspace.source_exclusions);
         let source_pathspecs = source_pathspecs(&workspace.source_exclusions);
+        // The confirmation-marker check and write render from the same
+        // constants the local marker cache uses
+        // ([[RFC-0002:C-ENVIRONMENT-CHECKS]]): one file name, one schema
+        // version, one byte shape.
+        let marker_check = crate::environment::confirmation_marker_check_shell();
+        let marker_write = crate::environment::confirmation_marker_write_shell();
+        // The usability probe runs the same argument words the local gate
+        // executes ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]); only the
+        // pixi executable resolution stays remote-specific.
+        let pixi_probe =
+            crate::environment::pixi_usability_probe_words(&shell_quote(pixi_environment))
+                .join(" ");
         let script = format!(
-            "set -eu; cd {root}; pixi=$(type -P pixi); revision=$(git rev-parse HEAD); dirty=0; test -z \"$(git status {status_flags} -- {source_pathspecs})\" || dirty=1; source_digest=$({source_digest}); manifest=$(sha256sum pixi.toml | awk '{{print $1}}'); lock=$(sha256sum pixi.lock | awk '{{print $1}}'); marker={confirmation_cache_dir}/{environment}/confirmed; set +e; if test -d {pixi_envs_dir}/{environment} && test -f \"$marker\" && [ \"$(sed -n 1p \"$marker\" 2>/dev/null)\" = \"$manifest\" ] && [ \"$(sed -n 2p \"$marker\" 2>/dev/null)\" = \"$lock\" ]; then pixi_status=0; else test -d {pixi_envs_dir}/{environment} && \"$pixi\" run --locked --no-install --executable -e {environment} -- true; pixi_status=$?; if [ \"$pixi_status\" = 0 ]; then mkdir -p \"$(dirname \"$marker\")\" && printf '%s\\n%s\\n' \"$manifest\" \"$lock\" > \"$marker.tmp.$$\" && mv \"$marker.tmp.$$\" \"$marker\"; fi; fi; set -e; printf 'INFERLAB_PREFLIGHT\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$revision\" \"$dirty\" \"$source_digest\" \"$manifest\" \"$lock\" \"$pixi\" \"$PATH\" \"$HOME\" \"$pixi_status\"; exit \"$pixi_status\"",
+            "set -eu; cd {root}; pixi=$(type -P pixi); revision=$(git rev-parse HEAD); dirty=0; test -z \"$(git status {status_flags} -- {source_pathspecs})\" || dirty=1; source_digest=$({source_digest}); manifest=$(sha256sum {pixi_manifest} | awk '{{print $1}}'); lock=$(sha256sum {pixi_lock} | awk '{{print $1}}'); marker={confirmation_cache_dir}/{environment}/{marker_file}; set +e; if test -d {pixi_envs_dir}/{environment} && {marker_check}; then pixi_status=0; else test -d {pixi_envs_dir}/{environment} && \"$pixi\" {pixi_probe}; pixi_status=$?; if [ \"$pixi_status\" = 0 ]; then {marker_write}; fi; fi; set -e; printf '{PREFLIGHT_MARKER}%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$revision\" \"$dirty\" \"$source_digest\" \"$manifest\" \"$lock\" \"$pixi\" \"$PATH\" \"$HOME\" \"$pixi_status\"; exit \"$pixi_status\"",
             root = shell_quote_path(&root),
             status_flags = git_status_flags(),
             environment = shell_quote(pixi_environment),
             pixi_envs_dir = crate::environment::PIXI_ENVS_DIR,
+            pixi_manifest = crate::environment::PIXI_MANIFEST,
+            pixi_lock = crate::environment::PIXI_LOCK,
             confirmation_cache_dir = crate::environment::CONFIRMATION_CACHE_DIR,
+            marker_file = crate::environment::CONFIRMATION_MARKER_FILE,
         );
         let output = ssh_output(&target, &script).map_err(|source| RemotePreflightError::Ssh {
             machine: machine.clone(),
@@ -483,7 +498,7 @@ pub(super) fn preflight_container_targets(
         let script = format!(
             "set -eu; present=1; docker image inspect --format '{{{{.Id}}}}' {reference} \
              >/dev/null 2>&1 || present=0; set_env=\"\"; {env_probe}printf \
-             'INFERLAB_CONTAINER_PREFLIGHT\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$present\" \
+             '{CONTAINER_PREFLIGHT_MARKER}%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$present\" \
              \"$(id -u)\" \"$(id -g)\" \"$(id -un)\" \"$PATH\" \"$HOME\" \"$set_env\"",
             reference = shell_quote(reference),
         );
@@ -688,15 +703,17 @@ fn parse_preflight_output(output: &str) -> Option<PreflightOutput> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hardware_output;
+    use super::{HARDWARE_MARKER, parse_hardware_output};
 
     #[test]
     fn hardware_rows_parse_through_banner_noise_in_index_order() -> Result<(), String> {
-        let stdout = "login banner\n\
-                      INFERLAB_HARDWARE\t1, Fixture GPU, 97871, GPU-bbb, 580.65.06\n\
-                      INFERLAB_HARDWARE\t0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n";
+        let stdout = format!(
+            "login banner\n\
+             {HARDWARE_MARKER}1, Fixture GPU, 97871, GPU-bbb, 580.65.06\n\
+             {HARDWARE_MARKER}0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n"
+        );
         let evidence =
-            parse_hardware_output("node-a", &[1, 0], stdout).map_err(|error| error.to_string())?;
+            parse_hardware_output("node-a", &[1, 0], &stdout).map_err(|error| error.to_string())?;
         assert_eq!(evidence.driver_version, "580.65.06");
         let indices: Vec<u32> = evidence.devices.iter().map(|device| device.index).collect();
         assert_eq!(indices, [0, 1]);
@@ -708,8 +725,8 @@ mod tests {
 
     #[test]
     fn hardware_coverage_mismatch_and_empty_output_are_loud() {
-        let one_row = "INFERLAB_HARDWARE\t0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n";
-        let mismatch = parse_hardware_output("node-a", &[0, 1], one_row);
+        let one_row = format!("{HARDWARE_MARKER}0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n");
+        let mismatch = parse_hardware_output("node-a", &[0, 1], &one_row);
         assert!(
             mismatch
                 .as_ref()
@@ -729,10 +746,12 @@ mod tests {
     fn zero_assigned_devices_record_the_driver_without_claiming_inventory() -> Result<(), String> {
         // A proxy-only host enumerates its full inventory (no `-i`), but
         // nothing is assigned there, so no device may be recorded as assigned.
-        let stdout = "INFERLAB_HARDWARE\t0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n\
-                      INFERLAB_HARDWARE\t1, Fixture GPU, 97871, GPU-bbb, 580.65.06\n";
+        let stdout = format!(
+            "{HARDWARE_MARKER}0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n\
+             {HARDWARE_MARKER}1, Fixture GPU, 97871, GPU-bbb, 580.65.06\n"
+        );
         let evidence =
-            parse_hardware_output("proxy-host", &[], stdout).map_err(|error| error.to_string())?;
+            parse_hardware_output("proxy-host", &[], &stdout).map_err(|error| error.to_string())?;
         assert_eq!(evidence.driver_version, "580.65.06");
         assert!(evidence.devices.is_empty(), "{evidence:?}");
         Ok(())

@@ -2,6 +2,7 @@
 //! serde authority.
 
 use crate::bench_metric::BenchMetric;
+use crate::record::state_dir;
 use inferlab_profiler::plan::NsysEscapes;
 use inferlab_protocol::{CaptureMechanism, KvTransferMechanism, Parallelism, ServeTopology};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
@@ -10,9 +11,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-pub(super) const WORKSPACE_FILE: &str = ".inferlab/workspace.toml";
-pub(super) const WORKSPACE_FRAGMENT_DIR: &str = ".inferlab/workspace.d";
-pub(super) const DEFAULT_LOCAL_FILE: &str = ".inferlab/local.toml";
+pub(super) const WORKSPACE_FILE: &str = concat!(state_dir!(), "/workspace.toml");
+pub(super) const WORKSPACE_FRAGMENT_DIR: &str = concat!(state_dir!(), "/workspace.d");
+pub(super) const DEFAULT_LOCAL_FILE: &str = concat!(state_dir!(), "/local.toml");
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -137,6 +138,12 @@ pub(crate) struct ServerDefinition {
     /// the speculative method or draft model.
     #[serde(default)]
     pub synthetic_acceptance: Option<SyntheticAcceptanceDefinition>,
+    /// Auxiliary weight artifacts consumed by the same launch, keyed by the
+    /// governed kind vocabulary and referencing ordinary workspace models
+    /// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]). Server-level only: cases must
+    /// not declare or override auxiliary models.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub auxiliary_models: BTreeMap<String, String>,
     /// Operator escape inputs onto the managed profiler commands
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(default, skip_serializing_if = "ProfilerEscapes::is_empty")]
@@ -151,6 +158,37 @@ pub(crate) struct ServerDefinition {
     pub cases: BTreeMap<String, ServerCaseDefinition>,
     #[serde(default)]
     pub default_case: Option<String>,
+}
+
+/// The outcome of implicit case selection when an invocation names no case
+/// ([[RFC-0003:C-RESOLUTION]]).
+pub(crate) enum ImplicitCaseSelection<'a> {
+    /// The declared `default_case`.
+    Default(&'a str),
+    /// The one declared case selects itself.
+    Sole(&'a str),
+    /// No cases declared: the base server definition runs as-is.
+    Base,
+    /// Multiple cases and no default; resolution rejects this selection.
+    Ambiguous,
+}
+
+impl ServerDefinition {
+    /// Implicit case-selection precedence: the declared default wins, a sole
+    /// declared case selects itself, no cases means the base server, and
+    /// multiple cases without a default are ambiguous. Resolution turns the
+    /// ambiguous outcome into an error, so display surfaces consuming this
+    /// never claim a selection resolution would reject.
+    pub(crate) fn implicit_case_selection(&self) -> ImplicitCaseSelection<'_> {
+        if let Some(default) = &self.default_case {
+            return ImplicitCaseSelection::Default(default.as_str());
+        }
+        match (self.cases.iter().next(), self.cases.iter().nth(1)) {
+            (None, _) => ImplicitCaseSelection::Base,
+            (Some((id, _)), None) => ImplicitCaseSelection::Sole(id.as_str()),
+            (Some(_), Some(_)) => ImplicitCaseSelection::Ambiguous,
+        }
+    }
 }
 
 pub(crate) const DEFAULT_READINESS_ATTEMPT_TIMEOUT_SECONDS: u64 = 30;
@@ -425,6 +463,13 @@ const fn default_openai_smoke_timeout_seconds() -> u64 {
 
 const fn default_eval_trials() -> u32 {
     1
+}
+
+/// The effective base seed of an lm-eval trial schedule: the declared seed,
+/// or the shared fallback when the definition omits one
+/// ([[RFC-0004:C-LM-EVAL]]).
+pub(crate) fn effective_lm_eval_base_seed(declared: Option<u64>) -> u64 {
+    declared.unwrap_or(1234)
 }
 
 /// The prompt rendering authority a generative lm-eval definition may declare.

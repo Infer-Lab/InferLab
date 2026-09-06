@@ -1,12 +1,13 @@
 {
   "operation": "render_serve",
-  "protocol_version": "9",
+  "protocol_version": "10",
   "input": {
     "model": {
-      "id": "dsv4",
-      "served_name": "dsv4"
+      "id": "deepseek-v4-flash",
+      "served_name": "deepseek-v4-flash"
     },
     "topology": "prefill_decode",
+    "state_dir": ".inferlab",
     "gateway_backend": "vllm-router",
     "pd_router_backend": "vllm-router",
     "kv_transfer": "mooncake",
@@ -21,7 +22,7 @@
         "rank": 0,
         "rank_count": 1,
         "machine": "node-a",
-        "model_locator": "/models/dsv4",
+        "model_locator": "/models/deepseek-v4-flash",
         "cache": "/cache/runtime/node-a/prefill",
         "capture_storage": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/prefill",
         "devices": [
@@ -87,7 +88,7 @@
         "rank": 0,
         "rank_count": 1,
         "machine": "node-b",
-        "model_locator": "/models/dsv4",
+        "model_locator": "/models/deepseek-v4-flash",
         "cache": "/cache/runtime/node-b/decode",
         "capture_storage": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/decode",
         "devices": [
@@ -159,9 +160,7 @@
           "implementation_version": "fixture-frontend-version",
           "effective_settings": {},
           "endpoint": {
-            "protocol": "http",
-            "completions_path": "/v1/completions",
-            "chat_completions_path": "/v1/chat/completions"
+            "protocol": "http"
           },
           "readiness": {
             "kind": "http",

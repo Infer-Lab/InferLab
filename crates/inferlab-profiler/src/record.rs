@@ -1,9 +1,10 @@
 use crate::plan::{
     CaptureDeadlines, CaptureWindowHttpMethodPlan, CaptureWindowPlan, NsysEscapes, ProfilerControl,
-    ProfilerFinalization, ProfilerLaunch, WindowControlKind, default_one,
+    ProfilerFinalization, default_one,
 };
 use inferlab_protocol::{CaptureMechanism, SettingValue};
 use inferlab_runtime::operation_bound::OperationTimingEvidence;
+use inferlab_runtime::plan::LaunchPlan;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -126,10 +127,8 @@ pub enum CaptureActionRecord {
         failure_kind: Option<CaptureHttpFailureKind>,
         /// Engine-trace window closing only: the close request was dispatched
         /// but no response was consumed before the shared finalization budget
-        /// expired. Neutral flush-pending evidence, never a failure by itself;
-        /// coverage verification is the sole completion verdict
-        /// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Records written before
-        /// workload schema version 19 predate the field.
+        /// expired. Neutral flush-pending evidence, never a failure by itself
+        /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flush_pending: bool,
         error: Option<String>,
@@ -154,9 +153,7 @@ pub enum CaptureActionRecord {
     /// trace-storage delta is the sole artifact-flush completion verdict
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]); the window-closing control
     /// response only acknowledges receipt, so this evidence never fails the
-    /// capture by itself. Records written before workload schema version 19
-    /// named the receipt field `flush_confirmed` and treated a successful
-    /// window-closing control response as flush completion.
+    /// capture by itself.
     EngineTraceFlush {
         target_id: String,
         operation: String,
@@ -231,8 +228,6 @@ pub struct EngineTraceCoverageRecord {
     /// count. Engine-internal profilers write one artifact per engine worker
     /// process, which the device count bounds, while the control-plane rank
     /// model counts entry processes ([[RFC-0004:C-WORKLOAD-PROFILING]]).
-    /// Records written before workload schema version 18 named this field
-    /// `rank_count` and used the entry-process rank count as the baseline.
     pub expected_artifacts: u32,
     pub baseline_files: Vec<PathBuf>,
     pub new_files: Vec<PathBuf>,
@@ -252,7 +247,6 @@ pub struct CapturePlanRecord {
     pub server_record_id: String,
     pub workload_id: String,
     pub deadlines: CaptureDeadlines,
-    pub control: WindowControlKind,
     pub windows: Vec<CaptureWindowPlan>,
     pub targets: Vec<CaptureTargetPlan>,
 }
@@ -317,10 +311,9 @@ pub struct ProfilerTargetRecord {
     pub trace_storage: Option<PathBuf>,
     pub session: String,
     pub executable: String,
-    pub launch: ProfilerLaunch,
+    pub launch: LaunchPlan,
     pub finalization: ProfilerFinalization,
     pub control: ProfilerControl,
-    pub supported_window_controls: Vec<WindowControlKind>,
     pub command_cwd: PathBuf,
     pub runtime_root: PathBuf,
     pub launch_prefix: Vec<String>,

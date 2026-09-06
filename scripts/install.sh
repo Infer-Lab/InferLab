@@ -13,7 +13,7 @@ set -eu
 
 VERSION="${INFERLAB_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
-REPO="Infer-Lab/inferlab"
+REPO="Infer-Lab/InferLab"
 
 show_help() {
     sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'

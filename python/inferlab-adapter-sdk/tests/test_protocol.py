@@ -13,8 +13,9 @@ from inferlab_adapter_sdk import (
     AdapterRequest,
     AdapterRequestPlanServe,
     AdapterResponse,
+    EndpointDeclaration,
     EndpointProtocol,
-    EndpointRequirement,
+    GatewayTargetEngine,
     IntegrationIdentity,
     LaunchFileDeclaration,
     PlanServeInput,
@@ -29,8 +30,10 @@ from inferlab_adapter_sdk import (
     RenderInputDeclaration,
     RenderSource,
     ServeProcessAllocationFrontend,
+    ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
     ServeRoleKind,
+    ServeRoleLinkSideChannel,
     ServeRoleResult,
     SettingValue,
     SuppliedRenderInput,
@@ -62,7 +65,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v9.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v10.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -138,10 +141,8 @@ def fixture_plan_serve(input: PlanServeInput) -> PlanServeResult:
                 effective_replica_count=1,
                 effective_settings=input.roles[0].settings,
                 effective_parallelism=input.roles[0].parallelism,
-                public_endpoint=EndpointRequirement(
+                public_endpoint=EndpointDeclaration(
                     protocol=EndpointProtocol(),
-                    completions_path="/v1/completions",
-                    chat_completions_path="/v1/chat/completions",
                 ),
             )
         ],
@@ -184,6 +185,81 @@ def test_generated_models_accept_shared_valid_fixtures() -> None:
     assert isinstance(frontend, ServeProcessAllocationFrontend)
     assert frontend.components.model_dump() == ("gateway", "pd_router")
     assert not hasattr(frontend, "model_locator")
+
+
+def test_auxiliary_model_fixtures_carry_identities_and_resolved_locators() -> None:
+    # [[RFC-0003:C-SERVE-AUXILIARY-MODELS]] over [[RFC-0006:C-INTEGRATIONS]]:
+    # planning receives the logical identities and each model-rank rendering
+    # allocation carries the machine-resolved locator.
+    plan_request = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-request-auxiliary-models.json")
+    )
+    plan_root = plan_request.root
+    assert isinstance(plan_root, AdapterRequestPlanServe)
+    assert plan_root.input.auxiliary_models is not None
+    auxiliary = plan_root.input.auxiliary_models[0]
+    assert auxiliary.kind.root == "draft-model"
+    assert auxiliary.model.id == "deepseek-v4-flash-draft"
+    assert auxiliary.model.served_name == "deepseek-v4-flash-draft"
+
+    render_request = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "render-serve-request-auxiliary-models.json")
+    )
+    render_root = render_request.root
+    assert isinstance(render_root, AdapterRequestRenderServe)
+    assert render_root.input.auxiliary_models is not None
+    allocation = render_root.input.allocations[0].root
+    assert isinstance(allocation, ServeProcessAllocationModelRank)
+    assert allocation.auxiliary_model_locators is not None
+    assert allocation.auxiliary_model_locators[0].kind.root == "draft-model"
+    assert allocation.auxiliary_model_locators[0].locator == "/models/deepseek-v4-flash-draft"
+
+
+def test_side_channel_and_routed_single_fixtures_preserve_wire_spellings() -> None:
+    # Wire spellings no other fixture covers ([[RFC-0006:C-INTEGRATIONS]]): the
+    # vLLM NIXL side-channel link, the Specialized Engine routed-single
+    # ["gateway"]-only frontend binding, and the engine Gateway target.
+    nixl = AdapterResponse.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-response-nixl-side-channel.json")
+    )
+    assert isinstance(nixl.root, AdapterResponseOk)
+    nixl_result = nixl.root.result.root
+    assert isinstance(nixl_result, AdapterResultPlanServe)
+    assert [replica.ports for replica in nixl_result.output.replicas] == [
+        ["side_channel"],
+        ["side_channel"],
+    ]
+    side_channel = nixl_result.output.links[-1].root
+    assert isinstance(side_channel, ServeRoleLinkSideChannel)
+    assert (side_channel.source, side_channel.target, side_channel.port) == (
+        "prefill",
+        "decode",
+        "side_channel",
+    )
+
+    routed = AdapterResponse.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-response-routed-single.json")
+    )
+    assert isinstance(routed.root, AdapterResponseOk)
+    routed_result = routed.root.result.root
+    assert isinstance(routed_result, AdapterResultPlanServe)
+    assert routed_result.output.gateway is not None
+    engine_target = routed_result.output.gateway.targets[0].root
+    assert isinstance(engine_target, GatewayTargetEngine)
+    assert engine_target.role == "serve"
+    assert routed_result.output.pd_router is None
+
+    render = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "render-serve-request-routed-single.json")
+    )
+    assert isinstance(render.root, AdapterRequestRenderServe)
+    frontend = render.root.input.allocations[1].root
+    assert isinstance(frontend, ServeProcessAllocationFrontend)
+    assert frontend.components.model_dump() == ["gateway"]
+    frontend_target = frontend.gateway.targets[0].root
+    assert isinstance(frontend_target, GatewayTargetEngine)
+    assert frontend_target.role == "serve"
+    assert frontend.pd_router is None
 
 
 def test_sdk_owns_fused_frontend_and_allocation_identity_invariants() -> None:
@@ -345,19 +421,19 @@ def test_unsupported_request_protocol_version_is_reported_before_shape(
     assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
 
 
-def test_protocol_v8_request_is_rejected_instead_of_partially_interpreted() -> None:
-    # The fixture is a well-formed protocol-v8 plan request carrying the
-    # synthetic acceptance member; protocol v9 MUST reject it outright rather
+def test_protocol_v9_request_is_rejected_instead_of_partially_interpreted() -> None:
+    # The fixture is a well-formed protocol-v9 plan request carrying the
+    # synthetic acceptance member; protocol v10 MUST reject it outright rather
     # than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
-    payload = (FIXTURES / "invalid" / "request-protocol-version-8.json").read_text()
+    payload = (FIXTURES / "invalid" / "request-protocol-version-9.json").read_text()
 
     response = handle_request(payload, fixture_plan_serve)
 
     response_error = response.root
     assert isinstance(response_error, AdapterResponseError)
     assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
-    assert "received protocol version 8" in response_error.error.message
-    assert "protocol version 9" in response_error.error.message
+    assert "received protocol version 9" in response_error.error.message
+    assert "protocol version 10" in response_error.error.message
 
 
 def test_malformed_request_json_stays_invalid_request() -> None:

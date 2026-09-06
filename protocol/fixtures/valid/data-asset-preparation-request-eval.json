@@ -1,5 +1,5 @@
 {
-  "protocol_version": "9",
+  "protocol_version": "10",
   "phase": {
     "kind": "resolve"
   },
@@ -19,6 +19,7 @@
       "limit": 8,
       "few_shot": 5,
       "seed": 1,
+      "base_seed": 1,
       "trials": 1,
       "max_tokens": 256,
       "concurrency": 4,

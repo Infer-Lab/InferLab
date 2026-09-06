@@ -1,9 +1,13 @@
+import os
+from pathlib import Path
 from typing import cast
 
+import yaml  # type: ignore[import-untyped]
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
     SettingValue,
+    SuppliedRenderInput,
     validate_extra_args,
     validate_settings,
 )
@@ -93,3 +97,70 @@ def _merge_yaml_patch(config: dict[str, object], patch: dict[str, YamlValue]) ->
             _merge_yaml_patch(_yaml_mapping(current, key), value)
         else:
             config[key] = value
+
+
+def _render_source_path(state_dir: str, path: str) -> str:
+    if Path(path).is_absolute():
+        return path
+    return os.path.normpath(Path(state_dir) / path)
+
+
+def _read_operator_config(state_dir: str, path: str) -> str:
+    """Plan-time read of the operator's source YAML through the workspace
+    filesystem under the request-supplied state directory."""
+    try:
+        return Path(_render_source_path(state_dir, path)).read_text(encoding="utf-8")
+    except OSError as error:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"cannot read TensorRT-LLM extra_llm_api_options {path!r}: {error}",
+        ) from error
+
+
+def _parse_operator_config(text: str, path: str) -> dict[str, object]:
+    try:
+        value: object = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"cannot parse TensorRT-LLM extra_llm_api_options {path!r}: {error}",
+        ) from error
+    if value is None:
+        return {}
+    return dict(_yaml_mapping(value, repr(path)))
+
+
+def _operator_config(
+    settings: TrtllmServeSettings,
+    state_dir: str,
+    render_inputs: list[SuppliedRenderInput] | None = None,
+) -> dict[str, object]:
+    """The operator's effective extra_llm_api_options mapping: the source YAML
+    plus the settings patch. At plan no supplied render inputs exist, so the
+    source YAML is read through the workspace filesystem under the
+    request-supplied state directory; at render the control-plane-supplied
+    frozen text is matched by the source path the same spelling produces
+    ([[RFC-0006:C-LAUNCH-FILES]])."""
+    config: dict[str, object] = {}
+    path = settings.extra_llm_api_options
+    if path is not None:
+        if render_inputs is None:
+            text = _read_operator_config(state_dir, path)
+        else:
+            supplied = next(
+                (
+                    item
+                    for item in render_inputs
+                    if item.source_path == _render_source_path(state_dir, path)
+                ),
+                None,
+            )
+            if supplied is None:
+                raise AdapterOperationError(
+                    AdapterErrorCode.invalid_request,
+                    f"TensorRT-LLM render input {path!r} was not supplied",
+                )
+            text = supplied.text
+        config = _parse_operator_config(text, path)
+    _merge_yaml_patch(config, settings.extra_llm_api_options_patch or {})
+    return config

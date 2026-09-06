@@ -88,6 +88,19 @@ def test_generated_models_preserve_bundled_eval_task_identity() -> None:
     assert len(source.task_closure_sha256) == 64
 
 
+def test_generated_models_consume_the_resolved_base_seed() -> None:
+    request = EvalClientRequest.model_validate(
+        load_json(FIXTURES / "valid" / "eval-client-request-fallback-seed.json")
+    )
+
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    # The definition declared no seed; the control-plane resolution is the
+    # only base seed the runtime side can read.
+    assert definition.seed is None
+    assert definition.base_seed == 1234
+
+
 def test_generated_models_preserve_typed_eval_probe_failure() -> None:
     result = EvalClientResult.model_validate(
         load_json(FIXTURES / "valid" / "eval-client-result-probe-failure.json")
@@ -203,6 +216,7 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
         FIXTURES / "valid" / "bench-client-result-agentic-source-failed.json"
     )
     eval_request = load_json(FIXTURES / "valid" / "eval-client-request-bundled.json")
+    eval_fallback_request = load_json(FIXTURES / "valid" / "eval-client-request-fallback-seed.json")
     data_asset_request = load_json(FIXTURES / "valid" / "data-asset-preparation-request-eval.json")
     data_asset_result = load_json(FIXTURES / "valid" / "data-asset-preparation-result-opaque.json")
     validator = Draft202012Validator(load_json(SCHEMA))
@@ -216,6 +230,7 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
     validator.validate({"bench_client_result": agentic_result})
     validator.validate({"bench_client_result": agentic_source_failure})
     validator.validate({"eval_client_request": eval_request})
+    validator.validate({"eval_client_request": eval_fallback_request})
     validator.validate({"data_asset_preparation_request": data_asset_request})
     validator.validate({"data_asset_preparation_result": data_asset_result})
 

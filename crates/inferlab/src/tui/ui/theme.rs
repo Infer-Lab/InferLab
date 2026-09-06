@@ -45,3 +45,26 @@ pub(super) fn section_color(section: &str) -> Color {
         ACCENT_SOFT
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The TUI accent is the brand InferLab Blue; the website stylesheet owns
+    /// the hex spelling (`--inferlab-blue`), so a brand refresh cannot drift
+    /// the product surface silently. The SVG artworks stay artwork.
+    #[test]
+    fn accent_matches_the_brand_stylesheet() -> Result<(), Box<dyn std::error::Error>> {
+        let brand = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../website/src/styles/brand.css"
+        ))?;
+        let ratatui::style::Color::Rgb(red, green, blue) = super::ACCENT else {
+            return Err("the TUI accent is no longer a direct RGB color".into());
+        };
+        let hex = format!("#{red:02X}{green:02X}{blue:02X}");
+        assert!(
+            brand.contains(&format!("--inferlab-blue: {hex};")),
+            "the TUI accent {hex} drifted from the brand stylesheet"
+        );
+        Ok(())
+    }
+}

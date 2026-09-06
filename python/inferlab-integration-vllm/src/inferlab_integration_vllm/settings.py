@@ -1,11 +1,10 @@
 from inferlab_adapter_sdk import (
+    JsonValue,
     SettingValue,
     validate_extra_args,
     validate_settings,
 )
 from pydantic import BaseModel, ConfigDict, Field
-
-type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 _INFERLAB_OWNED_OPTIONS: set[str] = {
     "--block-size",

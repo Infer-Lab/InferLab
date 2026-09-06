@@ -89,8 +89,5 @@ all of them to a nonzero shell status.
 
 ## Privacy
 
-Records intentionally retain actual effective values and may contain private
-model locators, hosts, devices, commands, and environments. Do not publish them
-without an operator privacy review. Tracked workspace definitions and portable
-image artifacts have a different boundary: they must exclude those local facts
-instead of relying on record redaction.
+Do not publish records without an operator privacy review. The full privacy
+rule set lives in [SKILL.md](../SKILL.md#privacy).

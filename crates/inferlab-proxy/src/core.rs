@@ -19,19 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-/// Identity of a built-in proxy. Each proxy module owns its own [`ProxyMeta`]
-/// so the proxy crate is the authority for the id/version recorded in
-/// `BuiltinProxy` evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProxyMeta {
-    pub id: &'static str,
-    pub version: u32,
-}
-
 /// Build a multi-threaded Tokio runtime and drive `run_async` to completion.
-///
-/// Built-in proxies share this runtime-builder wrapper; the per-proxy
-/// `run` functions call it with their own async entrypoint.
 pub fn run<F, Fut>(run_async: F) -> Result<(), ProxyLifecycleError>
 where
     F: FnOnce() -> Fut,
@@ -54,8 +42,7 @@ pub struct ProxyHealthcheckResponse {
     pub decode_instances: usize,
 }
 
-/// The shared `/healthcheck` payload: 200 once the proxy reports ready, 503
-/// before, with the configured instance counts.
+/// The shared `/healthcheck` payload: 200 once ready, 503 before, with the configured instance counts.
 pub(crate) fn healthcheck_response(
     ready: bool,
     prefill_instances: usize,
@@ -76,8 +63,7 @@ pub(crate) fn healthcheck_response(
     )
 }
 
-/// Validate that both role endpoint lists are non-empty, naming the proxy in
-/// the validation message.
+/// Validate that both role endpoint lists are non-empty, naming the proxy in the validation message.
 pub(crate) fn require_endpoints(
     proxy_name: &'static str,
     prefill_is_empty: bool,
@@ -105,8 +91,7 @@ pub(crate) fn pooled_client(
     })
 }
 
-/// Bind `host:port` and serve `router` to completion, naming the proxy in
-/// bind/serve failure messages.
+/// Bind `host:port` and serve `router`, naming the proxy in bind/serve failure messages.
 pub(crate) async fn serve_router(
     proxy_name: &'static str,
     host: &str,
@@ -125,9 +110,7 @@ pub(crate) async fn serve_router(
         })
 }
 
-/// Poll every backend `url` at `path` once per second until each answers
-/// with a success status. Runs as a background task; the caller marks the
-/// proxy ready once it returns.
+/// Poll every backend `url` at `path` once per second until each answers with a success status.
 pub(crate) async fn await_backends(client: reqwest::Client, urls: Vec<String>, path: &'static str) {
     let waits = urls
         .into_iter()
@@ -617,7 +600,7 @@ fn empty_fanout_failure(operation: &str) -> Response<Body> {
     .into_response()
 }
 
-/// Error type shared by both proxies, carrying an HTTP status and a message.
+/// Per-request error of the HTTP handlers: an HTTP status plus a message.
 #[derive(Debug)]
 pub struct ProxyHttpError {
     status: StatusCode,

@@ -125,6 +125,55 @@ class BenchDatasetFilterInput(BaseModel):
     value: str
 
 
+class BenchImageSamplingInput(StrEnum):
+    random_with_replacement = 'random-with-replacement'
+    shuffle_cycle = 'shuffle-cycle'
+    sequential_cycle = 'sequential-cycle'
+
+
+class BenchImageSourceInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    expected_sha256: Annotated[
+        str | None,
+        Field(
+            description='The declared digest binding over the release-owned recursive\nenumeration digest of the directory.'
+        ),
+    ] = None
+    path: Annotated[
+        str, Field(description='Workspace-relative directory path as declared.')
+    ]
+    resolved_path: Annotated[
+        str,
+        Field(description='Absolute resolution of `path` against the workspace root.'),
+    ]
+    sampling: Annotated[
+        BenchImageSamplingInput,
+        Field(description='The effective source-image sampling policy.'),
+    ]
+
+
+class BenchImagesInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    count: Annotated[
+        int,
+        Field(
+            description='The effective number of images attached to each request.', ge=0
+        ),
+    ]
+    height: Annotated[int, Field(description='The fixed image height in pixels.', ge=0)]
+    source: Annotated[
+        BenchImageSourceInput | None,
+        Field(
+            description="The image supply; absent selects the measurement runtime's synthetic\nnoise image supply."
+        ),
+    ] = None
+    width: Annotated[int, Field(description='The fixed image width in pixels.', ge=0)]
+
+
 class BenchLoadInputConcurrencyLimited(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -459,6 +508,12 @@ class EvalDefinitionInputOpenaiSmoke(BaseModel):
     max_tokens: Annotated[int, Field(ge=0)]
     prompt: str
     timeout_seconds: Annotated[int, Field(ge=0)]
+    vision: Annotated[
+        bool,
+        Field(
+            description='The effective vision-mode selection\n([[RFC-0004:C-MEASUREMENTS]]): a vision smoke routes to chat\ncompletions carrying the release-owned fixed test image.'
+        ),
+    ] = False
 
 
 class EvalFailureKind(StrEnum):
@@ -712,13 +767,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['10']]):
+class ProtocolVersion(RootModel[Literal['11']]):
     root: Annotated[
-        Literal['10'],
+        Literal['11'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `10` (serialized as the\nstring `"10"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `11` (serialized as the\nstring `"11"`); a mismatch is rejected before lowering.'
         ),
-    ] = '10'
+    ] = '11'
 
 
 class RawArtifact(BaseModel):
@@ -1306,6 +1361,12 @@ class BenchRequestSourceInputRandom(BaseModel):
         extra='forbid',
     )
     corpus: BenchCorpusInput | None = None
+    images: Annotated[
+        BenchImagesInput | None,
+        Field(
+            description='The effective per-request image decoration\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]); absent when the source\ndeclares no images.'
+        ),
+    ] = None
     input_tokens: BenchTokenSelectorInput
     kind: Literal['random'] = 'random'
     output_tokens: BenchTokenSelectorInput

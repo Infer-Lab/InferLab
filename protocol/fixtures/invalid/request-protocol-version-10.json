@@ -1,0 +1,21 @@
+{
+  "operation": "plan_serve",
+  "protocol_version": "10",
+  "input": {
+    "model": {
+      "id": "model",
+      "served_name": "model"
+    },
+    "topology": "single",
+    "roles": [],
+    "auxiliary_models": [
+      {
+        "kind": "draft-model",
+        "model": {
+          "id": "draft",
+          "served_name": "draft"
+        }
+      }
+    ]
+  }
+}

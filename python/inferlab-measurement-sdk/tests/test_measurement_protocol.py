@@ -8,6 +8,8 @@ from inferlab_measurement_sdk import (
     BenchArtifactLevelInput,
     BenchCacheStartInput,
     BenchClientRequest,
+    BenchImageSamplingInput,
+    BenchPopulationPreparationRequest,
     BenchPrefixSharingInput2,
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
@@ -17,6 +19,7 @@ from inferlab_measurement_sdk import (
     EvalClientRequest,
     EvalClientResult,
     EvalDefinitionInputLmEval,
+    EvalDefinitionInputOpenaiSmoke,
     EvalFailureKind,
     EvalMetricComparison,
     EvalMetricGateConclusion,
@@ -180,6 +183,53 @@ def test_random_corpus_fixture_round_trips() -> None:
     assert BenchClientRequest.model_validate(request.model_dump()) == request
 
 
+def test_random_images_fixture_round_trips() -> None:
+    request = BenchClientRequest.model_validate(
+        load_json(FIXTURES / "valid" / "bench-client-request-random-images.json")
+    )
+    assert request.definition.request_source is not None
+    source = request.definition.request_source.root
+
+    assert isinstance(source, BenchRequestSourceInputRandom)
+    assert source.images is not None
+    assert source.images.width == 512
+    assert source.images.height == 384
+    assert source.images.count == 2
+    assert source.images.source is not None
+    assert source.images.source.path == "images/pool"
+    assert source.images.source.resolved_path == "/workspace/images/pool"
+    assert source.images.source.expected_sha256 == "c" * 64
+    assert source.images.source.sampling is BenchImageSamplingInput.shuffle_cycle
+    assert BenchClientRequest.model_validate(request.model_dump()) == request
+
+
+def test_vision_smoke_fixture_round_trips() -> None:
+    request = EvalClientRequest.model_validate(
+        load_json(FIXTURES / "valid" / "eval-client-request-vision-smoke.json")
+    )
+
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputOpenaiSmoke)
+    assert definition.vision is True
+    assert definition.prompt == "Describe the image."
+    assert EvalClientRequest.model_validate(request.model_dump()) == request
+
+
+def test_random_images_population_preparation_fixture_round_trips() -> None:
+    request = BenchPopulationPreparationRequest.model_validate(
+        load_json(FIXTURES / "valid" / "bench-population-preparation-request-random-images.json")
+    )
+    assert request.request_source is not None
+    source = request.request_source.root
+
+    assert isinstance(source, BenchRequestSourceInputRandom)
+    assert source.images is not None
+    assert source.images.count == 2
+    assert source.images.source is not None
+    assert source.images.source.sampling is BenchImageSamplingInput.shuffle_cycle
+    assert BenchPopulationPreparationRequest.model_validate(request.model_dump()) == request
+
+
 def test_agentic_bench_fixtures_round_trip() -> None:
     request = BenchClientRequest.model_validate(
         load_json(FIXTURES / "valid" / "bench-client-request-agentic.json")
@@ -223,14 +273,18 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
 
     replay_request = load_json(FIXTURES / "valid" / "bench-client-request-replay.json")
     corpus_request = load_json(FIXTURES / "valid" / "bench-client-request-random-corpus.json")
+    images_request = load_json(FIXTURES / "valid" / "bench-client-request-random-images.json")
+    vision_smoke_request = load_json(FIXTURES / "valid" / "eval-client-request-vision-smoke.json")
     validator.validate({"bench_client_request": bench_request})
     validator.validate({"bench_client_request": replay_request})
     validator.validate({"bench_client_request": corpus_request})
+    validator.validate({"bench_client_request": images_request})
     validator.validate({"bench_client_request": agentic_request})
     validator.validate({"bench_client_result": agentic_result})
     validator.validate({"bench_client_result": agentic_source_failure})
     validator.validate({"eval_client_request": eval_request})
     validator.validate({"eval_client_request": eval_fallback_request})
+    validator.validate({"eval_client_request": vision_smoke_request})
     validator.validate({"data_asset_preparation_request": data_asset_request})
     validator.validate({"data_asset_preparation_result": data_asset_result})
 

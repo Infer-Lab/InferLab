@@ -29,7 +29,7 @@ def preparation_request(
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "10",
+            "protocol_version": "11",
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

@@ -151,6 +151,31 @@ max_input_tokens = 4096
                 .iter()
                 .any(|section| { section.rows.iter().any(|(label, _)| label == "Profile") })
         );
+
+        let images = definition(&parse(
+            r#"
+kind = "serving"
+timeout_seconds = 120
+concurrency = [1]
+prompts_per_concurrency = 1
+[request_source]
+kind = "random"
+input_tokens = 512
+output_tokens = 128
+images = { width = 512, height = 384, count = 2, source = { path = "images/pool" } }
+"#,
+        )?);
+        assert!(images.sections.iter().any(|section| {
+            section.rows.iter().any(|(label, value)| {
+                label == "Images" && value == "2 × 512x384 px · images/pool · shuffle-cycle"
+            })
+        }));
+        assert!(images.sections.iter().any(|section| {
+            section
+                .rows
+                .iter()
+                .any(|(label, value)| label == "Prompt" && value == "server chat (default)")
+        }));
         Ok(())
     }
 

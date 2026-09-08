@@ -6,9 +6,10 @@ use super::{
 };
 use crate::InferlabError;
 use crate::workspace::definitions::{
-    AggregateSlo, BenchCacheStart, BenchDefinition, BenchPrefixSharing, BenchPrompt,
-    BenchRequestSource, BenchSessionSource, BenchSharedSystemContent, BenchTokenSelector,
-    BenchTpotApplicability, JsonValue, RequestRate, RequestSlo,
+    AggregateSlo, BenchCacheStart, BenchDefinition, BenchImagesDeclaration, BenchPrefixSharing,
+    BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
+    BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability, JsonValue, RequestRate,
+    RequestSlo, effective_random_prompt,
 };
 use crate::{bench_agentic_catalog, bench_dataset_catalog};
 use std::collections::{BTreeMap, BTreeSet};
@@ -282,6 +283,7 @@ fn validate_cache_policy(
             prompt,
             shapes,
             prefix_sharing: Some(sharing),
+            ..
         }) if matches!(
             prompt.effective(),
             BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
@@ -508,6 +510,7 @@ fn validate_bench_common(
                 prefix_sharing,
                 shared_system_content,
                 corpus,
+                images,
             } => {
                 validate_bench_token_selector(id, "request_source.input_tokens", input_tokens)?;
                 validate_bench_token_selector(id, "request_source.output_tokens", output_tokens)?;
@@ -517,6 +520,8 @@ fn validate_bench_common(
                         "bench {id:?} request_source.output_tokens must not span TPOT-inapplicable and TPOT-applicable values"
                     ));
                 }
+                validate_random_images(id, prompt, images.as_ref())?;
+                let effective_prompt = effective_random_prompt(prompt, images.as_ref());
                 if let Some(corpus) = corpus {
                     validate_workspace_relative_source_path(
                         &format!("bench {id:?}"),
@@ -533,7 +538,7 @@ fn validate_bench_common(
                     // Corpus slices are exact final-prompt token streams; a
                     // chat template would insert tokens between them, so the
                     // corpus supply exists only for flat prompts.
-                    if !matches!(prompt.effective(), BenchPrompt::Flat) {
+                    if !matches!(effective_prompt, BenchPrompt::Flat) {
                         return invalid(format!(
                             "bench {id:?} random request_source.corpus requires prompt.kind = \"flat\""
                         ));
@@ -541,7 +546,7 @@ fn validate_bench_common(
                 }
                 validate_synthetic_prompt(
                     id,
-                    prompt.effective(),
+                    &effective_prompt,
                     prefix_sharing.as_ref(),
                     shared_system_content.as_ref(),
                     input_tokens.minimum(),
@@ -552,7 +557,9 @@ fn validate_bench_common(
                 prompt,
                 shapes,
                 prefix_sharing,
+                images,
             } => {
+                reject_images_declaration(id, "random_mixture", images)?;
                 if shapes.len() < 2 {
                     return invalid(format!(
                         "bench {id:?} request_source random_mixture requires at least two shapes"
@@ -618,7 +625,9 @@ fn validate_bench_common(
                 profile,
                 max_input_tokens,
                 output_tokens,
+                images,
             } => {
+                reject_images_declaration(id, "dataset", images)?;
                 let catalog = bench_dataset_catalog::resolve(dataset, profile.as_deref())?;
                 require_positive(
                     "request_source.max_input_tokens",
@@ -643,7 +652,9 @@ fn validate_bench_common(
                 expected_sha256,
                 prompt,
                 prefix_sharing,
+                images,
             } => {
+                reject_images_declaration(id, "replay", images)?;
                 validate_replay_path(id, path)?;
                 if let Some(digest) = expected_sha256 {
                     validate_expected_digest(
@@ -702,6 +713,77 @@ fn validate_bench_common(
         ));
     }
     require_positive("timeout_seconds", id, timeout_seconds)
+}
+
+// A `random` source's image decoration ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]):
+// fixed positive dimensions, a positive count, the chat-completions prompt
+// authority, and a well-formed optional directory binding.
+fn validate_random_images(
+    id: &str,
+    prompt: &BenchPromptSelection,
+    images: Option<&BenchImagesDeclaration>,
+) -> Result<(), InferlabError> {
+    let Some(images) = images else {
+        return Ok(());
+    };
+    require_positive(
+        "random request_source.images.width",
+        id,
+        u64::from(images.width),
+    )?;
+    require_positive(
+        "random request_source.images.height",
+        id,
+        u64::from(images.height),
+    )?;
+    require_positive(
+        "random request_source.images.count",
+        id,
+        u64::from(images.count),
+    )?;
+    if let Some(declared) = prompt.declared()
+        && !matches!(declared, BenchPrompt::ServerChat)
+    {
+        let declared_kind = match declared {
+            BenchPrompt::Flat => "flat",
+            BenchPrompt::RenderedChat { .. } => "rendered_chat",
+            BenchPrompt::ServerChat => "server_chat",
+        };
+        return invalid(format!(
+            "bench {id:?} random request_source.images rejects the {declared_kind} prompt authority; omit prompt or declare kind = \"server_chat\""
+        ));
+    }
+    if let Some(source) = &images.source {
+        validate_workspace_relative_source_path(
+            &format!("bench {id:?}"),
+            "random request_source.images.source.path",
+            &source.path,
+        )?;
+        if let Some(digest) = &source.expected_sha256 {
+            validate_expected_digest(
+                &format!("bench {id:?}"),
+                "random request_source.images.source.expected_sha256",
+                digest,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// Images attach only to the `random` source; the other source kinds tolerate
+// the member at parse so this rejection can name the offending kind
+// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+fn reject_images_declaration(
+    id: &str,
+    kind: &str,
+    images: &Option<serde::de::IgnoredAny>,
+) -> Result<(), InferlabError> {
+    if images.is_some() {
+        return invalid(format!(
+            "bench {id:?} {kind} request_source must not declare images"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_synthetic_prompt(
@@ -865,6 +947,7 @@ timeout_seconds = 60
                 profile: None,
                 max_input_tokens: 8192,
                 output_tokens: None,
+                images: None,
             }) if dataset == "sharegpt"
         ));
         let Some(request_source) = request_source else {
@@ -880,6 +963,7 @@ timeout_seconds = 60
                 profile: None,
                 max_input_tokens: 8192,
                 output_tokens: Some(1),
+                images: None,
             }
             .tpot_applicability(),
             BenchTpotApplicability::Inapplicable
@@ -1144,6 +1228,7 @@ timeout_seconds = 60
                 }),
                 shared_system_content: None,
                 corpus: None,
+                images: None,
             }) if prompt.effective() == &BenchPrompt::Flat
         ));
         Ok(())
@@ -1618,6 +1703,194 @@ timeout_seconds = 60
                 "{label}: {error}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_validate_their_declaration_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, images = { width = 512, height = 384, count = 2, source = { path = "images/pool", expected_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", sampling = "sequential-cycle" } } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("images", &definition)?;
+        let BenchDefinition::Serving { request_source, .. } = &definition else {
+            return Err(std::io::Error::other("expected a serving Bench").into());
+        };
+        assert!(matches!(
+            request_source,
+            Some(BenchRequestSource::Random {
+                images: Some(_),
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_require_positive_dimensions_and_count()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (label, images) in [
+            ("zero width", "width = 0, height = 384, count = 2"),
+            ("zero height", "width = 512, height = 0, count = 2"),
+            ("zero count", "width = 512, height = 384, count = 0"),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", input_tokens = 8, output_tokens = 2, images = {{ {images} }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            let error = validate_bench("images", &definition)
+                .err()
+                .ok_or_else(|| format!("images accepted {label}"))?;
+            assert!(error.to_string().contains("positive"), "{label}: {error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_require_the_chat_prompt_authority() -> Result<(), Box<dyn std::error::Error>> {
+        for (label, prompt) in [
+            ("flat", "{ kind = \"flat\" }"),
+            ("rendered chat", "{ kind = \"rendered_chat\" }"),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", prompt = {prompt}, input_tokens = 8, output_tokens = 2, images = {{ width = 512, height = 384, count = 2 }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            let error = validate_bench("images", &definition)
+                .err()
+                .ok_or_else(|| format!("images accepted the {label} prompt authority"))?;
+            let error = error.to_string();
+            assert!(error.contains("prompt authority"), "{label}: {error}");
+            assert!(error.contains("kind = \"server_chat\""), "{label}: {error}");
+        }
+        // An explicit server_chat declaration and an omitted prompt both pass.
+        for (label, prompt) in [
+            ("server chat", "prompt = { kind = \"server_chat\" }, "),
+            ("omitted", ""),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", {prompt}input_tokens = 8, output_tokens = 2, images = {{ width = 512, height = 384, count = 2 }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            validate_bench("images", &definition)
+                .map_err(|error| format!("{label} prompt rejected with images: {error}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_reject_unsafe_source_paths_and_digests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (label, path) in [
+            ("empty", ""),
+            ("absolute", "/tmp/images"),
+            ("escaping", "../images"),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", input_tokens = 8, output_tokens = 2, images = {{ width = 512, height = 384, source = {{ path = {path:?} }} }} }}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            let error = validate_bench("images", &definition)
+                .err()
+                .ok_or_else(|| format!("images accepted a {label} source path"))?;
+            assert!(
+                error.to_string().contains("workspace-relative path"),
+                "{label}: {error}"
+            );
+        }
+        let bad_digest = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, images = { width = 512, height = 384, source = { path = "images/pool", expected_sha256 = "ABCDEF" } } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("images", &bad_digest)
+            .err()
+            .ok_or("images accepted a malformed expected digest")?;
+        assert!(
+            error.to_string().contains("64 lowercase hexadecimal"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_random_sources_reject_an_images_declaration() -> Result<(), Box<dyn std::error::Error>> {
+        for (label, source) in [
+            (
+                "random_mixture",
+                r#"{ kind = "random_mixture", shapes = [{ input_tokens = 8, output_tokens = 2, weight = 1 }, { input_tokens = 16, output_tokens = 2, weight = 1 }], images = { width = 512, height = 384 } }"#,
+            ),
+            (
+                "dataset",
+                r#"{ kind = "dataset", dataset = "sharegpt", max_input_tokens = 8192, images = { width = 512, height = 384 } }"#,
+            ),
+        ] {
+            let definition = toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {source}
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+            ))?;
+            let error = validate_bench("images", &definition)
+                .err()
+                .ok_or_else(|| format!("{label} accepted an images declaration"))?;
+            let error = error.to_string();
+            assert!(
+                error.contains(&format!("{label} request_source must not declare images")),
+                "{label}: {error}"
+            );
+        }
+        let replay = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "replay", path = "populations/x.jsonl", prompt = { kind = "server_chat" }, images = { width = 512, height = 384 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let error = validate_bench("images", &replay)
+            .err()
+            .ok_or("replay accepted an images declaration")?;
+        assert!(
+            error
+                .to_string()
+                .contains("replay request_source must not declare images"),
+            "{error}"
+        );
         Ok(())
     }
 

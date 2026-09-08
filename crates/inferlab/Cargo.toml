@@ -16,6 +16,7 @@ include = [
     "/resources/eval-toolchain/pixi.toml",
     "/resources/plugin/**",
     "/resources/toolchain-python/**",
+    "/resources/vision-smoke.png",
     "/LICENSE",
     "/build.rs",
 ]
@@ -23,15 +24,16 @@ readme = "../../README.md"
 
 [dependencies]
 agent-plugin-installer.workspace = true
+base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 flate2.workspace = true
 fs2.workspace = true
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.14" }
-inferlab-profiler = { path = "../inferlab-profiler", version = "0.14" }
-inferlab-proxy = { path = "../inferlab-proxy", version = "0.14" }
-inferlab-runtime = { path = "../inferlab-runtime", version = "0.14" }
-inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.14" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.15" }
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.15" }
+inferlab-proxy = { path = "../inferlab-proxy", version = "0.15" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.15" }
+inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.15" }
 humantime.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true

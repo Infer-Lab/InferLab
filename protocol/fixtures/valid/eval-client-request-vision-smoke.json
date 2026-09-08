@@ -1,0 +1,25 @@
+{
+  "protocol_version": "11",
+  "workspace_root": "/workspace",
+  "workspace_source_exclusions": [],
+  "endpoint": {
+    "protocol": "http",
+    "host": "127.0.0.1",
+    "port": 8000,
+    "completions_path": "/v1/completions",
+    "chat_completions_path": "/v1/chat/completions"
+  },
+  "model": {
+    "locator": "/models/qwen3-vl",
+    "served_name": "qwen3-vl"
+  },
+  "definition": {
+    "kind": "openai_smoke",
+    "prompt": "Describe the image.",
+    "max_tokens": 16,
+    "timeout_seconds": 60,
+    "vision": true
+  },
+  "case_budget_seconds": 60.0,
+  "artifact_dir": "/records/eval/artifacts"
+}

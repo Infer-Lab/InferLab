@@ -1,7 +1,7 @@
 use super::domain::{
     BenchAgenticCatalog, BenchDatasetCatalog, BenchPopulation, BenchPromptRoute,
     BenchRenderingAuthority, BenchRequestRepresentation, DatasetCacheState, MeasurementModel,
-    ResolvedBenchAgenticSource, ResolvedBenchDefinition, ResolvedBenchPrompt,
+    ResolvedBenchAgenticSource, ResolvedBenchDefinition, ResolvedBenchImages, ResolvedBenchPrompt,
     ResolvedBenchRequestSource, ResolvedBenchSessionSource, ResolvedBenchSource, WorkloadEndpoint,
     WorkloadEndpointProtocol,
 };
@@ -242,6 +242,7 @@ pub(super) fn bench_request_source_input(
             prefix_sharing,
             shared_system_content,
             corpus,
+            images,
         } => BenchRequestSourceInput::Random {
             input_tokens: token_selector_input(input_tokens),
             output_tokens: token_selector_input(output_tokens),
@@ -253,6 +254,7 @@ pub(super) fn bench_request_source_input(
                 path: corpus.path.clone(),
                 expected_sha256: corpus.expected_sha256.clone(),
             }),
+            images: images.as_ref().map(images_input),
         },
         ResolvedBenchRequestSource::RandomMixture {
             shapes,
@@ -339,6 +341,33 @@ pub(super) fn prompt_input(
             rendering_authority,
         },
     })
+}
+
+fn images_input(images: &ResolvedBenchImages) -> inferlab_protocol::BenchImagesInput {
+    inferlab_protocol::BenchImagesInput {
+        width: images.width,
+        height: images.height,
+        count: images.count,
+        source: images
+            .source
+            .as_ref()
+            .map(|source| inferlab_protocol::BenchImageSourceInput {
+                path: source.path.clone(),
+                resolved_path: source.resolved_path.clone(),
+                expected_sha256: source.expected_sha256.clone(),
+                sampling: match source.sampling {
+                    crate::workspace::BenchImageSampling::RandomWithReplacement => {
+                        inferlab_protocol::BenchImageSamplingInput::RandomWithReplacement
+                    }
+                    crate::workspace::BenchImageSampling::ShuffleCycle => {
+                        inferlab_protocol::BenchImageSamplingInput::ShuffleCycle
+                    }
+                    crate::workspace::BenchImageSampling::SequentialCycle => {
+                        inferlab_protocol::BenchImageSamplingInput::SequentialCycle
+                    }
+                },
+            }),
+    }
 }
 
 fn prefix_sharing_input(sharing: &BenchPrefixSharing) -> BenchPrefixSharingInput {
@@ -446,10 +475,12 @@ pub(super) fn eval_definition_input(
             prompt,
             max_tokens,
             timeout_seconds,
+            vision,
         } => EvalDefinitionInput::OpenAiSmoke {
             prompt: prompt.clone(),
             max_tokens: *max_tokens,
             timeout_seconds: *timeout_seconds,
+            vision: *vision,
         },
         EvalDefinition::LmEval {
             task,

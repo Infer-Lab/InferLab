@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-08
+
+### Added
+
+- `openai-smoke` Eval definitions accept a `vision` flag
+  ([[RFC-0004:C-MEASUREMENTS]]): a vision smoke routes to chat completions
+  with one user message carrying the effective prompt as a text part plus the
+  release-owned fixed 96×64 PNG test image as an `image_url` data-URI part,
+  and judges success with the completions failure conditions with the first
+  choice's `message.content` string in place of `text`.
+- Random Bench request sources accept an `images` decoration
+  ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]): fixed pixel `width`/`height`, a
+  per-request `count` resolving to one when omitted, and an optional
+  workspace-relative image directory `source` with an expected enumeration
+  digest binding and a closed sampling vocabulary (`random-with-replacement`,
+  `shuffle-cycle` when omitted, `sequential-cycle`). Images attach at
+  measurement-run time on the chat-completions route through the pinned
+  measurement runtime's native image options; frozen populations stay
+  text-only and the image selection sequence is determined by the Bench
+  seed. Declaring images together with an explicit `flat` or `rendered_chat`
+  prompt authority is rejected naming the authority, and an omitted `prompt`
+  resolves to `server_chat` ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]); the
+  other request-source kinds reject an `images` member naming the kind.
+  Invocation overrides cannot change the image source identity (path,
+  expected digest, sampling) while dimensions and count remain ordinary
+  override targets. The Bench record preserves the request-time decoration
+  policy and the directory's observed enumeration digest (workload record
+  schema 20) ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]).
+
+### Changed
+
+- The adapter protocol hard-cuts to version 11 ([[RFC-0006:C-INTEGRATIONS]]),
+  which carries the `openai-smoke` vision selection and the random
+  request-source image decoration. Protocol version 10 payloads are rejected
+  rather than partially interpreted; workspace adapter pins must move to
+  Adapter SDK 0.11.0 and framework integration 0.10.0 releases carrying
+  protocol 11.
+
 ## [0.14.2] - 2026-09-06
 
 ### Added

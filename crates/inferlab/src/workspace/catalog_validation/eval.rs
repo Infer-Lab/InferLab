@@ -17,6 +17,7 @@ pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(),
             prompt,
             max_tokens,
             timeout_seconds,
+            vision: _,
         } => {
             require_nonempty("eval prompt", id, prompt)?;
             require_positive("max_tokens", id, u64::from(*max_tokens))?;

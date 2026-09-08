@@ -38,7 +38,7 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
     )
     request_value = BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "10",
+            "protocol_version": "11",
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

@@ -34,6 +34,12 @@ from inferlab_measurement_sdk import (
     plain_setting,
 )
 
+from .aiperf_images import (
+    decoration_environment,
+    image_decoration,
+    native_image_options,
+)
+
 ARTIFACT_PREFIX = "inferlab-bench"
 PROFILE_EXPORT_NAME = "profile_export_aiperf.json"
 SERVER_METRICS_EXPORT_NAME = "server_metrics_export.json"
@@ -192,6 +198,7 @@ def inference_request_config(request: BenchClientRequest) -> JsonObject:
     }
     selected_name, selected_path, _ = selected_endpoint(request)
     prompt = request.definition.prompt.root
+    decoration = image_decoration(request)
     return {
         "schema_version": 1,
         "selected_named_route": selected_name,
@@ -203,6 +210,7 @@ def inference_request_config(request: BenchClientRequest) -> JsonObject:
             "route": prompt.route.value,
             "rendering_authority": prompt.rendering_authority.value,
         },
+        "image_decoration": (None if decoration is None else native_image_options(decoration)),
         "definition_request_body": definition_body,
         "aiperf_client_defaults": aiperf_client_defaults(request),
         "effective_request_body": effective_request_body(request),
@@ -325,6 +333,12 @@ def resolve_aiperf_population(request: BenchClientRequest) -> AiperfRequestPopul
                 "osl": output_tokens,
             },
         }
+        # The frozen-population path decorates through the release-owned
+        # composer plugin; an unmaterialized synthetic dataset takes AIPerf's
+        # native image options instead.
+        decoration = image_decoration(request)
+        if decoration is not None:
+            dataset["images"] = native_image_options(decoration)
         tpot_applicable = output_tokens >= 2
     elif isinstance(source, BenchRequestSourceInputRandomMixture):
         if source.prefix_sharing is not None:
@@ -703,6 +717,12 @@ def prepare_aiperf_execution(
                 catalog.service_profile_configuration_timeout_seconds
             ),
         }
+    decoration = image_decoration(request)
+    if decoration is not None and request.population is not None:
+        # A materialized frozen population reaches AIPerf as a file dataset,
+        # where the native image options do not exist; the release-owned
+        # composer plugin decorates each request at composition time instead.
+        environment.update(decoration_environment(decoration))
     return PreparedAiperfExecution(
         artifact_dir=artifact_dir,
         config_path=config_path,

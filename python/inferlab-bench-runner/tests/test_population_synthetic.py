@@ -212,7 +212,7 @@ def random_preparation_request(
     effective_prompt = resolved_prompt_input(prompt)
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "10",
+            "protocol_version": "11",
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",
@@ -289,6 +289,53 @@ def test_synthetic_population_preserves_structured_messages_and_configured_isl(
         row["messages"] == population[index]["messages"] for index, row in enumerate(evidence)
     )
     assert all("rendered_prompt" not in row for row in evidence)
+
+
+def test_image_decoration_never_enters_the_frozen_population(tmp_path: Path) -> None:
+    source: dict[str, object] = {
+        "kind": "random",
+        "input_tokens": 8,
+        "output_tokens": 4,
+        "prefix_sharing": None,
+    }
+    plain = prepare_population(
+        random_preparation_request(tmp_path, 2, request_source=source, artifact_name="plain"),
+        FakeTokenizer(),
+    )
+    decorated = prepare_population(
+        random_preparation_request(
+            tmp_path,
+            2,
+            request_source={
+                **source,
+                "images": {
+                    "width": 512,
+                    "height": 384,
+                    "count": 2,
+                    "source": {
+                        "path": "images/pool",
+                        "resolved_path": "/workspace/images/pool",
+                        "expected_sha256": None,
+                        "sampling": "shuffle-cycle",
+                    },
+                },
+            },
+            artifact_name="decorated",
+        ),
+        FakeTokenizer(),
+    )
+
+    assert plain.status == ClientStatus.succeeded
+    assert decorated.status == ClientStatus.succeeded
+    assert plain.population is not None
+    assert decorated.population is not None
+    # Image decoration attaches at request time; the frozen population bytes
+    # are identical with and without the declaration.
+    assert Path(decorated.population.path).read_bytes() == Path(plain.population.path).read_bytes()
+    population = [
+        json.loads(line) for line in Path(decorated.population.path).read_text().splitlines()
+    ]
+    assert all("image" not in line for row in population for line in json.dumps(row))
 
 
 def test_synthetic_population_targets_the_complete_local_chat_projection(

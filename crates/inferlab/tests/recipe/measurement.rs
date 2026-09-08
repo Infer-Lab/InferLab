@@ -36,6 +36,21 @@ impl TestWorkspace {
         Ok(())
     }
 
+    fn configure_vision_smoke_only(&self) -> Result<(), Box<dyn Error>> {
+        let config = WORKSPACE
+            .replace(
+                "evals = [\"smoke\", \"gsm8k\"]\ngate = \"gsm8k\"\nbenches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "evals = [\"smoke\"]\ngate = \"smoke\"\nbenches = []",
+            )
+            .replacen(
+                "[evals.smoke]\nkind = \"openai-smoke\"",
+                "[evals.smoke]\nkind = \"openai-smoke\"\nvision = true",
+                1,
+            );
+        fs::write(self.root().join(".inferlab/workspace.toml"), config)?;
+        Ok(())
+    }
+
     fn configure_gsm8k_timeout(&self, seconds: u64) -> Result<(), Box<dyn Error>> {
         let manifest = self.root().join(".inferlab/workspace.toml");
         let text = fs::read_to_string(&manifest)?;
@@ -255,6 +270,67 @@ impl TestWorkspace {
                 1,
             );
         }
+        fs::write(manifest, text)?;
+        Ok(())
+    }
+
+    // One workspace-local image pool standing in for the operator's decorated
+    // image directory; returns the release-owned enumeration digest (relative
+    // paths byte-ordered, each contributing path bytes, 0x00, the file's raw
+    // SHA-256, 0x00).
+    fn write_image_pool(
+        &self,
+        path: &str,
+        files: &[(&str, &[u8])],
+    ) -> Result<String, Box<dyn Error>> {
+        let directory = self.root().join(path);
+        fs::create_dir_all(&directory)?;
+        let mut entries = Vec::new();
+        for (name, bytes) in files {
+            let file = directory.join(name);
+            fs::create_dir_all(file.parent().ok_or("image path has no parent")?)?;
+            fs::write(&file, bytes)?;
+            entries.push(((*name).to_owned(), sha2::Sha256::digest(bytes)));
+        }
+        entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let mut digest = sha2::Sha256::new();
+        for (name, file_digest) in &entries {
+            digest.update(name.as_bytes());
+            digest.update([0x00]);
+            digest.update(file_digest);
+            digest.update([0x00]);
+        }
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    fn configure_images_bench(
+        &self,
+        source: Option<(&str, Option<&str>)>,
+    ) -> Result<(), Box<dyn Error>> {
+        let manifest = self.root().join(".inferlab/workspace.toml");
+        let mut images = String::from("images = { width = 512, height = 384, count = 2");
+        if let Some((path, expected_sha256)) = source {
+            images.push_str(&format!(
+                ", source = {{ path = \"{path}\", sampling = \"random-with-replacement\""
+            ));
+            if let Some(digest) = expected_sha256 {
+                images.push_str(&format!(", expected_sha256 = \"{digest}\""));
+            }
+            images.push_str(" }");
+        }
+        images.push_str(" }");
+        let text = fs::read_to_string(&manifest)?
+            .replacen(
+                "request_source = { kind = \"random\", prompt = { kind = \"server_chat\" }, input_tokens = 8192, output_tokens = 1024 }",
+                &format!(
+                    "request_source = {{ kind = \"random\", input_tokens = 8192, output_tokens = 1024, {images} }}"
+                ),
+                1,
+            )
+            .replace(
+                "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+                "benches = [\"c8k1k\"]",
+            );
         fs::write(manifest, text)?;
         Ok(())
     }
@@ -886,6 +962,167 @@ fn primed_corpus_conditions_the_cache_from_the_fixed_slice() -> Result<(), Box<d
 }
 
 #[test]
+fn images_bench_records_the_decoration_evidence() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let digest = workspace.write_image_pool(
+        "images/pool",
+        &[
+            ("alpha.png", b"fixture-image-alpha"),
+            ("nested/beta.png", b"fixture-image-beta"),
+        ],
+    )?;
+    workspace.configure_images_bench(Some(("images/pool", Some(&digest))))?;
+
+    let output = workspace.run()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its images Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(
+        bench["status"], "succeeded",
+        "bench error: {}",
+        bench["error"]
+    );
+    assert_eq!(bench["schema_version"], 20);
+
+    let source = &bench["request_source"];
+    assert_eq!(source["kind"], "random");
+    assert_eq!(source["images"]["count"], 2);
+    assert_eq!(source["images"]["width"], 512);
+    assert_eq!(source["images"]["height"], 384);
+    assert_eq!(source["images"]["source"]["path"], "images/pool");
+    assert_eq!(
+        source["images"]["source"]["expected_sha256"],
+        digest.as_str()
+    );
+    assert_eq!(
+        source["images"]["source"]["observed_sha256"],
+        digest.as_str()
+    );
+    assert_eq!(
+        source["images"]["source"]["sampling"],
+        "random-with-replacement"
+    );
+    // The evidence carries the request-time decoration policy only; no frozen
+    // per-request image sequence is recorded.
+    assert!(source["images"].get("sequence").is_none());
+    // Omitting prompt with images resolves to the server_chat authority.
+    let prompt = &bench["resolved"]["client"]["effective_definition"]["prompt"];
+    assert_eq!(prompt["kind"], "server_chat");
+    assert_eq!(prompt["route"], "chat_completions");
+    // The decoration reaches the measurement client request on the wire, not
+    // only the record ([[RFC-0006:C-INTEGRATIONS]]).
+    let request_path = bench["cases"][0]["request"]
+        .as_str()
+        .ok_or("bench case omitted its client request path")?;
+    let request: Value = serde_json::from_slice(&fs::read(workspace.root().join(request_path))?)?;
+    let wire_images = &request["definition"]["request_source"]["images"];
+    assert_eq!(wire_images["count"], 2);
+    assert_eq!(wire_images["width"], 512);
+    assert_eq!(wire_images["height"], 384);
+    assert_eq!(
+        wire_images["source"]["resolved_path"],
+        workspace
+            .root()
+            .join("images/pool")
+            .to_string_lossy()
+            .as_ref()
+    );
+    Ok(())
+}
+
+#[test]
+fn images_dry_run_reports_the_observed_source_digest() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let digest =
+        workspace.write_image_pool("images/pool", &[("alpha.png", b"fixture-image-alpha")])?;
+    workspace.configure_images_bench(Some(("images/pool", None)))?;
+
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let source =
+        &recipe["measurements"]["benches"][0]["client"]["effective_definition"]["request_source"];
+    assert_eq!(source["kind"], "random");
+    assert_eq!(source["images"]["count"], 2);
+    assert_eq!(source["images"]["source"]["path"], "images/pool");
+    assert_eq!(source["images"]["source"]["expected_sha256"], Value::Null);
+    assert_eq!(
+        source["images"]["source"]["observed_sha256"],
+        digest.as_str()
+    );
+    assert_eq!(
+        source["images"]["source"]["sampling"],
+        "random-with-replacement"
+    );
+    assert!(
+        !workspace.bench_marker().exists(),
+        "dry-run must not run the Bench client"
+    );
+    Ok(())
+}
+
+#[test]
+fn images_digest_mismatch_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_image_pool("images/pool", &[("alpha.png", b"fixture-image-alpha")])?;
+    workspace.configure_images_bench(Some(("images/pool", Some(&"0".repeat(64)))))?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its images Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    let error = bench["error"].as_str().ok_or("images bench has no error")?;
+    assert!(error.contains("SHA-256"), "{error}");
+    assert!(error.contains(&"0".repeat(64)), "{error}");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "an image source digest mismatch must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
+fn images_empty_directory_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    fs::create_dir_all(workspace.root().join("images/pool"))?;
+    workspace.configure_images_bench(Some(("images/pool", None)))?;
+
+    let output = workspace.run()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(recipe["benches"][0]["status"], "failed");
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its images Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert_eq!(bench["status"], "failed");
+    let error = bench["error"].as_str().ok_or("images bench has no error")?;
+    assert!(error.contains("enumerates no regular files"), "{error}");
+    assert!(
+        !workspace.bench_marker().exists(),
+        "an empty image source directory must fail before the first transport request"
+    );
+    Ok(())
+}
+
+#[test]
 fn static_slo_failure_keeps_measurement_status_and_runs_every_case() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.configure_static_slo_failure()?;
@@ -976,7 +1213,7 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
         .as_str()
         .ok_or("smoke Eval has no record id")?;
     let eval = workspace.load_record(eval_id)?;
-    assert_eq!(eval["schema_version"], 19);
+    assert_eq!(eval["schema_version"], 20);
     assert_eq!(eval["kind"], "eval");
     assert_eq!(eval["resolved"]["execution"]["kind"], "native_openai_smoke");
     assert_eq!(eval["cases"][0]["process"], Value::Null);
@@ -1021,6 +1258,108 @@ fn smoke_only_recipe_needs_no_measurement_toolchain() -> Result<(), Box<dyn Erro
     let response: Value = serde_json::from_slice(&response)?;
     assert_eq!(response["choices"][0]["text"], " San Francisco");
     assert!(!workspace.eval_marker().exists());
+    Ok(())
+}
+
+#[test]
+fn vision_smoke_recipe_posts_a_chat_request_with_image_parts() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_vision_smoke_only()?;
+    let missing_data_home = workspace.root().join("missing-data");
+    let chat_log = workspace.root().join("chat-requests.jsonl");
+
+    let dry_run = workspace
+        .command()
+        .env("XDG_DATA_HOME", &missing_data_home)
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&dry_run.stdout)?;
+    assert_eq!(
+        plan["measurements"]["evals"][0]["definition"]["vision"],
+        true
+    );
+
+    let output = workspace
+        .command()
+        .env("XDG_DATA_HOME", &missing_data_home)
+        .env("FIXTURE_CHAT_LOG", &chat_log)
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let eval_id = recipe["evals"][0]["id"]
+        .as_str()
+        .ok_or("vision smoke Eval has no record id")?;
+    let eval = workspace.load_record(eval_id)?;
+    assert_eq!(eval["schema_version"], 20);
+    assert_eq!(eval["resolved"]["definition"]["vision"], true);
+    assert_eq!(eval["cases"][0]["metrics"]["completed"], 1.0);
+    assert_eq!(eval["cases"][0]["metrics"]["http_status"], 200.0);
+    assert_eq!(eval["cases"][0]["metrics"]["choices_count"], 1.0);
+    assert_eq!(eval["cases"][0]["error"], Value::Null);
+
+    let request_path = eval["cases"][0]["request"]
+        .as_str()
+        .ok_or("vision smoke case has no request path")?;
+    let request: Value = serde_json::from_slice(&fs::read(workspace.root().join(request_path))?)?;
+    assert_eq!(request["method"], "POST");
+    assert!(
+        request["url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/v1/chat/completions")),
+        "unexpected vision smoke URL: {}",
+        request["url"]
+    );
+    assert_eq!(request["body"]["model"], "deepseek-v4-flash");
+    let messages = request["body"]["messages"]
+        .as_array()
+        .ok_or("vision smoke request has no messages array")?;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let content = messages[0]["content"]
+        .as_array()
+        .ok_or("vision smoke message content is not a parts array")?;
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "San Francisco is a city in");
+    assert_eq!(content[1]["type"], "image_url");
+    let image_url = content[1]["image_url"]["url"]
+        .as_str()
+        .ok_or("vision smoke image part has no url")?;
+    assert!(
+        image_url.starts_with("data:image/png;base64,"),
+        "vision smoke image part is not a PNG data URI: {image_url}"
+    );
+    assert_eq!(request["body"]["max_tokens"], 16);
+    assert_eq!(request["body"]["temperature"], 0.0);
+    assert_eq!(request["body"]["stream"], false);
+    assert_eq!(request["body"]["n"], 1);
+
+    // The server tolerated the structured content parts and answered with a
+    // chat completion carrying the text part back.
+    let served: Vec<Value> = fs::read_to_string(&chat_log)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(served.len(), 1);
+    assert!(served[0]["messages"][0]["content"].is_array());
+    let response_path = eval["cases"][0]["raw_artifacts"][0]["path"]
+        .as_str()
+        .ok_or("vision smoke case has no raw response path")?;
+    let response: Value = serde_json::from_slice(&fs::read(response_path)?)?;
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        "San Francisco is a city in"
+    );
     Ok(())
 }
 

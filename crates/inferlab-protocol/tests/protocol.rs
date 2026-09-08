@@ -1,12 +1,13 @@
 use inferlab_protocol::{
     AdapterRequest, AdapterResponse, AdapterResult, BenchArtifactLevelInput, BenchClientRequest,
-    BenchClientResult, BenchPrefixSharingInput, BenchRequestSourceInput, BenchTokenSelectorInput,
-    EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
-    EvalMetricComparison, EvalMetricGateConclusion, EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID,
-    MeasurementDataAssetPreparationRequest, MeasurementDataAssetPreparationResult,
-    MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID, Parallelism, ParallelismAttention,
-    ParallelismExperts, ParallelismOuter, ProtocolVersion, ReadinessProbe, RenderInputDeclaration,
-    SettingValue, SuppliedRenderInput, TargetEndpointScheme, measurement_schema, protocol_schema,
+    BenchClientResult, BenchPopulationPreparationRequest, BenchPrefixSharingInput,
+    BenchRequestSourceInput, BenchTokenSelectorInput, EvalClientRequest, EvalClientResult,
+    EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion,
+    EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
+    MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
+    Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, ProtocolVersion,
+    ReadinessProbe, RenderInputDeclaration, SettingValue, SuppliedRenderInput,
+    TargetEndpointScheme, measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -43,9 +44,9 @@ const INVALID_RESPONSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/invalid/response-wrong-shape.json"
 ));
-const INVALID_PROTOCOL_V9_REQUEST: &str = include_str!(concat!(
+const INVALID_PROTOCOL_V10_REQUEST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/fixtures/invalid/request-protocol-version-9.json"
+    "/../../protocol/fixtures/invalid/request-protocol-version-10.json"
 ));
 const VALID_PLAN_REQUEST_AUXILIARY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -112,6 +113,18 @@ const VALID_BENCH_CLIENT_REQUEST_RANDOM_CORPUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/bench-client-request-random-corpus.json"
 ));
+const VALID_BENCH_CLIENT_REQUEST_RANDOM_IMAGES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-client-request-random-images.json"
+));
+const VALID_BENCH_POPULATION_PREPARATION_REQUEST_RANDOM_IMAGES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-population-preparation-request-random-images.json"
+));
+const VALID_EVAL_CLIENT_REQUEST_VISION_SMOKE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/eval-client-request-vision-smoke.json"
+));
 const VALID_BENCH_CLIENT_REQUEST_AGENTIC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/bench-client-request-agentic.json"
@@ -134,7 +147,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v10.schema.json"
+    "/../../protocol/schema/adapter-protocol-v11.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -158,11 +171,11 @@ fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
 }
 
 #[test]
-fn protocol_v9_requests_are_rejected_instead_of_partially_interpreted() {
-    // The fixture is a well-formed protocol-v9 plan request carrying the
-    // synthetic acceptance member; protocol v10 MUST reject it outright rather
+fn protocol_v10_requests_are_rejected_instead_of_partially_interpreted() {
+    // The fixture is a well-formed protocol-v10 plan request carrying the
+    // auxiliary-model member; protocol v11 MUST reject it outright rather
     // than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
-    assert!(serde_json::from_str::<AdapterRequest>(INVALID_PROTOCOL_V9_REQUEST).is_err());
+    assert!(serde_json::from_str::<AdapterRequest>(INVALID_PROTOCOL_V10_REQUEST).is_err());
 }
 /// The auxiliary-model fixtures: planning carries the logical identities and
 /// each model-rank rendering allocation carries the machine-resolved locator
@@ -408,6 +421,96 @@ fn random_corpus_fixture_round_trips() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The protocol-v11 image decoration on a random Bench source: effective
+/// count and dimensions, and the directory source's declared path, absolute
+/// resolution, digest binding, and sampling policy
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]], [[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn random_images_fixture_round_trips() -> Result<(), Box<dyn Error>> {
+    let request: BenchClientRequest =
+        serde_json::from_str(VALID_BENCH_CLIENT_REQUEST_RANDOM_IMAGES)?;
+    let BenchRequestSourceInput::Random { images, .. } = request
+        .definition
+        .request_source
+        .as_ref()
+        .ok_or("Bench fixture omitted its request source")?
+    else {
+        return Err("Bench fixture did not contain a random source".into());
+    };
+
+    let images = images.as_ref().ok_or("random fixture omitted its images")?;
+    assert_eq!((images.count, images.width, images.height), (2, 512, 384));
+    let source = images
+        .source
+        .as_ref()
+        .ok_or("images fixture omitted its directory source")?;
+    assert_eq!(source.path, "images/pool");
+    assert_eq!(source.resolved_path, Path::new("/workspace/images/pool"));
+    assert_eq!(
+        source.expected_sha256.as_deref(),
+        Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+    );
+    assert_eq!(
+        source.sampling,
+        inferlab_protocol::BenchImageSamplingInput::ShuffleCycle
+    );
+    assert_eq!(
+        serde_json::from_str::<BenchClientRequest>(&serde_json::to_string(&request)?)?,
+        request
+    );
+    Ok(())
+}
+
+/// The protocol-v11 image decoration also crosses on the Bench
+/// population-preparation request ([[RFC-0004:C-BENCH-REQUEST-SOURCES]],
+/// [[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn random_images_population_preparation_fixture_round_trips() -> Result<(), Box<dyn Error>> {
+    let request: BenchPopulationPreparationRequest =
+        serde_json::from_str(VALID_BENCH_POPULATION_PREPARATION_REQUEST_RANDOM_IMAGES)?;
+    let BenchRequestSourceInput::Random { images, .. } = request
+        .request_source
+        .as_ref()
+        .ok_or("population-preparation fixture omitted its request source")?
+    else {
+        return Err("population-preparation fixture did not contain a random source".into());
+    };
+    let images = images.as_ref().ok_or("random fixture omitted its images")?;
+    assert_eq!((images.count, images.width, images.height), (2, 512, 384));
+    assert_eq!(
+        serde_json::from_str::<BenchPopulationPreparationRequest>(&serde_json::to_string(
+            &request
+        )?)?,
+        request
+    );
+    Ok(())
+}
+
+/// The protocol-v11 vision smoke declaration on the Eval measurement-client
+/// request ([[RFC-0004:C-MEASUREMENTS]], [[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn vision_smoke_fixture_round_trips() -> Result<(), Box<dyn Error>> {
+    let request: EvalClientRequest = serde_json::from_str(VALID_EVAL_CLIENT_REQUEST_VISION_SMOKE)?;
+    let EvalDefinitionInput::OpenAiSmoke {
+        prompt,
+        max_tokens,
+        vision,
+        ..
+    } = &request.definition
+    else {
+        return Err("fixture did not contain an openai_smoke definition".into());
+    };
+
+    assert_eq!(prompt, "Describe the image.");
+    assert_eq!(*max_tokens, 16);
+    assert!(vision);
+    assert_eq!(
+        serde_json::from_str::<EvalClientRequest>(&serde_json::to_string(&request)?)?,
+        request
+    );
+    Ok(())
+}
+
 #[test]
 fn agentic_bench_fixtures_round_trip() -> Result<(), Box<dyn Error>> {
     let request: BenchClientRequest = serde_json::from_str(VALID_BENCH_CLIENT_REQUEST_AGENTIC)?;
@@ -464,7 +567,7 @@ fn failed_agentic_source_fixture_preserves_partial_evidence() -> Result<(), Box<
 }
 
 #[test]
-fn protocol_v10_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
+fn protocol_v11_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     let capture_target = response
         .pointer_mut("/result/output/replicas/0/capture_target")
@@ -484,7 +587,7 @@ fn protocol_v10_rejects_the_pre_binding_capture_control_shape() -> Result<(), Bo
 }
 
 #[test]
-fn protocol_v10_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
+fn protocol_v11_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["replicas"][0]["capture_target"]["window_control"]["start"]["body"] =
         serde_json::json!({"activities": ["CUDA_PROFILER"]});
@@ -509,7 +612,7 @@ fn protocol_v10_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn protocol_v10_does_not_attach_capture_bodies_to_prefix_cache_actions()
+fn protocol_v11_does_not_attach_capture_bodies_to_prefix_cache_actions()
 -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["roles"][0]["public_endpoint"]["prefix_cache_reset"] = serde_json::json!({
@@ -548,16 +651,16 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let launch_file_response: AdapterResponse = serde_json::from_str(VALID_LAUNCH_FILE_RESPONSE)?;
     let error_response: AdapterResponse = serde_json::from_str(VALID_ERROR_RESPONSE)?;
 
-    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V10);
-    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V10);
-    assert_eq!(render_request.protocol_version(), ProtocolVersion::V10);
-    assert_eq!(render_response.protocol_version(), ProtocolVersion::V10);
-    assert_eq!(error_response.protocol_version(), ProtocolVersion::V10);
+    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V11);
+    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V11);
+    assert_eq!(render_request.protocol_version(), ProtocolVersion::V11);
+    assert_eq!(render_response.protocol_version(), ProtocolVersion::V11);
+    assert_eq!(error_response.protocol_version(), ProtocolVersion::V11);
 
     // The projected string form must stay identical to the wire spelling.
     assert_eq!(
         ProtocolVersion::CURRENT.as_str(),
-        serde_json::to_value(ProtocolVersion::V10)?
+        serde_json::to_value(ProtocolVersion::V11)?
             .as_str()
             .ok_or("protocol version must serialize as a string")?
     );
@@ -807,7 +910,7 @@ fn eval_client_fixture_preserves_workspace_yaml_task_source() -> Result<(), Box<
         return Err("fixture did not contain a workspace YAML task source".into());
     };
 
-    assert_eq!(request.protocol_version, ProtocolVersion::V10);
+    assert_eq!(request.protocol_version, ProtocolVersion::V11);
     assert_eq!(request.endpoint.completions_path, "/v1/completions");
     assert_eq!(
         request.endpoint.chat_completions_path,
@@ -943,7 +1046,7 @@ fn data_asset_preparation_fixtures_preserve_opaque_readiness() -> Result<(), Box
     let request = serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
         VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL,
     )?;
-    assert_eq!(request.protocol_version, ProtocolVersion::V10);
+    assert_eq!(request.protocol_version, ProtocolVersion::V11);
     let result = serde_json::from_str::<MeasurementDataAssetPreparationResult>(
         VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE,
     )?;
@@ -1041,6 +1144,8 @@ fn generated_schemas_are_current_versioned_and_disjoint() -> Result<(), Box<dyn 
     assert!(GENERATED_ADAPTER_SCHEMA.contains("render_inputs"));
     assert!(GENERATED_MEASUREMENT_SCHEMA.contains("random_mixture"));
     assert!(GENERATED_MEASUREMENT_SCHEMA.contains("prefix_sharing"));
+    assert!(GENERATED_MEASUREMENT_SCHEMA.contains("shuffle-cycle"));
+    assert!(GENERATED_MEASUREMENT_SCHEMA.contains("vision"));
     Ok(())
 }
 

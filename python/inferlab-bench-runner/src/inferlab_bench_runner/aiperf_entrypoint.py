@@ -8,6 +8,7 @@ from importlib import import_module
 from importlib.metadata import version
 from typing import Protocol, cast
 
+from .aiperf_images import IMAGE_DECORATION_ENV, register_image_decoration
 from .aiperf_phase_barrier import (
     PROFILE_BARRIER_ENV,
     AiperfAgenticProfileBarrierStrategy,
@@ -45,6 +46,8 @@ def _register_profile_barrier() -> None:
 def main() -> None:
     if os.environ.get(PROFILE_BARRIER_ENV) is not None:
         _register_profile_barrier()
+    if os.environ.get(IMAGE_DECORATION_ENV) is not None:
+        register_image_decoration(SUPPORTED_AIPERF_VERSION)
     cli_module = import_module("aiperf.cli")
     app = cast(Callable[[], object], cli_module.app)
     app()

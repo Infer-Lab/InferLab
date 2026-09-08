@@ -21,8 +21,9 @@ pub use wire::{
     BenchAgenticSourceInput, BenchAgenticSourceVerification, BenchArtifactLevelInput,
     BenchCacheStartInput, BenchCaseInput, BenchClientRequest, BenchClientResult, BenchCorpusInput,
     BenchDatasetCacheState, BenchDatasetCatalogInput, BenchDatasetFilterInput,
-    BenchDefinitionInput, BenchInclusiveUniformInput, BenchLoadInput, BenchNativeInvocation,
-    BenchPopulationInput, BenchPopulationPreparationRequest, BenchPopulationPreparationResult,
+    BenchDefinitionInput, BenchImageSamplingInput, BenchImageSourceInput, BenchImagesInput,
+    BenchInclusiveUniformInput, BenchLoadInput, BenchNativeInvocation, BenchPopulationInput,
+    BenchPopulationPreparationRequest, BenchPopulationPreparationResult,
     BenchPrefixConditioningInput, BenchPrefixGeometrySummary, BenchPrefixSharingInput,
     BenchPromptCacheObservation, BenchPromptInput, BenchPromptRouteInput,
     BenchPromptTemplateProjection, BenchPromptTemplateSource, BenchPromptTokenReconciliation,
@@ -53,7 +54,7 @@ pub use wire::{
     SyntheticAcceptanceOutcome, TargetEndpointScheme,
 };
 
-pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v10";
+pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v11";
 pub const MEASUREMENT_SCHEMA_ID: &str = "https://inferlab.dev/schema/measurement-protocol/v1";
 pub const PROTOCOL_WIRE_SOURCE: &str = "crates/inferlab-protocol/src/wire.rs";
 pub const MEASUREMENT_WIRE_SOURCE: &str =

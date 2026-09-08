@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v10",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v11",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -1129,12 +1129,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `10` (serialized as the\nstring `\"10\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `11` (serialized as the\nstring `\"11\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 10.",
+          "description": "Protocol version 11.",
           "type": "string",
-          "const": "10"
+          "const": "11"
         }
       ]
     },

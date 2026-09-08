@@ -174,6 +174,19 @@ impl ResolvedBenchPrompt {
         )
     }
 
+    /// Resolve from an already-resolved effective authority: the images-aware
+    /// `random` defaulting rule runs before planning
+    /// ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]).
+    pub(crate) fn from_declared_and_resolved(
+        declared: Option<&BenchPromptSelection>,
+        effective: BenchPrompt,
+    ) -> Self {
+        Self::resolve(
+            declared.and_then(BenchPromptSelection::declared).cloned(),
+            effective,
+        )
+    }
+
     pub(crate) fn from_definition(definition: &BenchPrompt) -> Self {
         Self::resolve(None, definition.clone())
     }
@@ -240,6 +253,10 @@ pub(crate) enum ResolvedBenchRequestSource {
         shared_system_content: Option<BenchSharedSystemContent>,
         #[serde(default)]
         corpus: Option<ResolvedBenchCorpus>,
+        /// The effective per-request image decoration; absent when the source
+        /// declares no images ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+        #[serde(default)]
+        images: Option<ResolvedBenchImages>,
     },
     RandomMixture {
         shapes: Vec<ResolvedBenchRandomShape>,
@@ -282,6 +299,38 @@ pub(crate) struct ResolvedBenchCorpus {
     /// was unreadable, never fabricated. The corpus token length stays
     /// unresolved here because tokenization is runner-owned.
     pub observed_sha256: Option<String>,
+}
+
+/// The effective image decoration of a random request source
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]). Images attach at measurement-run
+/// time on the chat-completions route; frozen population entries never carry
+/// image identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ResolvedBenchImages {
+    pub width: u32,
+    pub height: u32,
+    /// The effective per-request image count.
+    pub count: u32,
+    /// The image supply; absent selects the measurement runtime's synthetic
+    /// noise image supply.
+    #[serde(default)]
+    pub source: Option<ResolvedBenchImageSource>,
+}
+
+/// One resolved operator image directory binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ResolvedBenchImageSource {
+    /// Workspace-relative directory path as declared.
+    pub path: String,
+    /// Absolute resolution of `path` against the workspace root.
+    pub resolved_path: PathBuf,
+    pub expected_sha256: Option<String>,
+    /// Enumeration digest observed while resolving the plan; absent when the
+    /// directory was missing, unreadable, or held no regular file, never
+    /// fabricated. Preparation owns the typed failure.
+    pub observed_sha256: Option<String>,
+    /// The effective source-image sampling policy.
+    pub sampling: crate::workspace::BenchImageSampling,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

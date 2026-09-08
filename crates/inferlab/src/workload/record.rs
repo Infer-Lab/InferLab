@@ -192,6 +192,10 @@ pub(crate) enum BenchRequestSourceEvidence {
         shared_system_content: Option<BenchSharedSystemContent>,
         #[serde(default)]
         corpus: Option<BenchCorpusSourceEvidence>,
+        /// The effective image decoration when the source declares one
+        /// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]), schema 20.
+        #[serde(default)]
+        images: Option<BenchImagesEvidence>,
         #[serde(default)]
         preparation: Option<BenchPopulationPreparationEvidence>,
     },
@@ -237,6 +241,40 @@ pub(crate) struct BenchCorpusSourceEvidence {
     /// Observed content digest of the corpus at preparation.
     #[serde(default)]
     pub observed_sha256: Option<String>,
+}
+
+/// The effective image decoration on a random request source
+/// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]): a request-time policy
+/// record — it never claims a frozen image sequence or per-request image
+/// identities.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchImagesEvidence {
+    /// The effective per-request image count.
+    pub count: u32,
+    pub width: u32,
+    pub height: u32,
+    /// The source form: absent for the synthetic noise supply, present for an
+    /// operator directory binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<BenchImageSourceEvidence>,
+}
+
+/// Directory-source provenance for an image decoration: the declared path,
+/// the declared and observed enumeration digests, and the effective sampling
+/// policy.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchImageSourceEvidence {
+    /// Workspace-relative directory path as declared.
+    pub path: String,
+    /// Declared expected enumeration digest when present.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
+    /// Observed enumeration digest of the directory at preparation.
+    #[serde(default)]
+    pub observed_sha256: Option<String>,
+    pub sampling: crate::workspace::BenchImageSampling,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -841,5 +879,76 @@ mod tests {
                 .as_ref()
                 .is_err_and(|error| error.to_string().contains("completed_requests"))
         );
+    }
+
+    #[test]
+    fn random_source_evidence_serializes_the_image_decoration_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{BenchImageSourceEvidence, BenchImagesEvidence, BenchRequestSourceEvidence};
+        use crate::workspace::{BenchImageSampling, BenchTokenSelector};
+
+        let evidence = BenchRequestSourceEvidence::Random {
+            input_tokens: BenchTokenSelector::Fixed(512),
+            output_tokens: BenchTokenSelector::Fixed(128),
+            prefix_sharing: None,
+            shared_system_content: None,
+            corpus: None,
+            images: Some(BenchImagesEvidence {
+                count: 2,
+                width: 512,
+                height: 384,
+                source: Some(BenchImageSourceEvidence {
+                    path: "images/pool".to_owned(),
+                    expected_sha256: Some("c".repeat(64)),
+                    observed_sha256: Some("d".repeat(64)),
+                    sampling: BenchImageSampling::ShuffleCycle,
+                }),
+            }),
+            preparation: None,
+        };
+
+        let value = serde_json::to_value(&evidence)?;
+        assert_eq!(value["kind"], "random");
+        assert_eq!(value["images"]["count"], 2);
+        assert_eq!(value["images"]["width"], 512);
+        assert_eq!(value["images"]["height"], 384);
+        assert_eq!(value["images"]["source"]["path"], "images/pool");
+        assert_eq!(value["images"]["source"]["expected_sha256"], "c".repeat(64));
+        assert_eq!(value["images"]["source"]["observed_sha256"], "d".repeat(64));
+        assert_eq!(value["images"]["source"]["sampling"], "shuffle-cycle");
+        // The evidence is the request-time policy only; no frozen image
+        // sequence member exists.
+        assert!(value["images"].get("sequence").is_none());
+        let round_trip: BenchRequestSourceEvidence = serde_json::from_value(value)?;
+        assert!(matches!(
+            round_trip,
+            BenchRequestSourceEvidence::Random {
+                images: Some(_),
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn random_source_evidence_decodes_the_schema_19_shape_without_images()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::BenchRequestSourceEvidence;
+
+        let schema_19 = serde_json::json!({
+            "kind": "random",
+            "input_tokens": 8192,
+            "output_tokens": 1024,
+            "prefix_sharing": null,
+            "shared_system_content": null,
+            "corpus": null,
+            "preparation": null,
+        });
+        let evidence: BenchRequestSourceEvidence = serde_json::from_value(schema_19)?;
+        let BenchRequestSourceEvidence::Random { images, .. } = &evidence else {
+            return Err(std::io::Error::other("expected random source evidence").into());
+        };
+        assert!(images.is_none());
+        Ok(())
     }
 }

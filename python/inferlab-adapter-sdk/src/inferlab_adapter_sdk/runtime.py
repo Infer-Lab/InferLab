@@ -62,7 +62,7 @@ type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
 type ServeAllocation = ServeProcessAllocationModelRank | ServeProcessAllocationFrontend
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-PROTOCOL_V10 = ProtocolVersion()
+PROTOCOL_V11 = ProtocolVersion()
 
 # Inferlab owns readiness; the router's internal guard must not expire first.
 ROUTER_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
@@ -588,13 +588,13 @@ def consistent_acceptance_outcome(
 def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     return AdapterResponse(
         root=AdapterResponseError(
-            protocol_version=PROTOCOL_V10,
+            protocol_version=PROTOCOL_V11,
             error=AdapterError(code=code, message=message),
         )
     )
 
 
-SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V10.root
+SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V11.root
 
 
 def handle_request(
@@ -645,7 +645,7 @@ def handle_request(
 
     return AdapterResponse(
         root=AdapterResponseOk(
-            protocol_version=PROTOCOL_V10,
+            protocol_version=PROTOCOL_V11,
             result=AdapterResult(root=result),
         )
     )

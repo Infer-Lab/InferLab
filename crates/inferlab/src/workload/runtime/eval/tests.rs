@@ -85,3 +85,97 @@ fn openai_smoke_requires_a_nonempty_choices_array_with_text() {
         assert!(validate_openai_completion_body(body).is_err());
     }
 }
+
+#[test]
+fn vision_smoke_requires_a_nonempty_choices_array_with_message_content() {
+    assert_eq!(
+        super::validate_openai_chat_vision_body(
+            br#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#
+        ),
+        Ok(1)
+    );
+    for body in [
+        br#"not-json"#.as_slice(),
+        br#"{}"#.as_slice(),
+        br#"{"choices":[]}"#.as_slice(),
+        br#"{"choices":[{}]}"#.as_slice(),
+        br#"{"choices":[{"text":"ok"}]}"#.as_slice(),
+        br#"{"choices":[{"message":{"role":"assistant"}}]}"#.as_slice(),
+        br#"{"choices":[{"message":{"content":1}}]}"#.as_slice(),
+    ] {
+        assert!(super::validate_openai_chat_vision_body(body).is_err());
+    }
+}
+
+#[test]
+fn vision_smoke_request_body_carries_one_text_part_and_the_fixed_image()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = super::OpenAiSmokeRequestBody::ChatVision(super::OpenAiChatVisionRequest {
+        model: "qwen3-vl",
+        messages: [super::OpenAiChatVisionMessage {
+            role: "user",
+            content: [
+                super::OpenAiChatContentPart::Text {
+                    text: "Describe the image.",
+                },
+                super::OpenAiChatContentPart::ImageUrl {
+                    image_url: super::OpenAiImageUrl {
+                        url: super::vision_smoke_image_data_uri(),
+                    },
+                },
+            ],
+        }],
+        max_tokens: 16,
+        temperature: 0.0,
+        stream: false,
+        n: 1,
+    });
+
+    let value = serde_json::to_value(&body)?;
+    assert_eq!(value["model"], "qwen3-vl");
+    assert_eq!(value["max_tokens"], 16);
+    assert_eq!(value["temperature"], 0.0);
+    assert_eq!(value["stream"], false);
+    assert_eq!(value["n"], 1);
+    let messages = value["messages"]
+        .as_array()
+        .ok_or("request has no messages array")?;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let content = messages[0]["content"]
+        .as_array()
+        .ok_or("message content is not a parts array")?;
+    assert_eq!(
+        content[0],
+        serde_json::json!({"type": "text", "text": "Describe the image."})
+    );
+    assert_eq!(content[1]["type"], "image_url");
+    let url = content[1]["image_url"]["url"]
+        .as_str()
+        .ok_or("image part has no url")?;
+    let prefix = "data:image/png;base64,";
+    assert!(url.starts_with(prefix), "{url}");
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(&url[prefix.len()..])?;
+    assert_eq!(decoded, super::VISION_SMOKE_IMAGE_PNG);
+    Ok(())
+}
+
+#[test]
+fn non_vision_smoke_request_body_keeps_the_completions_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = super::OpenAiSmokeRequestBody::Completion(super::OpenAiCompletionRequest {
+        model: "deepseek-v4-flash",
+        prompt: "San Francisco is a city in",
+        max_tokens: 16,
+        temperature: 0.0,
+        stream: false,
+        n: 1,
+    });
+
+    assert_eq!(
+        serde_json::to_string(&body)?,
+        r#"{"model":"deepseek-v4-flash","prompt":"San Francisco is a city in","max_tokens":16,"temperature":0.0,"stream":false,"n":1}"#
+    );
+    Ok(())
+}

@@ -1,0 +1,35 @@
+{
+  "protocol_version": "11",
+  "model": {
+    "locator": "/models/qwen3-vl",
+    "served_name": "qwen3-vl"
+  },
+  "tokenizer_backend": "huggingface",
+  "transformers_version": "5.12.1",
+  "request_source": {
+    "kind": "random",
+    "input_tokens": 512,
+    "output_tokens": 128,
+    "images": {
+      "width": 512,
+      "height": 384,
+      "count": 2,
+      "source": {
+        "path": "images/pool",
+        "resolved_path": "/workspace/images/pool",
+        "expected_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sampling": "shuffle-cycle"
+      }
+    }
+  },
+  "prompt": {
+    "kind": "server_chat",
+    "request_representation": "structured_messages",
+    "route": "chat_completions",
+    "rendering_authority": "server"
+  },
+  "cache_start": "uncontrolled",
+  "required_entries": 16,
+  "seed": 7,
+  "artifact_dir": "artifacts"
+}

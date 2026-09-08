@@ -3,11 +3,12 @@
 use super::client::{accept_client_result, run_client, wait_for_interrupt};
 use super::{
     BenchAgenticSourceEvidence, BenchCorpusSourceEvidence, BenchDatasetRequestSourceEvidence,
-    BenchExecutionPlan, BenchPlan, BenchPopulation, BenchPopulationPreparationEvidence,
-    BenchRequestSourceEvidence, BenchSessionSourceEvidence, BenchSessionTemplate,
-    CORPUS_MATERIALIZATION_IDENTITY, DataAssetMaterializationEvidence, DatasetAcquisitionEvidence,
-    DatasetAcquisitionOutcome, REPLAY_MATERIALIZATION_IDENTITY, ResolvedBenchRequestSource,
-    ResolvedBenchSource, SYNTHETIC_MATERIALIZATION_IDENTITY, WorkloadRecordSession,
+    BenchExecutionPlan, BenchImageSourceEvidence, BenchImagesEvidence, BenchPlan, BenchPopulation,
+    BenchPopulationPreparationEvidence, BenchRequestSourceEvidence, BenchSessionSourceEvidence,
+    BenchSessionTemplate, CORPUS_MATERIALIZATION_IDENTITY, DataAssetMaterializationEvidence,
+    DatasetAcquisitionEvidence, DatasetAcquisitionOutcome, REPLAY_MATERIALIZATION_IDENTITY,
+    ResolvedBenchRequestSource, ResolvedBenchSource, SYNTHETIC_MATERIALIZATION_IDENTITY,
+    WorkloadRecordSession,
 };
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
@@ -40,6 +41,7 @@ pub(super) fn prepare_bench_request_source(
                 prefix_sharing,
                 shared_system_content,
                 corpus,
+                images,
             } => {
                 // A declared corpus is content-addressed like the replay
                 // population file: the bytes are read locally and a declared
@@ -65,6 +67,41 @@ pub(super) fn prepare_bench_request_source(
                     });
                     source_path = Some(corpus.resolved_path.clone());
                 }
+                // A declared image source directory is bound by the
+                // release-owned enumeration digest: a missing, unreadable, or
+                // empty directory and a declared-digest mismatch all fail
+                // preparation before any transport request.
+                let mut images_evidence = None;
+                if let Some(images) = &images {
+                    let source_evidence = match &images.source {
+                        Some(source) => {
+                            let observed_sha256 =
+                                crate::digest::hash_directory_entries(&source.resolved_path)?;
+                            if let Some(expected) = &source.expected_sha256
+                                && observed_sha256 != *expected
+                            {
+                                return Err(InferlabError::DatasetDigest {
+                                    path: source.resolved_path.clone(),
+                                    expected: expected.clone(),
+                                    observed: observed_sha256,
+                                });
+                            }
+                            Some(BenchImageSourceEvidence {
+                                path: source.path.clone(),
+                                expected_sha256: source.expected_sha256.clone(),
+                                observed_sha256: Some(observed_sha256),
+                                sampling: source.sampling,
+                            })
+                        }
+                        None => None,
+                    };
+                    images_evidence = Some(BenchImagesEvidence {
+                        count: images.count,
+                        width: images.width,
+                        height: images.height,
+                        source: source_evidence,
+                    });
+                }
                 let preparation = run_population_preparation(plan, session, progress, source_path)?;
                 session.set_bench_request_source(BenchRequestSourceEvidence::Random {
                     input_tokens,
@@ -72,6 +109,7 @@ pub(super) fn prepare_bench_request_source(
                     prefix_sharing,
                     shared_system_content,
                     corpus: corpus_evidence,
+                    images: images_evidence,
                     preparation: Some(preparation.0.clone()),
                 })?;
                 finish_population_preparation(

@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `10` (serialized as the
-/// string `"10"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `11` (serialized as the
+/// string `"11"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 10.
-    #[serde(rename = "10")]
-    V10,
+    /// Protocol version 11.
+    #[serde(rename = "11")]
+    V11,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V10;
+    pub const CURRENT: Self = Self::V11;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V10 => "10",
+            Self::V11 => "11",
         }
     }
 }
@@ -1229,6 +1229,11 @@ pub enum EvalDefinitionInput {
         prompt: String,
         max_tokens: u32,
         timeout_seconds: u64,
+        /// The effective vision-mode selection
+        /// ([[RFC-0004:C-MEASUREMENTS]]): a vision smoke routes to chat
+        /// completions carrying the release-owned fixed test image.
+        #[serde(default)]
+        vision: bool,
     },
     /// An lm-eval task run with a pass threshold on the chosen metric.
     LmEval {
@@ -1522,6 +1527,11 @@ pub enum BenchRequestSourceInput {
         shared_system_content: Option<BenchSharedSystemContentInput>,
         #[serde(default)]
         corpus: Option<BenchCorpusInput>,
+        /// The effective per-request image decoration
+        /// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]); absent when the source
+        /// declares no images.
+        #[serde(default)]
+        images: Option<BenchImagesInput>,
     },
     /// AIPerf samples exact token-shape pairs from one seeded categorical
     /// distribution.
@@ -1606,6 +1616,56 @@ pub struct BenchCorpusInput {
     pub path: String,
     #[serde(default)]
     pub expected_sha256: Option<String>,
+}
+
+/// The effective per-request image decoration of a random request source
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]): fixed pixel dimensions and the
+/// per-request image count. Images attach at measurement-run time on the
+/// chat-completions route and never enter the frozen population.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchImagesInput {
+    /// The fixed image width in pixels.
+    pub width: u32,
+    /// The fixed image height in pixels.
+    pub height: u32,
+    /// The effective number of images attached to each request.
+    pub count: u32,
+    /// The image supply; absent selects the measurement runtime's synthetic
+    /// noise image supply.
+    #[serde(default)]
+    pub source: Option<BenchImageSourceInput>,
+}
+
+/// One operator-supplied image directory binding for the random request
+/// source's image decoration ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchImageSourceInput {
+    /// Workspace-relative directory path as declared.
+    pub path: String,
+    /// Absolute resolution of `path` against the workspace root.
+    pub resolved_path: PathBuf,
+    /// The declared digest binding over the release-owned recursive
+    /// enumeration digest of the directory.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
+    /// The effective source-image sampling policy.
+    pub sampling: BenchImageSamplingInput,
+}
+
+/// The closed source-image sampling vocabulary
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchImageSamplingInput {
+    /// Draw each source image independently; repeats may occur immediately.
+    RandomWithReplacement,
+    /// Draw every source image once per shuffled cycle, reshuffling after
+    /// exhaustion.
+    ShuffleCycle,
+    /// Walk source images in sorted load order and wrap after exhaustion.
+    SequentialCycle,
 }
 
 /// One exact ISL/OSL pair and its relative categorical sampling weight.

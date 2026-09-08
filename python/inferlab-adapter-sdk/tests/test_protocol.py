@@ -65,7 +65,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v10.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v11.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -421,19 +421,19 @@ def test_unsupported_request_protocol_version_is_reported_before_shape(
     assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
 
 
-def test_protocol_v9_request_is_rejected_instead_of_partially_interpreted() -> None:
-    # The fixture is a well-formed protocol-v9 plan request carrying the
-    # synthetic acceptance member; protocol v10 MUST reject it outright rather
+def test_protocol_v10_request_is_rejected_instead_of_partially_interpreted() -> None:
+    # The fixture is a well-formed protocol-v10 plan request carrying the
+    # auxiliary-model member; protocol v11 MUST reject it outright rather
     # than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
-    payload = (FIXTURES / "invalid" / "request-protocol-version-9.json").read_text()
+    payload = (FIXTURES / "invalid" / "request-protocol-version-10.json").read_text()
 
     response = handle_request(payload, fixture_plan_serve)
 
     response_error = response.root
     assert isinstance(response_error, AdapterResponseError)
     assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
-    assert "received protocol version 9" in response_error.error.message
-    assert "protocol version 10" in response_error.error.message
+    assert "received protocol version 10" in response_error.error.message
+    assert "protocol version 11" in response_error.error.message
 
 
 def test_malformed_request_json_stays_invalid_request() -> None:

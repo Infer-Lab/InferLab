@@ -31,7 +31,8 @@ pub(crate) use definitions::{
     WorkloadSuiteDefinition, WorkspaceConfig, effective_lm_eval_base_seed,
 };
 pub(crate) use definitions::{
-    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchSharedSystemContent,
+    BenchImageSampling, BenchImagesDeclaration, BenchPrefixSharing, BenchPrompt,
+    BenchPromptSelection, BenchSharedSystemContent, effective_random_prompt,
 };
 pub(crate) use definitions::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,

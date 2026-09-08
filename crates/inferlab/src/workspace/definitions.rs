@@ -422,6 +422,10 @@ pub(crate) enum EvalDefinition {
         max_tokens: u32,
         #[serde(default = "default_openai_smoke_timeout_seconds")]
         timeout_seconds: u64,
+        /// The effective vision-mode selection
+        /// ([[RFC-0004:C-MEASUREMENTS]]); omission resolves to false.
+        #[serde(default)]
+        vision: bool,
     },
     LmEval {
         task: EvalTaskSource,
@@ -760,6 +764,8 @@ pub(crate) enum BenchRequestSource {
         shared_system_content: Option<BenchSharedSystemContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corpus: Option<BenchCorpusDeclaration>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<BenchImagesDeclaration>,
     },
     RandomMixture {
         #[serde(default)]
@@ -767,6 +773,10 @@ pub(crate) enum BenchRequestSource {
         shapes: Vec<BenchRandomShape>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_sharing: Option<BenchPrefixSharing>,
+        // Tolerated at parse so validation can name the offending source kind
+        // ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]); never serialized back.
+        #[serde(default, skip_serializing)]
+        images: Option<serde::de::IgnoredAny>,
     },
     Dataset {
         dataset: String,
@@ -775,6 +785,9 @@ pub(crate) enum BenchRequestSource {
         max_input_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u32>,
+        // Tolerated at parse so validation can name the offending source kind.
+        #[serde(default, skip_serializing)]
+        images: Option<serde::de::IgnoredAny>,
     },
     Replay {
         path: String,
@@ -784,6 +797,9 @@ pub(crate) enum BenchRequestSource {
         prompt: BenchPromptSelection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_sharing: Option<BenchPrefixSharing>,
+        // Tolerated at parse so validation can name the offending source kind.
+        #[serde(default, skip_serializing)]
+        images: Option<serde::de::IgnoredAny>,
     },
 }
 
@@ -957,6 +973,70 @@ pub(crate) struct BenchCorpusDeclaration {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,
+}
+
+/// One per-request image decoration on the random request source
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]): fixed pixel dimensions and the
+/// per-request image count. Images attach at measurement-run time on the
+/// chat-completions route and never enter the frozen population.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchImagesDeclaration {
+    pub width: u32,
+    pub height: u32,
+    /// The effective per-request image count; omission resolves to one.
+    #[serde(default = "default_bench_image_count")]
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<BenchImageSourceDeclaration>,
+}
+
+const fn default_bench_image_count() -> u32 {
+    1
+}
+
+/// One operator-supplied image directory binding for the image decoration
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]). Omission of the whole table
+/// resolves to the measurement runtime's synthetic noise image supply.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchImageSourceDeclaration {
+    /// Workspace-relative path of the operator image directory.
+    pub path: String,
+    /// The declared binding over the release-owned recursive enumeration
+    /// digest of the directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    /// The effective source-image sampling policy; omission resolves to
+    /// `shuffle-cycle`.
+    #[serde(default)]
+    pub sampling: BenchImageSampling,
+}
+
+/// The closed source-image sampling vocabulary
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum BenchImageSampling {
+    RandomWithReplacement,
+    #[default]
+    ShuffleCycle,
+    SequentialCycle,
+}
+
+/// The prompt authority a `random` request source resolves
+/// ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]): a declared prompt table wins; an
+/// omitted table resolves to `server_chat` when the source declares images
+/// and to `flat` otherwise.
+pub(crate) fn effective_random_prompt(
+    prompt: &BenchPromptSelection,
+    images: Option<&BenchImagesDeclaration>,
+) -> BenchPrompt {
+    match prompt.declared() {
+        Some(declared) => declared.clone(),
+        None if images.is_some() => BenchPrompt::ServerChat,
+        None => prompt.effective().clone(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1211,6 +1291,134 @@ timeout_seconds = 900
         assert_eq!(value["max_tokens"], 16);
         assert_eq!(value["timeout_seconds"], 60);
         Ok(())
+    }
+
+    #[test]
+    fn openai_smoke_vision_defaults_to_false_and_serializes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let plain = toml::from_str::<EvalDefinition>(r#"kind = "openai-smoke""#)?;
+        assert_eq!(serde_json::to_value(&plain)?["vision"], false);
+
+        let definition =
+            toml::from_str::<EvalDefinition>("kind = \"openai-smoke\"\nvision = true")?;
+        let EvalDefinition::OpenAiSmoke { vision, .. } = &definition else {
+            return Err(std::io::Error::other("expected an openai-smoke definition").into());
+        };
+        assert!(vision);
+        assert_eq!(serde_json::to_value(&definition)?["vision"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_declaration_resolves_its_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let source = toml::from_str::<BenchRequestSource>(
+            r#"kind = "random"
+input_tokens = 512
+output_tokens = 128
+images = { width = 512, height = 384 }
+"#,
+        )?;
+        let BenchRequestSource::Random {
+            images: Some(images),
+            ..
+        } = &source
+        else {
+            return Err(std::io::Error::other("expected a random source with images").into());
+        };
+        assert_eq!(images.width, 512);
+        assert_eq!(images.height, 384);
+        assert_eq!(images.count, 1, "an omitted count resolves to one");
+        assert_eq!(images.source, None);
+
+        let sourced = toml::from_str::<BenchRequestSource>(
+            r#"kind = "random"
+input_tokens = 512
+output_tokens = 128
+images = { width = 512, height = 384, count = 2, source = { path = "images/pool", expected_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" } }
+"#,
+        )?;
+        let BenchRequestSource::Random {
+            images: Some(images),
+            ..
+        } = &sourced
+        else {
+            return Err(std::io::Error::other("expected a random source with images").into());
+        };
+        let source_declaration = images
+            .source
+            .as_ref()
+            .ok_or("images.source did not parse")?;
+        assert_eq!(source_declaration.path, "images/pool");
+        assert_eq!(
+            source_declaration.expected_sha256.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+        assert_eq!(
+            source_declaration.sampling,
+            BenchImageSampling::ShuffleCycle,
+            "an omitted sampling resolves to shuffle-cycle"
+        );
+        let value = serde_json::to_value(&sourced)?;
+        assert_eq!(value["images"]["source"]["sampling"], "shuffle-cycle");
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_reject_distribution_spellings() {
+        let result = toml::from_str::<BenchRequestSource>(
+            r#"kind = "random"
+input_tokens = 512
+output_tokens = 128
+images = { width = { mean = 512, stddev = 0 }, height = 384, count = 2 }
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "image dimensions are fixed values, not distributions"
+        );
+    }
+
+    #[test]
+    fn random_images_sampling_is_a_closed_kebab_case_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sampling: BenchImageSampling = serde_json::from_str(r#""random-with-replacement""#)?;
+        assert_eq!(sampling, BenchImageSampling::RandomWithReplacement);
+        assert_eq!(
+            serde_json::to_string(&BenchImageSampling::SequentialCycle)?,
+            "\"sequential-cycle\""
+        );
+        assert!(
+            serde_json::from_str::<BenchImageSampling>(r#""round-robin""#).is_err(),
+            "an unknown sampling spelling must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn effective_random_prompt_prefers_declared_then_images_then_flat() {
+        let declared = BenchPromptSelection::explicit(BenchPrompt::Flat);
+        let images = BenchImagesDeclaration {
+            width: 64,
+            height: 64,
+            count: 1,
+            source: None,
+        };
+        assert_eq!(
+            effective_random_prompt(&declared, Some(&images)),
+            BenchPrompt::Flat,
+            "a declared prompt table wins over the images default"
+        );
+        let omitted = BenchPromptSelection::default();
+        assert_eq!(
+            effective_random_prompt(&omitted, Some(&images)),
+            BenchPrompt::ServerChat,
+            "images resolve an omitted prompt to server_chat"
+        );
+        assert_eq!(
+            effective_random_prompt(&omitted, None),
+            BenchPrompt::Flat,
+            "without images an omitted prompt stays flat"
+        );
     }
 
     #[test]

@@ -9,31 +9,35 @@
     "server_metrics": null
   },
   "model": {
-    "locator": "/models/example",
-    "served_name": "example"
+    "locator": "/models/qwen3-vl",
+    "served_name": "qwen3-vl"
   },
   "definition": {
     "request_source": {
       "kind": "random",
-      "input_tokens": 8192,
-      "output_tokens": 1024,
-      "corpus": {
-        "path": "corpus/shakespeare.txt",
-        "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-      },
-      "prefix_sharing": {
-        "shared_prefix_ratio": 0.8
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "images": {
+        "width": 512,
+        "height": 384,
+        "count": 2,
+        "source": {
+          "path": "images/pool",
+          "resolved_path": "/workspace/images/pool",
+          "expected_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "sampling": "shuffle-cycle"
+        }
       }
     },
     "prompt": {
-      "kind": "flat",
-      "request_representation": "flat_prompt",
-      "route": "completions",
-      "rendering_authority": "local_flat"
+      "kind": "server_chat",
+      "request_representation": "structured_messages",
+      "route": "chat_completions",
+      "rendering_authority": "server"
     },
     "server_metrics": false,
     "seed": 7,
-    "cache_start": "primed",
+    "cache_start": "uncontrolled",
     "timeout_seconds": 120
   },
   "case": {

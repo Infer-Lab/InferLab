@@ -12,4 +12,8 @@ pub(crate) use model::{
 pub(crate) use planning::{attempt_id_for, attempts_from_plans, plan_measurement_data_assets};
 pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 19;
+/// Version 20 adds the optional image-decoration evidence member on random
+/// request-source evidence and the effective vision-mode selection on the
+/// built-in OpenAI smoke definition
+/// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]], [[RFC-0004:C-MEASUREMENTS]]).
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 20;

@@ -404,6 +404,48 @@ sharing is natural reuse — it is not measured, promised, or presented as
 controlled prefix geometry. The record preserves the corpus path, declared
 and observed digests, and each entry's slice offset and length.
 
+## Attaching images to random requests
+
+A `random` source can decorate every request with images for
+vision-language servers:
+
+```toml
+[benches.vlm-random]
+kind = "serving"
+request_source = { kind = "random", input_tokens = 512, output_tokens = 128, images = { width = 512, height = 384, count = 2 } }
+concurrency = [1, 4]
+prompts_per_concurrency = 4
+timeout_seconds = 900
+```
+
+`width` and `height` are required fixed pixel values and `count` resolves to
+one image per request when omitted; distribution spellings are rejected, as
+for token-length selectors. `input_tokens` keeps its text meaning — the images
+ride on top, and the server-derived image token count remains observable in
+the backend-reported prompt tokens. An images declaration forces the
+`server_chat` prompt authority (an omitted `prompt` resolves to it; declaring
+`flat` or `rendered_chat` is rejected), because image content parts only exist
+on the chat-completions route. The other request-source kinds reject `images`.
+
+By default the measurement runtime synthesizes noise images. To load real
+images, declare one workspace-relative directory:
+
+```toml
+request_source = { kind = "random", input_tokens = 512, output_tokens = 128, images = { width = 512, height = 384, source = { path = "corpora/vlm-smoke-images", expected_sha256 = "<64-hex directory digest>", sampling = "shuffle-cycle" } } }
+```
+
+The same locator rules as the corpus apply: the path must stay inside the
+workspace, and `expected_sha256` optionally binds the directory content through
+InferLab's recursive enumeration digest (regular files ordered by relative
+path); a missing or empty directory, or a digest mismatch, fails preparation
+before any request runs. `sampling` is one of `random-with-replacement`,
+`shuffle-cycle` (the default), or `sequential-cycle`. Overrides cannot change
+the source `path`, digest, or `sampling`, while dimensions and `count` remain
+ordinary override targets. Images are attached at measurement-run time and the
+Bench seed determines the selection sequence; frozen populations stay
+text-only, and the record preserves the effective decoration policy and the
+directory's observed digest rather than per-request image identities.
+
 ## Source preparation and cold-to-warm verification
 
 Non-synthetic measurement sources are prepared before a recipe launches its

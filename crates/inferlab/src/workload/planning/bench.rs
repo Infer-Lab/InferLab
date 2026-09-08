@@ -11,9 +11,10 @@ use crate::toolchain::InstalledBenchToolchain;
 use crate::workload::domain::{
     AggregateSloBound, BenchAgenticCatalog, BenchDatasetCatalog, BenchDatasetFilter,
     BenchSessionDatasetCatalog, DatasetCacheState, ResolvedAggregateSlo,
-    ResolvedBenchAgenticSource, ResolvedBenchCorpus, ResolvedBenchDefinition, ResolvedBenchPrompt,
-    ResolvedBenchRandomShape, ResolvedBenchRequestSource, ResolvedBenchSessionSource,
-    ResolvedBenchSloPolicy, ResolvedBenchSource, WorkloadHttpAction,
+    ResolvedBenchAgenticSource, ResolvedBenchCorpus, ResolvedBenchDefinition,
+    ResolvedBenchImageSource, ResolvedBenchImages, ResolvedBenchPrompt, ResolvedBenchRandomShape,
+    ResolvedBenchRequestSource, ResolvedBenchSessionSource, ResolvedBenchSloPolicy,
+    ResolvedBenchSource, WorkloadHttpAction,
 };
 use crate::workload::plan::{
     BenchClientPlan, BenchPlan, BenchPrefixCacheConditioningPlan, ClientCommandPlan,
@@ -22,7 +23,7 @@ use crate::workload::plan::{
 use crate::workspace::{
     AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchPrefixSharing,
     BenchPrompt, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
-    BenchTpotApplicability, validate_bench,
+    BenchTpotApplicability, effective_random_prompt, validate_bench,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -344,10 +345,27 @@ pub(super) fn apply_bench_overrides(
             ..
         }
     );
+    let images_declared = matches!(
+        &definition,
+        BenchDefinition::Serving {
+            request_source: Some(BenchRequestSource::Random {
+                images: Some(_),
+                ..
+            }),
+            ..
+        } | BenchDefinition::AdaptiveServing {
+            request_source: BenchRequestSource::Random {
+                images: Some(_),
+                ..
+            },
+            ..
+        }
+    );
     let mut value =
-        toml::Value::try_from(definition).map_err(|error| InferlabError::InvalidConfig {
+        toml::Value::try_from(&definition).map_err(|error| InferlabError::InvalidConfig {
             message: format!("failed to prepare bench {id:?} for overrides: {error}"),
         })?;
+    remove_undeclared_prompt(&mut value, &definition);
     for item in overrides {
         if agentic_backed
             && ["request_source", "session_source", "agentic_source"]
@@ -419,6 +437,24 @@ pub(super) fn apply_bench_overrides(
             return Err(InferlabError::InvalidOverride {
                 value: item.raw().to_owned(),
                 message: "random Bench corpus overrides cannot change request_source.corpus.path or request_source.corpus.expected_sha256"
+                    .to_owned(),
+            });
+        }
+        // The image source identity (path, digest binding, and sampling) is
+        // declaration-owned; dimensions and count stay ordinary override
+        // targets ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]). The whole-table
+        // spelling (`request_source.images = { ... }`) is rejected outright:
+        // it arrives as one item whose value cannot be separated into the
+        // declarable scalars and the owned source identity here, and the
+        // scalar fields remain reachable through their own paths.
+        if images_declared
+            && (item.path() == "request_source.images"
+                || item.path() == "request_source.images.source"
+                || item.path().starts_with("request_source.images.source."))
+        {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
+                message: "random Bench image overrides cannot change request_source.images.source.path, request_source.images.source.expected_sha256, or request_source.images.source.sampling"
                     .to_owned(),
             });
         }
@@ -594,6 +630,30 @@ fn declared_request_source(definition: &BenchDefinition) -> Option<&BenchRequest
     }
 }
 
+// The override round-trip serializes a defaulted prompt selection as its
+// effective value, which the re-parse would read back as a declared one.
+// Drop the re-materialized key when the workspace definition did not declare
+// a prompt so the effective definition keeps the omitted-prompt semantics
+// ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]); an explicit prompt override
+// re-adds the key afterwards.
+fn remove_undeclared_prompt(value: &mut toml::Value, definition: &BenchDefinition) {
+    let prompt_declared = match declared_request_source(definition) {
+        Some(BenchRequestSource::Random { prompt, .. })
+        | Some(BenchRequestSource::RandomMixture { prompt, .. })
+        | Some(BenchRequestSource::Replay { prompt, .. }) => prompt.declared().is_some(),
+        Some(BenchRequestSource::Dataset { .. }) | None => true,
+    };
+    if prompt_declared {
+        return;
+    }
+    if let Some(request_source) = value
+        .get_mut("request_source")
+        .and_then(toml::Value::as_table_mut)
+    {
+        request_source.remove("prompt");
+    }
+}
+
 fn resolved_request_source_prompt(
     declared_source: Option<&BenchRequestSource>,
     source: &BenchRequestSource,
@@ -605,8 +665,13 @@ fn resolved_request_source_prompt(
         Some(BenchRequestSource::Dataset { .. }) | None => None,
     };
     match source {
-        BenchRequestSource::Random { prompt, .. }
-        | BenchRequestSource::RandomMixture { prompt, .. }
+        BenchRequestSource::Random { prompt, images, .. } => {
+            ResolvedBenchPrompt::from_declared_and_resolved(
+                declared_prompt,
+                effective_random_prompt(prompt, images.as_ref()),
+            )
+        }
+        BenchRequestSource::RandomMixture { prompt, .. }
         | BenchRequestSource::Replay { prompt, .. } => {
             ResolvedBenchPrompt::from_declared_and_effective(declared_prompt, prompt)
         }
@@ -671,6 +736,7 @@ fn resolve_bench_request_source(
             prefix_sharing,
             shared_system_content,
             corpus,
+            images,
         } => Ok(ResolvedBenchRequestSource::Random {
             input_tokens: input_tokens.clone(),
             output_tokens: output_tokens.clone(),
@@ -691,11 +757,35 @@ fn resolve_bench_request_source(
                     observed_sha256,
                 }
             }),
+            images: images.as_ref().map(|images| {
+                ResolvedBenchImages {
+                    width: images.width,
+                    height: images.height,
+                    count: images.count,
+                    source: images.source.as_ref().map(|source| {
+                        let resolved_path = workspace_root.join(&source.path);
+                        // Plan time observes the enumeration digest
+                        // best-effort; a missing, unreadable, or empty
+                        // directory records no digest and preparation owns
+                        // the typed failure.
+                        let observed_sha256 =
+                            crate::digest::hash_directory_entries(&resolved_path).ok();
+                        ResolvedBenchImageSource {
+                            path: source.path.clone(),
+                            resolved_path,
+                            expected_sha256: source.expected_sha256.clone(),
+                            observed_sha256,
+                            sampling: source.sampling,
+                        }
+                    }),
+                }
+            }),
         }),
         BenchRequestSource::RandomMixture {
             prompt: _,
             shapes,
             prefix_sharing,
+            images: _,
         } => {
             let total_weight = shapes.iter().try_fold(0_u64, |total, shape| {
                 total.checked_add(u64::from(shape.weight)).ok_or_else(|| {
@@ -724,6 +814,7 @@ fn resolve_bench_request_source(
             profile,
             max_input_tokens,
             output_tokens,
+            images: _,
         } => {
             let resolved = bench_dataset_catalog::resolve(dataset, profile.as_deref())?;
             let cache_path = dataset_cache_home()?
@@ -767,6 +858,7 @@ fn resolve_bench_request_source(
             expected_sha256,
             prompt: _,
             prefix_sharing,
+            images: _,
         } => {
             let resolved_path = workspace_root.join(path);
             let observation = observe_replay_population(&resolved_path)?;
@@ -925,7 +1017,7 @@ mod tests {
     use crate::toml_override::InvocationOverride;
     use crate::workload::domain::{
         BenchPromptRoute, BenchRenderingAuthority, BenchRequestRepresentation, ResolvedBenchCorpus,
-        ResolvedBenchSource,
+        ResolvedBenchImageSource, ResolvedBenchImages, ResolvedBenchSource,
     };
     use crate::workspace::{
         BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRandomShape,
@@ -947,6 +1039,7 @@ mod tests {
                 }),
                 shared_system_content: None,
                 corpus: None,
+                images: None,
             },
             Path::new("/workspace"),
         )?;
@@ -966,6 +1059,7 @@ mod tests {
                     },
                 ],
                 prefix_sharing: None,
+                images: None,
             },
             Path::new("/workspace"),
         )?;
@@ -1379,6 +1473,189 @@ timeout_seconds = 60
         else {
             return Err(std::io::Error::other("corpus input override did not apply").into());
         };
+        Ok(())
+    }
+
+    #[test]
+    fn random_images_resolve_observed_digest_and_observe_missing_directories()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let pool = workspace.path().join("images/pool");
+        std::fs::create_dir_all(&pool)?;
+        std::fs::write(pool.join("alpha.png"), b"alpha")?;
+        std::fs::write(pool.join("beta.png"), b"beta")?;
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, images = { width = 512, height = 384, count = 2, source = { path = "images/pool" } } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        validate_bench("images", &definition)?;
+        let resolved = resolve_bench_definition(&definition, &definition, workspace.path())?;
+        let ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Random {
+                    images:
+                        Some(ResolvedBenchImages {
+                            width: 512,
+                            height: 384,
+                            count: 2,
+                            source:
+                                Some(ResolvedBenchImageSource {
+                                    path,
+                                    resolved_path,
+                                    observed_sha256: Some(observed_sha256),
+                                    sampling: crate::workspace::BenchImageSampling::ShuffleCycle,
+                                    ..
+                                }),
+                        }),
+                    ..
+                },
+        } = &resolved.source
+        else {
+            return Err(std::io::Error::other("random images did not resolve").into());
+        };
+        assert_eq!(path, "images/pool");
+        assert_eq!(resolved_path, &pool);
+        assert_eq!(
+            observed_sha256,
+            &crate::digest::hash_directory_entries(&pool)?
+        );
+        // The omitted prompt resolves to the server_chat authority.
+        assert_eq!(resolved.prompt.definition, BenchPrompt::ServerChat);
+        assert_eq!(resolved.prompt.declared, None);
+
+        let missing = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, images = { width = 512, height = 384, source = { path = "images/missing" } } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        validate_bench("images-missing", &missing)?;
+        let resolved = resolve_bench_definition(&missing, &missing, workspace.path())?;
+        let ResolvedBenchSource::Requests {
+            request_source:
+                ResolvedBenchRequestSource::Random {
+                    images:
+                        Some(ResolvedBenchImages {
+                            source:
+                                Some(ResolvedBenchImageSource {
+                                    observed_sha256: None,
+                                    ..
+                                }),
+                            ..
+                        }),
+                    ..
+                },
+        } = &resolved.source
+        else {
+            return Err(std::io::Error::other("missing image directory fabricated facts").into());
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn images_overrides_cannot_change_the_source_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, images = { width = 512, height = 384, count = 2, source = { path = "images/pool" } } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        for override_text in [
+            "request_source.images.source.path=\"images/other\"",
+            "request_source.images.source.expected_sha256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "request_source.images.source.sampling=\"sequential-cycle\"",
+            "request_source.images.source={ path = \"images/other\" }",
+            // The whole-table spelling arrives as one item and must not slip
+            // a new source identity past the guard.
+            "request_source.images={ width = 256, height = 384, source = { path = \"images/other\" } }",
+        ] {
+            let overrides = InvocationOverride::parse_all(&[override_text.to_owned()])?;
+            let error = apply_bench_overrides("images", definition.clone(), &overrides)
+                .err()
+                .ok_or("image source identity override unexpectedly succeeded")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot change request_source.images.source"),
+                "{error}"
+            );
+        }
+        // Dimensions and count remain ordinary override targets.
+        let overrides = InvocationOverride::parse_all(&[
+            "request_source.images.width=256".to_owned(),
+            "request_source.images.count=3".to_owned(),
+        ])?;
+        let (effective, _) = apply_bench_overrides("images", definition, &overrides)?;
+        let BenchDefinition::Serving {
+            request_source:
+                Some(BenchRequestSource::Random {
+                    images:
+                        Some(crate::workspace::BenchImagesDeclaration {
+                            width: 256,
+                            count: 3,
+                            ..
+                        }),
+                    ..
+                }),
+            ..
+        } = effective
+        else {
+            return Err(std::io::Error::other("image dimension overrides did not apply").into());
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn undeclared_prompt_survives_the_override_round_trip_with_images()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2, images = { width = 512, height = 384 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+
+        // Even an empty override list round-trips the definition through TOML;
+        // the omitted prompt must not come back as a declared flat authority
+        // (which the images validation would reject).
+        let (effective, _) = apply_bench_overrides("images", definition.clone(), &[])?;
+        let BenchDefinition::Serving {
+            request_source: Some(BenchRequestSource::Random { prompt, .. }),
+            ..
+        } = &effective
+        else {
+            return Err(std::io::Error::other("expected a random request source").into());
+        };
+        assert_eq!(prompt.declared(), None);
+        let (effective, _) = apply_bench_overrides(
+            "images",
+            definition,
+            &InvocationOverride::parse_all(&["request_source.input_tokens=16".to_owned()])?,
+        )?;
+        let BenchDefinition::Serving {
+            request_source: Some(BenchRequestSource::Random { prompt, .. }),
+            ..
+        } = &effective
+        else {
+            return Err(std::io::Error::other("expected a random request source").into());
+        };
+        assert_eq!(prompt.declared(), None);
         Ok(())
     }
 

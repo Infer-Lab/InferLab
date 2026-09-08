@@ -134,6 +134,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/v1/chat/completions":
+            length = int(self.headers.get("Content-Length", "0"))
+            request = json.loads(self.rfile.read(length))
+            messages = request.get("messages") or []
+            # Tolerate both plain string content and structured content parts
+            # (the vision smoke's text + image_url part list).
+            content = messages[0].get("content") if messages else None
+            if isinstance(content, list):
+                text = next(
+                    (part.get("text") for part in content if part.get("type") == "text"), ""
+                )
+            else:
+                text = content or ""
+            chat_log = os.environ.get("FIXTURE_CHAT_LOG")
+            if chat_log:
+                with open(chat_log, "a") as handle:
+                    handle.write(json.dumps(request) + "\n")
+            response = {
+                "id": "fixture-chat-completion",
+                "object": "chat.completion",
+                "model": request["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": text},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            body = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/start_profile":
             length = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(length)) if length else None

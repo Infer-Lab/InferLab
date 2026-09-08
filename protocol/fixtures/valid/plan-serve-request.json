@@ -1,6 +1,6 @@
 {
   "operation": "plan_serve",
-  "protocol_version": "10",
+  "protocol_version": "11",
   "input": {
     "model": {
       "id": "deepseek-v4-flash",

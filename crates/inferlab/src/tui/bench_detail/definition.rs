@@ -1,8 +1,8 @@
 use super::super::FactSection;
 use crate::workspace::{
-    BenchCacheStart, BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
-    BenchRequestSource, BenchSessionSource, BenchSharedSystemContent, BenchTokenSelector,
-    RequestRate,
+    BenchCacheStart, BenchDefinition, BenchImageSampling, BenchImagesDeclaration,
+    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
+    BenchSharedSystemContent, BenchTokenSelector, RequestRate, effective_random_prompt,
 };
 
 pub(in crate::tui) struct DefinitionDetail {
@@ -240,13 +240,17 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
             prefix_sharing,
             shared_system_content,
             corpus,
+            images,
         } => (
             "requests · random".to_owned(),
             FactSection {
                 title: "SOURCE · REQUESTS",
                 rows: vec![
                     fact("Generator", "random"),
-                    fact("Prompt", prompt_summary(prompt)),
+                    fact(
+                        "Prompt",
+                        prompt_summary_with_images(prompt, images.as_ref()),
+                    ),
                     fact("Input tokens", token_selector(input_tokens)),
                     fact("Output tokens", token_selector(output_tokens)),
                     fact("Prefix sharing", prefix_summary(prefix_sharing.as_ref())),
@@ -260,6 +264,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
                             .as_ref()
                             .map_or_else(|| "synthetic".to_owned(), |corpus| corpus.path.clone()),
                     ),
+                    fact("Images", images_summary(images.as_ref())),
                 ],
             },
         ),
@@ -267,6 +272,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
             prompt,
             shapes,
             prefix_sharing,
+            ..
         } => (
             "requests · random mixture".to_owned(),
             FactSection {
@@ -296,6 +302,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
             profile,
             max_input_tokens,
             output_tokens,
+            ..
         } => {
             let mut rows = vec![fact("Generator", "dataset"), fact("Dataset", dataset)];
             if let Some(profile) = profile.as_deref() {
@@ -319,6 +326,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
             expected_sha256,
             prompt,
             prefix_sharing,
+            ..
         } => (
             format!("requests · replay {path}"),
             FactSection {
@@ -339,18 +347,54 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
 }
 
 fn prompt_summary(prompt: &BenchPromptSelection) -> String {
+    prompt_summary_effective(prompt, prompt.effective().clone())
+}
+
+/// A `random` source with an image decoration resolves an omitted prompt
+/// table to `server_chat` ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]).
+fn prompt_summary_with_images(
+    prompt: &BenchPromptSelection,
+    images: Option<&BenchImagesDeclaration>,
+) -> String {
+    prompt_summary_effective(prompt, effective_random_prompt(prompt, images))
+}
+
+fn prompt_summary_effective(prompt: &BenchPromptSelection, effective: BenchPrompt) -> String {
     let provenance = if prompt.declared().is_some() {
         "declared"
     } else {
         "default"
     };
-    match prompt.effective() {
+    match effective {
         BenchPrompt::Flat => format!("flat ({provenance})"),
         BenchPrompt::RenderedChat { chat_template, .. } => format!(
             "rendered chat · {} ({provenance})",
             chat_template.as_deref().unwrap_or("tokenizer default")
         ),
         BenchPrompt::ServerChat => format!("server chat ({provenance})"),
+    }
+}
+
+fn images_summary(images: Option<&BenchImagesDeclaration>) -> String {
+    match images {
+        Some(images) => {
+            let source = match &images.source {
+                Some(source) => {
+                    let sampling = match source.sampling {
+                        BenchImageSampling::RandomWithReplacement => "random-with-replacement",
+                        BenchImageSampling::ShuffleCycle => "shuffle-cycle",
+                        BenchImageSampling::SequentialCycle => "sequential-cycle",
+                    };
+                    format!("{} · {sampling}", source.path)
+                }
+                None => "noise".to_owned(),
+            };
+            format!(
+                "{} × {}x{} px · {source}",
+                images.count, images.width, images.height
+            )
+        }
+        None => "none".to_owned(),
     }
 }
 pub(super) fn token_selector(selector: &BenchTokenSelector) -> String {

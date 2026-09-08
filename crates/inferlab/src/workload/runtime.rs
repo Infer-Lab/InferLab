@@ -12,11 +12,11 @@ use super::domain::{
 };
 use super::record::{
     BenchAgenticSourceEvidence, BenchCorpusSourceEvidence, BenchDatasetRequestSourceEvidence,
-    BenchPopulationPreparationEvidence, BenchRequestSourceEvidence, BenchSessionSourceEvidence,
-    ClientCasePaths, ClientProcessEvidence, ClientTerminationEvidence, ClientTerminationTrigger,
-    DataAssetMaterializationEvidence, DatasetAcquisitionEvidence, DatasetAcquisitionOutcome,
-    EvalCaseEvidence, EvalCaseRecord, WorkloadKind, WorkloadRecord, WorkloadRecordSession,
-    WorkloadStatus, write_json,
+    BenchImageSourceEvidence, BenchImagesEvidence, BenchPopulationPreparationEvidence,
+    BenchRequestSourceEvidence, BenchSessionSourceEvidence, ClientCasePaths, ClientProcessEvidence,
+    ClientTerminationEvidence, ClientTerminationTrigger, DataAssetMaterializationEvidence,
+    DatasetAcquisitionEvidence, DatasetAcquisitionOutcome, EvalCaseEvidence, EvalCaseRecord,
+    WorkloadKind, WorkloadRecord, WorkloadRecordSession, WorkloadStatus, write_json,
 };
 use super::{
     BenchExecutionPlan, BenchPlan, ClientCommandPlan, EvalExecutionPlan, EvalPlan,

@@ -1080,6 +1080,100 @@
         "cache_start"
       ]
     },
+    "BenchImageSamplingInput": {
+      "description": "The closed source-image sampling vocabulary\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).",
+      "oneOf": [
+        {
+          "description": "Draw each source image independently; repeats may occur immediately.",
+          "type": "string",
+          "const": "random-with-replacement"
+        },
+        {
+          "description": "Draw every source image once per shuffled cycle, reshuffling after\nexhaustion.",
+          "type": "string",
+          "const": "shuffle-cycle"
+        },
+        {
+          "description": "Walk source images in sorted load order and wrap after exhaustion.",
+          "type": "string",
+          "const": "sequential-cycle"
+        }
+      ]
+    },
+    "BenchImageSourceInput": {
+      "description": "One operator-supplied image directory binding for the random request\nsource's image decoration ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).",
+      "type": "object",
+      "properties": {
+        "expected_sha256": {
+          "description": "The declared digest binding over the release-owned recursive\nenumeration digest of the directory.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "path": {
+          "description": "Workspace-relative directory path as declared.",
+          "type": "string"
+        },
+        "resolved_path": {
+          "description": "Absolute resolution of `path` against the workspace root.",
+          "type": "string"
+        },
+        "sampling": {
+          "description": "The effective source-image sampling policy.",
+          "$ref": "#/$defs/BenchImageSamplingInput"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "resolved_path",
+        "sampling"
+      ]
+    },
+    "BenchImagesInput": {
+      "description": "The effective per-request image decoration of a random request source\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]): fixed pixel dimensions and the\nper-request image count. Images attach at measurement-run time on the\nchat-completions route and never enter the frozen population.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "The effective number of images attached to each request.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "height": {
+          "description": "The fixed image height in pixels.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source": {
+          "description": "The image supply; absent selects the measurement runtime's synthetic\nnoise image supply.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchImageSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "width": {
+          "description": "The fixed image width in pixels.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "count"
+      ]
+    },
     "BenchInclusiveUniformInput": {
       "description": "The one bounded distribution currently supported for a token selector.",
       "type": "object",
@@ -1962,6 +2056,18 @@
               "anyOf": [
                 {
                   "$ref": "#/$defs/BenchCorpusInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "images": {
+              "description": "The effective per-request image decoration\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]); absent when the source\ndeclares no images.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BenchImagesInput"
                 },
                 {
                   "type": "null"
@@ -2926,6 +3032,11 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
+            },
+            "vision": {
+              "description": "The effective vision-mode selection\n([[RFC-0004:C-MEASUREMENTS]]): a vision smoke routes to chat\ncompletions carrying the release-owned fixed test image.",
+              "type": "boolean",
+              "default": false
             }
           },
           "additionalProperties": false,
@@ -3915,12 +4026,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `10` (serialized as the\nstring `\"10\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `11` (serialized as the\nstring `\"11\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 10.",
+          "description": "Protocol version 11.",
           "type": "string",
-          "const": "10"
+          "const": "11"
         }
       ]
     },

@@ -13,6 +13,25 @@ The smoke carries authoring defaults, not hidden execution state.
 explicitly, and existing explicit forms remain valid. Serving Benches are
 covered by [bench-authoring.md](bench-authoring.md).
 
+## Vision smoke
+
+For a vision-language server, `vision = true` turns the smoke toward the
+vision path:
+
+```toml
+[evals.smoke-vision]
+kind = "openai-smoke"
+vision = true
+```
+
+A vision smoke routes to chat completions and sends one user message whose
+content carries the effective prompt as a text part followed by the
+release-owned fixed test image as an `image_url` data-URI part, so the check
+exercises the vision path instead of text-only completions. Success and
+failure mirror the completions smoke with the first choice's `message.content`
+string in place of `text`; the image content itself is never judged. The image
+bytes are fixed by the release, so there is nothing else to configure.
+
 ## lm-eval tasks and inference requests
 
 An lm-eval definition selects exactly one task. Use a pinned lm-eval task name,

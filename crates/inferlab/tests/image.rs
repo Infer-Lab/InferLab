@@ -276,6 +276,19 @@ impl TestWorkspace {
             .output()?)
     }
 
+    /// An image build whose fixture `pixi list` reports `listing` instead of
+    /// the default environment listing.
+    fn build_with_listing(&self, listing: &str, args: &[&str]) -> Result<Output, Box<dyn Error>> {
+        let path = self.root.path().join(".inferlab/cache/pixi-list.json");
+        fs::write(&path, listing)?;
+        Ok(self
+            .command()
+            .env("PIXI_FIXTURE_LIST", &path)
+            .args(["image", "build"])
+            .args(args)
+            .output()?)
+    }
+
     fn load_json(&self, relative: &str) -> Result<Value, Box<dyn Error>> {
         Ok(serde_json::from_slice(&fs::read(
             self.root.path().join(relative),
@@ -813,6 +826,209 @@ fn failing_entry_check_aborts_before_package_builds() -> Result<(), Box<dyn Erro
     assert!(
         !record_dir.join("build-linux-amd64").exists(),
         "no package build begins after a failed entry check"
+    );
+    Ok(())
+}
+
+/// `pixi list` rows in the shape pixi 0.81 reports: source-backed projects
+/// carry no hash and a workspace-relative `url`; registry entries carry both.
+const LISTING_PREFIX: &str = r#"[
+  {"name": "python", "kind": "conda", "url": "https://conda.example/linux-64/python-3.12.0.conda", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "source": "https://conda.example"},
+  {"name": "inferlab-integration-vllm", "kind": "pypi", "url": "https://pypi.example/inferlab_integration_vllm-0.1.0-py3-none-any.whl", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "source": "https://pypi.example/simple"},
+"#;
+
+/// A hashless registry row: pixi reports these for indexes that publish no
+/// hashes. It is an artifact location, never a source-backed project.
+const UNHASHED_REGISTRY_ROW: &str = r#"  {"name": "unhashed-index-wheel", "kind": "pypi", "url": "https://index.example/unhashed_index_wheel-1.0-py3-none-any.whl", "sha256": null, "source": "https://index.example"},
+"#;
+
+#[test]
+fn packages_build_at_the_project_directories_pixi_reports() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let listing = format!(
+        "{LISTING_PREFIX}  {{\"name\": \"vllm\", \"kind\": \"pypi\", \"url\": \"./vendor/vllm/python\", \"sha256\": null, \"source\": \"./vendor/vllm/python\"}},\n  {{\"name\": \"flashinfer\", \"kind\": \"pypi\", \"url\": \"./vendor/flashinfer\", \"sha256\": null, \"source\": \"./vendor/flashinfer\"}}\n]\n"
+    );
+    let output =
+        workspace.build_with_listing(&listing, &["deepseek-v4-flash-runtime", "--dry-run"])?;
+    assert!(
+        output.status.success(),
+        "dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan = stdout_json(&output)?;
+    let assemblies = plan["assemblies"].as_array().ok_or("assemblies")?;
+    // A submodule-style source path whose project lives below its root builds
+    // at the Pixi-reported project directory.
+    assert_eq!(
+        assemblies[0]["content_closure"]["wheel_sources"],
+        "vendor/vllm/python\u{1f}vendor/flashinfer"
+    );
+    Ok(())
+}
+
+#[test]
+fn subdirectory_project_builds_inside_its_source_path_copy() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let project = workspace.root.path().join("vendor/vllm/python");
+    fs::create_dir_all(&project)?;
+    fs::write(
+        project.join("pyproject.toml"),
+        "[project]\nname = \"vllm\"\n",
+    )?;
+    git(workspace.root.path(), &["add", "."])?;
+    git(
+        workspace.root.path(),
+        &["commit", "-qm", "project below the source root"],
+    )?;
+    let listing = format!(
+        "{LISTING_PREFIX}  {{\"name\": \"vllm\", \"kind\": \"pypi\", \"url\": \"./vendor/vllm/python\", \"sha256\": null, \"source\": \"./vendor/vllm/python\"}},\n  {{\"name\": \"flashinfer\", \"kind\": \"pypi\", \"url\": \"./vendor/flashinfer\", \"sha256\": null, \"source\": \"./vendor/flashinfer\"}}\n]\n"
+    );
+    let output = workspace.build_with_listing(&listing, &["deepseek-v4-flash-runtime-native"])?;
+    let report = stdout_json(&output)?;
+    let record_id = report["record_id"].as_str().ok_or("record id")?;
+    let record = workspace.load_json(&format!(".inferlab/records/{record_id}/record.json"))?;
+    assert!(
+        output.status.success(),
+        "subdirectory project build failed: {}",
+        record["assemblies"][0]["outcome"]
+    );
+    let assembly = &record["assemblies"][0];
+    let package_names: Vec<&str> = assembly["packages"]
+        .as_array()
+        .ok_or("packages")?
+        .iter()
+        .filter_map(|package| package["package"].as_str())
+        .collect();
+    assert_eq!(package_names, ["vllm", "flashinfer"]);
+    let commands = assembly["native_commands"].as_array().ok_or("commands")?;
+    assert!(
+        commands.iter().any(|command| {
+            command["argv"].as_array().is_some_and(|argv| {
+                argv.iter().any(|arg| arg == "wheel")
+                    && argv.last().and_then(Value::as_str).is_some_and(|path| {
+                        path.ends_with("wheel-build/sources/vendor/vllm/python")
+                    })
+            })
+        }),
+        "pip wheel targets the project directory inside the sanitized source copy"
+    );
+    Ok(())
+}
+
+#[test]
+fn nested_stack_source_paths_copy_each_tree_once() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let root = workspace.root.path();
+    let cubin = root.join("vendor/flashinfer/cubin");
+    fs::create_dir_all(&cubin)?;
+    fs::write(
+        cubin.join("pyproject.toml"),
+        "[project]\nname = \"flashinfer-cubin\"\n",
+    )?;
+    // The nested path is listed first: copying the enclosing tree afterwards
+    // must not land a second copy inside the first.
+    fs::write(
+        root.join(".inferlab/workspace.toml"),
+        format!(
+            "{WORKSPACE}\n[stacks.nested]\nintegration = \"vllm\"\npixi_environment = \"vllm\"\n\
+             source_paths = [\"vendor/flashinfer/cubin\", \"vendor/flashinfer\"]\n\n\
+             [images.nested-runtime]\nstack = \"nested\"\n\
+             base_image = \"example.com/micromamba:1.0\"\nplatforms = [\"linux/amd64\"]\n"
+        ),
+    )?;
+    git(root, &["add", "."])?;
+    git(root, &["commit", "-qm", "nested source paths"])?;
+    let listing = format!(
+        "{LISTING_PREFIX}  {{\"name\": \"flashinfer-cubin\", \"kind\": \"pypi\", \"url\": \"./vendor/flashinfer/cubin\", \"sha256\": null, \"source\": \"./vendor/flashinfer/cubin\"}},\n  {{\"name\": \"flashinfer\", \"kind\": \"pypi\", \"url\": \"./vendor/flashinfer\", \"sha256\": null, \"source\": \"./vendor/flashinfer\"}}\n]\n"
+    );
+    let output = workspace.build_with_listing(&listing, &["nested-runtime"])?;
+    let report = stdout_json(&output)?;
+    let record_id = report["record_id"].as_str().ok_or("record id")?;
+    let record = workspace.load_json(&format!(".inferlab/records/{record_id}/record.json"))?;
+    assert!(
+        output.status.success(),
+        "nested source path build failed: {}",
+        record["assemblies"][0]["outcome"]
+    );
+    let mut wheels = Vec::new();
+    for entry in fs::read_dir(root.join(".inferlab/cache/wheels"))? {
+        for wheel in fs::read_dir(entry?.path())? {
+            wheels.push(fs::read_to_string(wheel?.path())?);
+        }
+    }
+    let flashinfer = wheels
+        .iter()
+        .find(|wheel| wheel.starts_with("wheel bytes for flashinfer\n"))
+        .ok_or("flashinfer wheel")?;
+    let tree: Vec<&str> = flashinfer.lines().skip(1).collect();
+    assert_eq!(
+        tree,
+        ["./cubin", "./cubin/pyproject.toml", "./source.txt",],
+        "the enclosing tree is copied once, without a duplicate of itself"
+    );
+    Ok(())
+}
+
+#[test]
+fn unhashed_registry_package_fails_before_any_package_build() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let listing = format!(
+        "{LISTING_PREFIX}{UNHASHED_REGISTRY_ROW}  {{\"name\": \"vllm\", \"kind\": \"pypi\", \"url\": \"./vendor/vllm\", \"sha256\": null, \"source\": \"./vendor/vllm\"}},\n  {{\"name\": \"flashinfer\", \"kind\": \"pypi\", \"url\": \"./vendor/flashinfer\", \"sha256\": null, \"source\": \"./vendor/flashinfer\"}}\n]\n"
+    );
+    let output = workspace.build_with_listing(&listing, &["deepseek-v4-flash-runtime-native"])?;
+    assert!(
+        !output.status.success(),
+        "an unhashed registry package cannot be reproduced in an image"
+    );
+    // A registry location is never read as a local project: the failure is
+    // the missing hash, reported before any wheel build or record.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unhashed-index-wheel") && stderr.contains("hash"),
+        "the failure names the unhashed package: {stderr}"
+    );
+    // The failure carries the repair verified against pixi 0.81: take the
+    // listed packages, transitives included, from conda and relock.
+    assert!(
+        stderr.contains("from conda") && stderr.contains("relock"),
+        "the failure names the repair: {stderr}"
+    );
+    let records = workspace.root.path().join(".inferlab/records");
+    assert!(
+        !records.exists() || fs::read_dir(&records)?.next().is_none(),
+        "resolution failures leave no record"
+    );
+    assert!(
+        !workspace
+            .root
+            .path()
+            .join(".inferlab/cache/wheels")
+            .exists(),
+        "no package is built"
+    );
+    Ok(())
+}
+
+#[test]
+fn package_path_without_a_pixi_project_fails_before_a_record() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let listing = format!(
+        "{LISTING_PREFIX}  {{\"name\": \"vllm\", \"kind\": \"pypi\", \"url\": \"./vendor/vllm\", \"sha256\": null, \"source\": \"./vendor/vllm\"}}\n]\n"
+    );
+    let output = workspace.build_with_listing(&listing, &["deepseek-v4-flash-runtime"])?;
+    assert!(
+        !output.status.success(),
+        "a selected package path the environment installs nothing from must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("vendor/flashinfer") && stderr.contains("source-backed project"),
+        "the failure names the package path: {stderr}"
+    );
+    let records = workspace.root.path().join(".inferlab/records");
+    assert!(
+        !records.exists() || fs::read_dir(&records)?.next().is_none(),
+        "resolution failures leave no record"
     );
     Ok(())
 }

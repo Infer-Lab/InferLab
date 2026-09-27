@@ -147,6 +147,8 @@ impl TokenSpeedScheduler for SmgService {
                 output_logprobs: None,
                 matched_stop: None,
                 index: 0,
+                spec_accepted_tokens: 0,
+                spec_draft_tokens: 0,
             })),
         }));
 

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-09-27
+
+### Added
+
+- Image packages build at the projects the stack's Pixi environment installs
+  from inside each selected source path ([[RFC-0007:C-IMAGE-BUILD]],
+  [[ADR-0051]]), not at the source path's root. A git submodule whose Python
+  project lives in a subdirectory, such as SGLang's `python/`, is selected by
+  its root path and assembles without a repository-root build shim. The
+  source identity stays that of the selected path, and dry-run reports the
+  derived build directories.
+
+### Changed
+
+- An image package path inside which the stack's Pixi environment installs
+  no project from source now fails image resolution, before a record exists.
+  Previously InferLab built a wheel at the path root and let it replace the
+  identically named locked release. Install the package from that path, or
+  remove it from the image's `packages`.
+- A locked registry package without a hash now fails image resolution,
+  before a record or any package build, with an error that names the
+  package. Previously InferLab treated it as a local source project and
+  failed at assembly while reading its URL as a workspace path.
+
+### Fixed
+
+- Image package builds copy nested stack source paths (for example
+  `flashinfer` and `flashinfer/flashinfer-cubin`) once. Previously the second
+  copy landed inside the first, so the enclosing project's build directory,
+  and possibly its wheel, carried a duplicate of its own tree.
+
 ## [0.15.1] - 2026-09-26
 
 ### Added

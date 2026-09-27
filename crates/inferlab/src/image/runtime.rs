@@ -239,7 +239,7 @@ fn assemble<T: BuilderTool>(
                 .image
                 .source_paths
                 .iter()
-                .find(|path| wheel_source.starts_with(path))
+                .find(|path| wheel_source.starts_with(package_closure::without_current_dir(path)))
                 .ok_or_else(|| InferlabError::ImageBuild {
                     message: format!(
                         "package path {} is not under a stack source path",
@@ -267,15 +267,38 @@ fn assemble<T: BuilderTool>(
                 }
                 None => {
                     if copied.is_empty() {
-                        for path in &resolved.image.source_paths {
-                            let destination = copy_root.join(path);
-                            sanitized_source_copy(&workspace.root.join(path), &destination)?;
-                            copied.insert(path.clone(), destination);
+                        // A source path inside another one arrives with the
+                        // enclosing copy; copying it again would land a
+                        // second tree inside the first. Enclosing paths are
+                        // copied first, enclosed ones only sanitized.
+                        let source_paths = &resolved.image.source_paths;
+                        let enclosed = |path: &PathBuf| {
+                            let normalized = package_closure::without_current_dir(path);
+                            source_paths.iter().any(|other| {
+                                let other = package_closure::without_current_dir(other);
+                                other != normalized && normalized.starts_with(&other)
+                            })
+                        };
+                        for pass_enclosed in [false, true] {
+                            for path in source_paths
+                                .iter()
+                                .filter(|path| enclosed(path) == pass_enclosed)
+                            {
+                                let source = workspace.root.join(path);
+                                let destination =
+                                    copy_root.join(package_closure::without_current_dir(path));
+                                if pass_enclosed {
+                                    sanitize_copied_repository(&source, &destination)?;
+                                } else {
+                                    sanitized_source_copy(&source, &destination)?;
+                                }
+                                copied.insert(path.clone(), destination);
+                            }
                         }
                     }
                     let build_path = copied[owner].join(
                         wheel_source
-                            .strip_prefix(owner)
+                            .strip_prefix(package_closure::without_current_dir(owner))
                             .unwrap_or_else(|_| Path::new("")),
                     );
                     let log = wheel_build_dir(&build_dir, wheel_source).join("build.log");
@@ -900,6 +923,13 @@ fn sanitized_source_copy(source: &Path, destination: &Path) -> Result<(), Inferl
         })?;
     }
     run_copy(source, destination)?;
+    sanitize_copied_repository(source, destination)
+}
+
+/// Make a copied tree a standalone repository reduced to committed content.
+/// Also applied to a source path enclosed by another one, whose tree already
+/// arrived with the enclosing copy.
+fn sanitize_copied_repository(source: &Path, destination: &Path) -> Result<(), InferlabError> {
     let git_pointer = destination.join(".git");
     if git_pointer.is_file() {
         // A submodule checkout points at its git directory through a `.git`

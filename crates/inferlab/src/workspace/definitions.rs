@@ -66,10 +66,12 @@ pub(crate) struct ImageDefinition {
     pub stack: String,
     pub base_image: String,
     pub platforms: Vec<String>,
-    /// Stack source paths built into wheels for the image. Omit to build every
-    /// stack source path. Paths consumed only at wheel-build time through the
-    /// activation environment (for example DeepGEMM, compiled into the vLLM
-    /// wheel) are excluded by declaring the subset.
+    /// Stack source paths whose source-backed projects are built into wheels
+    /// for the image, at the project directories the stack's Pixi environment
+    /// installs from inside each path. Omit to select every stack source path.
+    /// Paths consumed only at wheel-build time through the activation
+    /// environment (for example DeepGEMM, compiled into the vLLM wheel) are
+    /// excluded by declaring the subset.
     #[serde(default)]
     pub packages: Option<Vec<PathBuf>>,
     #[serde(default)]

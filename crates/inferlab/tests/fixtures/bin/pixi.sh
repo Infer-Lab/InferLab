@@ -43,12 +43,18 @@ PYTHON
   exit 0
 fi
 if [ "$1" = list ] && [ "$2" = --json ]; then
+  if [ -n "${PIXI_FIXTURE_LIST:-}" ]; then
+    cat "$PIXI_FIXTURE_LIST"
+    exit 0
+  fi
+  # Mirrors the pixi 0.81 row shape: source-backed projects carry no hash
+  # and a workspace-relative url; there is no editable field.
   cat <<'JSON'
 [
-  {"name": "python", "kind": "conda", "url": "https://conda.example/linux-64/python-3.12.0.conda", "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
-  {"name": "inferlab-integration-vllm", "kind": "pypi", "url": "https://pypi.example/inferlab_integration_vllm-0.1.0-py3-none-any.whl", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
-  {"name": "vllm", "kind": "pypi", "editable": true, "url": "./vendor/vllm"},
-  {"name": "flashinfer", "kind": "pypi", "editable": true, "url": "./vendor/flashinfer"}
+  {"name": "python", "kind": "conda", "url": "https://conda.example/linux-64/python-3.12.0.conda", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "source": "https://conda.example"},
+  {"name": "inferlab-integration-vllm", "kind": "pypi", "url": "https://pypi.example/inferlab_integration_vllm-0.1.0-py3-none-any.whl", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "source": "https://pypi.example/simple"},
+  {"name": "vllm", "kind": "pypi", "url": "./vendor/vllm", "sha256": null, "source": "./vendor/vllm"},
+  {"name": "flashinfer", "kind": "pypi", "url": "./vendor/flashinfer", "sha256": null, "source": "./vendor/flashinfer"}
 ]
 JSON
   exit 0
@@ -68,8 +74,13 @@ if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   while [ $# -gt 0 ] && printf '%s' "$1" | grep -q =; do shift; done
 fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
-  name="$(basename "$9")"
+  # Like pip, name the wheel after the project metadata when the build
+  # directory declares it; bare fixture trees fall back to the directory name.
+  name="$(sed -n 's/^name = "\(.*\)"$/\1/p' "$9/pyproject.toml" 2>/dev/null | head -n 1)"
+  [ -n "$name" ] || name="$(basename "$9")"
   printf 'wheel bytes for %s\n' "$name" > "$8/${name}-1.0-py3-none-any.whl"
+  # The payload lists the build tree, so tests can see what the build read.
+  (cd "$9" && find . -mindepth 1 -not -path './.git*' | sort) >> "$8/${name}-1.0-py3-none-any.whl"
   exit 0
 fi
 exec "$@"

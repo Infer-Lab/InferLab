@@ -74,7 +74,8 @@ pub(crate) struct ImagePlan {
     pub stack: String,
     pub pixi_environment: String,
     pub source_paths: Vec<PathBuf>,
-    /// The stack source paths built into wheels for the image.
+    /// The source-backed project directories built into wheels for the image,
+    /// derived from the selected package paths and the environment listing.
     pub wheel_sources: Vec<PathBuf>,
     pub base_image: String,
     /// Declared environment checks resolved to content identities
@@ -194,15 +195,38 @@ pub(crate) fn resolve_image<T: BuilderTool, C: AdapterClient>(
     let stack = &workspace.config.stacks[&definition.stack];
     let (checks, image_postprocess) =
         crate::environment::plan_environment_checks(&workspace.root, stack)?;
+    let selected = definition
+        .packages
+        .clone()
+        .unwrap_or_else(|| stack.source_paths.clone());
+    let locked = package_closure::locked_packages(&workspace.root, &stack.pixi_environment)?;
+    let unpinned = package_closure::unpinned_registry_packages(&locked);
+    if !unpinned.is_empty() {
+        // Some indexes omit hashes for individual files (the PyTorch index
+        // serves jinja2 3.1.6 without one). Taking the packages from conda is
+        // the repair verified against pixi 0.81; a per-dependency PyPI index
+        // pin records hashes but leaves the lock permanently stale there.
+        return Err(InferlabError::ImageBuild {
+            message: format!(
+                "locked packages {unpinned:?} of Pixi environment {:?} carry no registry \
+                 hash, so an image cannot pin them and the committed lock cannot reproduce \
+                 it. Take the listed packages, including transitive dependencies, from \
+                 conda instead of PyPI, then relock",
+                stack.pixi_environment
+            ),
+        });
+    }
+    let wheel_sources = if selected.is_empty() {
+        Vec::new()
+    } else {
+        package_closure::package_project_directories(&locked, &selected, &stack.pixi_environment)?
+    };
     let image = ImagePlan {
         id: request.image.to_owned(),
         stack: definition.stack.clone(),
         pixi_environment: stack.pixi_environment.clone(),
         source_paths: stack.source_paths.clone(),
-        wheel_sources: definition
-            .packages
-            .clone()
-            .unwrap_or_else(|| stack.source_paths.clone()),
+        wheel_sources,
         base_image: definition.base_image.clone(),
         checks,
         image_postprocess,

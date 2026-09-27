@@ -37,7 +37,9 @@ struct PixiListEntry {
 }
 
 /// List the locked packages of one environment via `pixi list --json`; Pixi
-/// remains the only package authority. The listing covers the host platform,
+/// remains the only package authority. `--locked --no-install` keeps the
+/// listing read-only: a stale lock fails instead of being re-solved, so image
+/// resolution never rewrites the committed lock it derives facts from. The listing covers the host platform,
 /// which is the only platform the local builder assembles. Entries without a
 /// registry hash are source-backed (editable path dependencies) and are
 /// either replaced by locally built wheels or deliberately excluded.
@@ -47,7 +49,14 @@ pub(super) fn locked_packages(
 ) -> Result<Vec<PackageSpec>, InferlabError> {
     let output = Command::new("pixi")
         .current_dir(root)
-        .args(["list", "--json", "--environment", environment])
+        .args([
+            "list",
+            "--json",
+            "--environment",
+            environment,
+            "--locked",
+            "--no-install",
+        ])
         .output()
         .map_err(|source| InferlabError::LaunchPixi {
             action: "list",
@@ -73,7 +82,9 @@ pub(super) fn locked_packages(
     Ok(entries
         .into_iter()
         .map(|entry| {
-            let editable = entry.sha256.is_none() && entry.kind != "conda";
+            let editable = entry.kind != "conda"
+                && entry.sha256.is_none()
+                && entry.url.as_deref().and_then(local_project_path).is_some();
             PackageSpec {
                 name: entry.name,
                 kind: match entry.kind.as_str() {
@@ -86,6 +97,78 @@ pub(super) fn locked_packages(
             }
         })
         .collect())
+}
+
+/// Workspace-relative project directory of a locked location, or `None` for
+/// a registry location. Pixi reports source-backed projects as relative paths
+/// (`./sglang/python`); any location carrying a URL scheme is an artifact.
+fn local_project_path(url: &str) -> Option<PathBuf> {
+    if url.contains("://") {
+        return None;
+    }
+    Some(without_current_dir(Path::new(url)))
+}
+
+/// A workspace-relative path without `.` components, so `./sglang` and
+/// `sglang` compare as the same path.
+pub(super) fn without_current_dir(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect()
+}
+
+/// Directories to build for the selected image package paths
+/// ([[RFC-0007:C-IMAGE-BUILD]]): every source-backed project the environment
+/// installs from inside a selected path, at the directory Pixi reports. A
+/// selected path with no such project is an error rather than a root build,
+/// because that wheel would have no counterpart in the realized environment.
+pub(super) fn package_project_directories(
+    packages: &[PackageSpec],
+    selected: &[PathBuf],
+    environment: &str,
+) -> Result<Vec<PathBuf>, InferlabError> {
+    let projects: Vec<PathBuf> = packages
+        .iter()
+        .filter(|package| package.editable)
+        .filter_map(|package| package.url.as_deref().and_then(local_project_path))
+        .collect();
+    let mut directories: Vec<PathBuf> = Vec::new();
+    for path in selected {
+        let normalized = without_current_dir(path);
+        let mut inside: Vec<&PathBuf> = projects
+            .iter()
+            .filter(|project| project.starts_with(&normalized))
+            .collect();
+        if inside.is_empty() {
+            return Err(InferlabError::ImageBuild {
+                message: format!(
+                    "image package path {} contains no source-backed project of Pixi \
+                     environment {environment:?}; install it from that path or remove it \
+                     from the image packages",
+                    path.display()
+                ),
+            });
+        }
+        inside.sort();
+        for project in inside {
+            if !directories.contains(project) {
+                directories.push(project.clone());
+            }
+        }
+    }
+    Ok(directories)
+}
+
+/// Locked registry packages that the generated image context cannot pin by
+/// hash, so the committed lock cannot reproduce them ([[RFC-0007:C-IMAGE-BUILD]]).
+/// Image resolution rejects them before any package build; context
+/// generation keeps the same rule as its final guard.
+pub(super) fn unpinned_registry_packages(packages: &[PackageSpec]) -> Vec<&str> {
+    packages
+        .iter()
+        .filter(|package| !package.editable && (package.url.is_none() || package.sha256.is_none()))
+        .map(|package| package.name.as_str())
+        .collect()
 }
 
 /// Content identity of the selected environment's locked package closure
@@ -241,6 +324,48 @@ pub(super) enum PackageKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_directories_cover_every_project_under_a_selected_path() -> Result<(), InferlabError>
+    {
+        let source_backed = |name: &str, url: &str| PackageSpec {
+            name: name.to_owned(),
+            kind: PackageKind::Pypi,
+            url: Some(url.to_owned()),
+            sha256: None,
+            editable: true,
+        };
+        let packages = vec![
+            source_backed("flashinfer-python", "./flashinfer"),
+            source_backed("flashinfer-cubin", "./flashinfer/flashinfer-cubin"),
+            source_backed("sglang", "./sglang/python"),
+        ];
+        // Nested selected paths share a project; it is built once.
+        let directories = package_project_directories(
+            &packages,
+            &[
+                PathBuf::from("sglang"),
+                PathBuf::from("flashinfer"),
+                PathBuf::from("flashinfer/flashinfer-cubin"),
+            ],
+            "sglang",
+        )?;
+        assert_eq!(
+            directories,
+            vec![
+                PathBuf::from("sglang/python"),
+                PathBuf::from("flashinfer"),
+                PathBuf::from("flashinfer/flashinfer-cubin"),
+            ]
+        );
+        // The workspace accepts `./`-spelled source paths; they select the
+        // same projects.
+        assert_eq!(
+            package_project_directories(&packages, &[PathBuf::from("./sglang")], "sglang")?,
+            vec![PathBuf::from("sglang/python")]
+        );
+        Ok(())
+    }
 
     #[test]
     fn editable_identities_cover_external_paths_only() -> Result<(), InferlabError> {

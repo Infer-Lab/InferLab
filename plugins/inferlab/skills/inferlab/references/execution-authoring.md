@@ -105,7 +105,13 @@ recipe = "smoke"
 server_case = "tp1"
 ```
 
-Omitting `packages` selects every stack source path. A validation names only a
+Omitting `packages` selects every stack source path. Each selected path builds
+one wheel for every project the stack's Pixi environment installs from inside
+it, at the directory the Pixi manifest declares. A submodule whose Python
+project lives below its root (for example SGLang's `python/`) is selected by
+its root path, while the manifest points the dependency at the project
+directory. A selected path the environment installs nothing from fails image
+resolution. A validation names only a
 recipe and optional server case; it does not restate model, placement, server,
 or measurement facts. Builds require a clean workspace. Local bindings
 currently expose one builder kind:

@@ -245,6 +245,9 @@ def test_agentic_profile_barrier_preserves_native_warmup_and_branch_contract(
         def report_warmup_failures(self) -> None:
             observed.append(("report", None))
 
+        async def finalize_phase(self) -> None:
+            observed.append(("finalize", None))
+
     delegate = Delegate()
     monkeypatch.delenv("INFERLAB_AIPERF_PROFILE_BARRIER", raising=False)
     monkeypatch.setattr(
@@ -267,6 +270,12 @@ def test_agentic_profile_barrier_preserves_native_warmup_and_branch_contract(
     asyncio.run(strategy.handle_credit_return(credit, error="context overflow"))
     strategy.record_warmup_failure("trace-1")
     strategy.report_warmup_failures()
+    # AIPerf discovers optional phase hooks with getattr: the native warmup
+    # handoff lives in finalize_phase, and absent hooks must stay absent.
+    finalize_phase = getattr(strategy, "finalize_phase", None)
+    assert finalize_phase is not None
+    asyncio.run(finalize_phase())
+    assert getattr(strategy, "handle_first_token", None) is None
 
     assert strategy.wants_returns_after_sending_complete
     assert strategy.allows_pending_branch_handoff_after_sending_complete
@@ -274,6 +283,7 @@ def test_agentic_profile_barrier_preserves_native_warmup_and_branch_contract(
         (credit, "context overflow"),
         ("trace-1", "warmup"),
         ("report", None),
+        ("finalize", None),
     ]
 
 

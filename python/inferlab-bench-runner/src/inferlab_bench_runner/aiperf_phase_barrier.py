@@ -211,6 +211,15 @@ class AiperfProfileBarrierStrategy:
     def set_request_rate(self, new_rate: float) -> None:
         self._delegate.set_request_rate(new_rate)
 
+    def __getattr__(self, name: str) -> object:
+        # AIPerf discovers optional strategy hooks such as finalize_phase with
+        # getattr; expose exactly the ones the native strategy defines. The
+        # explicit members stay because protocol isinstance checks do not
+        # consult __getattr__.
+        if name == "_delegate":
+            raise AttributeError(name)
+        return cast(object, getattr(self._delegate, name))
+
 
 class AiperfAgenticProfileBarrierStrategy:
     """Delegate native AgentX scheduling and gate its profiling setup."""
@@ -275,3 +284,12 @@ class AiperfAgenticProfileBarrierStrategy:
 
     def report_warmup_failures(self) -> None:
         self._delegate.report_warmup_failures()
+
+    def __getattr__(self, name: str) -> object:
+        # AIPerf discovers optional strategy hooks such as finalize_phase with
+        # getattr; expose exactly the ones the native strategy defines. The
+        # explicit members stay because protocol isinstance checks do not
+        # consult __getattr__.
+        if name == "_delegate":
+            raise AttributeError(name)
+        return cast(object, getattr(self._delegate, name))

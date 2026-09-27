@@ -594,6 +594,12 @@ fn pinned_pypi_version(feature: &str, package: &str) -> Result<String, InferlabE
                 "embedded toolchain manifest has no version for feature {feature:?} package {package:?}"
             ),
         })?;
+    // A git-sourced dependency cannot carry a version requirement in the
+    // manifest; the version pixi resolved for its pinned revision lives in
+    // the embedded lock.
+    if dependency.get("git").is_some() {
+        return locked_pypi_version(package);
+    }
     let requirement = dependency
         .as_str()
         .or_else(|| dependency.get("version").and_then(toml::Value::as_str))
@@ -611,6 +617,32 @@ fn pinned_pypi_version(feature: &str, package: &str) -> Result<String, InferlabE
                 "embedded toolchain requirement for {package:?} is not an exact pin: {requirement:?}"
             ),
         })
+}
+
+fn locked_pypi_version(package: &str) -> Result<String, InferlabError> {
+    let lock: yaml_serde::Value =
+        yaml_serde::from_str(LOCK).map_err(|error| InferlabError::ToolchainVerification {
+            message: format!("embedded toolchain lock is invalid: {error}"),
+        })?;
+    let mut versions = lock
+        .get("packages")
+        .and_then(yaml_serde::Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("pypi").is_some())
+        .filter(|entry| entry.get("name").and_then(yaml_serde::Value::as_str) == Some(package))
+        .filter_map(|entry| entry.get("version").and_then(yaml_serde::Value::as_str))
+        .collect::<Vec<_>>();
+    versions.sort_unstable();
+    versions.dedup();
+    match versions.as_slice() {
+        [version] => Ok((*version).to_owned()),
+        _ => Err(InferlabError::ToolchainVerification {
+            message: format!(
+                "embedded toolchain lock must resolve exactly one version of {package:?}, found {versions:?}"
+            ),
+        }),
+    }
 }
 
 fn run_handshake<T: DeserializeOwned>(

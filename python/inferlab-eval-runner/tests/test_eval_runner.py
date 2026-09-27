@@ -767,6 +767,62 @@ def test_expired_repeated_request_is_not_recorded_as_issued_before_transport(
     assert evidence["endpoint_outcomes"] == []
 
 
+def test_repeated_sync_request_keeps_the_case_deadline_over_the_lm_eval_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    def post(url: str, **kwargs: object) -> object:
+        observed.update(kwargs)
+        return SimpleNamespace(ok=True, status_code=200, text="{}")
+
+    class FakeTemplateApi:
+        @staticmethod
+        def model_call(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return object()
+
+        @staticmethod
+        async def amodel_call(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return object()
+
+    api_models = SimpleNamespace(
+        requests=SimpleNamespace(post=post),
+        ClientSession=object,
+        ClientTimeout=lambda **kwargs: kwargs,
+        TemplateAPI=FakeTemplateApi,
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module",
+        lambda name: api_models,
+    )
+    writer = TrialEvidenceWriter(tmp_path / "eval-trials.json", 2, 71)
+    state = RepeatedTrialState(writer, "trial-0001", time.monotonic() + 60)
+    state.prepare(
+        object(),
+        "chat_completions",
+        {"model": "deepseek-v4-flash"},
+        {"model": "deepseek-v4-flash", "seed": 71},
+        {},
+        PayloadEvidenceWriter(tmp_path / "inference-requests.jsonl"),
+    )
+    install_repeated_response_capture(state)
+
+    # lm-eval 0.4.13 passes its own client timeout on the synchronous path.
+    api_models.requests.post(
+        "http://127.0.0.1/v1/chat/completions",
+        json={"model": "deepseek-v4-flash", "seed": 71},
+        headers={},
+        verify=True,
+        timeout=300,
+    )
+
+    timeout = observed["timeout"]
+    assert isinstance(timeout, float)
+    assert 0 < timeout <= 60
+
+
 def test_repeated_completion_count_uses_the_resolved_huggingface_tokenizer(
     tmp_path: Path,
 ) -> None:

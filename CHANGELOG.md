@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-26
+
+### Added
+
+- The Specialized Engine integration's serve settings accept `extra_args` and
+  `extra_env` escape-hatch entries ([[ADR-0048]]) carrying engine
+  implementation-specific worker command-line and environment knobs. Entries
+  naming InferLab-owned options are rejected while planning, tokens after a
+  bare `--` sentinel pass through verbatim as a deliberate override, and the
+  exact effective contents are returned in effective settings and recorded
+  with the rendered command. Published as
+  `inferlab-integration-specialized-engine==0.10.1`; the adapter protocol and
+  the other integrations are unchanged. Workspaces selecting the Specialized
+  Engine integration update the pin and relock.
+
+### Changed
+
+- The release-owned measurement toolchain moves to lm-eval `0.4.13` and to
+  an AIPerf `0.13.0+inferlab.1` integration build ([[ADR-0050]]): official
+  AIPerf `0.13.0` plus two upstream pull requests that are not yet released,
+  a teardown fix (ai-dynamo/aiperf#1468) and the AgentX harness port
+  (ai-dynamo/aiperf#1413). The build is pinned by commit and installed from
+  GitHub, so `inferlab toolchain install` needs network access to
+  `github.com/lucifer1004/aiperf`. Reinstall the toolchain after upgrading
+  InferLab.
+
+### Fixed
+
+- SemiAnalysis AgentX Bench cases run again
+  ([[RFC-0004:C-BENCH-AGENTIC-TRACE-REPLAY]]). Since 0.13.2 the `inferencex`
+  profile lowered a per-lane warmup budget and a per-trace idle-gap cap that
+  the pinned official AIPerf rejected, so every AgentX case exited before its
+  first request. The profile parameters are unchanged; the pinned AIPerf now
+  accepts them, and the catalog binds the InferenceX revision that currently
+  declares them.
+- Bench cases whose result export outlasts AIPerf's heartbeat window no
+  longer fail after a complete run. AIPerf `0.13.0` reaped its own stopped
+  services during export and exited non-zero.
+- Captured Bench cases keep every optional AIPerf timing-strategy hook: the
+  profile-capture barrier forwarded only a fixed set of strategy members, so
+  captured AgentX runs skipped AIPerf's cache-pressure warmup handoff and
+  started profiling from the pre-warmup trajectories.
+
 ## [0.15.0] - 2026-09-08
 
 ### Added

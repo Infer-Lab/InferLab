@@ -20,7 +20,7 @@ if [ "$1" = install ] && [ "$2" = --manifest-path ] && [ "$4" = --all ] && [ "$5
   cat > "$prefix/.pixi/envs/eval/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"lm_eval_version":"0.4.12"}\n'
+  printf '{"lm_eval_version":"0.4.13"}\n'
   exit 0
 fi
 shift
@@ -29,7 +29,7 @@ PYTHON
   cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"aiperf_version":"0.12.0","transformers_version":"5.12.1"}\n'
+  printf '{"aiperf_version":"0.13.0+inferlab.1","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 if [ "$1" = -m ] && [ "$2" = inferlab_bench_runner.bench_client ]; then

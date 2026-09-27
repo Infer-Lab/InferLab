@@ -1,9 +1,9 @@
 # Specialized Engines
 
 InferLab exposes one reusable `specialized-engine` integration for Engines that
-implement a closed token-worker contract. A hardware × architecture × model
-Engine remains in its downstream workspace; adding one does not create another
-InferLab integration package.
+implement a token-worker contract with a closed typed core. A
+hardware × architecture × model Engine remains in its downstream workspace;
+adding one does not create another InferLab integration package.
 
 The first supported workflow is deliberately small:
 
@@ -60,6 +60,27 @@ prefix_cache_ranks = [
   { cpu_bytes = 200, numa_node = 4 },
 ]
 ```
+
+An Engine implementation may define additional command-line and environment
+knobs of its own. The serve role carries them through the `extra_args` and
+`extra_env` escape-hatch settings, which exist for engine bring-up and
+implementation-specific experiments rather than for contract behavior:
+
+```toml
+[servers.engine.roles.serve.settings]
+extra_args = ["--speculative=dspark", "--speculative-block-size", "4"]
+extra_env = { INFERLAB_FORM_D = "1" }
+```
+
+Extra arguments precede the managed arguments in the rendered command, so the
+managed values win ordinary last-wins parsing. Entries naming an InferLab-owned
+option — the canonical command flags and every flag rendered from the typed
+settings above — are rejected while planning. Tokens after a bare `--`
+sentinel pass through verbatim after the managed arguments as a deliberate
+override; the sentinel itself is never rendered. The exact effective hatch
+contents are returned in the plan's effective settings and recorded with the
+rendered command, so a run exercised through the hatch demonstrates that exact
+configuration rather than the typed contract alone.
 
 The listener serves the published TokenSpeed scheduler gRPC protocol and the
 standard gRPC health service used by TokenSpeed SMG during worker registration.

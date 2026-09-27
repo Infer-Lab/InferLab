@@ -417,8 +417,8 @@ print(json.dumps({
              if [ \"$1\" = install ] && [ \"$2\" = --manifest-path ] && [ \"$4\" = --all ] && [ \"$5\" = --locked ]; then\n\
                prefix=\"$(dirname \"$3\")\"\n\
                mkdir -p \"$prefix/.pixi/envs/eval/bin\" \"$prefix/.pixi/envs/bench/bin\"\n\
-               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"lm_eval_version\":\"0.4.12\"}\\n'\"'\"'; exit 0; fi' 'shift' 'exec fixture-eval-client \"$@\"' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
-               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"aiperf_version\":\"0.12.0\",\"transformers_version\":\"5.12.1\"}\\n'\"'\"'; exit 0; fi' 'if [ \"$1\" = -m ] && [ \"$2\" = inferlab_bench_runner.bench_client ]; then shift 2; else shift; fi' 'exec fixture-bench-client \"$@\"' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
+               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"lm_eval_version\":\"0.4.13\"}\\n'\"'\"'; exit 0; fi' 'shift' 'exec fixture-eval-client \"$@\"' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
+               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"aiperf_version\":\"0.13.0+inferlab.1\",\"transformers_version\":\"5.12.1\"}\\n'\"'\"'; exit 0; fi' 'if [ \"$1\" = -m ] && [ \"$2\" = inferlab_bench_runner.bench_client ]; then shift 2; else shift; fi' 'exec fixture-bench-client \"$@\"' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
                chmod +x \"$prefix/.pixi/envs/eval/bin/python\" \"$prefix/.pixi/envs/bench/bin/python\"\n\
                exit 0\n\
              fi\n\

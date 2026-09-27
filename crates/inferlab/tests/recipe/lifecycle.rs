@@ -86,7 +86,7 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
     );
     assert_eq!(
         record["resolved"]["measurements"]["evals"][1]["execution"]["toolchain"]["lm_eval_version"],
-        "0.4.12"
+        "0.4.13"
     );
     let matrix_id = record["benches"][0]["id"]
         .as_str()

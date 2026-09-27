@@ -135,7 +135,7 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
     );
     assert_eq!(
         recipe["measurements"]["evals"][1]["execution"]["toolchain"]["lm_eval_version"],
-        "0.4.12"
+        "0.4.13"
     );
     assert_eq!(
         recipe["measurements"]["benches"][0]["execution"]["mode"],

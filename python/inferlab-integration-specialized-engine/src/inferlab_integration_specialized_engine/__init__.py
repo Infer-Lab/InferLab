@@ -51,11 +51,13 @@ from inferlab_adapter_sdk import (
     SettingValue,
     effective_settings,
     integration_identity,
+    merge_serve_args,
     rendered_frontend,
     rendered_model_rank,
     replica_id,
     require_role,
     split_serve_allocations,
+    validate_extra_args,
     validate_settings,
 )
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -65,6 +67,22 @@ from .auxiliary import reject_auxiliary_locators, validate_auxiliary_models
 _ADAPTER_DISTRIBUTION = "inferlab-integration-specialized-engine"
 _GATEWAY_BACKEND = "smg"
 _GATEWAY_IMPLEMENTATION = "tokenspeed-smg"
+
+# Flags the managed Engine argv owns; the escape hatch must not restate them.
+_INFERLAB_OWNED_OPTIONS: set[str] = {
+    "--default-max-output-tokens",
+    "--gpu-memory-utilization-percent",
+    "--listen",
+    "--max-num-batched-tokens",
+    "--model",
+    "--prefix-cache-cpu-bytes-per-rank",
+    "--prefix-cache-gpu-entries",
+    "--prefix-cache-host-memory-percent",
+    "--prefix-cache-numa-node-per-rank",
+    "--served-model-name",
+    "--tensor-parallel-size",
+    "--workspace-reserve-mib",
+}
 
 
 class PrefixCacheRank(BaseModel):
@@ -84,7 +102,9 @@ class EngineContractSettings(BaseModel):
     """Settings shared by every implementation of the token Engine contract.
 
     An omitted optional setting renders no worker argument, so the worker's own
-    default governs and InferLab does not restate it.
+    default governs and InferLab does not restate it. `extra_args` and
+    `extra_env` carry implementation-specific worker knobs whose exact
+    effective contents are returned and recorded ([[ADR-0048]]).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -96,6 +116,8 @@ class EngineContractSettings(BaseModel):
     prefix_cache_gpu_entries: Annotated[int, Field(ge=1)] | None = None
     prefix_cache_host_memory_percent: Annotated[int, Field(ge=1, le=100)] | None = None
     prefix_cache_ranks: list[PrefixCacheRank] | None = None
+    extra_args: list[str] | None = None
+    extra_env: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def _one_host_prefix_cache_authority(self) -> "EngineContractSettings":
@@ -112,6 +134,12 @@ class EngineContractSettings(BaseModel):
                 "prefix_cache_ranks is declared; declare exactly one host sizing authority"
             )
         return self
+
+
+def _settings(values: dict[str, SettingValue]) -> EngineContractSettings:
+    settings = validate_settings(EngineContractSettings, values)
+    validate_extra_args(settings.extra_args or [], _INFERLAB_OWNED_OPTIONS)
+    return settings
 
 
 def _identity() -> IntegrationIdentity:
@@ -236,7 +264,7 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "the Specialized Engine integration supports exactly one replica",
         )
-    settings = validate_settings(EngineContractSettings, role.settings)
+    settings = _settings(role.settings)
     parallelism, tensor_parallel_size = _pure_tp_parallelism(role.parallelism)
     mechanism = input.profiling
     if mechanism == CaptureMechanism.engine_trace:
@@ -407,7 +435,7 @@ def _render_engine(
             AdapterErrorCode.invalid_request,
             "the Engine allocation is missing its endpoint",
         )
-    settings = validate_settings(EngineContractSettings, allocation.effective_settings)
+    settings = _settings(allocation.effective_settings)
     _, tensor_parallel_size = _pure_tp_parallelism(
         allocation.effective_parallelism,
         AdapterErrorCode.invalid_request,
@@ -421,9 +449,7 @@ def _render_engine(
             f"prefix_cache_ranks declares {len(settings.prefix_cache_ranks)} ranks "
             f"but the resolved tensor-parallel size is {tensor_parallel_size}",
         )
-    argv = [
-        "inferlab-token-engine",
-        "smg-worker",
+    inferlab_args = [
         "--listen",
         f"{endpoint.host}:{endpoint.port}",
         "--model",
@@ -442,14 +468,18 @@ def _render_engine(
         ("--prefix-cache-host-memory-percent", settings.prefix_cache_host_memory_percent),
     ):
         if value is not None:
-            argv.extend([option, str(value)])
+            inferlab_args.extend([option, str(value)])
     # The worker pairs these two lists by occurrence order, so each is emitted
     # once per rank in rank order.
     for rank in settings.prefix_cache_ranks or ():
-        argv.extend(["--prefix-cache-cpu-bytes-per-rank", str(rank.cpu_bytes)])
+        inferlab_args.extend(["--prefix-cache-cpu-bytes-per-rank", str(rank.cpu_bytes)])
     for rank in settings.prefix_cache_ranks or ():
-        argv.extend(["--prefix-cache-numa-node-per-rank", str(rank.numa_node)])
-    return rendered_model_rank(allocation, ProcessSpec(argv=argv, env={}))
+        inferlab_args.extend(["--prefix-cache-numa-node-per-rank", str(rank.numa_node)])
+    argv = ["inferlab-token-engine", "smg-worker"]
+    argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OWNED_OPTIONS))
+    return rendered_model_rank(
+        allocation, ProcessSpec(argv=argv, env=dict(settings.extra_env or {}))
+    )
 
 
 def _render_gateway(

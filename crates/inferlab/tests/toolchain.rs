@@ -97,7 +97,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
     assert_eq!(first["eval"]["platform"], host_platform());
     // Pin the exact versions the pixi fixture handshake reports so a swap
     // between the two runtimes (eval <-> bench) would fail this test.
-    assert_eq!(first["eval"]["lm_eval_version"], "0.4.12");
+    assert_eq!(first["eval"]["lm_eval_version"], "0.4.13");
     assert_eq!(
         first["eval"]["bundled_task_closure_sha256"]
             .as_str()
@@ -105,7 +105,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         Some(64)
     );
     assert_eq!(first["bench"]["platform"], host_platform());
-    assert_eq!(first["bench"]["aiperf_version"], "0.12.0");
+    assert_eq!(first["bench"]["aiperf_version"], "0.13.0+inferlab.1");
     assert_eq!(first["bench"]["transformers_version"], "5.12.1");
     assert!(home.install_dir().join("complete.json").is_file());
     assert!(home.install_dir().join("pixi.toml").is_file());
@@ -260,7 +260,7 @@ mkdir -p "$prefix/.pixi/envs/eval/bin" "$prefix/.pixi/envs/bench/bin"
 cat > "$prefix/.pixi/envs/eval/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"lm_eval_version":"0.4.12"}\n'
+  printf '{"lm_eval_version":"0.4.13"}\n'
   exit 0
 fi
 printf 'unexpected python fixture arguments: %s\n' "$*" >&2
@@ -269,7 +269,7 @@ PYTHON
 cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"aiperf_version":"0.12.0","transformers_version":"5.12.1"}\n'
+  printf '{"aiperf_version":"0.13.0+inferlab.1","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 printf 'unexpected python fixture arguments: %s\n' "$*" >&2

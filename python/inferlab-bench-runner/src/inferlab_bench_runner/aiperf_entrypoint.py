@@ -15,7 +15,7 @@ from .aiperf_phase_barrier import (
     AiperfProfileBarrierStrategy,
 )
 
-SUPPORTED_AIPERF_VERSION = "0.12.0"
+SUPPORTED_AIPERF_VERSION = "0.13.0+inferlab.1"
 
 
 class PluginRegistry(Protocol):

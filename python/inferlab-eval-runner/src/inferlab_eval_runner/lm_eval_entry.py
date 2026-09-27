@@ -522,8 +522,11 @@ def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
         json: JsonObject,
         headers: object,
         verify: object,
+        timeout: object = None,
     ) -> CapturedSyncResponse:
-        timeout = repeated.remaining()
+        # The case deadline replaces lm-eval's client timeout, as on the async path.
+        del timeout
+        remaining = repeated.remaining()
         repeated.release(json)
         response = cast(
             SyncResponse,
@@ -532,7 +535,7 @@ def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
                 json=json,
                 headers=headers,
                 verify=verify,
-                timeout=timeout,
+                timeout=remaining,
             ),
         )
         return CapturedSyncResponse(response, repeated)

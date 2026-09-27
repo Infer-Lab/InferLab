@@ -406,6 +406,81 @@ def test_plan_rejects_two_host_prefix_cache_sizing_authorities() -> None:
         )
 
 
+def test_render_splices_extra_args_around_the_managed_worker_argv() -> None:
+    render_input = _render_input(
+        tensor_parallel_size=2,
+        engine_settings={
+            "extra_args": [
+                "--speculative=dspark",
+                "--speculative-block-size",
+                "4",
+                "--",
+                "--listen",
+                "0.0.0.0:1",
+            ],
+            "extra_env": {"INFERLAB_FORM_D": "1"},
+        },
+    )
+
+    command = render_serve(render_input).processes[0].root.command
+
+    # Pre-sentinel extras precede the managed tail; post-sentinel tokens pass
+    # through verbatim after it, where engine last-wins parsing applies the
+    # deliberate override. The sentinel itself is never rendered.
+    assert command.argv == [
+        "inferlab-token-engine",
+        "smg-worker",
+        "--speculative=dspark",
+        "--speculative-block-size",
+        "4",
+        "--listen",
+        "engine.example:50051",
+        "--model",
+        "/models/fixture-model",
+        "--served-model-name",
+        "fixture-model",
+        "--tensor-parallel-size",
+        "2",
+        "--default-max-output-tokens",
+        "3",
+        "--max-num-batched-tokens",
+        "12000",
+        "--listen",
+        "0.0.0.0:1",
+    ]
+    assert command.env == {"INFERLAB_FORM_D": "1"}
+
+
+def test_plan_rejects_extra_args_naming_inferlab_owned_options() -> None:
+    # Settings validation runs while planning, so the restated managed flag
+    # never reaches a rendered command.
+    with pytest.raises(AdapterOperationError, match="InferLab-owned option"):
+        _render_input(engine_settings={"extra_args": ["--tensor-parallel-size", "8"]})
+
+
+def test_plan_returns_the_exact_escape_hatch_contents_in_effective_settings() -> None:
+    plan_input = _plan_input()
+    plan_input.roles[0].settings["extra_args"] = SettingValue.model_validate(
+        ["--speculative=dspark", "--speculative-block-size", "4"]
+    )
+    plan_input.roles[0].settings["extra_env"] = SettingValue.model_validate(
+        {"INFERLAB_FORM_D": "1"}
+    )
+
+    effective = plan_serve(plan_input).roles[0].effective_settings
+
+    args = effective["extra_args"].root
+    assert isinstance(args, list)
+    assert [entry.root for entry in args] == [
+        "--speculative=dspark",
+        "--speculative-block-size",
+        "4",
+    ]
+    env = effective["extra_env"].root
+    assert isinstance(env, dict)
+    assert env["INFERLAB_FORM_D"].root == "1"
+
+
 def test_render_rejects_multi_process_rank_decomposition() -> None:
     render_input = _render_input(tensor_parallel_size=2)
     engine = render_input.allocations[0].root

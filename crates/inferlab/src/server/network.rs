@@ -1,6 +1,7 @@
 use crate::execution::{
     ActiveRdmaInterfacePlan, NetworkMachinePlan, NetworkPlan, NetworkSelectionReason, ProcessPlan,
 };
+use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::plan::LaunchPlan;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
@@ -113,21 +114,22 @@ pub(super) fn resolve(
 
 fn probe_machine(process: &ProcessPlan) -> Result<NetworkMachinePlan, NetworkResolutionError> {
     let script = probe_script();
-    let output =
-        match &process.launch {
-            LaunchPlan::Local => Command::new("bash")
-                .args(["-c", &script])
-                .output()
-                .map_err(|source| NetworkResolutionError::LocalLaunch {
-                    machine: process.machine.clone(),
-                    source,
-                })?,
-            LaunchPlan::Ssh { target } => inferlab_runtime::ssh::ssh_output(target, &script)
+    let output = match &process.launch {
+        LaunchPlan::Local => Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .map_err(|source| NetworkResolutionError::LocalLaunch {
+                machine: process.machine.clone(),
+                source,
+            })?,
+        LaunchPlan::Ssh { target } => {
+            inferlab_runtime::ssh::ssh_output(target, &script, &OperationBound::unbounded())
                 .map_err(|source| NetworkResolutionError::Ssh {
                     machine: process.machine.clone(),
                     source,
-                })?,
-        };
+                })?
+        }
+    };
     parse_output(&process.machine, output)
 }
 

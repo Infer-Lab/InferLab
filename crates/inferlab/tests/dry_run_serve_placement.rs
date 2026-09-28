@@ -263,15 +263,12 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
     assert!(server_rank.command.argv.iter().any(|arg| arg == "8000"));
     assert_eq!(serve["server"]["endpoint"]["host"], "127.0.0.1");
     assert_eq!(serve["server"]["endpoint"]["port"], 8000);
-    let ReadinessProjection::Http {
-        path,
-        timeout_seconds,
-    } = &server_rank.readiness
-    else {
+    let ReadinessProjection::Http { path } = &server_rank.readiness else {
         return Err("expected HTTP readiness".into());
     };
     assert_eq!(path, "/v1/models");
-    assert_eq!(*timeout_seconds, Some(900));
+    // The readiness budget is one server fact, not a per-process copy.
+    assert_eq!(serve["server"]["readiness_timeout_seconds"], 900);
     assert_eq!(server_rank.devices, [0, 1]);
     assert_eq!(server_rank.command.env["CUDA_VISIBLE_DEVICES"], "0,1");
     let cache = &server_rank.runtime_cache;

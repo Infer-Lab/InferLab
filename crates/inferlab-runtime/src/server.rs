@@ -179,6 +179,11 @@ pub struct CleanupEvidence {
     /// carries no probe claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_residuals: Option<Vec<DeviceResidualEvidence>>,
+    /// The settle window within which a device still holding memory was
+    /// probed again before the cleanup was judged ([[RFC-0009:C-CLEANUP-GRACE]]);
+    /// present exactly when `device_residuals` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_residual_settle_window_ms: Option<u64>,
 }
 
 /// The post-cleanup probe outcome for one assigned device
@@ -449,6 +454,7 @@ pub trait ReadinessObserver {
         endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
         bound: &OperationBound,
+        attempt_timeout_seconds: u64,
         on_probe_failure: &mut dyn FnMut(&str),
     ) -> Result<ReadinessEvidence, ReadinessFailure>;
 }

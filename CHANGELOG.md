@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-09-28
+
+### Fixed
+
+- Server stop and startup rollback no longer fail cleanup because a device
+  still shows compute memory right after its processes exit. The driver
+  releases a killed process's device memory after the process is gone, so
+  InferLab now re-probes the devices that still hold memory for up to 30
+  seconds and fails the cleanup only if memory is still held then. The
+  error names the device, its machine, and the settle window
+  ([[RFC-0005:C-EVIDENCE]]).
+- Each post-cleanup device probe now runs within that settle window, locally
+  and over SSH, so a wedged driver or unreachable host can no longer hang
+  `serve stop`; a probe that cannot answer records the device as
+  probe-unavailable, while a device that already showed held memory stays
+  held ([[RFC-0009:C-CLEANUP-GRACE]]).
+- Remote Nsight Systems agent cleanup now sends SIGKILL when a liveness check
+  fails during the TERM grace, instead of ending unverified without a kill.
+- A prefix-cache reset, flush, or conditioning request through the
+  control-plane proxy is no longer cut off after a fixed 60 seconds per
+  target; the measurement case's remaining budget bounds it, as
+  [[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]] requires, and a caller that gives
+  up cancels the proxy's in-flight target work.
+
+### Changed
+
+- Server record schema version 12 ([[RFC-0005:C-EVIDENCE]]):
+  - cleanup evidence for probed devices records
+    `device_residual_settle_window_ms`, the settle window that decided the
+    residual outcome;
+  - process readiness plans no longer carry `timeout_seconds` and
+    `attempt_timeout_seconds`. They were copies of the server's
+    `readiness_timeout_seconds` and `readiness_attempt_timeout_seconds`,
+    and the per-process budget copy was never the one enforced.
+    Readiness reads the server values.
+
+  Earlier server records are rejected by the version gate, as with previous
+  schema bumps.
+
 ## [0.15.2] - 2026-09-27
 
 ### Added

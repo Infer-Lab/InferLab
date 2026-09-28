@@ -1,6 +1,11 @@
 use inferlab_runtime::operation_bound::{OperationBound, Remaining};
 use std::time::Duration;
 
+/// Backoff for waiting on a profiler artifact to land inside the
+/// finalization budget: an Nsight report file or engine-trace files.
+pub(crate) const ARTIFACT_POLL_INITIAL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const ARTIFACT_POLL_MAX_INTERVAL: Duration = Duration::from_secs(2);
+
 /// One probe outcome inside a budget-aware polling loop.
 pub(crate) enum Poll<T> {
     /// The polled condition is decided; polling stops with this outcome.

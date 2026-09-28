@@ -5,42 +5,51 @@
 //! hardware probe already uses, and the per-device outcome joins the cleanup
 //! evidence.
 
+use inferlab_runtime::container::{BoundedError, BoundedWait, run_cleanup_with_bound};
+use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::plan::LaunchPlan;
 use inferlab_runtime::server::{DeviceResidualEvidence, SystemProcessRuntime};
-use inferlab_runtime::ssh::ssh_output;
-use std::process::{Command, Stdio};
+use inferlab_runtime::ssh::{SSH_ENV_REMOVE, ssh_argv};
+use std::process::ExitStatus;
+use std::time::Duration;
 
 const RESIDUAL_MARKER: &str = "INFERLAB_DEVICE_RESIDUAL\t";
 
+/// How long held devices are probed again after process cleanup: the driver
+/// releases a killed process's device memory after the process has exited,
+/// so a held reading right after cleanup is not yet a leak. Every probe
+/// consumes this window, so a wedged driver or host cannot hang cleanup.
+pub(super) const RESIDUAL_SETTLE_WINDOW: Duration = Duration::from_secs(30);
+pub(super) const RESIDUAL_SETTLE_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(super) trait ResidualProbe {
     /// Residual compute memory in bytes on one assigned device, probed on its
-    /// launch machine after process cleanup.
+    /// launch machine after process cleanup within the settle window.
     fn residual_bytes(
         &self,
         launch: &LaunchPlan,
         machine: &str,
         device: u32,
+        bound: &OperationBound,
     ) -> Result<u64, ResidualProbeError>;
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ResidualProbeError {
-    #[error("failed to launch the device residual probe on machine {machine:?}: {source}")]
-    LocalLaunch {
+    #[error("failed to run the device residual probe on machine {machine:?}: {source}")]
+    Command {
         machine: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to launch the device residual probe on machine {machine:?}: {source}")]
-    Ssh {
-        machine: String,
-        #[source]
-        source: inferlab_runtime::ssh::SshError,
-    },
+    #[error(
+        "device residual probe on machine {machine:?} did not answer within the settle window ({elapsed_ms} ms)"
+    )]
+    Expired { machine: String, elapsed_ms: u64 },
     #[error("device residual probe on machine {machine:?} exited with {status}: {stderr}")]
     Exit {
         machine: String,
-        status: std::process::ExitStatus,
+        status: ExitStatus,
         stderr: String,
     },
     #[error("machine {machine:?} returned a non-numeric residual memory row {row:?}: {source}")]
@@ -58,32 +67,54 @@ impl ResidualProbe for SystemProcessRuntime {
         launch: &LaunchPlan,
         machine: &str,
         device: u32,
+        bound: &OperationBound,
     ) -> Result<u64, ResidualProbeError> {
         let script = residual_script(device);
-        let output = match launch {
-            LaunchPlan::Local => Command::new("sh")
-                .args(["-c", &script])
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|source| ResidualProbeError::LocalLaunch {
-                    machine: machine.to_owned(),
-                    source,
-                })?,
-            LaunchPlan::Ssh { target } => {
-                ssh_output(target, &script).map_err(|source| ResidualProbeError::Ssh {
-                    machine: machine.to_owned(),
-                    source,
-                })?
-            }
+        let (argv, env_remove) = match launch {
+            LaunchPlan::Local => (vec!["sh".to_owned(), "-c".to_owned(), script], &[][..]),
+            LaunchPlan::Ssh { target } => (ssh_argv(target, &script), SSH_ENV_REMOVE),
         };
-        if !output.status.success() {
+        let command_error = |source| ResidualProbeError::Command {
+            machine: machine.to_owned(),
+            source,
+        };
+        let (status, stdout, stderr) =
+            match run_cleanup_with_bound(&argv, env_remove, None, None, bound, None) {
+                Ok(BoundedWait::Exited {
+                    status,
+                    stdout,
+                    stderr,
+                }) => (status, stdout, stderr),
+                Ok(BoundedWait::Expired {
+                    operation_elapsed_ms,
+                    ..
+                }) => {
+                    return Err(ResidualProbeError::Expired {
+                        machine: machine.to_owned(),
+                        elapsed_ms: operation_elapsed_ms,
+                    });
+                }
+                Ok(BoundedWait::Interrupted { kill, .. }) => {
+                    kill.map_err(command_error)?;
+                    return Err(command_error(std::io::Error::other(
+                        "interrupted during cleanup",
+                    )));
+                }
+                Err(
+                    BoundedError::Launch(source)
+                    | BoundedError::Stdin(source)
+                    | BoundedError::Wait(source)
+                    | BoundedError::WaitCleanup { source, .. },
+                ) => return Err(command_error(source)),
+            };
+        if !status.success() {
             return Err(ResidualProbeError::Exit {
                 machine: machine.to_owned(),
-                status: output.status,
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                status,
+                stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
             });
         }
-        parse_residual_rows(machine, &String::from_utf8_lossy(&output.stdout))
+        parse_residual_rows(machine, &String::from_utf8_lossy(&stdout))
     }
 }
 
@@ -122,6 +153,10 @@ fn parse_residual_rows(machine: &str, stdout: &str) -> Result<u64, ResidualProbe
     Ok(total)
 }
 
+pub(super) fn residual_held(evidence: &DeviceResidualEvidence) -> bool {
+    matches!(evidence, DeviceResidualEvidence::ResidualHeld { .. })
+}
+
 /// The evidence outcome for one probed device: a probe failure records
 /// probe-unavailable — it must not fail or unverify the cleanup.
 pub(super) fn probe_device_residual<R: ResidualProbe>(
@@ -129,9 +164,10 @@ pub(super) fn probe_device_residual<R: ResidualProbe>(
     launch: &LaunchPlan,
     machine: &str,
     device: u32,
+    bound: &OperationBound,
 ) -> DeviceResidualEvidence {
     let machine = machine.to_owned();
-    match runtime.residual_bytes(launch, &machine, device) {
+    match runtime.residual_bytes(launch, &machine, device, bound) {
         Ok(0) => DeviceResidualEvidence::Freed { machine, device },
         Ok(bytes) => DeviceResidualEvidence::ResidualHeld {
             machine,

@@ -13,7 +13,6 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
 use tokio::sync::RwLock;
 
 pub const VERSION: u32 = 1;
@@ -181,7 +180,7 @@ async fn discover_prefillers(state: ProxyState) {
             if discover_prefiller(&state.client(), prefill).await.is_ok() {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(crate::core::BACKEND_RETRY_INTERVAL).await;
         }
     }
     state.set_ready();

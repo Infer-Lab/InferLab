@@ -655,21 +655,10 @@ pub(super) fn pixi_command(environment: &str, process: Vec<String>) -> Vec<Strin
 
 pub(super) fn readiness_plan(
     probe: &ReadinessProbe,
-    timeout: u64,
-    attempt_timeout: u64,
-    capture_armed: bool,
     allocations: &[ResolvedProcessAllocation],
 ) -> Result<ReadinessPlan, InferlabError> {
     match probe {
-        ReadinessProbe::Http { path } => Ok(ReadinessPlan::Http {
-            path: path.clone(),
-            // A capture-armed server's readiness wait is unbounded
-            // ([[RFC-0004:C-WORKLOAD-PROFILING]]): instrumentation multiplies
-            // startup unpredictably, and the wait still terminates on process
-            // death or interruption.
-            timeout_seconds: (!capture_armed).then_some(timeout),
-            attempt_timeout_seconds: attempt_timeout,
-        }),
+        ReadinessProbe::Http { path } => Ok(ReadinessPlan::Http { path: path.clone() }),
         ReadinessProbe::HttpTargetRegistry(registry) => {
             let expected_targets = allocations
                 .iter()
@@ -734,14 +723,9 @@ pub(super) fn readiness_plan(
                 target_healthy_field: registry.target_healthy_field.clone(),
                 target_bootstrap_port_field: registry.target_bootstrap_port_field.clone(),
                 expected_targets,
-                timeout_seconds: (!capture_armed).then_some(timeout),
-                attempt_timeout_seconds: attempt_timeout,
             })
         }
-        ReadinessProbe::ProcessAlive => Ok(ReadinessPlan::ProcessAlive {
-            timeout_seconds: (!capture_armed).then_some(timeout),
-            attempt_timeout_seconds: attempt_timeout,
-        }),
+        ReadinessProbe::ProcessAlive => Ok(ReadinessPlan::ProcessAlive),
     }
 }
 
@@ -838,7 +822,7 @@ mod tests {
             prefill_bootstrap_port: "bootstrap".to_owned(),
         }));
 
-        let readiness = readiness_plan(&probe, 900, 30, false, &allocations)?;
+        let readiness = readiness_plan(&probe, &allocations)?;
         assert!(matches!(
             &readiness,
             ReadinessPlan::HttpTargetRegistry { .. }

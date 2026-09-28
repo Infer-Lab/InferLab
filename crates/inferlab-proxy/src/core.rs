@@ -128,9 +128,13 @@ async fn await_backend(client: reqwest::Client, url: String, path: &'static str)
         {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(BACKEND_RETRY_INTERVAL).await;
     }
 }
+
+/// Pause between readiness-gate attempts against a backend that is not up
+/// yet; the owning server readiness budget ends the wait.
+pub(crate) const BACKEND_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Collect the fan-out target URLs shared by the reset/flush sweeps and the
 /// readiness wait: every prefill replica URL followed by every decode URL.
@@ -307,13 +311,6 @@ pub(crate) fn build_pooled_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-/// Per-target ceiling for cache reset/flush/prime fan-out operations. The
-/// pooled client itself carries no timeout because it also serves
-/// long-lived streaming decode requests; fan-out targets instead get this
-/// per-target bound so one hung engine cannot stall every remaining rank
-/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
-pub(crate) const FANOUT_TARGET_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Failure detail of one reset/flush fan-out target.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FanoutFailure {
@@ -446,9 +443,11 @@ pub(crate) fn ranked_prime_targets<R: PrimeReplica + Clone>(
 
 /// Run the reset/flush fan-out skeleton: the engine module enumerates the
 /// target base URLs and names its endpoint (`path`) and operation; target
-/// execution, the per-target timeout, and the response aggregation (200 when
-/// every target succeeded, 206 on partial failure) live here. An empty
-/// target set is a 502 — "no targets" must not be conflated with success.
+/// execution and the response aggregation (200 when every target succeeded,
+/// 206 on partial failure) live here. The caller's measurement-case request
+/// deadline bounds the whole fan-out; the proxy adds no shorter cap
+/// ([[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]]). An empty target set is a 502 —
+/// "no targets" must not be conflated with success.
 pub(crate) async fn run_sweep_fanout(
     client: reqwest::Client,
     operation: &'static str,
@@ -490,7 +489,7 @@ async fn sweep_target(
     authorization: Option<String>,
 ) -> Result<String, FanoutFailure> {
     let endpoint = join_path(&url, path);
-    let mut request = client.post(endpoint).timeout(FANOUT_TARGET_TIMEOUT);
+    let mut request = client.post(endpoint);
     if let Some(authorization) = authorization {
         request = request.header(reqwest::header::AUTHORIZATION, authorization);
     }
@@ -517,28 +516,14 @@ async fn sweep_target(
 
 /// Run the prefix-cache conditioning fan-out skeleton: the engine module
 /// enumerates the (replica, rank) targets and supplies the per-target
-/// conditioning flow; sequential target execution with a per-target timeout
-/// and the response aggregation (200 when every flow succeeded, 206 on
-/// partial failure) live here. An empty target set is a 502 — "no targets"
-/// must not be conflated with success.
+/// conditioning flow; sequential target execution and the response
+/// aggregation (200 when every flow succeeded, 206 on partial failure) live
+/// here, bounded by the caller's request deadline like the sweep. An empty
+/// target set is a 502 — "no targets" must not be conflated with success.
 pub(crate) async fn run_prime_fanout<T, F, Fut>(
     operation: &'static str,
     targets: Vec<T>,
-    execute: F,
-) -> Response<Body>
-where
-    T: PrimeFanoutTarget,
-    F: FnMut(T) -> Fut,
-    Fut: Future<Output = Result<u16, PrimeFlowFailure>>,
-{
-    run_prime_fanout_with_timeout(operation, targets, execute, FANOUT_TARGET_TIMEOUT).await
-}
-
-async fn run_prime_fanout_with_timeout<T, F, Fut>(
-    operation: &'static str,
-    targets: Vec<T>,
     mut execute: F,
-    target_timeout: Duration,
 ) -> Response<Body>
 where
     T: PrimeFanoutTarget,
@@ -553,32 +538,22 @@ where
         let url = target.url().to_owned();
         let rank = target.rank();
         let started = std::time::Instant::now();
-        let outcome = tokio::time::timeout(target_timeout, execute(target)).await;
+        let outcome = execute(target).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         results.push(match outcome {
-            Ok(Ok(status)) => PrimePrefixCacheTarget {
+            Ok(status) => PrimePrefixCacheTarget {
                 url,
                 rank,
                 http_status: Some(status),
                 elapsed_ms,
                 error: None,
             },
-            Ok(Err(failure)) => PrimePrefixCacheTarget {
+            Err(failure) => PrimePrefixCacheTarget {
                 url,
                 rank,
                 http_status: failure.http_status,
                 elapsed_ms,
                 error: Some(failure.error),
-            },
-            Err(_elapsed) => PrimePrefixCacheTarget {
-                url,
-                rank,
-                http_status: None,
-                elapsed_ms,
-                error: Some(format!(
-                    "{operation} timed out after {}s",
-                    target_timeout.as_secs()
-                )),
             },
         });
     }
@@ -934,32 +909,60 @@ mod tests {
         Ok(())
     }
 
-    /// A hung target must not stall the remaining ranks: the flow is bounded
-    /// by the per-target timeout and surfaces as a failed target (206).
+    /// The proxy imposes no per-target cap of its own: the caller's
+    /// measurement-case deadline bounds a fan-out, and a caller that gives up
+    /// cancels the in-flight target work ([[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]]).
     #[test]
-    fn prime_fanout_times_out_a_hung_target() -> Result<()> {
+    fn prime_fanout_is_cancelled_when_the_caller_gives_up() -> Result<()> {
         let runtime = proxy_test_runtime()?;
-        let response = runtime.block_on(run_prime_fanout_with_timeout(
-            "prefix cache conditioning",
-            vec![StaticPrimeTarget {
-                url: "http://127.0.0.1:1",
-                rank: 0,
-            }],
-            |_target| async {
-                futures_util::future::pending::<()>().await;
-                Ok::<u16, PrimeFlowFailure>(200)
-            },
-            Duration::from_millis(50),
-        ));
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        let body = runtime.block_on(axum::body::to_bytes(response.into_body(), usize::MAX))?;
-        let value: Value = serde_json::from_slice(&body)?;
-        assert_eq!(value["targets"][0]["http_status"], Value::Null);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = dropped.clone();
+        let observed = dropped.clone();
+        runtime.block_on(async move {
+            let app = axum::Router::new().route(
+                "/prime",
+                axum::routing::post(move || {
+                    let flag = flag.clone();
+                    async move {
+                        run_prime_fanout(
+                            "prefix cache conditioning",
+                            vec![StaticPrimeTarget {
+                                url: "http://127.0.0.1:1",
+                                rank: 0,
+                            }],
+                            move |_target| {
+                                let guard = SetOnDrop(flag.clone());
+                                async move {
+                                    let _guard = guard;
+                                    futures_util::future::pending::<()>().await;
+                                    Ok::<u16, PrimeFlowFailure>(200)
+                                }
+                            },
+                        )
+                        .await
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            let result = reqwest::Client::new()
+                .post(format!("http://{addr}/prime"))
+                .timeout(Duration::from_millis(200))
+                .send()
+                .await;
+            assert!(result.is_err(), "the pending target must hold the response");
+            for _ in 0..50 {
+                if observed.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            anyhow::Ok(())
+        })?;
         assert!(
-            value["targets"][0]["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("timed out")),
-            "got {value}"
+            dropped.load(Ordering::SeqCst),
+            "target work outlived the caller's deadline"
         );
         Ok(())
     }

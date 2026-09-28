@@ -206,7 +206,6 @@ pub(crate) struct LaunchFileProjection {
 pub(crate) enum ReadinessProjection {
     Http {
         path: String,
-        timeout_seconds: Option<u64>,
     },
     HttpTargetRegistry {
         readiness_path: String,
@@ -217,7 +216,6 @@ pub(crate) enum ReadinessProjection {
         target_healthy_field: String,
         target_bootstrap_port_field: String,
         expected_targets: Vec<TargetRegistryExpectedProjection>,
-        timeout_seconds: Option<u64>,
     },
     ProcessAlive,
 }

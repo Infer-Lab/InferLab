@@ -9,7 +9,6 @@ use inferlab_runtime::operation_bound::OperationBound;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const NSYS_INACTIVE_SESSION_STATE: &str = "Launched";
 
@@ -177,9 +176,6 @@ pub(crate) fn snapshot_trace_files(trace_dir: &Path) -> Result<BTreeSet<PathBuf>
     Ok(files)
 }
 
-const INITIAL_TRACE_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const MAX_TRACE_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
 /// Verify one engine-trace replica's coverage: the dedicated-directory
 /// storage delta since collection arming must contain at least one new trace
 /// artifact per device of the replica's whole-replica device count
@@ -208,8 +204,8 @@ pub(crate) fn verify_engine_trace_coverage(
     };
     poll_until(
         bound,
-        INITIAL_TRACE_POLL_INTERVAL,
-        MAX_TRACE_POLL_INTERVAL,
+        crate::poll::ARTIFACT_POLL_INITIAL_INTERVAL,
+        crate::poll::ARTIFACT_POLL_MAX_INTERVAL,
         || {
             let current = match snapshot_trace_files(trace_dir) {
                 Ok(current) => current,

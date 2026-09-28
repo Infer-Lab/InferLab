@@ -137,10 +137,11 @@ pub(crate) struct ServerRecord {
 }
 
 impl ServerRecord {
-    /// The device-residual cleanup evidence member ([[RFC-0005:C-EVIDENCE]])
-    /// MUST NOT be encoded under an earlier server record version, so the
-    /// version gate stops older records before serde does.
-    pub(crate) const SCHEMA_VERSION: u32 = 11;
+    /// The device-residual settle window and the removal of per-process
+    /// readiness bound copies ([[RFC-0005:C-EVIDENCE]]) MUST NOT be encoded
+    /// under an earlier server record version, so the version gate stops
+    /// older records before serde does.
+    pub(crate) const SCHEMA_VERSION: u32 = 12;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

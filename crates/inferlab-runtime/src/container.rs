@@ -21,6 +21,7 @@ use crate::operation_bound::{OperationBound, Remaining, duration_millis};
 /// cleanup path must not hang on its own cleanup.
 pub const REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CONTAINER_ABSENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const COMMAND_REAP_GRACE: Duration = Duration::from_secs(5);
 const COMMAND_IO_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
@@ -604,10 +605,13 @@ fn confirm_container_absent(target: Option<&str>, container: &str, bound: &Opera
         if bound.is_expired() {
             return false;
         }
-        let sleep = match bound.attempt(Some(Duration::from_millis(250))).remaining() {
+        let sleep = match bound
+            .attempt(Some(CONTAINER_ABSENCE_POLL_INTERVAL))
+            .remaining()
+        {
             Remaining::Finite(duration) => duration,
             Remaining::Expired => return false,
-            Remaining::Unbounded => Duration::from_millis(250),
+            Remaining::Unbounded => CONTAINER_ABSENCE_POLL_INTERVAL,
         };
         std::thread::sleep(sleep);
     }

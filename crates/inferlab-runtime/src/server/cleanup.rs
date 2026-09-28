@@ -17,6 +17,16 @@ pub(super) const REMOTE_SERVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(
 const LOCAL_LAUNCH_FAILURE_REAP_GRACE: Duration = Duration::from_secs(5);
 pub(super) const TERM_POLL_LIMIT: u128 = TERM_GRACE.as_millis() / POLL_INTERVAL.as_millis();
 pub(super) const KILL_POLL_LIMIT: u128 = KILL_GRACE.as_millis() / POLL_INTERVAL.as_millis();
+
+/// The `sleep` operand of the remote TERM and KILL loops: the poll limits
+/// above count iterations of this same interval.
+pub(super) fn remote_poll_sleep() -> String {
+    format!(
+        "{}.{:03}",
+        POLL_INTERVAL.as_secs(),
+        POLL_INTERVAL.subsec_millis()
+    )
+}
 const CLEANUP_MARKER: &str = "INFERLAB_CLEANUP\t";
 
 impl CleanupEvidence {
@@ -36,6 +46,7 @@ impl CleanupEvidence {
             error: Some(message),
             container_removal: None,
             device_residuals: None,
+            device_residual_settle_window_ms: None,
         }
     }
 
@@ -66,6 +77,7 @@ impl CleanupEvidence {
             error,
             container_removal: Some(removal),
             device_residuals: None,
+            device_residual_settle_window_ms: None,
         }
     }
 }
@@ -237,6 +249,7 @@ pub(super) fn terminate_local(
                     )),
                     container_removal: None,
                     device_residuals: None,
+                    device_residual_settle_window_ms: None,
                 },
                 Err(error) => cleanup_error(trigger, true, signals, error.to_string()),
             }
@@ -262,7 +275,7 @@ pub(super) fn terminate_ssh(handle: &SshProcessHandle, trigger: CleanupTrigger) 
 /// signal, naming the offending members in the detail field.
 pub(super) fn remote_cleanup_script(handle: &SshProcessHandle) -> String {
     format!(
-        "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t0\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then bad=\"\"; for mpid in $(ps -eo pid=,pgid=,stat= | awk -v pgid=\"$pgid\" '$2 == pgid && $3 !~ /^Z/ {{print $1}}'); do mticks=$(awk '{{print $22}}' /proc/$mpid/stat 2>/dev/null) || mticks=\"\"; if [ -n \"$mticks\" ] && [ \"$mticks\" -lt \"$expected\" ]; then bad=\"$bad $mpid:$mticks\"; fi; done; if [ -n \"$bad\" ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tleader-missing; cohort members%s predate recorded leader start %s\\n' \"$bad\" \"$expected\"; exit 0; fi; else printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep 0.1; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; i=0; while {} && [ $i -lt {kill_limit} ]; do sleep 0.1; i=$((i+1)); done; fi; alive=0; if {}; then alive=1; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\" \"$alive\"",
+        "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t0\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then bad=\"\"; for mpid in $(ps -eo pid=,pgid=,stat= | awk -v pgid=\"$pgid\" '$2 == pgid && $3 !~ /^Z/ {{print $1}}'); do mticks=$(awk '{{print $22}}' /proc/$mpid/stat 2>/dev/null) || mticks=\"\"; if [ -n \"$mticks\" ] && [ \"$mticks\" -lt \"$expected\" ]; then bad=\"$bad $mpid:$mticks\"; fi; done; if [ -n \"$bad\" ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tleader-missing; cohort members%s predate recorded leader start %s\\n' \"$bad\" \"$expected\"; exit 0; fi; else printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; i=0; while {} && [ $i -lt {kill_limit} ]; do sleep {poll}; i=$((i+1)); done; fi; alive=0; if {}; then alive=1; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\" \"$alive\"",
         handle.process_group,
         handle.leader_pid,
         handle.leader_start_time_ticks,
@@ -274,6 +287,7 @@ pub(super) fn remote_cleanup_script(handle: &SshProcessHandle) -> String {
         remote_group_alive_script("$pgid"),
         term_limit = TERM_POLL_LIMIT,
         kill_limit = KILL_POLL_LIMIT,
+        poll = remote_poll_sleep(),
         marker = CLEANUP_MARKER,
     )
 }
@@ -488,6 +502,7 @@ pub(super) fn completed_cleanup(
         error: None,
         container_removal: None,
         device_residuals: None,
+        device_residual_settle_window_ms: None,
     }
 }
 
@@ -512,6 +527,7 @@ pub(super) fn cleanup_error(
         error: Some(error),
         container_removal: None,
         device_residuals: None,
+        device_residual_settle_window_ms: None,
     }
 }
 

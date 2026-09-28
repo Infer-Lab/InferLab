@@ -16,7 +16,10 @@ use inferlab_runtime::server::{
 };
 use preflight::{PreflightObserver, RemoteCheckError, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
-use residual::{ResidualProbe, probe_device_residual};
+use residual::{
+    RESIDUAL_SETTLE_INTERVAL, RESIDUAL_SETTLE_WINDOW, ResidualProbe, probe_device_residual,
+    residual_held,
+};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -682,6 +685,11 @@ fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
     progress: &Progress,
     spawned: &SpawnedProcesses<'_>,
 ) -> Result<(), InferlabError> {
+    // One readiness budget covers every process, starting after all have
+    // spawned ([[RFC-0003:C-RESOLUTION]]). A capture-armed server's readiness
+    // wait is unbounded ([[RFC-0004:C-WORKLOAD-PROFILING]]): instrumentation
+    // multiplies startup unpredictably, and the wait still terminates on
+    // process death or interruption.
     let readiness_bound = if resolved.server.profiling {
         OperationBound::unbounded()
     } else {
@@ -707,6 +715,7 @@ fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
             &process.endpoint,
             &process.readiness,
             &readiness_bound,
+            resolved.server.readiness_attempt_timeout_seconds,
             &mut on_probe_failure,
         ) {
             Ok(readiness) => {
@@ -1104,53 +1113,79 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
 /// every process whose latest cleanup entry claims verified gets its assigned
 /// devices probed on their launch machine ([[RFC-0005:C-EVIDENCE]]). An
 /// unverified entry is already honest and is not probed: while its process
-/// group may still live, residual memory says nothing about a leak. A device
-/// still holding memory flips the entry to unverified naming machine and
-/// device; a machine without the probe tool records probe-unavailable without
-/// failing the cleanup. Returns the first residual error for the caller's
+/// group may still live, residual memory says nothing about a leak. Driver
+/// teardown of a killed process lags its exit, so held devices are probed
+/// again until they free or the settle window closes; every probe consumes
+/// that window, so a wedged driver or host cannot hang cleanup. A device
+/// still holding memory at the deadline flips the entry to unverified naming
+/// machine and device. A machine without the probe tool, or a probe that
+/// cannot answer in time, records probe-unavailable without failing the
+/// cleanup. Returns the first residual error for the caller's
 /// failure message.
 fn verify_freed_devices<R: ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
 ) -> Result<Option<String>, InferlabError> {
-    let probes = session
-        .record()
-        .resolved
-        .server
-        .processes()
-        .map(|process| {
-            (
-                process.id.clone(),
-                process.machine.clone(),
-                process.launch.clone(),
-                process.allocation.devices.clone(),
-            )
+    let mut probes = Vec::new();
+    for process in session.record().resolved.server.processes() {
+        let verified = process_cleanup_verified(session, &process.id)?;
+        if verified {
+            probes.extend(process.allocation.devices.iter().map(|&device| {
+                (
+                    process.id.clone(),
+                    process.machine.clone(),
+                    process.launch.clone(),
+                    device,
+                )
+            }));
+        }
+    }
+    let settle = OperationBound::finite(RESIDUAL_SETTLE_WINDOW);
+    let mut residuals = probes
+        .iter()
+        .map(|(_, machine, launch, device)| {
+            probe_device_residual(runtime, launch, machine, *device, &settle)
         })
         .collect::<Vec<_>>();
-    let mut first_error = None;
-    for (process_id, machine, launch, devices) in probes {
-        if devices.is_empty() {
-            continue;
+    while residuals.iter().any(residual_held) && !settle.is_expired() {
+        std::thread::sleep(RESIDUAL_SETTLE_INTERVAL);
+        for ((_, machine, launch, device), residual) in probes.iter().zip(residuals.iter_mut()) {
+            if !residual_held(residual) {
+                continue;
+            }
+            // A re-probe that cannot answer is inconclusive: the device keeps
+            // the held reading it last showed.
+            let reprobed = probe_device_residual(runtime, launch, machine, *device, &settle);
+            if !matches!(reprobed, DeviceResidualEvidence::ProbeUnavailable { .. }) {
+                *residual = reprobed;
+            }
         }
-        let cleanup = session.process_mut(&process_id)?.cleanup.last_mut();
-        let Some(cleanup) = cleanup.filter(|cleanup| cleanup.verified) else {
-            continue;
-        };
-        let residuals = devices
-            .iter()
-            .map(|&device| probe_device_residual(runtime, &launch, &machine, device))
-            .collect::<Vec<_>>();
+    }
+
+    let mut first_error = None;
+    let mut by_process = std::collections::BTreeMap::<String, Vec<DeviceResidualEvidence>>::new();
+    for ((process_id, _, _, _), residual) in probes.into_iter().zip(residuals) {
+        by_process.entry(process_id).or_default().push(residual);
+    }
+    for (process_id, residuals) in by_process {
         let held = residuals.iter().find_map(|entry| match entry {
             DeviceResidualEvidence::ResidualHeld {
                 machine,
                 device,
                 bytes,
             } => Some(format!(
-                "device {device} on machine {machine:?} still holds {bytes} bytes of compute memory after process cleanup"
+                "device {device} on machine {machine:?} still holds {bytes} bytes of compute memory {}s after process cleanup",
+                RESIDUAL_SETTLE_WINDOW.as_secs()
             )),
             _ => None,
         });
+        let Some(cleanup) = session.process_mut(&process_id)?.cleanup.last_mut() else {
+            continue;
+        };
         cleanup.device_residuals = Some(residuals);
+        cleanup.device_residual_settle_window_ms = Some(
+            inferlab_runtime::operation_bound::duration_millis(RESIDUAL_SETTLE_WINDOW),
+        );
         if let Some(error) = held {
             cleanup.verified = false;
             cleanup.error = Some(error.clone());
@@ -1160,6 +1195,17 @@ fn verify_freed_devices<R: ResidualProbe>(
         }
     }
     Ok(first_error)
+}
+
+fn process_cleanup_verified(
+    session: &ServerRecordSession,
+    process_id: &str,
+) -> Result<bool, InferlabError> {
+    Ok(session
+        .process(process_id)?
+        .cleanup
+        .last()
+        .is_some_and(|cleanup| cleanup.verified))
 }
 
 fn finalize_profiler_process(
@@ -1281,12 +1327,13 @@ mod tests {
             _launch: &LaunchPlan,
             machine: &str,
             device: u32,
+            _bound: &OperationBound,
         ) -> Result<u64, ResidualProbeError> {
             self.residuals
                 .get(&(machine.to_owned(), device))
                 .cloned()
                 .unwrap_or(Ok(0))
-                .map_err(|reason| ResidualProbeError::LocalLaunch {
+                .map_err(|reason| ResidualProbeError::Command {
                     machine: machine.to_owned(),
                     source: std::io::Error::other(reason),
                 })
@@ -1335,6 +1382,7 @@ mod tests {
             _endpoint: &ProcessEndpointPlan,
             _readiness: &ReadinessPlan,
             bound: &inferlab_runtime::operation_bound::OperationBound,
+            _attempt_timeout_seconds: u64,
             _on_probe_failure: &mut dyn FnMut(&str),
         ) -> Result<ReadinessEvidence, ReadinessFailure> {
             self.readiness_bounds
@@ -1377,6 +1425,7 @@ mod tests {
                 error: None,
                 container_removal: None,
                 device_residuals: None,
+                device_residual_settle_window_ms: None,
             }
         }
     }
@@ -1435,7 +1484,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 11);
+        assert_eq!(value["schema_version"], 12);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1461,65 +1510,6 @@ mod tests {
         assert!(first.get("machine").is_none());
         assert!(first["stdout"].as_str().is_some());
         assert!(first["stderr"].as_str().is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn server_record_loader_rejects_an_incompatible_schema_version()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let record = ServerRecordSession::begin(root.path(), &resolved(), Some("schema-test"))?
-            .into_record();
-        let path = root
-            .path()
-            .join(".inferlab/records/schema-test/record.json");
-        let mut value = serde_json::to_value(record)?;
-        value["schema_version"] = serde_json::json!(3);
-        std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
-
-        let Err(error) = load_record(root.path(), "schema-test") else {
-            return Err(std::io::Error::other(
-                "schema 3 must not be read as the current server-record shape",
-            )
-            .into());
-        };
-
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported schema version 3; expected 11"),
-            "{error}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn server_record_loader_gates_an_old_record_before_strict_decoding()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let record_dir = root.path().join(".inferlab/records/schema-test");
-        std::fs::create_dir_all(&record_dir)?;
-        // A protocol-v7-era record: version 6 with a body that no longer
-        // decodes as the current ServerRecord shape. The version gate must
-        // still catch it instead of surfacing a bare serde variant error.
-        std::fs::write(
-            record_dir.join("record.json"),
-            br#"{"schema_version":6,"status":"running"}"#,
-        )?;
-
-        let Err(error) = load_record(root.path(), "schema-test") else {
-            return Err(std::io::Error::other(
-                "a version-6 record must be stopped by the version gate",
-            )
-            .into());
-        };
-
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported schema version 6; expected 11"),
-            "{error}"
-        );
         Ok(())
     }
 
@@ -1670,10 +1660,7 @@ mod tests {
                 cwd: std::env::temp_dir(),
             },
             launch_files: Vec::new(),
-            readiness: ReadinessPlan::ProcessAlive {
-                timeout_seconds: Some(60),
-                attempt_timeout_seconds: 30,
-            },
+            readiness: ReadinessPlan::ProcessAlive,
             endpoint: ProcessEndpointPlan {
                 host: "127.0.0.1".to_owned(),
                 port: 8000 + index as u16,

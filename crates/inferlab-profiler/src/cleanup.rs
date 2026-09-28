@@ -109,44 +109,15 @@ pub fn cleanup_target_agent(
             );
         }
     };
-    let term_bound = OperationBound::finite(PROFILER_AGENT_TERM_GRACE);
-    let mut errors = Vec::new();
-    let term_sent = match signal_pids(target, &pids, "-TERM", &term_bound) {
-        Ok(sent) => sent,
-        Err(error) => {
-            errors.push(error.to_string());
-            false
-        }
-    };
-    let stopped_after_term = wait_for_pids(target, &pids, &term_bound);
-    let (kill_sent, verified) = match stopped_after_term {
-        Ok(true) => (false, true),
-        Ok(false) => {
-            let kill_bound = OperationBound::finite(PROFILER_AGENT_KILL_GRACE);
-            let kill_sent = match signal_pids(target, &pids, "-KILL", &kill_bound) {
-                Ok(sent) => sent,
-                Err(error) => {
-                    errors.push(error.to_string());
-                    false
-                }
-            };
-            match wait_for_pids(target, &pids, &kill_bound) {
-                Ok(true) => (kill_sent, true),
-                Ok(false) => {
-                    errors.push("Nsight Systems session agent remained alive".to_owned());
-                    (kill_sent, false)
-                }
-                Err(error) => {
-                    errors.push(error.to_string());
-                    (kill_sent, false)
-                }
-            }
-        }
-        Err(error) => {
-            errors.push(error.to_string());
-            (false, false)
-        }
-    };
+    let AgentTermination {
+        term_sent,
+        kill_sent,
+        verified,
+        errors,
+    } = terminate_agents(
+        |signal, bound| signal_pids(target, &pids, signal, bound),
+        |bound| wait_for_pids(target, &pids, bound),
+    );
     ProfilerCleanupRecord {
         trigger,
         session: target.session.clone(),
@@ -161,6 +132,64 @@ pub fn cleanup_target_agent(
         kill_sent,
         verified,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
+    }
+}
+
+struct AgentTermination {
+    term_sent: bool,
+    kill_sent: bool,
+    verified: bool,
+    errors: Vec<String>,
+}
+
+/// TERM, wait out the grace, then KILL whatever may still live. A liveness
+/// observation that fails inside the TERM grace — an SSH `kill -0` reaching
+/// the grace deadline, for example — is inconclusive, so it escalates to
+/// SIGKILL like a still-alive agent rather than ending cleanup unkilled.
+fn terminate_agents<S, W>(mut signal: S, mut wait: W) -> AgentTermination
+where
+    S: FnMut(&str, &OperationBound) -> Result<bool, ProfilerCleanupCommandError>,
+    W: FnMut(&OperationBound) -> Result<bool, ProfilerCleanupCommandError>,
+{
+    let mut errors = Vec::new();
+    let term_bound = OperationBound::finite(PROFILER_AGENT_TERM_GRACE);
+    let term_sent = signal("-TERM", &term_bound).unwrap_or_else(|error| {
+        errors.push(error.to_string());
+        false
+    });
+    let stopped_after_term = wait(&term_bound).unwrap_or_else(|error| {
+        errors.push(error.to_string());
+        false
+    });
+    if stopped_after_term {
+        return AgentTermination {
+            term_sent,
+            kill_sent: false,
+            verified: true,
+            errors,
+        };
+    }
+    let kill_bound = OperationBound::finite(PROFILER_AGENT_KILL_GRACE);
+    let kill_sent = signal("-KILL", &kill_bound).unwrap_or_else(|error| {
+        errors.push(error.to_string());
+        false
+    });
+    let verified = match wait(&kill_bound) {
+        Ok(true) => true,
+        Ok(false) => {
+            errors.push("Nsight Systems session agent remained alive".to_owned());
+            false
+        }
+        Err(error) => {
+            errors.push(error.to_string());
+            false
+        }
+    };
+    AgentTermination {
+        term_sent,
+        kill_sent,
+        verified,
+        errors,
     }
 }
 
@@ -328,5 +357,47 @@ fn target_pid_alive(
                 }),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProfilerCleanupCommandError, terminate_agents};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn inconclusive_liveness_during_term_grace_escalates_to_kill() {
+        let mut signals = Vec::new();
+        let mut waits = 0;
+        let outcome = terminate_agents(
+            |signal, _bound| {
+                signals.push(signal.to_owned());
+                Ok(true)
+            },
+            |_bound| {
+                waits += 1;
+                if waits == 1 {
+                    Err(ProfilerCleanupCommandError::InspectExit {
+                        pid: 7,
+                        status: ExitStatus::from_raw(255 << 8),
+                        stderr: "fixture ssh deadline".to_owned(),
+                    })
+                } else {
+                    Ok(true)
+                }
+            },
+        );
+        assert_eq!(signals, ["-TERM", "-KILL"]);
+        assert!(outcome.kill_sent);
+        assert!(outcome.verified);
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("fixture ssh deadline")),
+            "{:?}",
+            outcome.errors
+        );
     }
 }

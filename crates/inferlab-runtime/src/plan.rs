@@ -5,12 +5,11 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReadinessPlan {
+    /// The readiness budget and attempt timeout are server facts resolved
+    /// once ([[RFC-0003:C-RESOLUTION]]); a process plan carries only its
+    /// probe shape.
     Http {
         path: String,
-        /// `None` when the server is capture-armed: readiness remains
-        /// unbounded while process exit and interruption still terminate it.
-        timeout_seconds: Option<u64>,
-        attempt_timeout_seconds: u64,
     },
     HttpTargetRegistry {
         readiness_path: String,
@@ -21,13 +20,8 @@ pub enum ReadinessPlan {
         target_healthy_field: String,
         target_bootstrap_port_field: String,
         expected_targets: Vec<TargetRegistryExpectedTarget>,
-        timeout_seconds: Option<u64>,
-        attempt_timeout_seconds: u64,
     },
-    ProcessAlive {
-        timeout_seconds: Option<u64>,
-        attempt_timeout_seconds: u64,
-    },
+    ProcessAlive,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

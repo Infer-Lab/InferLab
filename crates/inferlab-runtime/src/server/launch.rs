@@ -1,6 +1,6 @@
 use super::cleanup::{
     KILL_POLL_LIMIT, REMOTE_SERVER_CLEANUP_DEADLINE, TERM_POLL_LIMIT, cleanup_error,
-    cleanup_failed_local_launch, completed_cleanup, remove_server_container,
+    cleanup_failed_local_launch, completed_cleanup, remote_poll_sleep, remove_server_container,
 };
 use super::observation::{remote_group_alive_script, run_cleanup_command};
 use super::{
@@ -255,7 +255,9 @@ pub(super) fn spawn_ssh(
         handle = shell_quote_path(&remote_handle),
         marker = HANDLE_MARKER,
     );
-    let output = ssh_output(target, &script)
+    // Handle delivery is operator-interruptible, not time-bounded
+    // ([[RFC-0009:C-OPERATION-BUDGETS]]).
+    let output = ssh_output(target, &script, &OperationBound::unbounded())
         .map_err(ServerLaunchError::from)
         .map_err(LaunchFailure::from_error)?;
     if !output.status.success() {
@@ -300,7 +302,12 @@ fn materialize_ssh_launch_files(
 ) -> Result<(), ServerLaunchError> {
     for launch_file in launch_files {
         let script = remote_launch_file_script(launch_file)?;
-        let output = ssh_output_with_input(target, &script, launch_file.text.as_bytes())?;
+        let output = ssh_output_with_input(
+            target,
+            &script,
+            launch_file.text.as_bytes(),
+            &OperationBound::unbounded(),
+        )?;
         if !output.status.success() {
             return Err(ServerLaunchError::Exit {
                 operation: format!(
@@ -455,10 +462,11 @@ fn cleanup_incomplete_ssh_launch(target: &str, remote_handle: &Path) -> Result<(
     let bound = OperationBound::finite(REMOTE_SERVER_CLEANUP_DEADLINE);
     let alive = remote_group_alive_script("$pid");
     let script = format!(
-        "set +e; file={file}; if [ ! -r \"$file\" ]; then exit 4; fi; read pid expected < \"$file\" || exit 4; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat) || exit 4; [ \"$actual\" = \"$expected\" ] || exit 4; elif {alive}; then exit 5; else rm -f \"$file\"; exit 0; fi; if ! {alive}; then rm -f \"$file\"; exit 0; fi; kill -TERM -- -$pid; i=0; while {alive} && [ $i -lt {term_limit} ]; do sleep 0.1; i=$((i+1)); done; if {alive}; then kill -KILL -- -$pid; i=0; while {alive} && [ $i -lt {kill_limit} ]; do sleep 0.1; i=$((i+1)); done; fi; if {alive}; then exit 6; fi; rm -f \"$file\"",
+        "set +e; file={file}; if [ ! -r \"$file\" ]; then exit 4; fi; read pid expected < \"$file\" || exit 4; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat) || exit 4; [ \"$actual\" = \"$expected\" ] || exit 4; elif {alive}; then exit 5; else rm -f \"$file\"; exit 0; fi; if ! {alive}; then rm -f \"$file\"; exit 0; fi; kill -TERM -- -$pid; i=0; while {alive} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; if {alive}; then kill -KILL -- -$pid; i=0; while {alive} && [ $i -lt {kill_limit} ]; do sleep {poll}; i=$((i+1)); done; fi; if {alive}; then exit 6; fi; rm -f \"$file\"",
         file = shell_quote_path(remote_handle),
         term_limit = TERM_POLL_LIMIT,
         kill_limit = KILL_POLL_LIMIT,
+        poll = remote_poll_sleep(),
     );
     let output = run_cleanup_command(
         &ssh_argv(target, &script),

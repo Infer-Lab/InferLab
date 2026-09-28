@@ -91,15 +91,18 @@ pub(super) fn verified_ssh_status_under(
         remote_group_alive_script(&handle.process_group.to_string()),
         remote_group_alive_script(&handle.process_group.to_string()),
     );
-    let output = match bound {
-        Some(bound) => {
-            run_status_command(&ssh_argv(&handle.target, &script), SSH_ENV_REMOVE, bound)
-        }
-        None => ssh_output(&handle.target, &script).map_err(|source| ProcessCommandError::Ssh {
-            operation: "process status command".to_owned(),
-            source,
-        }),
-    };
+    let output =
+        match bound {
+            Some(bound) => {
+                run_status_command(&ssh_argv(&handle.target, &script), SSH_ENV_REMOVE, bound)
+            }
+            None => ssh_output(&handle.target, &script, &OperationBound::unbounded()).map_err(
+                |source| ProcessCommandError::Ssh {
+                    operation: "process status command".to_owned(),
+                    source,
+                },
+            ),
+        };
     match output {
         Ok(output) if output.status.success() => ProcessStatus {
             queried: true,

@@ -388,11 +388,16 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
         evidence["cleanup"][0]["device_residuals"],
         serde_json::json!(expected_residuals)
     );
+    assert_eq!(
+        evidence["cleanup"][0]["device_residual_settle_window_ms"],
+        30_000
+    );
     Ok(())
 }
 
-/// A stopped server whose assigned device still shows compute memory reports
-/// unverified cleanup naming the device ([[RFC-0005:C-EVIDENCE]]).
+/// A stopped server whose assigned device still shows compute memory at the
+/// settle deadline reports unverified cleanup naming the device
+/// ([[RFC-0005:C-EVIDENCE]]).
 #[test]
 fn stop_reports_unverified_cleanup_when_a_device_still_holds_memory() -> Result<(), Box<dyn Error>>
 {
@@ -411,6 +416,7 @@ fn stop_reports_unverified_cleanup_when_a_device_still_holds_memory() -> Result<
     );
     assert!(stderr.contains("device 0"), "{stderr}");
     assert!(stderr.contains("\"local\""), "{stderr}");
+    assert!(stderr.contains("30s after process cleanup"), "{stderr}");
 
     let record: Value = serde_json::from_slice(&fs::read(
         workspace
@@ -421,12 +427,134 @@ fn stop_reports_unverified_cleanup_when_a_device_still_holds_memory() -> Result<
     assert_eq!(record["status"], "failed");
     let cleanup = &process_evidence(&record, "server")?["cleanup"][0];
     assert_eq!(cleanup["verified"], false);
+    assert_eq!(cleanup["device_residual_settle_window_ms"], 30_000);
     assert!(
         cleanup["error"]
             .as_str()
             .is_some_and(|error| error.contains("device 0") && error.contains("\"local\"")),
         "{cleanup}"
     );
+    assert_eq!(
+        cleanup["device_residuals"],
+        serde_json::json!([
+            {"outcome": "residual_held", "machine": "local", "device": 0, "bytes": bytes},
+            {"outcome": "residual_held", "machine": "local", "device": 1, "bytes": bytes},
+        ])
+    );
+    Ok(())
+}
+
+/// Driver teardown of a killed process lags its exit: memory the driver
+/// releases within the settle window is freed evidence, not a failed
+/// cleanup, and only the still-held devices are probed again.
+#[test]
+fn stop_waits_for_device_memory_the_driver_releases_after_cleanup() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+    let probe_log = workspace.root.path().join("nvidia-smi-probes.log");
+
+    let mut command = workspace.command(&["serve", "stop", id]);
+    command
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", "1024")
+        .env("FIXTURE_NVIDIA_SMI_HELD_PROBES", "3")
+        .env("FIXTURE_NVIDIA_SMI_PROBE_LOG", &probe_log);
+    let output = command.output()?;
+    assert!(
+        output.status.success(),
+        "memory released within the settle window must not fail the stop: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stopped: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(stopped["status"], "stopped");
+    let cleanup = &process_evidence(&stopped, "server")?["cleanup"][0];
+    assert_eq!(cleanup["verified"], true);
+    assert_eq!(
+        cleanup["device_residuals"],
+        serde_json::json!([
+            {"outcome": "freed", "machine": "local", "device": 0},
+            {"outcome": "freed", "machine": "local", "device": 1},
+        ])
+    );
+    // Round one holds both devices, round two holds one and frees one, and
+    // round three probes only the device that was still held.
+    assert_eq!(fs::read_to_string(&probe_log)?.lines().count(), 5);
+    Ok(())
+}
+
+/// A wedged driver cannot hang the stop: each residual probe consumes the
+/// settle window, and a probe that never answers records probe-unavailable
+/// ([[RFC-0009:C-CLEANUP-GRACE]]).
+#[test]
+fn stop_bounds_a_residual_probe_that_never_answers() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+
+    let mut command = workspace.command(&["serve", "stop", id]);
+    command
+        .env("FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES", "0")
+        .env(
+            "FIXTURE_NVIDIA_SMI_PROBE_LOG",
+            workspace.root.path().join("nvidia-smi-probes.log"),
+        );
+    let output = command.output()?;
+    assert!(
+        output.status.success(),
+        "an unanswered residual probe must not fail or hang the stop: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stopped: Value = serde_json::from_slice(&output.stdout)?;
+    let cleanup = &process_evidence(&stopped, "server")?["cleanup"][0];
+    assert_eq!(cleanup["verified"], true);
+    let residuals = cleanup["device_residuals"]
+        .as_array()
+        .ok_or("device residual evidence")?;
+    assert_eq!(residuals.len(), 2);
+    assert!(
+        residuals.iter().all(|entry| {
+            entry["outcome"] == "probe_unavailable"
+                && entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("settle window"))
+        }),
+        "{residuals:?}"
+    );
+    Ok(())
+}
+
+/// Once a device has shown held memory, a later probe that cannot answer is
+/// inconclusive: the device stays held rather than turning the cleanup
+/// verified.
+#[test]
+fn stop_keeps_held_memory_when_a_later_probe_never_answers() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+    let bytes = 1024_u64 * 1_048_576;
+
+    let mut command = workspace.command(&["serve", "stop", id]);
+    command
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", "1024")
+        .env("FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES", "2")
+        .env(
+            "FIXTURE_NVIDIA_SMI_PROBE_LOG",
+            workspace.root.path().join("nvidia-smi-probes.log"),
+        );
+    let output = command.output()?;
+    assert!(
+        !output.status.success(),
+        "held memory must still fail the stop: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record: Value = serde_json::from_slice(&fs::read(
+        workspace
+            .root
+            .path()
+            .join(format!(".inferlab/records/{id}/record.json")),
+    )?)?;
+    let cleanup = &process_evidence(&record, "server")?["cleanup"][0];
+    assert_eq!(cleanup["verified"], false);
     assert_eq!(
         cleanup["device_residuals"],
         serde_json::json!([
@@ -508,7 +636,7 @@ fn start_persists_synthetic_acceptance_in_the_record() -> Result<(), Box<dyn Err
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 11);
+    assert_eq!(persisted["schema_version"], 12);
     assert_eq!(
         persisted["resolved"]["server"]["synthetic_acceptance"]["acceptance_length"],
         2.5
@@ -556,7 +684,7 @@ fn start_persists_curve_form_synthetic_acceptance_evidence() -> Result<(), Box<d
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 11);
+    assert_eq!(persisted["schema_version"], 12);
     let synthetic = &persisted["resolved"]["server"]["synthetic_acceptance"];
     let declared = &synthetic["declared"]["curve"];
     assert_eq!(declared["path"], "curves/golden.yaml");
@@ -1384,7 +1512,12 @@ eval "exec bash -c $command"
 /// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape;
 /// `FIXTURE_NVIDIA_SMI_ERROR` forces a loud probe failure, and a
 /// compute-apps query answers with the `FIXTURE_NVIDIA_SMI_COMPUTE_APPS`
-/// rows (empty — no surviving compute applications — when unset).
+/// rows (empty — no surviving compute applications — when unset). With
+/// `FIXTURE_NVIDIA_SMI_HELD_PROBES`, each compute-apps query appends a line
+/// to `FIXTURE_NVIDIA_SMI_PROBE_LOG` and the rows stop after that many
+/// queries — memory the driver releases while the probe waits. With
+/// `FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES`, compute-apps queries past that
+/// count never return — a wedged driver.
 const NVIDIA_SMI: &str = r#"#!/bin/sh
 if [ -n "${FIXTURE_NVIDIA_SMI_ERROR:-}" ]; then
   printf '%s\n' "$FIXTURE_NVIDIA_SMI_ERROR" >&2
@@ -1392,6 +1525,16 @@ if [ -n "${FIXTURE_NVIDIA_SMI_ERROR:-}" ]; then
 fi
 case " $* " in
   *" --query-compute-apps="*)
+    if [ -n "${FIXTURE_NVIDIA_SMI_PROBE_LOG:-}" ]; then
+      printf 'probe\n' >> "$FIXTURE_NVIDIA_SMI_PROBE_LOG"
+      probes="$(wc -l < "$FIXTURE_NVIDIA_SMI_PROBE_LOG")"
+    fi
+    if [ -n "${FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES:-}" ] && [ "$probes" -gt "$FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES" ]; then
+      sleep 3600
+    fi
+    if [ -n "${FIXTURE_NVIDIA_SMI_HELD_PROBES:-}" ] && [ "$probes" -gt "$FIXTURE_NVIDIA_SMI_HELD_PROBES" ]; then
+      exit 0
+    fi
     if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS:-}" ]; then
       printf '%s\n' "$FIXTURE_NVIDIA_SMI_COMPUTE_APPS"
     fi

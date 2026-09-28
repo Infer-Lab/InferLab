@@ -84,33 +84,40 @@ pub enum SshError {
         cleanup: Box<CommandCleanupEvidence>,
     },
     #[error(
-        "SSH supervisor for target {target:?} unexpectedly exhausted an unbounded operation after {operation_elapsed_ms} ms; child cleanup: {cleanup:?}"
+        "SSH for target {target:?} exhausted its operation bound after {operation_elapsed_ms} ms; child cleanup: {cleanup:?}"
     )]
-    UnexpectedDeadline {
+    Expired {
         target: String,
         operation_elapsed_ms: u64,
         cleanup: Option<Box<CommandCleanupEvidence>>,
     },
 }
 
-pub fn ssh_output(target: &str, script: &str) -> Result<Output, SshError> {
-    run_ssh(target, script, None)
+/// Run `script` on `target` under the caller's operation bound. Every caller
+/// states its bound: a workflow that is deliberately unbounded passes
+/// [`OperationBound::unbounded`] and stays operator-interruptible
+/// ([[RFC-0009:C-OPERATION-BUDGETS]]).
+pub fn ssh_output(target: &str, script: &str, bound: &OperationBound) -> Result<Output, SshError> {
+    run_ssh(target, script, None, bound)
 }
 
-pub fn ssh_output_with_input(target: &str, script: &str, input: &[u8]) -> Result<Output, SshError> {
-    run_ssh(target, script, Some(input))
+pub fn ssh_output_with_input(
+    target: &str,
+    script: &str,
+    input: &[u8],
+    bound: &OperationBound,
+) -> Result<Output, SshError> {
+    run_ssh(target, script, Some(input), bound)
 }
 
-fn run_ssh(target: &str, script: &str, input: Option<&[u8]>) -> Result<Output, SshError> {
+fn run_ssh(
+    target: &str,
+    script: &str,
+    input: Option<&[u8]>,
+    bound: &OperationBound,
+) -> Result<Output, SshError> {
     let argv = ssh_argv(target, script);
-    match run_with_bound(
-        &argv,
-        SSH_ENV_REMOVE,
-        None,
-        input,
-        &OperationBound::unbounded(),
-        None,
-    ) {
+    match run_with_bound(&argv, SSH_ENV_REMOVE, None, input, bound, None) {
         Ok(BoundedWait::Exited {
             status,
             stdout,
@@ -127,10 +134,10 @@ fn run_ssh(target: &str, script: &str, input: Option<&[u8]>) -> Result<Output, S
         }) => {
             kill.map_err(|source| SshError::Io {
                 target: target.to_owned(),
-                operation: "clean up SSH after unexpected deadline",
+                operation: "clean up SSH after its operation bound expired",
                 source,
             })?;
-            Err(SshError::UnexpectedDeadline {
+            Err(SshError::Expired {
                 target: target.to_owned(),
                 operation_elapsed_ms,
                 cleanup: cleanup.map(Box::new),

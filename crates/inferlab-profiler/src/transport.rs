@@ -11,9 +11,6 @@ use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
 
-const INITIAL_REPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const MAX_REPORT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
 pub(crate) fn prepare_output(
     target: &ProfilerTargetRecord,
     parent: &Path,
@@ -57,8 +54,8 @@ pub(crate) fn verify_report(
 ) -> CaptureActionRecord {
     poll_until(
         bound,
-        INITIAL_REPORT_POLL_INTERVAL,
-        MAX_REPORT_POLL_INTERVAL,
+        crate::poll::ARTIFACT_POLL_INITIAL_INTERVAL,
+        crate::poll::ARTIFACT_POLL_MAX_INTERVAL,
         || {
             let action = check_report(target, path, bound, start_boundary);
             if action.succeeded() {

@@ -3,6 +3,7 @@ use crate::execution::{ProcessPlan, RemoteWorkspacePlan};
 use crate::workspace::{
     WorkspaceSnapshot, git_status_flags, source_digest_script, source_pathspecs,
 };
+use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::plan::LaunchPlan;
 use inferlab_runtime::shell::{shell_quote, shell_quote_path};
 use inferlab_runtime::ssh::ssh_output;
@@ -196,12 +197,11 @@ impl PreflightObserver for inferlab_runtime::server::SystemProcessRuntime {
                     machine: machine.to_owned(),
                     source,
                 })?,
-            LaunchPlan::Ssh { target } => {
-                ssh_output(target, &script).map_err(|source| HardwareProbeError::Ssh {
+            LaunchPlan::Ssh { target } => ssh_output(target, &script, &OperationBound::unbounded())
+                .map_err(|source| HardwareProbeError::Ssh {
                     machine: machine.to_owned(),
                     source,
-                })?
-            }
+                })?,
         };
         if !output.status.success() {
             return Err(HardwareProbeError::Exit {
@@ -373,10 +373,13 @@ pub(super) fn preflight_targets(
             confirmation_cache_dir = crate::environment::CONFIRMATION_CACHE_DIR,
             marker_file = crate::environment::CONFIRMATION_MARKER_FILE,
         );
-        let output = ssh_output(&target, &script).map_err(|source| RemotePreflightError::Ssh {
-            machine: machine.clone(),
-            source,
-        })?;
+        let output =
+            ssh_output(&target, &script, &OperationBound::unbounded()).map_err(|source| {
+                RemotePreflightError::Ssh {
+                    machine: machine.clone(),
+                    source,
+                }
+            })?;
         let stdout =
             String::from_utf8(output.stdout).map_err(|source| RemotePreflightError::NonUtf8 {
                 machine: machine.clone(),
@@ -502,10 +505,13 @@ pub(super) fn preflight_container_targets(
              \"$(id -u)\" \"$(id -g)\" \"$(id -un)\" \"$PATH\" \"$HOME\" \"$set_env\"",
             reference = shell_quote(reference),
         );
-        let output = ssh_output(&target, &script).map_err(|source| RemotePreflightError::Ssh {
-            machine: machine.clone(),
-            source,
-        })?;
+        let output =
+            ssh_output(&target, &script, &OperationBound::unbounded()).map_err(|source| {
+                RemotePreflightError::Ssh {
+                    machine: machine.clone(),
+                    source,
+                }
+            })?;
         let stdout =
             String::from_utf8(output.stdout).map_err(|source| RemotePreflightError::NonUtf8 {
                 machine: machine.clone(),
@@ -629,11 +635,14 @@ pub(super) fn run_remote_checks(
             environment = shell_quote(pixi_environment),
             script = shell_quote_path(&check.script),
         );
-        let output = ssh_output(target, &script).map_err(|source| RemoteCheckError::Ssh {
-            machine: machine.to_owned(),
-            check: check.id.clone(),
-            source,
-        })?;
+        let output =
+            ssh_output(target, &script, &OperationBound::unbounded()).map_err(|source| {
+                RemoteCheckError::Ssh {
+                    machine: machine.to_owned(),
+                    check: check.id.clone(),
+                    source,
+                }
+            })?;
         let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.trim().is_empty() {

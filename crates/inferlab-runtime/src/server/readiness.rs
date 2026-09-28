@@ -11,6 +11,11 @@ use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Readiness probes back off by doubling from `POLL_INTERVAL` to a cap.
+fn next_probe_interval(interval: Duration) -> Duration {
+    (interval * 2).min(MAX_PROBE_INTERVAL)
+}
 const READINESS_START_BOUNDARY: &str = "after_process_spawn_before_readiness_attempt";
 
 #[derive(Debug, thiserror::Error)]
@@ -130,7 +135,7 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
                 .unwrap_or("process status attempt deadline expired");
             on_probe_failure(last_error);
             sleep_within_readiness(bound, probe_interval);
-            probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
+            probe_interval = next_probe_interval(probe_interval);
             continue;
         }
         ensure_readiness_active(
@@ -237,7 +242,7 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
             ));
         }
         sleep_within_readiness(bound, probe_interval);
-        probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
+        probe_interval = next_probe_interval(probe_interval);
     }
 }
 
@@ -364,7 +369,7 @@ pub(super) fn wait_http_target_registry_ready(
                 .unwrap_or("process status attempt deadline expired");
             on_probe_failure(last_error);
             sleep_within_readiness(bound, probe_interval);
-            probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
+            probe_interval = next_probe_interval(probe_interval);
             continue;
         }
         ensure_readiness_active(
@@ -513,7 +518,7 @@ pub(super) fn wait_http_target_registry_ready(
             ));
         }
         sleep_within_readiness(bound, probe_interval);
-        probe_interval = (probe_interval * 2).min(MAX_PROBE_INTERVAL);
+        probe_interval = next_probe_interval(probe_interval);
     }
 }
 
@@ -881,28 +886,22 @@ impl ReadinessObserver for SystemProcessRuntime {
         endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
         bound: &OperationBound,
+        attempt_timeout_seconds: u64,
         on_probe_failure: &mut dyn FnMut(&str),
     ) -> Result<ReadinessEvidence, ReadinessFailure> {
         match readiness {
-            ReadinessPlan::ProcessAlive {
-                attempt_timeout_seconds,
-                ..
-            } => wait_process_alive_ready(
+            ReadinessPlan::ProcessAlive => wait_process_alive_ready(
                 |bound| self.status_with_bound(handle, bound),
-                *attempt_timeout_seconds,
+                attempt_timeout_seconds,
                 bound,
                 on_probe_failure,
             ),
-            ReadinessPlan::Http {
-                path,
-                attempt_timeout_seconds,
-                ..
-            } => wait_http_ready(
+            ReadinessPlan::Http { path } => wait_http_ready(
                 self,
                 handle,
                 endpoint,
                 path,
-                *attempt_timeout_seconds,
+                attempt_timeout_seconds,
                 bound,
                 on_probe_failure,
             ),
@@ -915,8 +914,6 @@ impl ReadinessObserver for SystemProcessRuntime {
                 target_healthy_field,
                 target_bootstrap_port_field,
                 expected_targets,
-                attempt_timeout_seconds,
-                ..
             } => wait_http_target_registry_ready(
                 |bound| self.status_with_bound(handle, bound),
                 endpoint,
@@ -930,7 +927,7 @@ impl ReadinessObserver for SystemProcessRuntime {
                     target_bootstrap_port_field,
                     expected_targets,
                 },
-                *attempt_timeout_seconds,
+                attempt_timeout_seconds,
                 bound,
                 on_probe_failure,
             ),

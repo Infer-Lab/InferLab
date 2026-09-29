@@ -46,8 +46,8 @@ pub(crate) struct WorkspaceConfig {
 /// A digest-pinned serving image this workspace did not build
 /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): official releases, colleagues'
 /// builds, older baselines. The declaration claims the integration the
-/// image's serving stack answers; nothing else about the image is assumed
-/// or qualified.
+/// image's serving stack answers and how the image runs a command; nothing
+/// else about the image is assumed or qualified.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExternalImageDefinition {
@@ -55,6 +55,26 @@ pub(crate) struct ExternalImageDefinition {
     /// `repository[:tag]@sha256:<64 hex>`.
     pub reference: String,
     pub integration: String,
+    #[serde(default)]
+    pub entrypoint: ExternalImageEntrypoint,
+}
+
+/// How an external image runs a workload command ([[ADR-0052]]): `replace`
+/// overrides the image entrypoint with the command; `image` keeps the
+/// image's own entrypoint and passes the command as its arguments.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ExternalImageEntrypoint {
+    #[default]
+    Replace,
+    Image,
+}
+
+impl ExternalImageEntrypoint {
+    /// Whether the command replaces the image entrypoint.
+    pub(crate) fn overrides(self) -> bool {
+        self == Self::Replace
+    }
 }
 
 /// A named runtime-image production unit ([[RFC-0007:C-IMAGE-BUILD]]): the

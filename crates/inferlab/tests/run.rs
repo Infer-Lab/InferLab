@@ -422,6 +422,29 @@ fn built_image_run_composes_a_bare_container_with_declared_facts_only() -> Resul
     Ok(())
 }
 
+/// Adhoc execution follows the external image's declared entrypoint: under
+/// `image` the command becomes the image entrypoint's arguments
+/// ([[RFC-0002:C-ADHOC-EXECUTION]]).
+#[test]
+fn external_image_run_honors_a_declared_image_entrypoint() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], true)?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    let mut text = fs::read_to_string(&manifest)?;
+    text.push_str("entrypoint = \"image\"\n");
+    fs::write(&manifest, text)?;
+    let output = workspace.run(&["--external-image", "base", "--", "python3", "-V"])?;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let argv = workspace.docker_argv();
+    let run = argv.lines().last().ok_or("docker run line")?;
+    assert!(
+        !run.contains("--entrypoint")
+            && run.contains("@sha256:")
+            && run.trim_end().ends_with("python3 -V"),
+        "the image entrypoint receives the command: {argv}"
+    );
+    Ok(())
+}
+
 #[test]
 fn external_image_run_overrides_the_entrypoint_after_a_presence_probe() -> Result<(), Box<dyn Error>>
 {

@@ -25,10 +25,11 @@ pub(crate) use definitions::BenchRandomShape;
 pub(crate) use definitions::{
     AggregateSlo, BenchAgenticSource, BenchArtifactLevel, BenchCacheStart, BenchDefinition,
     BenchRequestSource, BenchSessionSource, BenchTokenSelector, BenchTpotApplicability,
-    EvalDefinition, EvalPrompt, EvalTaskSource, ImplicitCaseSelection, JsonValue, ModelDefinition,
-    RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition, ServerDefinition,
-    StackDefinition, SyntheticAcceptanceCurveDefinition, SyntheticAcceptanceDefinition,
-    WorkloadSuiteDefinition, WorkspaceConfig, effective_lm_eval_base_seed,
+    EvalDefinition, EvalPrompt, EvalTaskSource, ExternalImageEntrypoint, ImplicitCaseSelection,
+    JsonValue, ModelDefinition, RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition,
+    ServerDefinition, StackDefinition, SyntheticAcceptanceCurveDefinition,
+    SyntheticAcceptanceDefinition, WorkloadSuiteDefinition, WorkspaceConfig,
+    effective_lm_eval_base_seed,
 };
 pub(crate) use definitions::{
     BenchImageSampling, BenchImagesDeclaration, BenchPrefixSharing, BenchPrompt,

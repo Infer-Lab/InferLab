@@ -149,6 +149,18 @@ reference = "example.com/vllm@sha256:<64-hex-digest>"
 integration = "vllm"
 ```
 
+By default InferLab replaces an external image's entrypoint with the rendered
+command, because an entrypoint may itself be a fixed serving command. When the
+image's own entrypoint is the supported way to run commands in it, for example
+an entrypoint that prepares the image's CUDA or NCCL runtime before executing
+its arguments, declare `entrypoint = "image"`: serving processes and
+`inferlab run` commands then keep that entrypoint and receive the command as
+its arguments. The recorded server command shows which path ran.
+
+Variables that settings or the integration set for a containerized process,
+such as `extra_env`, reach the container verbatim and apply only inside it;
+the host-side container client keeps its launch machine's own environment.
+
 Select a successful build record with `--image` or the declared artifact with
 `--external-image`, never both. External images are probed on every launch
 machine and are not pulled automatically. Use `inferlab run` for unrecorded

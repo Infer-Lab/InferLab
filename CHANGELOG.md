@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-09-28
+
+### Added
+
+- An external image may declare `entrypoint = "image"` ([[ADR-0052]]). Its
+  serving processes and `inferlab run` commands then keep the image's own
+  entrypoint and receive the rendered command as its arguments, so an image
+  whose entrypoint prepares its runtime (for example its NCCL build and CUDA
+  toolkit) runs as its publisher documents. The default, `replace`, keeps the
+  explicit override.
+
+### Fixed
+
+- Variables set for a containerized server process, such as `extra_env`,
+  reach the container verbatim. A declared `PATH` on a remote launch
+  previously reached the container as the launch machine's own `PATH`.
+- Those variables no longer apply to the host-side container client. A
+  container-only `LD_PRELOAD`, for example, previously made the client fail
+  to start.
+
 ## [0.15.3] - 2026-09-28
 
 ### Fixed

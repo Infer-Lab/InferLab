@@ -44,6 +44,10 @@ pub(crate) struct ExternalImagePlan {
     pub framework_version: Option<String>,
     #[serde(skip)]
     pub framework_probe_timing: Option<inferlab_runtime::operation_bound::OperationTimingEvidence>,
+    /// The declared entrypoint choice; the recorded server commands, with or
+    /// without `--entrypoint`, are its evidence ([[ADR-0052]]).
+    #[serde(skip)]
+    pub entrypoint: crate::workspace::ExternalImageEntrypoint,
 }
 
 /// Validate an image selection against the recipe's workspace facts and the
@@ -176,6 +180,7 @@ pub(crate) fn select_external(
         integration: declaration.integration.clone(),
         framework_version: None,
         framework_probe_timing: None,
+        entrypoint: declaration.entrypoint,
     })
 }
 
@@ -238,7 +243,12 @@ pub(crate) fn apply_external(
         adapter.image_timeout(),
         &framework,
     )?;
-    containerize(execution, &external.reference, machines, true)?;
+    containerize(
+        execution,
+        &external.reference,
+        machines,
+        external.entrypoint.overrides(),
+    )?;
     execution.server.external_image = Some(ExternalImagePlan {
         framework_version: Some(probe.version),
         framework_probe_timing: Some(probe.timing),
@@ -288,7 +298,7 @@ fn probe_local_presence(external_id: &str, reference: &str) -> Result<(), Inferl
 pub(crate) fn select_external_for_adhoc(
     config: &crate::workspace::WorkspaceConfig,
     external_id: &str,
-) -> Result<String, InferlabError> {
+) -> Result<(String, crate::workspace::ExternalImageEntrypoint), InferlabError> {
     let Some(declaration) = config.external_images.get(external_id) else {
         return Err(reject(format!(
             "unknown external image {external_id:?}; declare it under [external_images] in the \
@@ -296,7 +306,7 @@ pub(crate) fn select_external_for_adhoc(
         )));
     };
     probe_local_presence(external_id, &declaration.reference)?;
-    Ok(declaration.reference.clone())
+    Ok((declaration.reference.clone(), declaration.entrypoint))
 }
 
 fn reject(message: String) -> InferlabError {
@@ -410,6 +420,11 @@ pub(crate) fn containerize(
     explicit_entrypoint: bool,
 ) -> Result<(), InferlabError> {
     let remote = execution.server.placement.remote_containers.clone();
+    // The container client is a host tool on its launch machine: it runs
+    // under that machine's own environment, while the resolver- and
+    // integration-set variables apply only inside the container
+    // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    let local_client_env = crate::resolve::current_environment()?;
     // One nonce per resolution: the container name is the cleanup handle —
     // a container is a daemon-owned object the process-group kill never
     // reaches — and must not collide with any earlier invocation's leftover
@@ -432,7 +447,16 @@ pub(crate) fn containerize(
         // machine's preflight, not from controller state
         // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
         let remote_facts = match &process.launch {
-            inferlab_runtime::plan::LaunchPlan::Ssh { .. } => remote.get(&process.machine),
+            inferlab_runtime::plan::LaunchPlan::Ssh { .. } => Some(
+                remote
+                    .get(&process.machine)
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: format!(
+                            "remote container launch on machine {:?} has no preflight facts",
+                            process.machine
+                        ),
+                    })?,
+            ),
             inferlab_runtime::plan::LaunchPlan::Local => None,
         };
         let inner = containerization_seam(&process.id, argv)?.to_vec();
@@ -598,6 +622,10 @@ pub(crate) fn containerize(
             container.extend(inner);
         }
         process.command.argv = container;
+        process.command.env = match remote_facts {
+            Some(facts) => facts.environment.clone(),
+            None => local_client_env.clone(),
+        };
         process.container = Some(crate::execution::ContainerPlan {
             name: container_name,
             image: image_id.to_owned(),

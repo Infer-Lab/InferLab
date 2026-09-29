@@ -581,19 +581,9 @@ pub(super) fn preflight_container_targets(
             },
         );
     }
-    // Remote processes launch under a clean environment; the docker client
-    // needs the machine's own PATH and HOME, exactly as remote host
-    // processes receive them from the workspace preflight.
-    for process in processes {
-        if matches!(process.launch, LaunchPlan::Ssh { .. }) {
-            let remote = facts.get(&process.machine).ok_or_else(|| {
-                RemotePreflightError::MissingMachine {
-                    machine: process.machine.clone(),
-                }
-            })?;
-            process.command.env.extend(remote.environment.clone());
-        }
-    }
+    // The observed PATH and HOME become each remote docker client's whole
+    // environment when the process is containerized; the process env map
+    // keeps the container's declared variables until then.
     Ok(facts)
 }
 

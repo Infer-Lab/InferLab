@@ -224,7 +224,10 @@ elif operation == "render_serve":
                 "launch_files": launch_files,
                 "command": {
                     "argv": argv,
-                    "env": {"FIXTURE_EXPLICIT": "1"},
+                    "env": {
+                        "FIXTURE_EXPLICIT": "1",
+                        **allocation["effective_settings"].get("fixture_env", {}),
+                    },
                 },
             }
         )

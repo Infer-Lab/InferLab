@@ -35,9 +35,16 @@ pub(crate) fn execute(
             false,
         )
     } else if let Some(external_id) = request.external_image {
-        let reference = crate::image::launch::select_external_for_adhoc(config, external_id)?;
+        let (reference, entrypoint) =
+            crate::image::launch::select_external_for_adhoc(config, external_id)?;
         (
-            container_argv(&reference, &mounts, request.devices, request.command, true),
+            container_argv(
+                &reference,
+                &mounts,
+                request.devices,
+                request.command,
+                entrypoint.overrides(),
+            ),
             false,
         )
     } else {
@@ -139,13 +146,15 @@ fn local_argv(
 /// The container launcher ([[RFC-0002:C-ADHOC-EXECUTION]]): a built image
 /// executes through its own activation entrypoint; an external image gets
 /// an explicit command override because its entrypoint may itself launch a
-/// server. No implicit mounts, no devices without an explicit selection.
+/// server, unless it declares that its own entrypoint runs commands
+/// ([[ADR-0052]]). No implicit mounts, no devices without an explicit
+/// selection.
 fn container_argv(
     image: &str,
     mounts: &[Mount],
     devices: Option<&str>,
     command: &[String],
-    external: bool,
+    override_entrypoint: bool,
 ) -> Vec<String> {
     let mut argv = vec![
         "docker".to_owned(),
@@ -179,7 +188,7 @@ fn container_argv(
             ));
         }
     }
-    if external {
+    if override_entrypoint {
         argv.push("--entrypoint".to_owned());
         argv.push(command[0].clone());
         argv.push(image.to_owned());

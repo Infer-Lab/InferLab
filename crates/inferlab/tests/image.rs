@@ -2636,6 +2636,126 @@ fn external_two_machine_serving_resolves_per_machine_facts() -> Result<(), Box<d
     Ok(())
 }
 
+/// Variables an integration sets for a containerized process reach the
+/// container verbatim and apply only there: the docker client keeps its launch
+/// machine's own environment, so a declared PATH is not replaced by the remote
+/// host's and a container-only LD_PRELOAD never loads into the host-side
+/// client ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+#[test]
+fn declared_container_env_reaches_only_the_container() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    enable_pair_placement(&workspace)?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    let mut text = fs::read_to_string(&manifest)?;
+    text.push_str(
+        "\n[servers.deepseek-v4-flash-pair.settings.fixture_env]\n\
+         PATH = \"/fixture/image/bin\"\n\
+         LD_PRELOAD = \"/fixture/image/lib/preload.so\"\n",
+    );
+    fs::write(&manifest, text)?;
+
+    let dry = workspace
+        .command()
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-pair",
+            "--external-image",
+            "fixture-external",
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(
+        dry.status.success(),
+        "external dry-run failed: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let plan = stdout_json(&dry)?;
+    let processes = resolved_ranks(&plan["server"])?;
+    assert_eq!(processes.len(), 2);
+    for process in &processes {
+        let command = &process.rank.command;
+        for declared in [
+            "PATH=/fixture/image/bin",
+            "LD_PRELOAD=/fixture/image/lib/preload.so",
+        ] {
+            assert!(
+                command
+                    .argv
+                    .windows(2)
+                    .any(|pair| pair[0] == "--env" && pair[1] == declared),
+                "{declared} reaches the {} container verbatim: {:?}",
+                process.rank.machine,
+                command.argv
+            );
+        }
+        assert!(
+            !command.env.contains_key("LD_PRELOAD"),
+            "a container-only variable stays off the {} docker client",
+            process.rank.machine
+        );
+        assert_ne!(
+            command.env.get("PATH").map(String::as_str),
+            Some("/fixture/image/bin"),
+            "the {} docker client keeps its machine's PATH",
+            process.rank.machine
+        );
+    }
+    Ok(())
+}
+
+/// An external image declared with `entrypoint = "image"` runs its serving
+/// processes through its own entrypoint, the rendered command becoming the
+/// entrypoint's arguments ([[ADR-0052]]).
+#[test]
+fn external_image_entrypoint_receives_the_rendered_command() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root.path().join(".inferlab/workspace.toml");
+    let mut text = fs::read_to_string(&manifest)?;
+    text.push_str(&format!(
+        "\n[external_images.fixture-own-entrypoint]\n\
+         reference = \"example.com/fixture-vllm@sha256:{}\"\n\
+         integration = \"vllm\"\n\
+         entrypoint = \"image\"\n",
+        "ab".repeat(32)
+    ));
+    fs::write(&manifest, text)?;
+
+    let dry = workspace
+        .command()
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--external-image",
+            "fixture-own-entrypoint",
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(
+        dry.status.success(),
+        "external dry-run failed: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let plan = stdout_json(&dry)?;
+    let processes = resolved_ranks(&plan["server"])?;
+    let argv = &processes.first().ok_or("server process")?.rank.command.argv;
+    assert!(
+        !argv.iter().any(|arg| arg == "--entrypoint"),
+        "the image's own entrypoint runs: {argv:?}"
+    );
+    let image = argv
+        .iter()
+        .position(|arg| arg.starts_with("example.com/fixture-vllm@sha256:"))
+        .ok_or("image reference")?;
+    assert_eq!(
+        argv.get(image + 1).map(String::as_str),
+        Some("fixture-server"),
+        "the rendered command follows the image as entrypoint arguments: {argv:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;

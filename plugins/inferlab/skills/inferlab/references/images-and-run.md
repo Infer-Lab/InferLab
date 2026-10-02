@@ -15,8 +15,9 @@ inferlab image build <IMAGE> --builder local --placement local
 inferlab image build <IMAGE> --export /absolute/output/directory
 ```
 
-Dry-run resolves package builds, content-closure reuse, platforms, inspection,
-export paths, and validation eligibility without assembly. A real build creates
+Dry-run resolves package builds, including the project directory each selected
+source path builds at, content-closure reuse, platforms, inspection, export
+paths, and validation eligibility without assembly. A real build creates
 one record, assembles and inspects every producible platform, optionally exports
 unique OCI archives, and runs eligible recipe validations. One platform or
 validation failure does not suppress the remaining batch.
@@ -28,14 +29,23 @@ registry.
 
 `serve start`, `recipe run`, and `run` may select a successful
 `--image <IMAGE_BUILD_RECORD>` assembly. Server and recipe selection requires
-the host platform, stack, placement, and builder storage to remain compatible;
-InferLab does not distribute an image between machines.
+the image record's stack to equal the server's stack, a successful assembly for
+the host platform, and a placement on the single local machine whose builder
+storage holds the image; InferLab does not distribute a built image between
+machines.
 
-`--external-image <ID>` selects a workspace-declared digest-pinned artifact.
-InferLab verifies it in builder storage on every launch machine and never pulls
-it automatically. Built and external selections are mutually exclusive.
-Image-backed launches reject profiling until an in-container profiler contract
-exists.
+`--external-image <ID>` selects a workspace-declared digest-pinned artifact
+whose integration claim matches the server stack's integration; its commands
+are lowered with the workspace's `adapter` Pixi environment (see
+[External images](execution-authoring.md#runtime-images-and-ad-hoc-execution)).
+InferLab verifies the image in builder storage on the controller and every
+launch machine and never pulls it automatically. An external-image placement
+may span SSH machines, and a remote machine then needs no workspace
+realization: its `workspace` path is only a launch directory. Resolution
+probes the framework version inside the image, and the record marks the launch
+as not qualified by the workspace, carrying that observed version. Built and
+external selections are mutually exclusive. Image-backed launches reject
+profiling until an in-container profiler contract exists.
 
 ## Ad-Hoc Probes
 
@@ -50,7 +60,8 @@ inferlab run --external-image official --mount /data -- python3 /data/probe.py
 ```
 
 With multiple stacks, `--stack` is required. Container probes receive no host
-mount or device implicitly. `--mount /absolute/path` is same-path read-only;
+mount, device, or machine container grant implicitly, and an external image
+declaring `entrypoint = "image"` runs the command through its own entrypoint. `--mount /absolute/path` is same-path read-only;
 append `:rw` for write access. `--devices 0,1` exposes only those host device
 indexes. Local probes execute with `CUDA_VISIBLE_DEVICES` set from the
 workspace's default placement when every machine it references launches
@@ -59,6 +70,5 @@ ad-hoc GPU work lands on the workspace's own devices without extra flags.
 Use `run` for diagnostics, not evidence; qualification requires a
 managed recorded workflow.
 
-Never execute a binary directly through `.pixi/envs/<env>/bin/`. That bypasses
-manifest activation variables and package activation scripts, so it observes a
-different environment from InferLab.
+Never execute a binary directly through `.pixi/envs/<env>/bin/`; the
+[skill entry point](../SKILL.md) explains why `run` replaces it.

@@ -24,12 +24,11 @@ python/**/pixi.lock
 website/node_modules/
 website/dist/
 website/.astro/
-website/src/content/docs/docs/getting-started/installation.md
-website/src/content/docs/docs/guides/workspace-authoring/*.md
-website/src/content/docs/docs/guides/tui.md
-website/src/content/docs/docs/reference/backend-support.md
-website/src/content/docs/docs/architecture/rfc/RFC-*.md
-website/src/content/docs/docs/architecture/adr/ADR-*.md
+# Pages projected by website/scripts/content-manifest.mjs; the hand-written
+# pages are the section index pages.
+website/src/content/docs/docs/**/*.md
+!website/src/content/docs/docs/**/index.md
+website/src/content/docs/docs/guides/workspace-authoring/index.md
 
 # Editor
 *.code-workspace

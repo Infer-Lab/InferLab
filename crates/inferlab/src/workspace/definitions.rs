@@ -611,7 +611,11 @@ pub(crate) struct RequestSlo {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum BenchDefinition {
     Serving {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "settled_optional_request_source"
+        )]
         request_source: Option<BenchRequestSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_source: Option<BenchSessionSource>,
@@ -656,6 +660,7 @@ pub(crate) enum BenchDefinition {
         timeout_seconds: u64,
     },
     AdaptiveServing {
+        #[serde(deserialize_with = "settled_request_source")]
         request_source: BenchRequestSource,
         #[serde(default)]
         seed: u64,
@@ -1046,11 +1051,35 @@ pub(crate) enum BenchImageSampling {
     SequentialCycle,
 }
 
+/// Parse a Bench request source with its omitted `random` prompt settled to
+/// the kind it resolves to, so every reader, the canonical rendering, dry-run,
+/// and records see the effective prompt
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]). The prompt stays undeclared.
+fn settled_request_source<'de, D>(deserializer: D) -> Result<BenchRequestSource, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut source = BenchRequestSource::deserialize(deserializer)?;
+    if let BenchRequestSource::Random { prompt, images, .. } = &mut source {
+        prompt.effective = effective_random_prompt(prompt, images.as_ref());
+    }
+    Ok(source)
+}
+
+fn settled_optional_request_source<'de, D>(
+    deserializer: D,
+) -> Result<Option<BenchRequestSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    settled_request_source(deserializer).map(Some)
+}
+
 /// The prompt authority a `random` request source resolves
 /// ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]): a declared prompt table wins; an
 /// omitted table resolves to `server_chat` when the source declares images
 /// and to `flat` otherwise.
-pub(crate) fn effective_random_prompt(
+fn effective_random_prompt(
     prompt: &BenchPromptSelection,
     images: Option<&BenchImagesDeclaration>,
 ) -> BenchPrompt {
@@ -1412,6 +1441,35 @@ images = { width = { mean = 512, stddev = 0 }, height = 384, count = 2 }
         assert!(
             serde_json::from_str::<BenchImageSampling>(r#""round-robin""#).is_err(),
             "an unknown sampling spelling must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_image_decorated_random_source_renders_its_effective_prompt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 512, output_tokens = 16, images = { width = 64, height = 64, count = 1 } }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        let rendered = serde_json::to_value(&definition)?;
+        assert_eq!(rendered["request_source"]["prompt"]["kind"], "server_chat");
+        let BenchDefinition::Serving {
+            request_source: Some(BenchRequestSource::Random { prompt, .. }),
+            ..
+        } = &definition
+        else {
+            return Err("expected a random request source".into());
+        };
+        assert_eq!(
+            prompt.declared(),
+            None,
+            "parsing keeps the omitted prompt undeclared"
         );
         Ok(())
     }

@@ -685,29 +685,10 @@ fn package_gate(
     Some(AgentReport { rows })
 }
 
-/// The package paths one runtime needs before its native CLI may run.
-fn package_requirements(runtime: AgentRuntime, checkout: &Path) -> Vec<PathBuf> {
-    let marketplace = match runtime {
-        AgentRuntime::Claude => ".claude-plugin/marketplace.json",
-        AgentRuntime::Codex => ".agents/plugins/marketplace.json",
-    };
-    let manifest = match runtime {
-        AgentRuntime::Claude => "plugins/inferlab/.claude-plugin/plugin.json",
-        AgentRuntime::Codex => "plugins/inferlab/.codex-plugin/plugin.json",
-    };
-    let skill = checkout.join("plugins/inferlab/skills/inferlab");
-    vec![
-        checkout.join(marketplace),
-        checkout.join(manifest),
-        skill.join("SKILL.md"),
-        skill.join("references/workspace-authoring.md"),
-        skill.join("references/workspace-definition.md"),
-        skill.join("references/execution-authoring.md"),
-        skill.join("references/eval-authoring.md"),
-        skill.join("references/bench-authoring.md"),
-    ]
-}
-
+/// The package paths one runtime needs before its native CLI may run: its
+/// marketplace and plugin manifests, the skill entry, and every file the
+/// skill links, followed transitively through linked Markdown, so an
+/// installed skill carries no dead link ([[RFC-0008:C-AGENT-PLUGIN]]).
 fn validate_package(runtime: AgentRuntime, checkout: &Path) -> Result<(), String> {
     if !checkout.is_dir() {
         return Err(format!(
@@ -716,50 +697,113 @@ fn validate_package(runtime: AgentRuntime, checkout: &Path) -> Result<(), String
             checkout.display()
         ));
     }
-    for required in package_requirements(runtime, checkout) {
-        if !required.is_file() {
-            return Err(format!(
-                "plugin package for {} is missing {}",
-                runtime.id(),
-                required.display()
-            ));
+    let marketplace = match runtime {
+        AgentRuntime::Claude => ".claude-plugin/marketplace.json",
+        AgentRuntime::Codex => ".agents/plugins/marketplace.json",
+    };
+    let manifest = match runtime {
+        AgentRuntime::Claude => "plugins/inferlab/.claude-plugin/plugin.json",
+        AgentRuntime::Codex => "plugins/inferlab/.codex-plugin/plugin.json",
+    };
+    for required in [marketplace, manifest] {
+        read_package_file(runtime, &checkout.join(required), None)?;
+    }
+    let skill = checkout.join("plugins/inferlab/skills/inferlab/SKILL.md");
+    let mut pending = vec![(skill, None)];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some((path, linked_from)) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
         }
-        let contents = fs::read(&required).map_err(|error| {
+        let text = read_package_file(runtime, &path, linked_from.as_deref())?;
+        if path.extension().is_none_or(|extension| extension != "md") {
+            continue;
+        }
+        let directory = path.parent().unwrap_or(checkout);
+        for target in relative_links(&text) {
+            pending.push((normalized(&directory.join(target)), Some(path.clone())));
+        }
+    }
+    Ok(())
+}
+
+/// Read one required package file, rejecting a missing, empty, non-UTF-8, or
+/// (for JSON) unparsable one.
+fn read_package_file(
+    runtime: AgentRuntime,
+    required: &Path,
+    linked_from: Option<&Path>,
+) -> Result<String, String> {
+    if !required.is_file() {
+        let link = linked_from
+            .map(|source| format!(" (linked from {})", source.display()))
+            .unwrap_or_default();
+        return Err(format!(
+            "plugin package for {} is missing {}{link}",
+            runtime.id(),
+            required.display()
+        ));
+    }
+    let contents = fs::read(required).map_err(|error| {
+        format!(
+            "plugin package for {} cannot read {}: {error}",
+            runtime.id(),
+            required.display()
+        )
+    })?;
+    let text = String::from_utf8(contents).map_err(|error| {
+        format!(
+            "plugin package for {}: {} is corrupted: invalid UTF-8: {error}",
+            runtime.id(),
+            required.display()
+        )
+    })?;
+    if required
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|error| {
             format!(
-                "plugin package for {} cannot read {}: {error}",
+                "plugin package for {}: {} is corrupted: invalid JSON: {error}",
                 runtime.id(),
                 required.display()
             )
         })?;
-        if required
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            serde_json::from_slice::<serde_json::Value>(&contents).map_err(|error| {
-                format!(
-                    "plugin package for {}: {} is corrupted: invalid JSON: {error}",
-                    runtime.id(),
-                    required.display()
-                )
-            })?;
-        } else {
-            let text = std::str::from_utf8(&contents).map_err(|error| {
-                format!(
-                    "plugin package for {}: {} is corrupted: invalid UTF-8: {error}",
-                    runtime.id(),
-                    required.display()
-                )
-            })?;
-            if text.trim().is_empty() {
-                return Err(format!(
-                    "plugin package for {}: {} is corrupted: file is empty",
-                    runtime.id(),
-                    required.display()
-                ));
+    } else if text.trim().is_empty() {
+        return Err(format!(
+            "plugin package for {}: {} is corrupted: file is empty",
+            runtime.id(),
+            required.display()
+        ));
+    }
+    Ok(text)
+}
+
+/// Resolve `.` and `..` lexically, so one file reached by different link
+/// spellings is read once.
+fn normalized(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
             }
+            other => resolved.push(other),
         }
     }
-    Ok(())
+    resolved
+}
+
+/// The package-relative targets of a Markdown document's inline links, without
+/// their fragments; external URLs and in-page anchors are not package files.
+fn relative_links(text: &str) -> Vec<&str> {
+    text.split("](")
+        .skip(1)
+        .filter_map(|rest| rest.split([')', ' ']).next())
+        .map(|target| target.split('#').next().unwrap_or_default())
+        .filter(|target| !target.is_empty() && !target.contains(':'))
+        .collect()
 }
 
 /// Map the shared installer's complete batch result into Inferlab's stable

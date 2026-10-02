@@ -633,23 +633,7 @@ fn a_gate_failure_on_one_runtime_skips_the_other() -> Result<(), Box<dyn Error>>
     // A checkout valid for claude but missing the codex manifest: codex
     // fails validation, claude reports skipped, and no native CLI runs.
     let harness = AgentHarness::new(true)?;
-    let partial = tempfile::tempdir()?;
-    let root = repo_root();
-    for relative in [
-        ".claude-plugin/marketplace.json",
-        ".agents/plugins/marketplace.json",
-        "plugins/inferlab/.claude-plugin/plugin.json",
-        "plugins/inferlab/skills/inferlab/SKILL.md",
-        "plugins/inferlab/skills/inferlab/references/workspace-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/workspace-definition.md",
-        "plugins/inferlab/skills/inferlab/references/execution-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/eval-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/bench-authoring.md",
-    ] {
-        let target = partial.path().join(relative);
-        fs::create_dir_all(target.parent().ok_or("parent")?)?;
-        fs::copy(root.join(relative), target)?;
-    }
+    let partial = package_without(&["plugins/inferlab/.codex-plugin/plugin.json"])?;
     let output = harness.run(&[
         "agent",
         "install",
@@ -676,25 +660,72 @@ fn a_gate_failure_on_one_runtime_skips_the_other() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+/// A copy of the shipped package (both marketplaces and the plugin tree)
+/// without the given files.
+fn package_without(omit: &[&str]) -> Result<tempfile::TempDir, Box<dyn Error>> {
+    fn copy_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error>> {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let destination = target.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &destination)?;
+            } else {
+                fs::copy(entry.path(), destination)?;
+            }
+        }
+        Ok(())
+    }
+    let package = tempfile::tempdir()?;
+    let root = repo_root();
+    for marketplace in [".claude-plugin", ".agents/plugins"] {
+        copy_tree(&root.join(marketplace), &package.path().join(marketplace))?;
+    }
+    copy_tree(
+        &root.join("plugins/inferlab"),
+        &package.path().join("plugins/inferlab"),
+    )?;
+    for relative in omit {
+        fs::remove_file(package.path().join(relative))?;
+    }
+    Ok(package)
+}
+
+#[test]
+fn a_package_missing_a_file_the_skill_links_fails_before_native_cli() -> Result<(), Box<dyn Error>>
+{
+    // The skill links profiling.md directly; workspace-definition.md is
+    // reached only through the workspace-authoring index it links.
+    let harness = AgentHarness::new(true)?;
+    for missing in ["profiling.md", "workspace-definition.md"] {
+        let partial = package_without(&[&format!(
+            "plugins/inferlab/skills/inferlab/references/{missing}"
+        )])?;
+        let output = harness.run(&[
+            "agent",
+            "install",
+            "--agent",
+            "claude",
+            "--from-checkout",
+            partial.path().to_str().ok_or("non-UTF-8 path")?,
+        ])?;
+        assert!(!output.status.success(), "{missing}");
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(report["rows"][0]["status"], "failed");
+        let message = report["rows"][0]["message"].as_str().ok_or("message")?;
+        assert!(
+            message.contains("missing") && message.contains(missing),
+            "{report}"
+        );
+    }
+    assert_eq!(harness.logged()?, "");
+    Ok(())
+}
+
 #[test]
 fn a_corrupt_authoring_reference_fails_before_native_cli() -> Result<(), Box<dyn Error>> {
     let harness = AgentHarness::new(true)?;
-    let partial = tempfile::tempdir()?;
-    let root = repo_root();
-    for relative in [
-        ".claude-plugin/marketplace.json",
-        "plugins/inferlab/.claude-plugin/plugin.json",
-        "plugins/inferlab/skills/inferlab/SKILL.md",
-        "plugins/inferlab/skills/inferlab/references/workspace-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/workspace-definition.md",
-        "plugins/inferlab/skills/inferlab/references/execution-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/eval-authoring.md",
-        "plugins/inferlab/skills/inferlab/references/bench-authoring.md",
-    ] {
-        let target = partial.path().join(relative);
-        fs::create_dir_all(target.parent().ok_or("parent")?)?;
-        fs::copy(root.join(relative), target)?;
-    }
+    let partial = package_without(&[])?;
     fs::write(
         partial
             .path()

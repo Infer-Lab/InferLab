@@ -46,10 +46,12 @@ leaves the Engine's own default in force rather than restating it:
 
 The two per-rank options pair by occurrence order, so the first occurrence of
 each describes rank 0. They are supplied together or not at all, each appears
-exactly `tensor-parallel-size` times, and their presence replaces
-`--prefix-cache-host-memory-percent` as the host-cache sizing authority. A
-workspace declares them as one list of rank entries so the two argument lists
-cannot drift apart:
+exactly `tensor-parallel-size` times. They and
+`--prefix-cache-host-memory-percent` are alternative host-cache sizing
+authorities: declaring both `prefix_cache_ranks` and
+`prefix_cache_host_memory_percent` is rejected while planning. A workspace
+declares the per-rank options as one list of rank entries, one per resolved
+tensor-parallel rank, so the two argument lists cannot drift apart:
 
 ```toml
 [servers.engine.roles.serve.settings]
@@ -93,7 +95,7 @@ model iteration. A concrete Engine uses it to materialize request-shaped
 execution workspaces before reporting healthy and retains its own scheduling
 and admission authority.
 
-The 0.2 contract is one replica and one rank process with an arbitrary nonzero
+The contract is one replica and one rank process with an arbitrary nonzero
 pure tensor-parallel width. That process owns all `N` allocated devices.
 Attention tensor parallelism, expert tensor parallelism, and dense-expert
 tensor parallelism equal the outer width; pipeline, data, context, and expert
@@ -101,7 +103,7 @@ parallelism remain one. The contract otherwise remains serial greedy generation
 with no P/D Router, KV transfer, Engine-local profiling endpoint, log
 probabilities, multimodal input, or request batching. Unsupported sampling and
 request fields are rejected rather than silently reinterpreted. A worker may
-emit SMG stream chunks only after generation completes, so this version makes
+emit SMG stream chunks only after generation completes, so the contract makes
 no low-latency online-streaming claim.
 
 Workload-attached Nsight Systems profiling is supported without adding an HTTP

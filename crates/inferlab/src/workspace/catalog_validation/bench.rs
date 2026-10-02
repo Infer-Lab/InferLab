@@ -9,12 +9,21 @@ use crate::workspace::definitions::{
     AggregateSlo, BenchCacheStart, BenchDefinition, BenchImagesDeclaration, BenchPrefixSharing,
     BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
     BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability, JsonValue, RequestRate,
-    RequestSlo, effective_random_prompt,
+    RequestSlo,
 };
 use crate::{bench_agentic_catalog, bench_dataset_catalog};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(), InferlabError> {
+    // Every Bench kind owns one positive case budget, checked before any
+    // source-specific branch can return ([[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]]).
+    let (BenchDefinition::Serving {
+        timeout_seconds, ..
+    }
+    | BenchDefinition::AdaptiveServing {
+        timeout_seconds, ..
+    }) = definition;
+    require_positive("timeout_seconds", id, *timeout_seconds)?;
     match definition {
         BenchDefinition::Serving {
             request_source,
@@ -34,7 +43,6 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
             duration_seconds,
             burstiness,
             cache,
-            timeout_seconds,
             ..
         } => {
             if [
@@ -90,13 +98,7 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
                 }
                 return Ok(());
             }
-            validate_bench_common(
-                id,
-                request_source.as_ref(),
-                request_body,
-                *burstiness,
-                *timeout_seconds,
-            )?;
+            validate_bench_common(id, request_source.as_ref(), request_body, *burstiness)?;
             if let Some(session_source) = session_source {
                 validate_bench_session_source(id, session_source)?;
             }
@@ -205,17 +207,10 @@ pub(crate) fn validate_bench(id: &str, definition: &BenchDefinition) -> Result<(
             request_count,
             duration_seconds,
             burstiness,
-            timeout_seconds,
             cache,
             ..
         } => {
-            validate_bench_common(
-                id,
-                Some(request_source),
-                request_body,
-                *burstiness,
-                *timeout_seconds,
-            )?;
+            validate_bench_common(id, Some(request_source), request_body, *burstiness)?;
             validate_bench_slos(
                 id,
                 request_source.tpot_applicability(),
@@ -498,7 +493,6 @@ fn validate_bench_common(
     request_source: Option<&BenchRequestSource>,
     request_body: &BTreeMap<String, JsonValue>,
     burstiness: Option<f64>,
-    timeout_seconds: u64,
 ) -> Result<(), InferlabError> {
     match request_source {
         None => {}
@@ -521,7 +515,7 @@ fn validate_bench_common(
                     ));
                 }
                 validate_random_images(id, prompt, images.as_ref())?;
-                let effective_prompt = effective_random_prompt(prompt, images.as_ref());
+                let effective_prompt = prompt.effective().clone();
                 if let Some(corpus) = corpus {
                     validate_workspace_relative_source_path(
                         &format!("bench {id:?}"),
@@ -712,7 +706,7 @@ fn validate_bench_common(
             "bench {id:?} burstiness must be positive and finite"
         ));
     }
-    require_positive("timeout_seconds", id, timeout_seconds)
+    Ok(())
 }
 
 // A `random` source's image decoration ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]):
@@ -1407,6 +1401,24 @@ timeout_seconds = 3600
             error.to_string().contains("prompts_per_concurrency"),
             "{error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn agentic_source_rejects_a_zero_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+agentic_source = { dataset = "semianalysis_agentx_062126_256k", profile = "inferencex" }
+concurrency = [1]
+timeout_seconds = 0
+"#,
+        )?;
+
+        let error = validate_bench("agentx", &definition)
+            .err()
+            .ok_or("agentic source unexpectedly accepted a zero timeout")?;
+        assert!(error.to_string().contains("timeout_seconds"), "{error}");
         Ok(())
     }
 

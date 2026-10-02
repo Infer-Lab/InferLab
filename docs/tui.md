@@ -11,7 +11,9 @@ inferlab tui --refresh-interval 2s
 ```
 
 The refresh override applies only to that invocation; `inferlab tui --help`
-prints the current default interval. Opening, refreshing, searching, and
+prints the current default interval. Declared workspace definitions and the
+workspace dirty state refresh on a slower cadence of at least a minute; press
+`r` to re-read every source, including those, immediately. Opening, refreshing, searching, and
 closing the TUI do not write a UI session or launch an InferLab workflow.
 
 ## Views and sources

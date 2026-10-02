@@ -43,9 +43,10 @@ run and diagnose the resolved definitions; they do not define a second schema.
 ## Measurement Coverage
 
 Prefix geometry describes the frozen request population. Cache-read metrics
-describe observed server behavior; neither substitutes for the other. The
-SemiAnalysis AgentX trace-replay profiles use AIPerf's release-pinned tree
-scheduler; they do not add a general InferLab DAG runtime.
+describe observed server behavior; neither substitutes for the other. AgentX
+trace replay delegates its tree scheduling to AIPerf rather than adding a
+general InferLab DAG runtime; its semantics live in
+[Bench authoring](bench-authoring.md#semianalysis-agentx-trace-replay).
 
 ## Parallelism And Capture Mechanisms
 
@@ -70,6 +71,6 @@ scheduler; they do not add a general InferLab DAG runtime.
   comparisons, scratchpad links, stable error codes, and privacy:
   [Evidence and diagnosis](evidence-and-diagnosis.md).
 
-Consult the bundled backend support matrix before claiming a topology, endpoint,
+Consult the [backend support matrix](backend-support.md) before claiming a topology, endpoint,
 profiling path, parallelism mode, or hardware/model combination is qualified.
 “Supported” and “Qualified” are not interchangeable.

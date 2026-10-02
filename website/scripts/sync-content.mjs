@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -5,6 +6,7 @@ import {
   repositoryRoot,
   routeForTarget,
   siteBase,
+  unexpectedPages,
   websiteRoot,
 } from './content-manifest.mjs';
 import { projectMarkdown } from './content-projection.mjs';
@@ -51,6 +53,9 @@ function rewriteUrl(url, sourceEntry) {
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error(`${sourceEntry.source}: projected link escapes repository root: ${url}`);
   }
+  if (!existsSync(absolute)) {
+    throw new Error(`${sourceEntry.source}: projected link targets a missing file: ${url}`);
+  }
   return `${repositoryUrl}/blob/main/${relative}${suffix}`;
 }
 
@@ -92,7 +97,7 @@ for (const entry of manifest) {
   const source = await readFile(sourcePath, 'utf8');
   const projection = projectMarkdown(source, entry.source);
   const projectedBody = projectLinks(projection.body, entry);
-  const metadata = frontmatter(projection.title, entry.description);
+  const metadata = frontmatter(entry.title ?? projection.title, entry.description);
 
   await mkdir(path.dirname(targetPath), { recursive: true });
   await writeFile(targetPath, metadata + projectedBody, 'utf8');
@@ -104,6 +109,25 @@ for (const entry of manifest) {
   ) {
     throw new Error(`${entry.target}: projection changed authoritative prose`);
   }
+}
+
+async function markdownFiles(directory) {
+  const entries = await readdir(path.join(websiteRoot, directory), { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map((entry) => {
+      const child = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) return markdownFiles(child);
+      return entry.name.endsWith('.md') ? [child] : [];
+    }),
+  );
+  return nested.flat();
+}
+
+const unexpected = unexpectedPages(await markdownFiles('src/content/docs/docs'), manifest);
+if (unexpected.length > 0) {
+  throw new Error(
+    `documentation pages must be a content-manifest projection or a section index.md: ${unexpected.join(', ')}`,
+  );
 }
 
 console.log(`Projected ${manifest.length} authoritative documents.`);

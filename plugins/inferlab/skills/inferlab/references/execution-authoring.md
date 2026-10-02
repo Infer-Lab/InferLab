@@ -4,14 +4,16 @@
 
 Profiling is prepared on a server and requested on a selected Eval or Bench; it
 is not a separate workload kind. Enable capture-target preparation on the
-server, a server case, or an invocation patch:
+server, a server case, or an invocation patch. The three capture deadlines are
+optional; omitted ones resolve to built-in defaults that dry-run renders, so
+declare them only to size a particular capture:
 
 ```toml
 [servers.example]
 profiling = true
-capture_arm_deadline_seconds = 60
-capture_control_deadline_seconds = 60
-capture_finalization_deadline_seconds = 300
+capture_arm_deadline_seconds = 120
+capture_control_deadline_seconds = 120
+capture_finalization_deadline_seconds = 1800
 ```
 
 Select the capture mechanism on the server, a case, or an invocation patch
@@ -25,13 +27,18 @@ mechanism = "engine_trace"
 
 Managed collection wraps each captured rank process tree with Nsight Systems.
 Engine trace instead lets the framework's own profiler write per-rank traces
-into a persistent record-owned directory that InferLab assigns at planning;
-vLLM renders it into `--profiler-config` and SGLang into
-`SGLANG_TORCH_PROFILER_DIR`. Engine trace requires a local, non-containerized
-placement, and coverage verifies that the dedicated directory gained at least
-one new trace artifact per model device of the replica. The TensorRT-LLM,
-TokenSpeed, and Specialized Engine integrations reject `engine_trace` with a
-typed error.
+into a record-owned directory that InferLab assigns at planning. Integrations
+that cannot honor `engine_trace` reject it while planning; the
+[backend support matrix](backend-support.md)
+lists which do. [Profiling](profiling.md#capture-lifecycle) owns the capture
+lifecycle, placement limits, and coverage rules.
+
+An engine-trace server declares no `profiler.nsys` escape inputs: combining
+`mechanism = "engine_trace"` with nsys escapes in one server or role fails
+workspace load, and a combination assembled across layers, such as a case or
+`--set` selecting `engine_trace` for a server with escapes, fails resolution. A server
+case may declare only `profiler.mechanism`; nsys escapes belong to the server
+and its roles.
 
 Declaring `profiler.mechanism` or nsys escape inputs on a server whose
 profiling resolves off (no `profiling = true` and no requested `--capture`)
@@ -39,21 +46,16 @@ fails resolution with a typed error naming the declaration and the
 enable-profiling remediation; profiler declarations never silently drop.
 
 `capture_arm_deadline_seconds` is one budget for preparing and arming every
-selected rank target. `capture_control_deadline_seconds` covers the complete
-HTTP response for each framework range action under managed collection.
+selected rank target. `capture_control_deadline_seconds` bounds each framework
+range action that opens a window, and each managed-collection close.
 `capture_finalization_deadline_seconds` is one budget for session inspection,
-any required collection stop, asynchronous report completion, and report
-coverage across all targets. Capture-armed readiness is unbounded overall but
-retains `readiness_attempt_timeout_seconds` on every blocking attempt, so
-process exit and operator interruption remain observable.
+any required collection stop, asynchronous report completion, report coverage,
+and every engine-trace window close. The undeclared finalization default
+follows the resolved mechanism and is larger for engine trace; dry-run renders
+the effective value. [Profiling](profiling.md#capture-lifecycle) describes how
+these budgets combine during a capture.
 
-The undeclared finalization default follows the resolved mechanism and is
-larger for engine trace, because engine stop calls block until worker traces
-serialize — vLLM `stop_profile` has been observed to take over ten minutes on
-a TP2 27B capture. The resolved plan and dry-run render the effective deadline.
-
-Managed Nsight Systems defaults use the `nsys` executable and the `cuda,nvtx`
-trace set. A server may replace the dedicated fields or add launch/start
+A server may replace the dedicated Nsight Systems fields or add launch/start
 options and environment; role declarations merge after the common layer:
 
 ```toml
@@ -81,10 +83,7 @@ Use OS runtime tracing when the experiment needs it; disabling `osrt` is not a
 general cure for startup or finalization timing. Select it explicitly in
 `trace` and size the lifecycle deadlines for its additional capture cost.
 
-Request capture with repeatable `recipe run --capture <WORKLOAD_ID>` or with
-`bench --capture` against a server started with profiling enabled. Complete
-report coverage may establish a successful capture even when a framework stop
-action failed.
+Request a capture as described in [Profiling](profiling.md#run-a-capture).
 
 ## Runtime images and ad-hoc execution
 
@@ -111,27 +110,31 @@ it, at the directory the Pixi manifest declares. A submodule whose Python
 project lives below its root (for example SGLang's `python/`) is selected by
 its root path, while the manifest points the dependency at the project
 directory. A selected path the environment installs nothing from fails image
-resolution. A validation names only a
-recipe and optional server case; it does not restate model, placement, server,
-or measurement facts. Builds require a clean workspace. Local bindings
-currently expose one builder kind:
+resolution, so when a stack also lists source paths consumed only while
+building another package, declare `packages` as the subset the environment
+installs. Every locked registry package must carry a hash: a locked PyPI
+package without one fails image resolution naming the package, because the
+image could not pin it; take such packages from conda instead and relock. A
+validation names only a recipe and optional server case; it does not restate
+model, placement, server, or measurement facts. Builds require a clean
+workspace. Local bindings currently expose one builder kind:
 
 ```toml
 [builders.local]
 kind = "local-docker"
 ```
 
-`inferlab image build <IMAGE>` resolves, assembles, inspects, optionally
-exports unique OCI archives with `--export <DIR>`, and runs every eligible
-validation as one recorded closed loop. `--builder`, `--placement`, `--local`,
-and `--dry-run` retain their owning selection semantics. Built images remain in
-local builder storage and are never pushed by this workflow.
+[Images and ad-hoc execution](images-and-run.md#build-workflow) covers the
+build workflow.
 
 Portable contexts and image metadata exclude model locators, builder hosts,
 workspace paths, placements, and other machine-private facts. Per-machine
-container bindings may pass environment values by name, grant absolute device
-paths, lift the memlock limit, and add only `IPC_LOCK`, `SYS_NICE`, or
-`SYS_PTRACE`; InferLab never requests privileged mode:
+container bindings apply to every server container on that machine, including
+image validations, but not to `inferlab run`. They may pass environment values
+by name, grant absolute device paths, lift the memlock limit, and add only
+`IPC_LOCK`, `SYS_NICE`, or `SYS_PTRACE`; InferLab never requests privileged
+mode. `pass_env` may not name variables InferLab manages in the container
+(`HOME`, `USER`, `LOGNAME`, `CUDA_VISIBLE_DEVICES`, `CONDA_PREFIX`):
 
 ```toml
 [machines.local.container]
@@ -149,6 +152,12 @@ reference = "example.com/vllm@sha256:<64-hex-digest>"
 integration = "vllm"
 ```
 
+The `integration` claim must equal the integration of every server stack the
+image is selected for. InferLab lowers an external image's commands with the
+workspace's own integration packages, so the workspace must commit and install
+a framework-free Pixi environment named `adapter` that contains
+`inferlab-adapter-sdk` and `inferlab-integration-<integration>`.
+
 By default InferLab replaces an external image's entrypoint with the rendered
 command, because an entrypoint may itself be a fixed serving command. When the
 image's own entrypoint is the supported way to run commands in it, for example
@@ -161,12 +170,9 @@ Variables that settings or the integration set for a containerized process,
 such as `extra_env`, reach the container verbatim and apply only inside it;
 the host-side container client keeps its launch machine's own environment.
 
-Select a successful build record with `--image` or the declared artifact with
-`--external-image`, never both. External images are probed on every launch
-machine and are not pulled automatically. Use `inferlab run` for unrecorded
-stack or image probes; container mode exposes no mount or device implicitly,
-so declare repeatable `--mount PATH[:rw]` and `--devices INDEX[,INDEX...]` as
-needed.
+[Built and external image selection](images-and-run.md#built-and-external-image-selection)
+and [ad-hoc probes](images-and-run.md#ad-hoc-probes) cover how a launch or an
+`inferlab run` command selects an image.
 
 ## Invocation patches
 
@@ -192,11 +198,6 @@ Recipe measurement patches may name only Eval and Bench definitions selected
 by that recipe's workload suite. They cannot change identities, kinds, suite
 membership, the gate, or the selected server.
 
-An lm-eval definition may set `trials` for repeated evaluation of one resolved
-single-sample `generate_until` task; omission evaluates once. The definition
-seed is the repeated base seed; when it is absent, the control plane applies
-its built-in fallback seed.
-Trial `i` uses `base_seed + i - 1`. The existing `concurrency` field controls
-those requests, and `request_body.seed` is rejected because the definition owns
-the seed schedule. Each trial repeats the complete resolved Eval; InferLab does
-not rewrite task-owned response multiplicity, filters, or scorer behavior.
+The `evals.gsm8k.trials` patch above repeats one lm-eval task; read
+[Repeated trials](eval-authoring.md#repeated-trials) for which tasks accept it
+and how trials are seeded.

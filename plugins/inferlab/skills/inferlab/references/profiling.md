@@ -36,14 +36,19 @@ client completion or failure, finalizes collection, and verifies required
 report coverage.
 
 The configured arm, framework-control, and finalization budgets cover distinct
-parts of that lifecycle. They do not replace the measurement timeout, and
-capture-armed readiness stays observable through bounded attempts. Under
-engine trace, closing the window draws only the one global finalization
-budget; the per-action control budget applies to managed collection.
+parts of that lifecycle, and capture-armed readiness stays observable through
+bounded attempts. The per-action control budget bounds every window-opening
+action and each managed-collection close; under engine trace, closing the
+window draws only the one global finalization budget. Finalization starts once
+the case's business result is terminal and does not consume the measurement
+case's `timeout_seconds`: a finalization or coverage failure fails the profiled
+measurement but preserves the case result.
 
-A positive AIPerf Bench warmup drains before InferLab opens the capture window.
-Warmup remains in native measurement artifacts but outside the trace window
-and normalized profiling metrics. A warmup failure leaves the window unopened.
+A positive AIPerf Bench warmup drains before InferLab opens the capture window,
+and a captured AgentX case always passes this barrier, so the profile's
+snapshot and cache-pressure warmup complete first. Warmup remains in native
+measurement artifacts but outside the trace window and normalized profiling
+metrics. A warmup failure leaves the window unopened.
 
 A delivery failure of the close — connection refusal, a dead engine process,
 or a prompt error status — remains window-closing control failure evidence

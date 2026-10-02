@@ -1,6 +1,8 @@
 const localRepositorySlug = 'Infer-Lab/InferLab';
 
 export const siteOrigin = 'https://infer-lab.github.io';
+export const siteDescription =
+  'Reproducible LLM inference experiments, from declared intent to durable evidence.';
 
 export function resolveRepositorySlug(repository) {
   const slug = repository?.trim() || localRepositorySlug;

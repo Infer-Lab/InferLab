@@ -17,8 +17,8 @@ inferlab serve start example --case tp2 --placement local --dry-run
 inferlab recipe run qualify --case tp2 --placement local --dry-run
 ```
 
-A sole server case is selected automatically. When several cases exist, the
-stored default applies unless the invocation supplies `--case`. The selected
+Case selection follows the server's declared cases and default; see
+[Workspace definitions](workspace-definition.md#minimal-workspace). The selected
 integration validates the complete resolved topology and backend pairing before
 launch.
 
@@ -34,8 +34,10 @@ inferlab serve stop <RECORD_ID>
 
 `start` emits the running server record id. `status`, `logs`, and `stop`
 use only that record; they do not reload workspace or local bindings. `stop`
-is idempotent and finalizes cleanup evidence. Always stop a manual server after
-the last measurement.
+is idempotent and finalizes cleanup evidence, including the device-residual
+check described in
+[Failure and cleanup](evidence-and-diagnosis.md#failure-and-cleanup). Always
+stop a manual server after the last measurement.
 
 Ordinary readiness, capture preparation, framework control, and report
 finalization use separate resolved budgets. Read
@@ -50,8 +52,8 @@ applies its gate, stops all processes, and aggregates child records:
 inferlab recipe run <RECIPE> [--case C] [--placement P]
 ```
 
-Failure is still evidence: the recipe record preserves the failing phase,
-measurement and server child references, per-process cleanup, and logs. A prior
+A failed recipe still finalizes its record; see
+[Failure and cleanup](evidence-and-diagnosis.md#failure-and-cleanup). A prior
 SLO failure does not suppress later static Bench cases; execution failure,
 timeout, or interruption follows the closed-loop failure path.
 
@@ -61,6 +63,5 @@ does not mutate the stored measurement definition.
 
 ## Image Selection
 
-`serve start` and `recipe run` accept either
-`--image <IMAGE_BUILD_RECORD>` or `--external-image <ID>`, never both; see
+See
 [Built and external image selection](images-and-run.md#built-and-external-image-selection).

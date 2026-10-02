@@ -11,6 +11,8 @@ const fixedEntries = [
   {
     source: 'README.md',
     target: 'src/content/docs/docs/getting-started/installation.md',
+    // The README's own heading is the product name, not this page's subject.
+    title: 'Installation and quick start',
     description: 'Install InferLab and run the first workspace-oriented commands.',
   },
   {
@@ -44,7 +46,7 @@ const fixedEntries = [
     description: 'Use the view-only workspace console.',
   },
   {
-    source: 'docs/backend-support.md',
+    source: 'plugins/inferlab/skills/inferlab/references/backend-support.md',
     target: 'src/content/docs/docs/reference/backend-support.md',
     description: 'Qualified backend capabilities exposed by InferLab.',
   },
@@ -74,8 +76,40 @@ export async function contentManifest() {
   ];
 }
 
+/** The Starlight slug of a projected page, e.g. `docs/guides/tui`. */
+export function slugForTarget(target) {
+  return target
+    .replace(/^src\/content\/docs\//, '')
+    .replace(/\.md$/, '')
+    .replace(/\/index$/, '')
+    .toLowerCase();
+}
+
 export function routeForTarget(target) {
-  let route = target.replace(/^src\/content\/docs\//, '').replace(/\.md$/, '');
-  route = route.replace(/\/index$/, '');
-  return `${siteBase}/${route.toLowerCase()}/`.replace(/\/+/g, '/');
+  return `${siteBase}/${slugForTarget(target)}/`.replace(/\/+/g, '/');
+}
+
+/**
+ * The fixed projected pages directly under a sidebar section, in manifest
+ * order, so the sidebar lists each page the manifest projects. A page that
+ * heads its own nested pages is left to the caller's nested group.
+ */
+export function sidebarPages(section) {
+  const slugs = fixedEntries.map((entry) => slugForTarget(entry.target));
+  return slugs.filter(
+    (slug) =>
+      slug.startsWith(`${section}/`) &&
+      !slug.slice(section.length + 1).includes('/') &&
+      !slugs.some((other) => other.startsWith(`${slug}/`)),
+  );
+}
+
+/**
+ * Documentation pages that are neither a manifest projection nor a
+ * hand-written section index. Projected pages are git-ignored, so any other
+ * page would build locally yet never be committed; the content sync rejects it.
+ */
+export function unexpectedPages(files, manifest) {
+  const targets = new Set(manifest.map((entry) => entry.target));
+  return files.filter((file) => !targets.has(file) && path.basename(file) !== 'index.md');
 }

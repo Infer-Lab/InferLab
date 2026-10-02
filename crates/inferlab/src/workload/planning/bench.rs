@@ -23,7 +23,7 @@ use crate::workload::plan::{
 use crate::workspace::{
     AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchPrefixSharing,
     BenchPrompt, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
-    BenchTpotApplicability, effective_random_prompt, validate_bench,
+    BenchTpotApplicability, validate_bench,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -460,16 +460,17 @@ pub(super) fn apply_bench_overrides(
         }
         apply_definition_override(&mut value, item)?;
     }
-    let definition = value
-        .try_into()
-        .map_err(|error| InferlabError::InvalidOverride {
-            value: overrides
-                .iter()
-                .map(InvocationOverride::raw)
-                .collect::<Vec<_>>()
-                .join(", "),
-            message: format!("invalid effective Bench definition: {error}"),
-        })?;
+    let definition: BenchDefinition =
+        value
+            .try_into()
+            .map_err(|error| InferlabError::InvalidOverride {
+                value: overrides
+                    .iter()
+                    .map(InvocationOverride::raw)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                message: format!("invalid effective Bench definition: {error}"),
+            })?;
     validate_bench(id, &definition)?;
     Ok((definition, override_plan(overrides)))
 }
@@ -665,13 +666,8 @@ fn resolved_request_source_prompt(
         Some(BenchRequestSource::Dataset { .. }) | None => None,
     };
     match source {
-        BenchRequestSource::Random { prompt, images, .. } => {
-            ResolvedBenchPrompt::from_declared_and_resolved(
-                declared_prompt,
-                effective_random_prompt(prompt, images.as_ref()),
-            )
-        }
-        BenchRequestSource::RandomMixture { prompt, .. }
+        BenchRequestSource::Random { prompt, .. }
+        | BenchRequestSource::RandomMixture { prompt, .. }
         | BenchRequestSource::Replay { prompt, .. } => {
             ResolvedBenchPrompt::from_declared_and_effective(declared_prompt, prompt)
         }
@@ -1618,6 +1614,18 @@ timeout_seconds = 60
         Ok(())
     }
 
+    fn random_prompt(
+        definition: &BenchDefinition,
+    ) -> Result<&crate::workspace::BenchPromptSelection, std::io::Error> {
+        match definition {
+            BenchDefinition::Serving {
+                request_source: Some(BenchRequestSource::Random { prompt, .. }),
+                ..
+            } => Ok(prompt),
+            _ => Err(std::io::Error::other("expected a random request source")),
+        }
+    }
+
     #[test]
     fn undeclared_prompt_survives_the_override_round_trip_with_images()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1633,29 +1641,43 @@ timeout_seconds = 60
 
         // Even an empty override list round-trips the definition through TOML;
         // the omitted prompt must not come back as a declared flat authority
-        // (which the images validation would reject).
-        let (effective, _) = apply_bench_overrides("images", definition.clone(), &[])?;
-        let BenchDefinition::Serving {
-            request_source: Some(BenchRequestSource::Random { prompt, .. }),
-            ..
-        } = &effective
-        else {
-            return Err(std::io::Error::other("expected a random request source").into());
-        };
-        assert_eq!(prompt.declared(), None);
+        // (which the images validation would reject), and it stays server_chat.
+        for overrides in [vec![], vec!["request_source.input_tokens=16".to_owned()]] {
+            let (effective, _) = apply_bench_overrides(
+                "images",
+                definition.clone(),
+                &InvocationOverride::parse_all(&overrides)?,
+            )?;
+            let prompt = random_prompt(&effective)?;
+            assert_eq!(prompt.declared(), None);
+            assert_eq!(prompt.effective(), &BenchPrompt::ServerChat);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn images_added_by_override_settle_an_omitted_prompt_to_server_chat()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = toml::from_str::<BenchDefinition>(
+            r#"
+kind = "serving"
+request_source = { kind = "random", input_tokens = 8, output_tokens = 2 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+        )?;
+        assert_eq!(random_prompt(&definition)?.effective(), &BenchPrompt::Flat);
         let (effective, _) = apply_bench_overrides(
             "images",
             definition,
-            &InvocationOverride::parse_all(&["request_source.input_tokens=16".to_owned()])?,
+            &InvocationOverride::parse_all(&[
+                "request_source.images={ width = 64, height = 64 }".to_owned()
+            ])?,
         )?;
-        let BenchDefinition::Serving {
-            request_source: Some(BenchRequestSource::Random { prompt, .. }),
-            ..
-        } = &effective
-        else {
-            return Err(std::io::Error::other("expected a random request source").into());
-        };
+        let prompt = random_prompt(&effective)?;
         assert_eq!(prompt.declared(), None);
+        assert_eq!(prompt.effective(), &BenchPrompt::ServerChat);
         Ok(())
     }
 

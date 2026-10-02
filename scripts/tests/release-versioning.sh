@@ -45,7 +45,6 @@ done <<'EOF'
 plugins/inferlab/.claude-plugin/plugin.json
 plugins/inferlab/.codex-plugin/plugin.json
 plugins/inferlab/skills/inferlab/SKILL.md
-docs/backend-support.md
 protocol/fixtures/valid/plan-serve-response.json
 protocol/fixtures/valid/render-serve-response.json
 protocol/fixtures/valid/render-serve-response-launch-file.json
@@ -136,7 +135,7 @@ for reference in workspace-definition.md execution-authoring.md eval-authoring.m
   grep -Fq "(${reference})" "${authoring_index}" \
     || fail "the bundled workspace-authoring index does not route to ${reference}"
 done
-grep -Fq '[backend support matrix](../../../../docs/backend-support.md)' \
+grep -Fq '[backend support matrix](references/backend-support.md)' \
   "${fixture}/${skill}" \
   || fail "${skill} does not use the bundled backend-support matrix"
 ! grep -Eq '/blob/v[0-9]+\.[0-9]+\.[0-9]+/docs/' "${fixture}/${skill}" \

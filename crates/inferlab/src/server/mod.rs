@@ -1,4 +1,5 @@
 mod network;
+mod numa;
 mod preflight;
 mod record;
 mod residual;
@@ -25,6 +26,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use numa::NumaPinningError;
 pub(crate) use record::{ServerRecord, ServerStatus};
 
 const STARTUP_INTERRUPTED: &str = "server startup was interrupted";
@@ -225,6 +227,15 @@ pub(crate) fn preflight_container_targets(
             source: Box::new(source),
         },
     )
+}
+
+/// Bind server processes on machines that declare `numa_nodes`
+/// ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+pub(crate) fn apply_numa_pinning<'a>(
+    processes: impl IntoIterator<Item = &'a mut ProcessPlan>,
+    machines: &std::collections::BTreeMap<String, crate::workspace::MachineBinding>,
+) -> Result<(), InferlabError> {
+    numa::apply(processes, machines).map_err(|source| InferlabError::NumaPinning { source })
 }
 
 pub(crate) fn resolve_network(
@@ -1619,7 +1630,7 @@ mod tests {
         Ok(())
     }
 
-    fn process(index: usize) -> ProcessPlan {
+    pub(super) fn process(index: usize) -> ProcessPlan {
         ProcessPlan {
             id: format!("rank-{index:03}"),
             identity: ProcessIdentityPlan::ModelRank {

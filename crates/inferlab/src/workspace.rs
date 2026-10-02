@@ -33,7 +33,7 @@ pub(crate) use definitions::{
 };
 pub(crate) use definitions::{
     BenchImageSampling, BenchImagesDeclaration, BenchPrefixSharing, BenchPrompt,
-    BenchPromptSelection, BenchSharedSystemContent, effective_random_prompt,
+    BenchPromptSelection, BenchSharedSystemContent,
 };
 pub(crate) use definitions::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,

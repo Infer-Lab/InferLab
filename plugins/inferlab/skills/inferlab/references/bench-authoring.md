@@ -1,6 +1,6 @@
 # Serving Bench load, sources, sessions, metrics, and SLOs
 
-Start with the smallest definition that expresses the workload. A static synthetic Bench defaults to `serving`. A `random` or
+Start with the smallest definition that expresses the workload. A Bench whose `kind` is omitted defaults to `serving`. A `random` or
 `random_mixture` source defaults to an exact flat completion prompt, so fixed
 ISL and OSL need no prompt table:
 
@@ -28,16 +28,30 @@ These are authoring defaults, not hidden execution state. The
 explicit forms remain valid. Add the advanced controls below only when the
 workload needs their distinct semantics.
 
-Eval definitions are covered by [eval-authoring.md](eval-authoring.md).
+Eval definitions are covered by [eval-authoring.md](eval-authoring.md), which
+also owns the shared `request_body` rule: the measurement runtime owns the
+request members listed
+[there](eval-authoring.md#lm-eval-tasks-and-inference-requests). A Bench
+fragment additionally may not declare `min_tokens`, `min_new_tokens`, or
+`ignore_eos`, because the runtime owns output-length enforcement.
 
 ## Static and adaptive serving load
 
 A static `serving` Bench uses either independent requests or dependent
 sessions. Concurrency cases use `prompts_per_concurrency` or
-`sessions_per_concurrency`. Request-rate cases instead use `request_count` or
-`duration_seconds`; rates accept positive numbers or `"inf"`, and `burstiness`
-controls supported stochastic arrival shaping. One definition cannot mix
-incompatible load authorities.
+`sessions_per_concurrency`. Request-rate cases instead declare `request_rates`
+and exactly one of `request_count` or `duration_seconds`; rates accept positive
+numbers or `"inf"`, an `"inf"` rate cannot be combined with
+`duration_seconds`, and `burstiness` controls supported stochastic arrival
+shaping. One definition cannot mix incompatible load authorities:
+
+```toml
+[benches.rate-sweep]
+request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024 }
+request_rates = [2.0, "inf"]
+request_count = 64
+timeout_seconds = 900
+```
 
 An `adaptive-serving` Bench declares positive initial request rates, one or
 more aggregate or request SLO constraints, a bounded search-step count, and an
@@ -81,20 +95,19 @@ cache = { start = "cold" }   # warmup drains, then reset, then profiling
 - Under attention data parallelism, conditioning fans out one recorded request
   per prefill replica and per attention data-parallel rank of that replica,
   pinned through the `X-Data-Parallel-Rank` request header, so no rank stays
-  cold. The built-in vLLM Mooncake, vLLM NIXL, and SGLang prefill/decode
-  proxies serve `POST /prime_prefix_cache` and route that fan-out through the
-  ordinary pairing flow. The record preserves per-(replica, rank) status,
-  token usage, and timing evidence, and any rank's conditioning failure fails
-  the case. The fan-out capability is required only when more than one
-  prefill-side cache-owning target (replica × attention DP rank) sits behind
-  the frontend; a single-target Gateway-fronted shape conditions through the
-  ordinary serving flow without it. The `vllm-router` and `sglang-router`
-  pairs declare no primed fan-out capability and reject a multi-target primed
-  start at planning.
-- The built-in vLLM Mooncake and NIXL pairs also serve
-  `POST /reset_prefix_cache`, fanning out to every prefill and decode engine,
-  so a cold start passes planning on those pairs. The `vllm-router` pairing
-  remains without reset control.
+  cold on a backend build that honors the header; the
+  [backend support matrix](backend-support.md) names those builds. The record preserves per-(replica, rank) status, token usage, and
+  timing evidence, and any rank's conditioning failure fails the case.
+- A frontend in front of more than one prefill-side cache-owning target
+  (replica × attention DP rank) must declare a conditioning fan-out capability,
+  and a cold start requires a declared reset capability; otherwise planning
+  rejects the start. A single-target frontend conditions through the ordinary
+  serving flow. The [backend support matrix](backend-support.md) owns which integrations,
+  proxies, Gateways, and routers declare reset and fan-out.
+- A reset, flush, or conditioning request sent through the built-in
+  prefill/decode proxy has no fixed per-target cap of its own: the case's
+  remaining `timeout_seconds` bounds the whole fan-out, and when the caller
+  gives up, the proxy cancels its in-flight target work.
 - Reset and conditioning occur after warmup, are excluded from profiling
   metrics, and do not consume population entries.
 - The one case timeout covers warmup, reset, conditioning, profiling, and
@@ -117,15 +130,13 @@ profiling request, and reports:
   distribution statistics;
 - `prompt_cache_read_ratio = sum(cache_read_tokens) / sum(prompt_tokens)`.
 
-For direct vLLM, enable `enable_prompt_tokens_details = true` in the server
-settings. For direct SGLang, enable `enable_cache_report = true`; SGLang's
-OpenAI protocol omits the cache detail when the reported read is exactly zero,
-so its integration records that endpoint representation and InferLab preserves
-the request observation as zero. An undeclared missing value still fails
-normalization. Built-in vLLM and SGLang prefill/decode frontend endpoints
-declare the backend cache-read capability only when both roles enable the
-reporting setting, because the built-in proxies forward engine responses
-verbatim. A primed or prefix-geometry Bench against an endpoint without the
+The endpoint must declare the backend cache-read capability; the
+[backend support matrix](backend-support.md) names the server setting each
+backend needs, and a prefill/decode frontend declares it only when both roles
+enable that setting. An integration may declare that its endpoint omits a
+zero read, as SGLang's does, and InferLab then preserves the request
+observation as zero; an undeclared missing value still fails normalization.
+A primed or prefix-geometry Bench against an endpoint without the
 declared capability fails at planning with a typed error naming the bench, the
 missing capability, and the remediation — enable the reporting setting on both
 roles and rebuild the server — instead of running to completion and failing
@@ -140,10 +151,9 @@ the exported profiling window. The integration may bind that endpoint to the
 public serving port or to one named port it already
 requires; InferLab allocates the port and freezes the exact URL before launching
 the measurement client. InferLab preserves framework routes such as `/metrics`
-or `/v1/metrics` rather than substituting a framework-neutral default. Direct
-SGLang declares the capability only when its server settings include
-`enable_metrics = true`. The Specialized Engine integration binds SMG's
-`prometheus` port and activates its canonical Engine-load polling. A successful
+or `/v1/metrics` rather than substituting a framework-neutral default; the
+[backend support matrix](backend-support.md) lists which endpoints declare a
+metrics export and the setting or port each needs. A successful
 `speed_bench` case additionally runs AIPerf's pinned SPEED report twice and
 publishes the CSV cells as `acceptance_length` and `acceptance_rate`; other
 request sources retain the raw server metrics but do not publish those two
@@ -223,7 +233,8 @@ request_source = { kind = "random", prompt = { kind = "rendered_chat", chat_temp
 ```
 
 Flat and rendered-chat sources may declare exact final-prompt prefix geometry
-as fixed tokens or a per-entry ratio:
+as fixed tokens (`shared_prefix_tokens`) or a per-entry ratio
+(`shared_prefix_ratio`):
 
 ```toml
 request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 0.75 } }
@@ -266,8 +277,9 @@ request_body = { chat_template_kwargs = { enable_thinking = false } }
 ```
 
 `shared_system_content` is a server-chat compatibility shape: it reserves
-pre-template system-message content and an independent user suffix. Its ratio
-must be strictly between zero and one. It is not exact final-prompt prefix
+pre-template system-message content and an independent user suffix, declared as
+`{ ratio = R }` or `{ tokens = N }`. A ratio must be strictly between zero and
+one. It is not exact final-prompt prefix
 geometry, cannot be combined with `prefix_sharing`, and cannot be declared on a
 weighted mixture.
 
@@ -288,8 +300,9 @@ source content. A successful Bench separately reports `mean_prompt_tokens`,
 also the token authority behind total-token throughput.
 
 The release catalog currently exposes ShareGPT as a bounded conversational
-source. InferLab pins the Apache-2.0
-[ShareGPT Vicuna snapshot](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/tree/bcd32a724d8460ebe14e1d05b0195e30e9a46cb1):
+source. InferLab pins an immutable snapshot of the Apache-2.0
+[ShareGPT Vicuna dataset](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered);
+dry-run reports the pinned revision:
 
 ```toml
 request_source = { kind = "dataset", dataset = "sharegpt", max_input_tokens = 8192 }
@@ -337,10 +350,13 @@ sessions.
 
 ## Replaying a recorded population
 
-Any earlier Bench record freezes its request population at
+Any earlier independent-request Bench record (a `random`, `random_mixture`,
+`dataset`, or `replay` source) freezes its request population at
 `.inferlab/records/<record-id>/cases/request-source/artifacts/population.jsonl`.
 Copy that file into the workspace and pin its digest to replay the exact same
-requests against another server or configuration:
+requests against another server or configuration. Linear-session records store
+turn templates and AgentX records freeze no population, so neither can be
+replayed this way:
 
 ```toml
 [benches.replay-c8k1k]
@@ -454,33 +470,31 @@ content; a task-owned lm-eval source that cannot expose its complete closure is
 recorded explicitly as opaque and non-reproducible. Source preparation is
 separate from lm-eval, AIPerf, or InferLab population materialization, so its
 time and cache outcome are not charged to an arbitrary measurement case.
-
-For a workspace lm-eval YAML using a file-backed `json`, `csv`, `parquet`,
-`text`, or `arrow` loader, InferLab snapshots the YAML include closure and
-workspace-local `data_files` before serving starts. Exact paths, lists, split
-mappings, and file globs are expanded into the recorded ordered closure, and
-the Eval client receives a generated task YAML bound only to the read-only
-snapshot. Remote selectors, paths outside the workspace, and task function
-references remain explicit opaque sources because preparation cannot bind
-their complete file closure.
+[eval-authoring.md](eval-authoring.md#source-preparation) describes how a
+workspace lm-eval YAML's file closure is snapshotted.
 
 Use an isolated cache to exercise a real cold preparation followed by verified
-reuse without changing the recipe or measurement definitions:
+reuse without changing the recipe or measurement definitions. Point every cache
+binding preparation honors into the scratch directory; Hugging Face downloads,
+including AgentX corpora, follow `HF_HOME` and `HF_HUB_CACHE` before
+`XDG_CACHE_HOME`:
 
 ```sh
-INFERLAB_ASSET_E2E_CACHE=$(mktemp -d)
-XDG_CACHE_HOME="$INFERLAB_ASSET_E2E_CACHE" inferlab recipe run <RECIPE> > cold-recipe.json
-XDG_CACHE_HOME="$INFERLAB_ASSET_E2E_CACHE" inferlab recipe run <RECIPE> > warm-recipe.json
+C=$(mktemp -d)
+export XDG_CACHE_HOME="$C" HF_HOME="$C/hf" HF_HUB_CACHE="$C/hf/hub" HF_DATASETS_CACHE="$C/hf/datasets"
+inferlab recipe run <RECIPE> > cold-recipe.json
+inferlab recipe run <RECIPE> > warm-recipe.json
 ```
 
 Choose a recipe whose suite contains a release-qualified dataset or AgentX
 source. Both records must report `source_preparation_completed = true` and
 `serving_launch_attempted = true`. In `data_assets`, the same selection must
-have the same `selection_key_sha256`; the cold attempt's terminal preparation
+have the same `source_key_sha256`; the cold attempt's terminal preparation
 phase reports downloaded source bytes and a cache miss, while the warm attempt
 reports reused source bytes and a verified full hit. The terminal `ready`
 attempt must retain a closed content list and its expected-versus-observed
-verification. Compare the two records' data-asset `selection`, `consumers`, and
+verification. Compare the two records' data-asset `source`, `effective_selection`,
+`consumers`, and
 the selected workload definitions under `resolved.measurements` to confirm
 that only the cache outcome changed. A dry-run may inspect an existing local
 path, but never downloads, verifies, or claims source readiness.
@@ -530,19 +544,42 @@ timeout_seconds = 7200
 `concurrency` counts root session-tree lanes. Spawned subagents can therefore
 produce more simultaneous HTTP requests than the declared value. The
 `inferencex` release profile fixes source-response replay, first-turn-prefix
-cache busting, trajectory sampling, a per-lane cache-pressure warmup,
-streaming chat requests, native failure thresholds, and minimum and default
-profiling durations. Omitting `duration_seconds` selects the profile's
-default duration. Live server responses are measured but do not become the
-context for later source turns, so this workflow measures replay transport
-behavior rather than agent task quality.
+cache busting, trajectory sampling, a per-trace and a global cap on recorded
+idle gaps, a per-lane cache-pressure warmup, streaming chat requests, native
+failure thresholds, and minimum and default profiling durations. Recorded idle
+periods longer than the caps are shortened, so replay timing differs from the
+raw trace. Omitting `duration_seconds` selects the profile's default duration.
+Live server responses are measured but do not become the context for later
+source turns, so this workflow measures replay transport behavior rather than
+agent task quality.
 
-The 256k corpus and the full-context `semianalysis_agentx_062126` corpus are
-sizable downloads. InferLab verifies the immutable Hugging Face revision and
-complete `traces.jsonl` digest before AIPerf materializes the trace trees.
-The release profile, not workspace fields,
-owns loader, scenario, timing, warmup, cache-bust, and failure-policy details.
-AgentX rejects request counts and rates, prompt and request-body controls,
+Choose the corpus the served context length can hold. Use
+`semianalysis_agentx_062126_256k` for a server whose context limit is at least
+256k tokens; the full-context `semianalysis_agentx_062126` corpus carries longer
+histories for servers with a larger native context. InferLab does not compare
+the corpus with the server's context length while planning: AIPerf records
+requests that exceed it as context overflows, excludes them from the latency
+distributions, and judges the overflow rate against its native scenario
+threshold, and an invalid native submission fails the case.
+
+A snapshot-warmup failure aborts the case before profiling. A cache-pressure
+warmup request failure is preserved as warmup evidence and does not by itself
+fail the case.
+
+Both corpora are sizable downloads. Source preparation, which runs before a
+recipe launches its server or before a manual Bench's first request, verifies
+the immutable Hugging Face revision and complete `traces.jsonl` digest; AIPerf
+then validates and materializes the trace trees when each
+case's client starts, inside that case's `timeout_seconds`, together with
+warmup, profiling, and result handling. Budget the timeout for all of them.
+
+The release profile, not workspace fields, owns loader, scenario, timing,
+warmup, cache-bust, and failure-policy details. Besides `agentic_source`, an
+AgentX Bench accepts `concurrency`, `duration_seconds` (at least the profile
+minimum), `timeout_seconds`, `seed`, `server_metrics`, and `artifact_level`. It
+rejects request counts and rates, prompt and request-body controls,
 linear-session counts and delays, cache-start controls, SLOs, and adaptive
-serving. Use `inferlab workspace show --json` and dry-run to inspect the closed
-effective policy before downloading or sending traffic.
+serving. `inferlab workspace show --json` shows only the dataset and profile
+names; use dry-run (`recipe run --dry-run`, or `bench --dry-run` against a
+server record) to inspect the closed effective policy before downloading or
+sending traffic.

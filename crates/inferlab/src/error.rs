@@ -360,6 +360,12 @@ pub enum InferlabError {
         source: inferlab_runtime::interrupt::InterruptInstallError,
     },
 
+    #[error("NUMA pinning failed: {source}")]
+    NumaPinning {
+        #[source]
+        source: crate::server::NumaPinningError,
+    },
+
     #[error("remote execution preflight failed: {source}")]
     ServerPreflight {
         #[source]
@@ -553,6 +559,7 @@ impl InferlabError {
             Self::ServerLifecycle { .. }
             | Self::ServerInterrupt { .. }
             | Self::ServerPreflight { .. }
+            | Self::NumaPinning { .. }
             | Self::ServerBusy { .. }
             | Self::Proxy { .. }
             | Self::Profiling { .. }

@@ -14,6 +14,10 @@ use crate::workspace::LoadedWorkspace;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// The words that open every containerized server command. Options that
+/// apply to the container, such as NUMA pinning's cpuset, follow them.
+pub(crate) const CONTAINER_RUN: [&str; 2] = ["docker", "run"];
+
 /// The image substitution facts preserved in the execution plan and every
 /// record embedding it ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): the qualifying
 /// image build record, the immutable image identity launched, and the
@@ -461,9 +465,8 @@ pub(crate) fn containerize(
         };
         let inner = containerization_seam(&process.id, argv)?.to_vec();
         let container_name = format!("inferlab-{}-{nonce}", process.id);
-        let mut container = vec![
-            "docker".to_owned(),
-            "run".to_owned(),
+        let mut container = CONTAINER_RUN.map(str::to_owned).to_vec();
+        container.extend([
             "--rm".to_owned(),
             "--init".to_owned(),
             "--name".to_owned(),
@@ -476,7 +479,7 @@ pub(crate) fn containerize(
             // SGLang DP attention on real hardware).
             "--ipc".to_owned(),
             "host".to_owned(),
-        ];
+        ]);
         if !process.allocation.devices.is_empty() {
             let devices = process
                 .allocation

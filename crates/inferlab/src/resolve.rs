@@ -361,6 +361,9 @@ pub(crate) fn resolve<C: AdapterClient>(
             &workspace.local.adapter,
         )?;
     }
+    // After containerization, so each process's command is the one that
+    // launches ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    crate::server::apply_numa_pinning(execution.server.processes_mut(), &workspace.local.machines)?;
     Ok(execution)
 }
 

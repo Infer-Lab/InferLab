@@ -43,10 +43,11 @@ the smallest matching reference completely:
 | Inspect records, compare results, use the TUI or scratchpad, or diagnose a failure | [Evidence and diagnosis](references/evidence-and-diagnosis.md) |
 | Install, update, diagnose, or remove the agent plugin | [Agent plugin](references/agent-plugin.md) |
 
-Backend-specific qualification boundaries remain in the bundled
-[backend support matrix](../../../../docs/backend-support.md). It comes from the
-same source snapshot as the installed plugin; do not substitute the latest
-website projection when reproducing an older InferLab release.
+Backend-specific qualification boundaries live in the
+[backend support matrix](references/backend-support.md), bundled with this
+skill at the installed InferLab version; its version correspondence table maps
+each InferLab release line to the Adapter SDK and integration packages it
+speaks.
 
 ## First Run
 
@@ -54,37 +55,28 @@ From the workspace root:
 
 ```sh
 inferlab workspace show
-cp .inferlab/local.example.toml .inferlab/local.toml  # when provided
+# write .inferlab/local.toml (copy .inferlab/local.example.toml when provided)
 pixi install --locked --all
 inferlab stack status
-inferlab toolchain install                            # only for Eval/Bench
+inferlab toolchain install                            # only for lm-eval Evals or serving Benches
 ```
 
 `workspace show` needs no local bindings. `stack status` checks the selected
 Pixi realization without model or placement bindings. Resolving a server,
-recipe, Bench, or image then needs the applicable local facts.
+recipe, or image then needs the applicable local facts; a standalone `bench`
+resolves from its target server record instead.
 
 ## Command Surface
 
-```text
-inferlab tui
-inferlab workspace show|lock
-inferlab stack status [STACK]
-inferlab toolchain install
-inferlab serve start <SERVER> [--case C] [--placement P]
-inferlab serve status|logs|stop <RECORD_ID>
-inferlab recipe run <RECIPE> [--case C] [--placement P]
-inferlab bench <BENCH> --serve <SERVER_RECORD_ID>
-inferlab run [--stack S] -- <CMD>...
-inferlab image build <IMAGE>
-inferlab scratchpad note|show
-inferlab agent install|update|uninstall|doctor
-inferlab license
-```
+The [capability map](references/capability-map.md) lists every command with its
+owning reference; each command's `--help` is authoritative for its flags.
 
-Every non-dry-run managed `serve start`, `recipe run`, `bench`, and
-`image build` prints one final JSON report containing a record `id`. A failed
-managed workflow still finalizes evidence and attempts cleanup.
+A non-dry-run `recipe run`, `bench`, or successful `serve start` prints its
+record as JSON keyed by `id`; `image build` prints a report keyed by
+`record_id`. `recipe run`, `bench`, and `image build` print that output even
+when they fail; a failed `serve start` instead names its record in the error on
+stderr. Every failed managed workflow still finalizes evidence and attempts
+cleanup.
 
 ## Privacy
 

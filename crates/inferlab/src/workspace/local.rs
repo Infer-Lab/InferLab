@@ -96,6 +96,10 @@ pub(crate) struct MachineBinding {
     pub launch: LaunchBinding,
     #[serde(default)]
     pub container: Option<ContainerBinding>,
+    /// NUMA nodes every server process launched on this machine is bound to
+    /// for CPU placement and memory allocation ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    #[serde(default)]
+    pub numa_nodes: Option<Vec<u32>>,
 }
 
 /// Container environment variables Inferlab itself manages: injected at
@@ -360,6 +364,14 @@ pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), Infer
         let unique: BTreeSet<_> = machine.devices.iter().collect();
         if unique.len() != machine.devices.len() {
             return invalid(format!("machine binding {id:?} contains duplicate devices"));
+        }
+        if let Some(nodes) = &machine.numa_nodes {
+            let unique: BTreeSet<_> = nodes.iter().collect();
+            if nodes.is_empty() || unique.len() != nodes.len() {
+                return invalid(format!(
+                    "machine binding {id:?} numa_nodes must list distinct nodes"
+                ));
+            }
         }
         let mut ports = BTreeSet::new();
         for port in &machine.ports {

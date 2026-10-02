@@ -26,3 +26,4 @@ mod workspace;
 
 pub use cli::{Cli, run};
 pub use error::{GitError, InferlabError};
+pub use server::NumaPinningError;

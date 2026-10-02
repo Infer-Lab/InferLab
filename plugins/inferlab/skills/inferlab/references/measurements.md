@@ -14,8 +14,12 @@ Bench execution:
 inferlab toolchain install
 ```
 
-The installed runtime is fixed by the InferLab product release. Serving
-workspaces do not declare or install its internal measurement SDK.
+The installed runtime is fixed by the InferLab product release, and each
+InferLab version installs its own, so rerun the install after upgrading.
+Installation fetches the pinned measurement packages, including a
+commit-pinned AIPerf build from GitHub, so the install host needs network
+access to GitHub. Serving workspaces do not declare or install its internal
+measurement SDK.
 
 ## Run Eval And Bench Workloads
 
@@ -45,12 +49,9 @@ traffic, preserving the same seeded population basis across cases.
 
 ## Runtime Phases
 
-For a cold or primed cache start, warmup drains, then reset, then primed
-conditioning, before profiling release; preparation stays outside normalized
-profiling counts and metrics. Planning rejects ineligible endpoints, and a
-captured Bench opens the framework window only after preparation succeeds.
+A cold or primed cache start prepares the cache between warmup and profiling;
 [Bench authoring](bench-authoring.md#serving-bench-warmup-and-metrics) owns the
-fan-out, evidence, and rejection detail.
+ordering, fan-out, evidence, and rejection detail.
 
 Independent request populations and dependent linear sessions use separate
 native phase identities. A session keeps each conversation live across its
@@ -58,11 +59,13 @@ inter-turn delays; one failed turn terminates that session rather than becoming
 an unrelated request.
 
 AgentX trace replay delegates source-tree materialization, snapshot warmup,
-branch scheduling, and scenario validity to the release-pinned AIPerf runtime.
-Its declared concurrency is root-tree lanes, while completed and failed counts
-remain transport-request counts. Its cache-pressure warmup and minimum
-profiling duration make the ordinary timeout examples too short; budget source
-configuration, warmup grace, profiling, and result handling explicitly.
+branch scheduling, and scenario validity to the release-pinned AIPerf runtime;
+its completed and failed counts are transport-request counts. Trace
+materialization at client start, the cache-pressure warmup, the default or
+declared profiling duration, and result handling all consume the case timeout,
+so the ordinary timeout examples are too short;
+[Bench authoring](bench-authoring.md#semianalysis-agentx-trace-replay) owns the
+AgentX semantics.
 
 Adaptive Bench records every measured rate and selects the highest observed
 feasible rate under its bounded search policy. It does not claim an unmeasured
@@ -73,21 +76,20 @@ manual Bench.
 
 ## Evidence Checks
 
-The record freezes the resolved route, prompt authority, tokenizer identity,
-template provenance, request population, prefix schedule, warmup/profiling
-phase identity, request-body fragment, native commands, artifacts, and
-normalized metrics.
+[Evidence and diagnosis](evidence-and-diagnosis.md) owns record reading and
+comparison. For a Bench, also check the frozen request population, prefix
+schedule, and warmup/profiling phase identity.
 
 For AgentX, also inspect source expected/observed revision and digest, the
-native scenario verdict and invalidity reasons, warmup and profiling raw
-records, source/runtime request coordinates, cache-bust markers, complete
-`branch_stats`, the aggregate artifact, and the explicit unavailable scheduler
-dimensions. Branch counters are not task-success or root-tree-throughput
-metrics. `benchmark_lib.sh` is qualification evidence only and is never run,
-parsed, or copied by InferLab.
+native scenario verdict and invalidity reasons, `context_overflow_count`,
+`ordinary_failure_count`, `warmup_error_records`, complete `branch_stats`, the
+aggregate artifact, and the explicit unavailable scheduler dimensions. Raw
+records, source/runtime request coordinates, and cache-bust markers exist only
+at `artifact_level = "diagnostic"`; at `performance` they are recorded as
+unavailable due to the artifact level. Branch counters are not task-success or
+root-tree-throughput metrics. `benchmark_lib.sh` is qualification evidence only
+and is never run, parsed, or copied by InferLab.
 
 Inspect backend-observed prompt-token evidence separately from configured
 prompt geometry. Prefix sharing describes the request population; cache-read
 metrics describe observed server behavior.
-
-Read [Evidence and diagnosis](evidence-and-diagnosis.md) before comparing runs.

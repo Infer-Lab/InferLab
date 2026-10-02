@@ -30,10 +30,18 @@ you can inspect, compare, and reproduce.
 - **Serve lifecycles** — long-running framework servers, single-role or
   prefill/decode disaggregated across machines, with readiness, logs, and
   verified cleanup in the record.
+- **Five framework integrations** — vLLM, SGLang, TensorRT-LLM, TokenSpeed,
+  and the reusable Specialized Engine contract behind one typed adapter
+  protocol.
 - **Closed-loop recipes** — serve + eval (lm-eval) + bench (AIPerf) suites in
   one command, with per-case metrics and raw artifacts preserved.
-- **Runtime images** — build and validate OCI images from the same workspace
-  baseline, then launch recipes from them.
+- **Measurements** — native and lm-eval Evals including vision smoke; serving
+  Benches over random, corpus, replay, and image-decorated request sources,
+  linear sessions, and SemiAnalysis AgentX agentic trace replay; standalone
+  `inferlab bench` against a running server.
+- **Runtime images** — build and validate OCI images from the workspace, or
+  select a digest-pinned external image, then launch servers, recipes, and
+  ad-hoc `inferlab run` commands from them.
 - **Profiling** — attach managed Nsight Systems collection or engine-native
   traces to selected workloads.
 - **Source identity** — records carry the workspace revision and a source
@@ -64,9 +72,13 @@ cargo install inferlab
 
 Or build from a checkout with `cargo install --path crates/inferlab`. The
 published library crates (`inferlab-runtime`, `inferlab-profiler`,
-`inferlab-protocol`, `inferlab-proxy`) exist to
+`inferlab-protocol`, `inferlab-proxy`, `inferlab-serve-domain`) exist to
 build the binary; their APIs are experimental and carry no stability promise
 yet.
+
+`inferlab --version` prints the adapter protocol line the binary speaks; the
+[backend support](plugins/inferlab/skills/inferlab/references/backend-support.md) correspondence table names the
+Adapter SDK and integration packages a workspace pins for it.
 
 ### Agent skill
 
@@ -85,10 +97,11 @@ unpacked release plugin tarball, for testing an unreleased change.
 In a workspace (see [`docs/rfc/`](docs/rfc/) for the full contract, starting at RFC-0001):
 
 ```sh
-pixi install --locked --all                 # realize every stack's selected Pixi environment
 inferlab workspace show                     # validate and browse public definitions
+# write .inferlab/local.toml (copy .inferlab/local.example.toml when provided)
+pixi install --locked --all                 # realize every stack's selected Pixi environment
 inferlab stack status                       # confirm environments and run declared stack checks
-inferlab toolchain install                  # measurement runtimes (only for lm-eval/Bench measurements)
+inferlab toolchain install                  # only for lm-eval Evals or serving Benches
 inferlab tui                                # observe this workspace; never starts or changes work
 
 inferlab recipe run my-recipe --dry-run     # validate placement, devices, commands, environment
@@ -98,9 +111,14 @@ inferlab bench random-8k1k --serve <ID>
 inferlab serve stop <ID>
 ```
 
-Non-dry-run `serve start`, `recipe run`, `bench`, and `image build` print JSON
-naming a record under `.inferlab/records/<ID>/`; `--dry-run` on
-those commands resolves and validates without launching or writing one.
+`inferlab toolchain install` fetches the pinned measurement packages, so it
+needs network access, and it must be rerun after upgrading InferLab.
+
+Non-dry-run `recipe run`, `bench`, and `image build` print JSON naming a
+record under `.inferlab/records/<ID>/`, even when they fail; `serve start`
+prints it only on success, and a start that fails after writing its record
+names it in the error on stderr. `--dry-run`
+on those commands resolves and validates without launching or writing one.
 
 ## Documentation
 
@@ -110,16 +128,20 @@ those commands resolves and validates without launching or writing one.
 - [Workspace authoring](plugins/inferlab/skills/inferlab/references/workspace-authoring.md):
   public definitions, local bindings, heterogeneous P/D placement, typed
   patches, and dry-run.
-- [Backend support](docs/backend-support.md): maintained backend capabilities
+- [Backend support](plugins/inferlab/skills/inferlab/references/backend-support.md): maintained backend capabilities
   and integration package names.
 - [View-only TUI](docs/tui.md): workspace observation, source labels, views,
   keys, search, refresh, and stale-state semantics.
+- [Specialized Engines](docs/specialized-engine.md): the reusable token-worker
+  Engine contract for hardware-by-model specialized backends.
 - [RFC-0001 — Specification Overview And Authority Map](docs/rfc/RFC-0001.md):
   the entry point of the normative external contract; topic RFCs under
   [docs/rfc/](docs/rfc/) own workspaces/stacks, servers/execution,
   measurements/toolchains, evidence, the integration protocol, runtime
-  images, and agent plugin distribution.
-- [Architecture decisions](docs/adr/): accepted ADRs.
+  images, agent plugin distribution, runtime time bounds, the view-only TUI,
+  and the public website.
+- [Architecture decisions](docs/adr/): accepted ADRs plus superseded and
+  rejected historical decisions.
 - [`plugins/inferlab/skills/inferlab/SKILL.md`](plugins/inferlab/skills/inferlab/SKILL.md):
   the operator workflow, as taught to agents.
 

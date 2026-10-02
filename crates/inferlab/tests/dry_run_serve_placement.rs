@@ -1630,6 +1630,59 @@ fn machine_binding_selects_runtime_cache_storage_root() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// A machine binding's `numa_nodes` binds a host-launched server through
+/// `numactl`, visible in the dry-run's resolved command
+/// ([[RFC-0002:C-LOCAL-PLACEMENT]]). Node 0 exists on every Linux host.
+#[test]
+fn numa_nodes_bind_a_host_server_through_numactl_in_dry_run() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    write_executable(
+        &workspace.adapter_bin.join("numactl"),
+        "#!/bin/sh\nexit 0\n",
+    )?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"local\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             \n\
+             [machines.local]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [8000]\n\
+             devices = [0, 1, 2, 3, 4, 5, 6, 7]\n\
+             numa_nodes = [0]\n\
+             \n\
+             [placements.local]\n\
+             machines = [\"local\"]\n",
+            workspace.private_weight,
+        ),
+    )?;
+
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+    let process = resolved_rank(&plan["server"], "server")?;
+    let prefix: Vec<_> = process
+        .command
+        .argv
+        .iter()
+        .take(6)
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        prefix,
+        [
+            "numactl",
+            "--cpunodebind=0",
+            "--membind=0",
+            "--",
+            "pixi",
+            "run"
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn two_node_resolution_rejects_placements_without_a_common_routable_interface()
 -> Result<(), Box<dyn Error>> {

@@ -174,19 +174,6 @@ impl ResolvedBenchPrompt {
         )
     }
 
-    /// Resolve from an already-resolved effective authority: the images-aware
-    /// `random` defaulting rule runs before planning
-    /// ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]).
-    pub(crate) fn from_declared_and_resolved(
-        declared: Option<&BenchPromptSelection>,
-        effective: BenchPrompt,
-    ) -> Self {
-        Self::resolve(
-            declared.and_then(BenchPromptSelection::declared).cloned(),
-            effective,
-        )
-    }
-
     pub(crate) fn from_definition(definition: &BenchPrompt) -> Self {
         Self::resolve(None, definition.clone())
     }

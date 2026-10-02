@@ -2,7 +2,7 @@ use super::super::FactSection;
 use crate::workspace::{
     BenchCacheStart, BenchDefinition, BenchImageSampling, BenchImagesDeclaration,
     BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
-    BenchSharedSystemContent, BenchTokenSelector, RequestRate, effective_random_prompt,
+    BenchSharedSystemContent, BenchTokenSelector, RequestRate,
 };
 
 pub(in crate::tui) struct DefinitionDetail {
@@ -247,10 +247,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
                 title: "SOURCE · REQUESTS",
                 rows: vec![
                     fact("Generator", "random"),
-                    fact(
-                        "Prompt",
-                        prompt_summary_with_images(prompt, images.as_ref()),
-                    ),
+                    fact("Prompt", prompt_summary(prompt)),
                     fact("Input tokens", token_selector(input_tokens)),
                     fact("Output tokens", token_selector(output_tokens)),
                     fact("Prefix sharing", prefix_summary(prefix_sharing.as_ref())),
@@ -347,25 +344,12 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
 }
 
 fn prompt_summary(prompt: &BenchPromptSelection) -> String {
-    prompt_summary_effective(prompt, prompt.effective().clone())
-}
-
-/// A `random` source with an image decoration resolves an omitted prompt
-/// table to `server_chat` ([[RFC-0004:C-BENCH-PROMPT-AUTHORITY]]).
-fn prompt_summary_with_images(
-    prompt: &BenchPromptSelection,
-    images: Option<&BenchImagesDeclaration>,
-) -> String {
-    prompt_summary_effective(prompt, effective_random_prompt(prompt, images))
-}
-
-fn prompt_summary_effective(prompt: &BenchPromptSelection, effective: BenchPrompt) -> String {
     let provenance = if prompt.declared().is_some() {
         "declared"
     } else {
         "default"
     };
-    match effective {
+    match prompt.effective() {
         BenchPrompt::Flat => format!("flat ({provenance})"),
         BenchPrompt::RenderedChat { chat_template, .. } => format!(
             "rendered chat · {} ({provenance})",

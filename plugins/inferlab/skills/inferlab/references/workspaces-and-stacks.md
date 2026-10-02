@@ -51,7 +51,11 @@ inferlab workspace show
 inferlab stack status
 ```
 
-`workspace lock` requires a clean local prefix and writes the committed Pixi
-lock. A successful lock does not establish that a previously realized
+`workspace lock` writes the committed Pixi lock and works from a clean local
+prefix: when packages named under `pypi-options.no-build-isolation` are also
+local `path` dependencies, it first locks and installs the base environment
+without them so those packages can build against it, then locks the full
+manifest. A failed or interrupted lock restores the manifest and the
+previous lock. A successful lock does not establish that a previously realized
 environment has been rebuilt; `stack status` reports confirmation and current
 declared checks separately.

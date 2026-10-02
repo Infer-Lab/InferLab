@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-10-02
+
+### Added
+
+- A machine binding may declare `numa_nodes` ([[ADR-0053]]). Every server
+  process InferLab launches on that machine then runs bound to those NUMA
+  nodes' CPUs and memory: host processes under `numactl`, containerized
+  processes through the container runtime's cpuset. This keeps managed
+  measurements on a shared multi-socket host away from other sessions' load.
+  A missing `numactl` for a host launch, or a node the machine does not have,
+  has no CPUs for, or does not report, fails resolution naming the machine.
+
+- The public website publishes a plain-text Markdown alternate of every
+  documentation page at its route with a `.md` suffix, plus `llms.txt` and
+  `llms-full.txt`, so agents can read the documentation without HTML
+  ([[ADR-0054]]).
+
+### Changed
+
+- The backend support matrix now lives beside the agent skill at
+  `plugins/inferlab/skills/inferlab/references/backend-support.md`, so an
+  installed plugin carries it and agents read it locally at the installed
+  version ([[ADR-0054]]). Its version correspondence table now covers the
+  0.15 line.
+- The operator documentation and the agent skill were brought up to date with
+  the current product: stale statements corrected, behavior added since the
+  0.12 line documented at one owning page, duplicated explanations replaced
+  by links, and broken links in installed plugins fixed.
+
+### Fixed
+
+- An AgentX Bench with `timeout_seconds = 0` is now rejected at workspace
+  load like every other Bench; the AgentX branch previously skipped the
+  positive-budget check.
+- `workspace show`, dry-run, and records now show `server_chat` as the
+  effective prompt of an image-decorated random source whose `prompt` is
+  omitted; they previously showed the parse-time `flat` default, which
+  execution never used.
+- Server cleanup no longer fails because another session uses the same
+  device. The post-cleanup device probe now counts only memory held by
+  processes that no longer exist on the launch machine; memory held by live
+  processes outside the stopped server is not its residual, including
+  another user's process hidden from the probe's process table. Memory the
+  device does not attribute to an identified process records
+  `probe_unavailable` for that device instead ([[RFC-0005:C-EVIDENCE]]).
+  Server record schema 12 is unchanged, so a `freed` outcome in a record
+  written by 0.15.3 or 0.15.4 means the device held no compute memory at all,
+  while from 0.15.5 it means no memory of a process that no longer exists.
+- `inferlab --help`, the README, and the agent skill now give one first-run
+  order, and the README writes local bindings before its first resolving
+  command. `bench --help` now names `server_chat` as the omitted prompt of an
+  image-decorated random source, and the README no longer says a failed
+  `serve start` prints a record.
+- `agent install --from-checkout` now rejects a plugin package missing any
+  file the skill links, directly or through the references it links.
+
 ## [0.15.4] - 2026-09-28
 
 ### Added

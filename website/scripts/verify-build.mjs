@@ -2,6 +2,7 @@ import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contentManifest, routeForTarget } from './content-manifest.mjs';
+import { markdownLinks } from '../src/markdown-links.mjs';
 import { siteBaseWithSlash as base, siteOrigin } from '../site.config.mjs';
 
 const websiteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,6 +29,65 @@ for (const required of [
 ]) {
   if (!(await exists(path.join(dist, required)))) {
     throw new Error(`missing built site output: ${required}`);
+  }
+}
+
+// Plain-text alternates (RFC-0011:C-CONTENT-AUTHORITY): every documentation
+// page has a `.md` twin at its route, and llms.txt links every one of them.
+const llmsIndex = await readFile(path.join(dist, 'llms.txt'), 'utf8');
+const llmsFull = await readFile(path.join(dist, 'llms-full.txt'), 'utf8');
+// Operator pages come first; the specification records sit in the skippable
+// `Optional` section (llmstxt.org).
+const llmsSections = llmsIndex.split('\n## Optional\n');
+if (llmsSections.length !== 2) {
+  throw new Error('llms.txt must end with one Optional section');
+}
+for (const htmlPath of await htmlFiles(path.join(dist, 'docs'))) {
+  const page = path.relative(dist, htmlPath).replaceAll(path.sep, '/');
+  const alternate = page.replace(/\/index\.html$/, '.md');
+  const markdown = await readFile(path.join(dist, alternate), 'utf8').catch(() => {
+    throw new Error(`${page}: missing Markdown alternate ${alternate}`);
+  });
+  if (!markdown.startsWith('# ')) {
+    throw new Error(`${alternate}: Markdown alternate must open with the page title`);
+  }
+  if (markdown.includes('<!-- GENERATED:') || markdown.includes('<!-- SIGNATURE:')) {
+    throw new Error(`${alternate}: Markdown alternate carries generator comments`);
+  }
+  // An alternate is also concatenated into llms-full.txt, so a relative link
+  // has no single base to resolve against: every site link is root-relative,
+  // and a documentation link stays in plain text. The links come from the
+  // same syntax-tree extraction the generator rewrites.
+  for (const { url: reference } of markdownLinks(markdown)) {
+    if (reference.startsWith('#')) continue;
+    let url;
+    try {
+      url = new URL(reference, siteOrigin);
+    } catch {
+      continue;
+    }
+    if (url.origin !== siteOrigin) continue;
+    if (!reference.startsWith('/')) {
+      throw new Error(`${alternate}: site link ${reference} is not root-relative`);
+    }
+    const pathname = decodeURIComponent(url.pathname);
+    const lastSegment = pathname.replace(/\/$/, '').split('/').at(-1) ?? '';
+    if (pathname.startsWith(`${base}docs`) && !lastSegment.includes('.')) {
+      throw new Error(`${alternate}: documentation link ${reference} must target a Markdown alternate`);
+    }
+    if (!(await exists(outputPathForUrl(url)))) {
+      throw new Error(`${alternate}: unresolved local reference ${reference}`);
+    }
+  }
+  const alternateUrl = new URL(alternate, `${siteOrigin}${base}`).href;
+  const specificationRecord = /^docs\/architecture\/(?:rfc|adr)\/./.test(alternate);
+  if (!llmsSections[specificationRecord ? 1 : 0].includes(`](${alternateUrl})`)) {
+    throw new Error(
+      `llms.txt does not link ${alternateUrl} under ${specificationRecord ? 'Optional' : 'Documentation'}`,
+    );
+  }
+  if (!llmsFull.includes(`<!-- ${alternateUrl} -->`)) {
+    throw new Error(`llms-full.txt does not include ${alternateUrl}`);
   }
 }
 

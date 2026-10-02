@@ -25,6 +25,11 @@ Read the final machine-readable report rather than scraping native agent CLI
 output. A partial failure still retains the attempted commands and per-runtime
 outcomes.
 
+`install` and `update` need the native `codex` or `claude` CLI to be installed
+and ready; `doctor` reports what is missing. `update` always reinstalls from the
+package embedded in the running binary, so it replaces an earlier
+`--from-checkout` installation.
+
 After changing the InferLab binary, run `update` then `doctor`:
 
 ```sh

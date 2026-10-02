@@ -78,6 +78,13 @@ the selected case, and invocation overrides:
   and the verbatim block owns the spelling. This exists because store-true
   flags cannot be retracted by last-wins parsing.
 
+`extra_env` is the matching escape hatch for process environment variables:
+a table of names to string values that the integration adds to each rendered
+process. Like other settings tables, it composes per variable across the
+server base, the selected case, and invocation overrides, and a later layer's
+value for one name replaces the earlier one. On a containerized launch these
+variables reach the container verbatim and apply only inside it.
+
 ## Synthetic acceptance
 
 For speculative-decoding benchmarks that must use a controlled acceptance
@@ -90,12 +97,16 @@ length onto that operator-owned configuration, and planning fails with a
 typed error when no speculative configuration exists to overlay. A case-level
 declaration replaces the server-level declaration wholesale.
 
+Declare exactly one form. An explicit acceptance length:
+
 ```toml
-# Explicit acceptance length:
 [servers.example.synthetic_acceptance]
 acceptance_length = 2.49
+```
 
-# Or a digest-pinned golden acceptance-length curve (InferenceX shape):
+Or a digest-pinned golden acceptance-length curve (InferenceX shape):
+
+```toml
 [servers.example.synthetic_acceptance.curve]
 path = "curves/deepseek_mtp.yaml"
 expected_sha256 = "<64 lowercase hex of the file bytes>"
@@ -114,7 +125,7 @@ server with synthetic acceptance fails at planning, because synthetic
 acceptance bypasses real draft-model verification; run correctness evals
 against a variant without the declaration. Per-backend overlay support is
 listed in the
-[backend support matrix](../../../../../docs/backend-support.md).
+[backend support matrix](backend-support.md).
 
 ## Auxiliary model weights
 
@@ -141,10 +152,32 @@ the artifact: planning fails with a typed error when the operator's
 speculative configuration already names the draft weights or offers no
 splice target. The declaration is server-level only — cases must not declare
 or override it. Per-backend consumption support is listed in the
-[backend support matrix](../../../../../docs/backend-support.md).
+[backend support matrix](backend-support.md).
 
-Optional image postprocessing belongs to the stack rather than an image
-definition. Use [Workspaces and stacks](workspaces-and-stacks.md) for
+## Stacks
+
+A stack names its integration, the Pixi environment that realizes it, and the
+workspace source paths it builds from. It may also declare realization checks
+and image postprocess steps; both are workspace-relative Python scripts run
+with the stack environment's interpreter:
+
+```toml
+[[stacks.vllm.checks]]
+id = "serving-stack"
+script = "tools/check_vllm_stack.py"
+repair_hint = "pixi install --locked -e vllm"
+
+[[stacks.vllm.image_postprocess]]
+id = "trim-caches"
+script = "tools/postprocess_image.py"
+```
+
+A check passes only on exit status zero, must not mutate the realization, and
+reports facts rather than remedies; `repair_hint` carries the operator remedy.
+One check set runs against every realization: the local environment, each
+remote machine's environment before launch, and the image during assembly.
+Postprocess steps run only during image assembly, after installation and
+before the checks. Use [Workspaces and stacks](workspaces-and-stacks.md) for
 installation, confirmation, and lock operations.
 
 ## Prefill/decode servers
@@ -219,18 +252,13 @@ context_parallel_size = 2
 ```
 
 The integration lowers the declared value; it is not an engine flag spelling.
-vLLM lowers `single` and `decode` roles to decode context parallelism and
-`prefill_decode` prefill roles to device-multiplying prefill context
-parallelism. SGLang lowers `single` and `prefill` roles to prefill context
-parallelism (`--enable-prefill-cp` with a default `zigzag` strategy) and
-`decode` roles to decode context parallelism (`--dcp-size`). Context
-parallelism on a `single` server never adds devices; only a `prefill_decode`
-prefill role may grow its device count.
+Context parallelism on a `single` server never adds devices; only a
+`prefill_decode` prefill role may grow its device count. Each backend's
+lowering and qualification live in the [backend support matrix](backend-support.md).
 
 Model- and hardware-dependent applicability (MLA-only prefill CP, attention
 head divisibility) remains the engine's launch-time verdict; planning cannot
-prove it. Consult the bundled backend support matrix before claiming a CP
-shape.
+prove it.
 
 For DeepSeek-family models on SGLang, declare CP and select the DSA prefill-CP
 spelling verbatim. The integration documents its whole prefill-CP flag group
@@ -268,6 +296,17 @@ Published workspaces should provide this shape as
 `.inferlab/local.example.toml`; operators copy it to the ignored local file and
 replace the generic values.
 
+A workflow selects its placement from an explicit `--placement`, then the
+local `default_placement`, then the sole declared placement; more than one
+remaining candidate is ambiguous and fails naming them.
+
+A `model_weights` binding may declare a fallback `locator`, per-machine
+`machine_locators`, or both; each model-serving rank uses its machine's
+locator when present and the fallback otherwise. Measurements run on the
+controller and load the tokenizer from a controller-local rank's locator, or
+else from the fallback `locator`, which must therefore be readable on the
+controller. A placement that offers neither fails resolution.
+
 Adapter invocation deadlines are machine-local because process startup and
 container startup costs vary by site. The two paths remain independent:
 
@@ -287,6 +326,38 @@ allocates runtime JIT caches using resolved stack and source identity. Cache
 contents remain convenience state rather than portable evidence or stack
 confirmation.
 
+On a shared multi-socket host, measurements can vary with load that other
+sessions place on the CPUs and memory a server happens to use. Machine
+`numa_nodes` binds every server process InferLab launches on that machine to
+the listed NUMA nodes, usually the node that hosts the machine's devices
+(`nvidia-smi topo -m` shows each GPU's NUMA affinity):
+
+```toml
+[machines.local]
+host = "127.0.0.1"
+devices = [0, 1]
+ports = [8000, 8001]
+numa_nodes = [0]
+```
+
+Host processes then run under `numactl --cpunodebind --membind`, which must be
+installed on the launch machine; containerized processes receive the
+container runtime's cpuset for those nodes. The binding appears in the
+resolved commands in dry-run and records. Resolution, dry-run included, reads
+the nodes' CPU lists on the launch machine and fails naming the machine when a
+declared node is absent there or has no CPUs, or when a host launch's machine
+lacks `numactl`; the list must be nonempty and must not repeat a node. Leave
+it unset for a machine whose devices span NUMA nodes.
+
+A machine with `launch = { kind = "ssh", target = "..." }` runs its processes
+through noninteractive SSH (`BatchMode`), so authentication must not prompt.
+Remote commands run in a login shell, whose initialization must put `pixi`, and
+`docker` or `numactl` when used, on `PATH`. A host launch requires the machine's
+`workspace` path to be a checkout at the controller's revision, dirty state,
+source digest, and Pixi manifest and lock, with the stack environment already
+installed there; a mismatch or a missing environment fails before launch. An
+external-image launch uses the remote `workspace` only as a launch directory.
+
 Use explicit rank placement when replicas span machines, roles use different
 device counts, or the same model has different locators on each machine. This
 example places two TP4 prefill replicas across pairs of machines, two TP2
@@ -296,6 +367,9 @@ also realizes P/D Router, and it has no model locator, replica index, or rank:
 
 ```toml
 default_placement = "cluster"
+
+[model_weights.example]
+locator = "/models/example"   # readable on the controller for measurements
 
 [model_weights.example.machine_locators]
 prefill-a = "/models/example-a"
@@ -403,12 +477,10 @@ inferlab recipe run smoke --dry-run
 inferlab recipe run smoke
 ```
 
-`workspace show` validates the public catalog. `stack status` separately
-reports each selected Pixi environment's manifest-and-lock confirmation,
-executes that stack's declared checks against a confirmed local realization,
-and reports overall readiness. A failed check reports its captured output and
-declared repair hint but does not repair or otherwise mutate the realization.
-Dry-run then resolves local placement, effective settings, endpoints, device
+`workspace show` validates the public catalog. `stack status` reports
+realization confirmation and declared checks as described in
+[Workspaces and stacks](workspaces-and-stacks.md#stack-lifecycle). Dry-run then
+resolves local placement, effective settings, endpoints, device
 assignments, commands, environment, and override provenance without launching
 or writing an execution record.
 
@@ -421,27 +493,21 @@ loading. A protocol mismatch at runtime names both versions and the remedy.
 
 To move a workspace across a hard cut, first learn the current correspondence
 from the authority surfaces: `inferlab --version` states the adapter protocol
-line the installed binary speaks, and the backend support matrix's front
-matter maps the product line to the exact adapter SDK and framework
-integration package versions. Then update the adapter SDK and the selected
+line the installed binary speaks, and the version correspondence table in the
+[backend support matrix](backend-support.md) maps the product line to the exact adapter SDK and
+framework integration package versions. Then update the adapter SDK and the selected
 framework integration pins together to those versions — never one without the
 other — and run `inferlab workspace lock` so the committed Pixi lock becomes
 the new workspace authority.
 
-The release-owned measurement toolchain (lm-eval runner and AIPerf Bench
-runner) is pinned by the product, not by the workspace. Re-run the installer
-after upgrading so the installed runtime matches the new release:
-
-```sh
-inferlab toolchain install
-```
-
-The product-owned measurement SDK remains internal to the installed
-measurement toolchain and must not be added to a serving workspace. Migration
+The release-owned measurement toolchain is pinned by the product, not by the
+workspace; reinstall it after upgrading as
+[Prepare The Measurement Runtime](measurements.md#prepare-the-measurement-runtime)
+describes. Migration
 history for each release lives in the changelog.
 
-Workspaces upgrading from an older release that still declared the former
-`routing_backend` field must replace it; the current control plane no longer
-interprets it. The per-topology declaration rule lives under
-[Prefill/decode servers](#prefilldecode-servers); the control plane rejects the
-old combined field rather than guessing how to divide its ownership.
+Record schemas also change between releases without an adapter protocol cut.
+A binary reads server records only at its own schema version, so after an
+upgrade that changes it, `serve status`, `logs`, `stop`, and `bench --serve`
+reject a server started by the previous binary. Stop managed servers before
+upgrading, or stop them with the binary that started them.

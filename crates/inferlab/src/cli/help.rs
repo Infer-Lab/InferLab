@@ -4,9 +4,10 @@ Committed workspace definitions own shareable stacks, servers, measurements, rec
 
 pub(super) const ROOT_EXAMPLES: &str = "FIRST RUN:
   inferlab workspace show
+  # write .inferlab/local.toml (copy .inferlab/local.example.toml when provided)
   pixi install --locked --all
   inferlab stack status
-  inferlab toolchain install        # only when running Eval or Bench
+  inferlab toolchain install        # only for lm-eval Evals or serving Benches
 
 SAFE DISCOVERY:
   Add --dry-run to serve start, recipe run, bench, or image build before a stateful execution.";
@@ -38,7 +39,7 @@ This command does not require machine-local bindings. A confirmed environment is
 
 pub(super) const TOOLCHAIN_INSTALL: &str = "Install and verify the release-owned lm-eval and AIPerf measurement runtimes.
 
-This toolchain is needed only for lm-eval and serving Bench measurements. It is separate from each serving stack's Pixi environment, and its internal measurement packages must not be added to a serving workspace.";
+This toolchain is needed only for lm-eval and serving Bench measurements. It is separate from each serving stack's Pixi environment, and its internal measurement packages must not be added to a serving workspace. Installation fetches the pinned measurement packages, so it needs network access, and it must be rerun after upgrading InferLab.";
 
 pub(super) const SERVE_START: &str = "Resolve and start one named server as a managed long-running lifecycle.
 
@@ -92,15 +93,15 @@ WORKSPACE TOML — SEMIANALYSIS AGENTX TRACE REPLAY:
   concurrency = [1]
   timeout_seconds = 7200
 
-AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, a 300-second per-trace idle-gap cap, a cache-pressure warmup of 10 requests per lane, a 900-second minimum and 1800-second default profiling duration, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context profile is about 1.85 GB. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
+AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, a 300-second per-trace idle-gap cap, a cache-pressure warmup of 10 requests per lane, a 900-second minimum and 1800-second default profiling duration, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context corpus is about 1.85 GB. Choose the corpus the served context length can hold: requests beyond it are recorded as context overflows at runtime, not rejected while planning. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
 
-Omitted static Bench and synthetic prompt kinds resolve to serving and flat. Use `inferlab workspace show --json` to inspect their canonical explicit values.";
+An omitted Bench kind resolves to serving, and an omitted synthetic prompt to flat, or to server_chat when a random source declares images. Use `inferlab workspace show --json` to inspect their canonical explicit values.";
 
 pub(super) const BENCH_OVERRIDE: &str = "Override one typed field inside the selected Bench definition with a TOML value, for example concurrency=[1,8] or request_body.temperature=1.0. Later assignments win. The Bench identity and kind cannot be changed.";
 
 pub(super) const RUN: &str = "Execute one unrecorded diagnostic command with the same stack activation or container substitution used by InferLab launches.
 
-Do not invoke .pixi/envs/<env>/bin tools directly: that bypasses manifest activation. A container receives no host mount or device implicitly. Local --stack and the two container-image selectors are mutually exclusive; --mount and --devices require a container image.";
+Do not invoke .pixi/envs/<env>/bin tools directly: that bypasses manifest activation. Local execution exports the default placement's devices as CUDA_VISIBLE_DEVICES when every machine in it launches locally; an operator-set CUDA_VISIBLE_DEVICES wins. A container receives no host mount or device implicitly. An external image declaring entrypoint = \"image\" keeps its own entrypoint and receives the command as its arguments. Local --stack and the two container-image selectors are mutually exclusive; --mount and --devices require a container image.";
 
 pub(super) const RUN_EXAMPLES: &str = "EXAMPLES:
   inferlab run -- python -c 'import vllm; print(vllm.__version__)'
@@ -121,7 +122,7 @@ pub(super) const IMAGE_BUILD_EXAMPLES: &str = "EXAMPLES:
 
 pub(super) const SCRATCHPAD_NOTE: &str = "Append one entry to the workspace-local operator narrative.
 
-Entries may link existing records but never alter workspace resolution, execution, records, or source identity. --record is repeatable, and the value last resolves to the newest local record.";
+Entries may link existing records but never alter workspace resolution, execution, records, or source identity. --record is repeatable, and the value `last` resolves to the newest local record.";
 
 pub(super) const SCRATCHPAD_SHOW: &str = "Render the workspace-local append-only operator narrative in chronological order.
 

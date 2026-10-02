@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { contentManifest } from './content-manifest.mjs';
+import { contentManifest, unexpectedPages } from './content-manifest.mjs';
 
 test('projects the canonical workspace-authoring reference set as focused pages', async () => {
   const manifest = await contentManifest();
@@ -40,5 +40,20 @@ test('projects the canonical workspace-authoring reference set as focused pages'
         target: 'src/content/docs/docs/guides/workspace-authoring/bench-authoring.md',
       },
     ],
+  );
+});
+
+test('a documentation page is a manifest projection or a hand-written section index', () => {
+  const manifest = [{ target: 'src/content/docs/docs/guides/tui.md' }];
+  assert.deepEqual(
+    unexpectedPages(
+      [
+        'src/content/docs/docs/guides/tui.md',
+        'src/content/docs/docs/guides/index.md',
+        'src/content/docs/docs/concepts/records.md',
+      ],
+      manifest,
+    ),
+    ['src/content/docs/docs/concepts/records.md'],
   );
 });

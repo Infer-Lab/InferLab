@@ -34,7 +34,7 @@ if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   while [ $# -gt 0 ] && printf '%s' "$1" | grep -q =; do shift; done
 fi
 if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
-  shift 6
+  shift 8
 fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
   printf 'stray\n' > vendor/vllm/stray-build-artifact.txt

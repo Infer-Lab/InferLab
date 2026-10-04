@@ -15,7 +15,8 @@ use std::process::Command;
 /// changes the closure digest together.
 /// Epoch 6: compiler path maps reach every build, and built packages are
 /// made path-neutral and verified before caching ([[ADR-0057]]).
-pub(super) const WHEEL_BUILD_EPOCH: u32 = 6;
+/// Epoch 7: the maps reach rustc and cover the Cargo home.
+pub(super) const WHEEL_BUILD_EPOCH: u32 = 7;
 
 /// Map an OCI platform (`linux/amd64`) to the Pixi platform (`linux-64`).
 pub(super) fn pixi_platform(oci_platform: &str) -> Result<&'static str, InferlabError> {

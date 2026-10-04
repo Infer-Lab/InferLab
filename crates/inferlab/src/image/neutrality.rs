@@ -16,6 +16,8 @@ use std::process::Command;
 pub(super) const SOURCE_TARGET: &str = "/opt/inferlab-src";
 /// Where any other workspace path appears in built packages.
 pub(super) const WORKSPACE_TARGET: &str = "/opt/inferlab-workspace";
+/// Where Cargo registry and git dependency sources appear in built packages.
+pub(super) const CARGO_TARGET: &str = "/opt/inferlab-cargo";
 
 /// One compiler path map.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -57,6 +59,28 @@ pub(super) struct BuildPaths {
     pub source_root: PathBuf,
     pub build_dir: PathBuf,
     pub home: Option<PathBuf>,
+    pub cargo_home: Option<PathBuf>,
+}
+
+/// The Cargo home a package build uses, as Cargo resolves it: the
+/// activation's `CARGO_HOME` (with pixi's workspace-root marker expanded),
+/// otherwise `.cargo` under the home directory.
+pub(super) fn cargo_home(
+    activation: &std::collections::BTreeMap<String, String>,
+    workspace_root: &Path,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    match activation.get("CARGO_HOME") {
+        Some(value) => {
+            let root = workspace_root.display().to_string();
+            Some(PathBuf::from(
+                value
+                    .replace("${PIXI_PROJECT_ROOT}", &root)
+                    .replace("$PIXI_PROJECT_ROOT", &root),
+            ))
+        }
+        None => home.map(|home| home.join(".cargo")),
+    }
 }
 
 /// A path and its canonical form when they differ, so a symlinked view and
@@ -78,10 +102,12 @@ impl BuildPaths {
     pub(super) fn path_maps(&self) -> Result<Vec<PathMap>, InferlabError> {
         let mut maps = Vec::new();
         for (path, target) in [
-            (&self.workspace_root, WORKSPACE_TARGET),
-            (&self.env_prefix, ENV_PREFIX),
-            (&self.source_root, SOURCE_TARGET),
+            (Some(&self.workspace_root), WORKSPACE_TARGET),
+            (Some(&self.env_prefix), ENV_PREFIX),
+            (self.cargo_home.as_ref(), CARGO_TARGET),
+            (Some(&self.source_root), SOURCE_TARGET),
         ] {
+            let Some(path) = path else { continue };
             for from in spellings(path) {
                 // The maps travel through whitespace-split flag variables and
                 // nvcc's comma-split -Xcompiler, and `=` delimits a map.
@@ -119,11 +145,16 @@ impl BuildPaths {
         }
         // A home directory matches only at a path-component boundary, and a
         // degenerate one (`/`) would match everything.
-        if let Some(home) = &self.home
-            && home.components().count() > 1
-        {
-            for form in spellings(home) {
-                needles.push(("home directory", format!("{}/", form.trim_end_matches('/'))));
+        for (label, path) in [
+            ("home directory", &self.home),
+            ("Cargo home", &self.cargo_home),
+        ] {
+            if let Some(path) = path
+                && path.components().count() > 1
+            {
+                for form in spellings(path) {
+                    needles.push((label, format!("{}/", form.trim_end_matches('/'))));
+                }
             }
         }
         needles
@@ -144,6 +175,16 @@ pub(super) fn nvcc_flags(maps: &[PathMap]) -> String {
         .map(|map| format!("-Xcompiler -ffile-prefix-map={}={}", map.from, map.to))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The same maps as rustc options, space-separated for `RUSTFLAGS` and
+/// `CARGO_BUILD_RUSTFLAGS` and unit-separated for `CARGO_ENCODED_RUSTFLAGS`.
+pub(super) fn rust_flags(maps: &[PathMap]) -> (String, String) {
+    let flags = maps
+        .iter()
+        .map(|map| format!("--remap-path-prefix={}={}", map.from, map.to))
+        .collect::<Vec<_>>();
+    (flags.join(" "), flags.join("\u{1f}"))
 }
 
 /// The rewritten search path list: entries under the environment prefix
@@ -548,8 +589,8 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> InferlabE
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildPaths, PathMap, host_flags, leak, nvcc_flags, rewrite_search_paths,
-        verify_compressed_sections,
+        BuildPaths, PathMap, cargo_home, host_flags, leak, nvcc_flags, rewrite_search_paths,
+        rust_flags, verify_compressed_sections,
     };
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -636,6 +677,7 @@ mod tests {
             source_root: PathBuf::from("/srv/example/ws/.inferlab/records/r/build/sources"),
             build_dir: PathBuf::from("/srv/example/ws/.inferlab/records/r/build"),
             home: Some(PathBuf::from("/srv/example")),
+            cargo_home: Some(PathBuf::from("/srv/cargo")),
         }
     }
 
@@ -649,6 +691,7 @@ mod tests {
             [
                 "/opt/inferlab-workspace",
                 "/opt/inferlab-env",
+                "/opt/inferlab-cargo",
                 "/opt/inferlab-src"
             ]
         );
@@ -658,11 +701,39 @@ mod tests {
         }];
         assert_eq!(host_flags(&one), "-ffile-prefix-map=/a=/b");
         assert_eq!(nvcc_flags(&one), "-Xcompiler -ffile-prefix-map=/a=/b");
+        let two = [one[0].clone(), one[0].clone()];
+        assert_eq!(
+            rust_flags(&two),
+            (
+                "--remap-path-prefix=/a=/b --remap-path-prefix=/a=/b".to_owned(),
+                "--remap-path-prefix=/a=/b\u{1f}--remap-path-prefix=/a=/b".to_owned()
+            )
+        );
 
         let mut odd = paths();
         odd.workspace_root = PathBuf::from("/srv/my ws");
         assert!(odd.path_maps().is_err(), "a space would split the flag");
         Ok(())
+    }
+
+    #[test]
+    fn the_cargo_home_follows_the_activation_and_otherwise_the_home_directory() {
+        let root = Path::new("/srv/example/ws");
+        let home = Path::new("/srv/example");
+        let mut activation = std::collections::BTreeMap::new();
+        assert_eq!(
+            cargo_home(&activation, root, Some(home)),
+            Some(PathBuf::from("/srv/example/.cargo"))
+        );
+        assert_eq!(cargo_home(&activation, root, None), None);
+        activation.insert(
+            "CARGO_HOME".to_owned(),
+            "$PIXI_PROJECT_ROOT/.cargo".to_owned(),
+        );
+        assert_eq!(
+            cargo_home(&activation, root, Some(home)),
+            Some(PathBuf::from("/srv/example/ws/.cargo"))
+        );
     }
 
     #[test]
@@ -691,6 +762,13 @@ mod tests {
             Some("home directory")
         );
         assert_eq!(leak(&needles, b"/srv/examples/file"), None);
+        assert_eq!(
+            leak(
+                &needles,
+                b"/srv/cargo/registry/src/index/demo-1.0/src/lib.rs"
+            ),
+            Some("Cargo home")
+        );
         assert_eq!(
             leak(&needles, b"/srv/example/ws/.pixi/envs/serve/include/x.h"),
             Some("Pixi environment prefix")

@@ -232,7 +232,9 @@ fn assemble<T: BuilderTool>(
         std::collections::BTreeMap::new();
     let mut wheels = Vec::new();
     let mut source_packages = Vec::new();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
     let build_paths = neutrality::BuildPaths {
+        cargo_home: neutrality::cargo_home(&activation, &workspace.root, home.as_deref()),
         workspace_root: workspace.root.clone(),
         env_prefix: workspace
             .root
@@ -240,7 +242,7 @@ fn assemble<T: BuilderTool>(
             .join(&resolved.image.pixi_environment),
         source_root: copy_root.clone(),
         build_dir: build_dir.clone(),
-        home: std::env::var_os("HOME").map(PathBuf::from),
+        home,
     };
     let neutral_work = build_dir.join("wheel-build").join("neutral");
     let build_result = (|| -> Result<(), InferlabError> {
@@ -1126,6 +1128,33 @@ struct BuildEnvironment<'a> {
     path_maps: &'a [neutrality::PathMap],
 }
 
+/// After the sanitized-view overrides, the compiler path maps join the
+/// activation's flags, last so they win ([[RFC-0007:C-IMAGE-BUILD]],
+/// [[ADR-0057]]). The rustc maps join the rustflags source Cargo honors —
+/// `CARGO_ENCODED_RUSTFLAGS`, then `RUSTFLAGS`, each in force once set even
+/// when empty — and otherwise `CARGO_BUILD_RUSTFLAGS`, which merges with a
+/// package's configured `build.rustflags` where `RUSTFLAGS` would replace them.
+fn path_map_stage(path_maps: &[neutrality::PathMap]) -> [String; 8] {
+    let (rust, rust_encoded) = neutrality::rust_flags(path_maps);
+    [
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        concat!(
+            r#"export CFLAGS="${CFLAGS:+$CFLAGS }$1" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$1" NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:+$NVCC_APPEND_FLAGS }$2"; "#,
+            r#"if [ -n "${CARGO_ENCODED_RUSTFLAGS+set}" ]; then export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS:+$CARGO_ENCODED_RUSTFLAGS"#,
+            "\u{1f}",
+            r#"}$4"; elif [ -n "${RUSTFLAGS+set}" ]; then export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$3"; "#,
+            r#"else export CARGO_BUILD_RUSTFLAGS="${CARGO_BUILD_RUSTFLAGS:+$CARGO_BUILD_RUSTFLAGS }$3"; fi; shift 4; exec "$@""#,
+        )
+        .to_owned(),
+        "sh".to_owned(),
+        neutrality::host_flags(path_maps),
+        neutrality::nvcc_flags(path_maps),
+        rust,
+        rust_encoded,
+    ]
+}
+
 fn build_wheel(
     root: &Path,
     pixi_environment: &str,
@@ -1174,16 +1203,7 @@ fn build_wheel(
             .iter()
             .map(|(name, value)| format!("{name}={value}")),
     );
-    // After the sanitized-view overrides, the compiler path maps join the
-    // activation's flags, last so they win ([[RFC-0007:C-IMAGE-BUILD]]).
-    argv.extend([
-        "/bin/sh".to_owned(),
-        "-c".to_owned(),
-        r#"export CFLAGS="${CFLAGS:+$CFLAGS }$1" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$1" NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:+$NVCC_APPEND_FLAGS }$2"; shift 2; exec "$@""#.to_owned(),
-        "sh".to_owned(),
-        neutrality::host_flags(path_maps),
-        neutrality::nvcc_flags(path_maps),
-    ]);
+    argv.extend(path_map_stage(path_maps));
     argv.extend([
         "python".to_owned(),
         "-m".to_owned(),
@@ -1296,6 +1316,65 @@ mod tests {
     use super::build_env_redirects;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn rust_path_maps_join_the_rustflags_source_cargo_honors() -> Result<(), String> {
+        let maps = [super::neutrality::PathMap {
+            from: "/srv/example".to_owned(),
+            to: "/opt/inferlab-src".to_owned(),
+        }];
+        let flag = "--remap-path-prefix=/srv/example=/opt/inferlab-src";
+        let stage = super::path_map_stage(&maps);
+        let run = |ambient: &[(&str, &str)]| -> Result<BTreeMap<String, String>, String> {
+            let output = std::process::Command::new(&stage[0])
+                .args(&stage[1..])
+                .arg("/usr/bin/env")
+                .env_clear()
+                .envs(ambient.iter().copied())
+                .output()
+                .map_err(|error| error.to_string())?;
+            Ok(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect())
+        };
+        let get = |env: &BTreeMap<String, String>, name: &str| env.get(name).cloned();
+
+        // Unset sources: CARGO_BUILD_RUSTFLAGS, which merges with configured
+        // build.rustflags; the host maps reach C and C++ alike.
+        let env = run(&[("CFLAGS", "-O2")])?;
+        assert_eq!(get(&env, "CARGO_BUILD_RUSTFLAGS").as_deref(), Some(flag));
+        assert_eq!(
+            get(&env, "RUSTFLAGS"),
+            None,
+            "RUSTFLAGS would drop build.rustflags"
+        );
+        assert_eq!(
+            get(&env, "CFLAGS").as_deref(),
+            Some("-O2 -ffile-prefix-map=/srv/example=/opt/inferlab-src")
+        );
+        let env = run(&[("CARGO_BUILD_RUSTFLAGS", "-Copt-level=2")])?;
+        assert_eq!(
+            get(&env, "CARGO_BUILD_RUSTFLAGS"),
+            Some(format!("-Copt-level=2 {flag}"))
+        );
+        // A set RUSTFLAGS is in force even when empty, so it is extended.
+        let env = run(&[("RUSTFLAGS", "")])?;
+        assert_eq!(get(&env, "RUSTFLAGS").as_deref(), Some(flag));
+        assert_eq!(get(&env, "CARGO_BUILD_RUSTFLAGS"), None);
+        // CARGO_ENCODED_RUSTFLAGS outranks RUSTFLAGS and is unit-separated.
+        let env = run(&[
+            ("CARGO_ENCODED_RUSTFLAGS", "-Ca\u{1f}-Cb"),
+            ("RUSTFLAGS", "-Cignored"),
+        ])?;
+        assert_eq!(
+            get(&env, "CARGO_ENCODED_RUSTFLAGS"),
+            Some(format!("-Ca\u{1f}-Cb\u{1f}{flag}"))
+        );
+        assert_eq!(get(&env, "RUSTFLAGS").as_deref(), Some("-Cignored"));
+        Ok(())
+    }
 
     #[test]
     fn check_evidence_reconstructs_from_framed_builder_log() -> Result<(), crate::InferlabError> {

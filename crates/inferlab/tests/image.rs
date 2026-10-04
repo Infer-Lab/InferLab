@@ -607,10 +607,15 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
                         arg.starts_with("-Xcompiler -ffile-prefix-map=")
                             && arg.ends_with("=/opt/inferlab-src")
                     })
+                }) && argv.iter().any(|arg| {
+                    arg.as_str().is_some_and(|arg| {
+                        arg.starts_with("--remap-path-prefix=")
+                            && arg.ends_with("=/opt/inferlab-src")
+                    })
                 })
             })
         }),
-        "each package build receives the compiler path maps"
+        "each package build receives the compiler path maps, rustc included"
     );
     assert!(
         commands

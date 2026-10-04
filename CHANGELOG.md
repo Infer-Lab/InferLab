@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-10-04
+
+### Fixed
+
+- Image package builds map Rust paths too: the path maps reach rustc as
+  `--remap-path-prefix` options through the rustflags variable Cargo already
+  honors, keeping a package's configured `build.rustflags`, and the effective
+  Cargo home maps to `/opt/inferlab-cargo` for every compiler and is verified
+  absent, so packages with Rust extensions (such as SGLang's) no longer fail
+  path-neutrality verification on their source, `OUT_DIR`, and Cargo
+  registry paths ([[ADR-0057]]). Cached wheels rebuild once. A build backend
+  that sets `RUSTFLAGS` itself replaces the maps and fails verification until
+  it extends the rustflags source already in effect.
+
 ## [0.17.0] - 2026-10-03
 
 ### Added

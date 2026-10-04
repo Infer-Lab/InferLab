@@ -98,10 +98,11 @@ if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   shift 4
   while [ $# -gt 0 ] && printf '%s' "$1" | grep -q =; do shift; done
 fi
-# The second stage appends the compiler path maps: `sh -c SCRIPT sh HOST NVCC`.
+# The second stage appends the compiler path maps:
+# `sh -c SCRIPT sh HOST NVCC RUST RUST_ENCODED`.
 if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   printf '%s\n' "$5" > "${FIXTURE_PATH_MAPS:-/dev/null}"
-  shift 6
+  shift 8
 fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
   # Like pip, name the wheel after the project metadata when the build

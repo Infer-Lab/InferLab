@@ -417,6 +417,7 @@ mod tests {
                     metric: "acc".to_owned(),
                     metric_filter: None,
                     threshold: 0.0,
+                    model_thresholds: BTreeMap::new(),
                     timeout_seconds: 60,
                 }),
                 bundled_task: None,

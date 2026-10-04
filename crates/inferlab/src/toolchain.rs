@@ -15,7 +15,7 @@ use inferlab_runtime::operation_bound::OperationBound;
 const INFERLAB_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Schema version written into `complete.json` and required when reading it
 /// back; the write and read gates share this one const.
-const COMPLETION_SCHEMA_VERSION: u32 = 3;
+const COMPLETION_SCHEMA_VERSION: u32 = 4;
 const MANIFEST: &str = include_str!("../resources/eval-toolchain/pixi.toml");
 const LOCK: &str = include_str!("../resources/eval-toolchain/pixi.lock");
 include!(concat!(env!("OUT_DIR"), "/toolchain_python_files.rs"));
@@ -59,6 +59,28 @@ pub(crate) struct BenchToolchainIdentity {
     pub transformers_version: String,
 }
 
+/// The image-packaging runtime ([[RFC-0004:C-INFERLAB-TOOLCHAIN]],
+/// [[RFC-0007:C-IMAGE-BUILD]]): the release-pinned tools that make locally
+/// built image packages path-neutral and verify them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImageToolchainIdentity {
+    pub inferlab_version: String,
+    pub platform: String,
+    pub manifest_sha256: String,
+    pub lock_sha256: String,
+    pub patchelf_version: String,
+    pub cuobjdump_version: String,
+    pub wheel_version: String,
+}
+
+pub(crate) struct InstalledImageToolchain {
+    pub identity: ImageToolchainIdentity,
+    pub python: PathBuf,
+    pub patchelf: PathBuf,
+    pub cuobjdump: PathBuf,
+}
+
 pub(crate) struct InstalledEvalToolchain {
     pub identity: EvalToolchainIdentity,
     pub python: PathBuf,
@@ -79,6 +101,7 @@ pub(crate) struct InstallReport {
     pub path: PathBuf,
     pub eval: EvalToolchainIdentity,
     pub bench: BenchToolchainIdentity,
+    pub image: ImageToolchainIdentity,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +117,7 @@ struct Completion {
     schema_version: u32,
     eval: EvalToolchainIdentity,
     bench: BenchToolchainIdentity,
+    image: ImageToolchainIdentity,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +165,7 @@ pub(crate) fn install_with_progress(progress: &Progress) -> Result<InstallReport
             path,
             eval: completion.eval,
             bench: completion.bench,
+            image: completion.image,
         });
     }
 
@@ -155,12 +180,15 @@ pub(crate) fn install_with_progress(progress: &Progress) -> Result<InstallReport
     let eval = eval_identity(platform, verify_eval_runtime(&path)?);
     progress.phase(Phase::named("Bench verification"))?;
     let bench = bench_identity(platform, verify_bench_runtime(&path)?);
+    progress.phase(Phase::named("image-packaging verification"))?;
+    let image = verify_image_runtime(&path, platform)?;
     write_completion(
         &path,
         &Completion {
             schema_version: COMPLETION_SCHEMA_VERSION,
             eval: eval.clone(),
             bench: bench.clone(),
+            image: image.clone(),
         },
     )?;
 
@@ -169,6 +197,7 @@ pub(crate) fn install_with_progress(progress: &Progress) -> Result<InstallReport
         path,
         eval,
         bench,
+        image,
     })
 }
 
@@ -213,6 +242,21 @@ pub(crate) fn require_bench() -> Result<InstalledBenchToolchain, InferlabError> 
         identity: completion.bench,
         python: bench_python_path(&path),
         python_path: path.join("runner"),
+    })
+}
+
+/// The installed image-packaging runtime an image build that selects packages
+/// requires ([[RFC-0007:C-IMAGE-BUILD]]).
+pub(crate) fn require_image() -> Result<InstalledImageToolchain, InferlabError> {
+    let platform = host_platform()?;
+    let path = install_path(platform)?;
+    let completion = require_completion(&path, platform)?;
+    let bin = image_bin_path(&path);
+    Ok(InstalledImageToolchain {
+        identity: completion.image,
+        python: bin.join("python"),
+        patchelf: bin.join("patchelf"),
+        cuobjdump: bin.join("cuobjdump"),
     })
 }
 
@@ -579,6 +623,107 @@ fn verify_bench_runtime(path: &Path) -> Result<BenchHandshake, InferlabError> {
     Ok(handshake)
 }
 
+/// Run each image-packaging tool and require the release-pinned version.
+fn verify_image_runtime(
+    path: &Path,
+    platform: &str,
+) -> Result<ImageToolchainIdentity, InferlabError> {
+    let bin = image_bin_path(path);
+    let reported = |program: PathBuf, args: &[&str], action: &'static str| {
+        let output = Command::new(&program)
+            .args(args)
+            .output()
+            .map_err(|source| InferlabError::LaunchToolchain { action, source })?;
+        if !output.status.success() {
+            return Err(InferlabError::ToolchainExit {
+                action,
+                status: output.status,
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let patchelf = reported(
+        bin.join("patchelf"),
+        &["--version"],
+        "patchelf verification",
+    )?
+    .trim()
+    .strip_prefix("patchelf ")
+    .map(str::to_owned);
+    // The release line reads `Cuda compilation tools, release 13.4, V13.4.92`.
+    let cuobjdump = reported(
+        bin.join("cuobjdump"),
+        &["--version"],
+        "cuobjdump verification",
+    )?
+    .lines()
+    .find_map(|line| {
+        line.rsplit_once(", V")
+            .map(|(_, version)| version.trim().to_owned())
+    });
+    let wheel = reported(
+        bin.join("python"),
+        &["-m", "wheel", "version"],
+        "wheel verification",
+    )?
+    .trim()
+    .strip_prefix("wheel ")
+    .map(str::to_owned);
+    for (tool, version) in [
+        ("patchelf", &patchelf),
+        ("cuda-cuobjdump", &cuobjdump),
+        ("wheel", &wheel),
+    ] {
+        let expected = pinned_conda_version("image", tool)?;
+        if version.as_deref() != Some(expected.as_str()) {
+            return Err(InferlabError::ToolchainVerification {
+                message: format!(
+                    "image-packaging {tool} reported {version:?}, expected {expected}"
+                ),
+            });
+        }
+    }
+    Ok(ImageToolchainIdentity {
+        inferlab_version: INFERLAB_VERSION.to_owned(),
+        platform: platform.to_owned(),
+        manifest_sha256: digest(MANIFEST.as_bytes()),
+        lock_sha256: digest(LOCK.as_bytes()),
+        patchelf_version: patchelf.unwrap_or_default(),
+        cuobjdump_version: cuobjdump.unwrap_or_default(),
+        wheel_version: wheel.unwrap_or_default(),
+    })
+}
+
+/// The exact `==` pin of a conda dependency in the embedded manifest.
+fn pinned_conda_version(feature: &str, package: &str) -> Result<String, InferlabError> {
+    let manifest: toml::Value =
+        toml::from_str(MANIFEST).map_err(|error| InferlabError::ToolchainVerification {
+            message: format!("embedded toolchain manifest is invalid: {error}"),
+        })?;
+    let requirement = manifest
+        .get("feature")
+        .and_then(|value| value.get(feature))
+        .and_then(|value| value.get("dependencies"))
+        .and_then(|value| value.get(package))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| InferlabError::ToolchainVerification {
+            message: format!(
+                "embedded toolchain manifest has no version for feature {feature:?} package {package:?}"
+            ),
+        })?;
+    requirement
+        .strip_prefix("==")
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| InferlabError::ToolchainVerification {
+            message: format!(
+                "embedded toolchain requirement for {package:?} is not an exact pin: {requirement:?}"
+            ),
+        })
+}
+
 fn pinned_pypi_version(feature: &str, package: &str) -> Result<String, InferlabError> {
     let manifest: toml::Value =
         toml::from_str(MANIFEST).map_err(|error| InferlabError::ToolchainVerification {
@@ -708,9 +853,13 @@ fn installed_completion(path: &Path, platform: &str) -> Option<Completion> {
     let completion = read_completion(path)?;
     (eval_identity_matches(&completion.eval, platform)
         && bench_identity_matches(&completion.bench, platform)
+        && image_identity_matches(&completion.image, platform)
         && release_files_match(path)
         && eval_python_path(path).is_file()
-        && bench_python_path(path).is_file())
+        && bench_python_path(path).is_file()
+        && ["python", "patchelf", "cuobjdump"]
+            .iter()
+            .all(|tool| image_bin_path(path).join(tool).is_file()))
     .then_some(completion)
 }
 
@@ -741,6 +890,21 @@ fn bench_identity_matches(identity: &BenchToolchainIdentity, platform: &str) -> 
             .is_ok_and(|expected| identity.aiperf_version == expected)
 }
 
+fn image_identity_matches(identity: &ImageToolchainIdentity, platform: &str) -> bool {
+    common_identity_matches(
+        &identity.inferlab_version,
+        &identity.platform,
+        &identity.manifest_sha256,
+        &identity.lock_sha256,
+        platform,
+    ) && pinned_conda_version("image", "patchelf")
+        .is_ok_and(|expected| identity.patchelf_version == expected)
+        && pinned_conda_version("image", "cuda-cuobjdump")
+            .is_ok_and(|expected| identity.cuobjdump_version == expected)
+        && pinned_conda_version("image", "wheel")
+            .is_ok_and(|expected| identity.wheel_version == expected)
+}
+
 fn common_identity_matches(
     inferlab_version: &str,
     identity_platform: &str,
@@ -768,6 +932,10 @@ fn release_files_match(path: &Path) -> bool {
             .as_deref()
             .is_some_and(|bytes| digest(bytes) == digest(LOCK.as_bytes()))
         && python_payload_matches
+}
+
+fn image_bin_path(path: &Path) -> PathBuf {
+    path.join(PIXI_ENVS_DIR).join("image/bin")
 }
 
 fn eval_python_path(path: &Path) -> PathBuf {

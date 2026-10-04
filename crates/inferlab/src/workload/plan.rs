@@ -38,6 +38,10 @@ pub(crate) struct EvalPlan {
     pub overrides: Vec<MeasurementOverridePlan>,
     pub endpoint: WorkloadEndpoint,
     pub model: MeasurementModel,
+    /// The model whose `model_thresholds` entry selected the effective
+    /// threshold, when one did ([[RFC-0005:C-LM-EVAL-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_model: Option<String>,
     pub workspace_source_exclusions: Vec<PathBuf>,
     pub execution: EvalExecutionPlan,
 }
@@ -344,6 +348,9 @@ pub(crate) struct MeasurementResolveContext<'a> {
     pub workspace_source_exclusions: &'a [PathBuf],
     pub endpoint: WorkloadEndpoint,
     pub model: MeasurementModel,
+    /// The workspace model the bound server serves, which selects a
+    /// model-keyed Eval threshold ([[RFC-0004:C-LM-EVAL]]).
+    pub model_id: &'a str,
     pub prefix_cache_reset: Option<WorkloadHttpAction>,
     /// The Gateway frontend's conditioning fan-out action, when the selected
     /// frontend backend declares one ([[RFC-0004:C-BENCH-CACHE-STATE]]).

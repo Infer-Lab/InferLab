@@ -471,6 +471,10 @@ pub(crate) enum EvalDefinition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metric_filter: Option<String>,
         threshold: f64,
+        /// Pass thresholds keyed by workspace model; `threshold` is the
+        /// default ([[RFC-0004:C-LM-EVAL]]).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        model_thresholds: BTreeMap<String, f64>,
         timeout_seconds: u64,
     },
 }

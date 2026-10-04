@@ -107,6 +107,10 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
     assert_eq!(first["bench"]["platform"], host_platform());
     assert_eq!(first["bench"]["aiperf_version"], "0.13.0+inferlab.1");
     assert_eq!(first["bench"]["transformers_version"], "5.12.1");
+    assert_eq!(first["image"]["platform"], host_platform());
+    assert_eq!(first["image"]["patchelf_version"], "0.19.2");
+    assert_eq!(first["image"]["cuobjdump_version"], "13.4.92");
+    assert_eq!(first["image"]["wheel_version"], "0.48.0");
     assert!(home.install_dir().join("complete.json").is_file());
     assert!(home.install_dir().join("pixi.toml").is_file());
     assert!(home.install_dir().join("pixi.lock").is_file());
@@ -167,6 +171,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         "Pixi installation",
         "Eval verification",
         "Bench verification",
+        "image-packaging verification",
     ] {
         assert!(
             first_progress.contains(&format!(" INFO [toolchain install] {phase}")),
@@ -276,4 +281,10 @@ printf 'unexpected python fixture arguments: %s\n' "$*" >&2
 exit 2
 PYTHON
 chmod +x "$prefix/.pixi/envs/eval/bin/python" "$prefix/.pixi/envs/bench/bin/python"
+# The image-packaging tools print what the release-pinned tools print.
+mkdir -p "$prefix/.pixi/envs/image/bin"
+printf '%s\n' '#!/bin/sh' 'printf "patchelf 0.19.2\n"' > "$prefix/.pixi/envs/image/bin/patchelf"
+printf '%s\n' '#!/bin/sh' 'printf "cuobjdump: NVIDIA (R) fat binary listing tool\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Sep_01_08:45:21_PDT_2026\nCuda compilation tools, release 13.4, V13.4.92\nBuild cuda_13.4.r13.4/compiler.38855100_0\n"' > "$prefix/.pixi/envs/image/bin/cuobjdump"
+printf '%s\n' '#!/bin/sh' 'if [ "$1" = -m ] && [ "$2" = wheel ] && [ "$3" = version ]; then printf "wheel 0.48.0\n"; exit 0; fi' 'printf "unexpected python fixture arguments: %s\n" "$*" >&2' 'exit 2' > "$prefix/.pixi/envs/image/bin/python"
+chmod +x "$prefix/.pixi/envs/image/bin/patchelf" "$prefix/.pixi/envs/image/bin/cuobjdump" "$prefix/.pixi/envs/image/bin/python"
 "#;

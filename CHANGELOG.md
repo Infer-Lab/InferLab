@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-03
+
+### Added
+
+- An lm-eval definition may key its pass threshold by workspace model with
+  `model_thresholds`, so one Eval gates several models at different expected
+  scores without copying it per model ([[ADR-0059]]). The entry for the
+  server's model is the effective threshold, `threshold` stays the default, an
+  unknown model key fails loading, and the plan names the model whose entry
+  selected the threshold.
+
+### Changed
+
+- Images built with locally built packages carry no builder paths
+  ([[ADR-0057]]): package builds map source, Pixi environment, and workspace
+  paths to fixed `/opt/inferlab-*` paths, library search paths are rewritten
+  to the image environment, and every package, including its device code and
+  compressed debug sections, is verified before it is cached or assembled. A
+  package that still embeds a workspace, environment, home, or build-tree path
+  fails the build naming the member.
+- **Breaking:** `inferlab toolchain install` also installs an image-packaging
+  runtime, and an image build that selects packages requires it, dry-run
+  included; rerun `inferlab toolchain install` after upgrading.
+- Image assembly installs built wheels from a build-time mount instead of
+  copying them into a layer, so images no longer carry each wheel twice.
+- **Breaking:** the SMG frontend is lowered by one shared package,
+  `inferlab-gateway-smg`, for both integrations that run it ([[ADR-0058]]).
+  TokenSpeed prefill/decode now selects the backend pair `(smg, smg)`: a workspace that still names
+  `tokenspeed-smg` for its Gateway or P/D Router fails resolution with an
+  instruction to select `smg`. Both integrations launch `smg launch` and record
+  the implementation `smg` with the installed `tokenspeed-smg` distribution
+  version.
+- The Specialized Engine contract is specified as RFC-0003
+  `C-SPECIALIZED-ENGINE`: the Engine serves the published
+  `tokenspeed.grpc.scheduler.TokenSpeedScheduler` service with a stated
+  required RPC subset, and evidence records that service name as the worker
+  protocol instead of the former `tokenspeed_scheduler_v1` label.
+
 ## [0.16.0] - 2026-10-03
 
 ### Added

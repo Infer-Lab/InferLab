@@ -495,6 +495,9 @@ pub(super) fn eval_definition_input(
             metric,
             metric_filter,
             threshold,
+            // Planning leaves only the selected threshold in the effective
+            // definition ([[RFC-0004:C-LM-EVAL]]).
+            model_thresholds: _,
             timeout_seconds,
         } => EvalDefinitionInput::LmEval {
             task: Box::new(match task {
@@ -569,6 +572,7 @@ mod tests {
             metric: "exact_match".to_owned(),
             metric_filter: None,
             threshold: 0.9,
+            model_thresholds: BTreeMap::new(),
             timeout_seconds: 300,
         }
     }

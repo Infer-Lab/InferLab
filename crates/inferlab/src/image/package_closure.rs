@@ -13,7 +13,9 @@ use std::process::Command;
 /// crate version change. Enters both the wheel cache key and the image
 /// content closure, so a procedure change invalidates cached wheels and
 /// changes the closure digest together.
-pub(super) const WHEEL_BUILD_EPOCH: u32 = 5;
+/// Epoch 6: compiler path maps reach every build, and built packages are
+/// made path-neutral and verified before caching ([[ADR-0057]]).
+pub(super) const WHEEL_BUILD_EPOCH: u32 = 6;
 
 /// Map an OCI platform (`linux/amd64`) to the Pixi platform (`linux-64`).
 pub(super) fn pixi_platform(oci_platform: &str) -> Result<&'static str, InferlabError> {

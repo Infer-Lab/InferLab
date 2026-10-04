@@ -59,6 +59,10 @@ pub(crate) struct PackageEvidence {
     /// True when the wheel was reused from the source-identity-keyed cache
     /// instead of being rebuilt.
     pub cached: bool,
+    /// How the package was made path-neutral and verified
+    /// ([[RFC-0007:C-IMAGE-BUILD]]); absent in records that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neutrality: Option<super::neutrality::PackageNeutrality>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

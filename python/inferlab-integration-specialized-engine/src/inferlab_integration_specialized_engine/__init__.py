@@ -1,10 +1,9 @@
 """Planning and rendering for the shared token-only Specialized Engine contract."""
 
-from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated
 
+import inferlab_gateway_smg
 from inferlab_adapter_sdk import (
-    ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
@@ -33,7 +32,6 @@ from inferlab_adapter_sdk import (
     ProcessSpec,
     PromptCacheReadZeroRepresentation,
     ReadinessProbe,
-    ReadinessProbeHttp,
     ReadinessProbeProcessAlive,
     RenderedServeProcess,
     RenderServeInput,
@@ -65,8 +63,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .auxiliary import reject_auxiliary_locators, validate_auxiliary_models
 
 _ADAPTER_DISTRIBUTION = "inferlab-integration-specialized-engine"
-_GATEWAY_BACKEND = "smg"
-_GATEWAY_IMPLEMENTATION = "tokenspeed-smg"
 
 # Flags the managed Engine argv owns; the escape hatch must not restate them.
 _INFERLAB_OWNED_OPTIONS: set[str] = {
@@ -149,13 +145,6 @@ def _identity() -> IntegrationIdentity:
         framework="specialized-engine",
         framework_distribution=_ADAPTER_DISTRIBUTION,
     )
-
-
-def _smg_version() -> str:
-    try:
-        return version("tokenspeed-smg")
-    except PackageNotFoundError:
-        return "unavailable"
 
 
 def _pure_tp_parallelism(
@@ -243,11 +232,7 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "the Specialized Engine integration supports only single topology",
         )
-    if input.gateway_backend != _GATEWAY_BACKEND:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "the Specialized Engine integration requires Gateway backend smg",
-        )
+    inferlab_gateway_smg.require_backend(input.gateway_backend, component="Gateway")
     if input.pd_router_backend is not None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
@@ -287,17 +272,16 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
         public_endpoint=None,
     )
     gateway = GatewayPlan(
-        backend=_GATEWAY_BACKEND,
-        implementation=_GATEWAY_IMPLEMENTATION,
-        implementation_version=_smg_version(),
+        backend=inferlab_gateway_smg.BACKEND,
+        implementation=inferlab_gateway_smg.IMPLEMENTATION,
+        implementation_version=inferlab_gateway_smg.installed_version(),
         effective_settings={
-            "worker_protocol": SettingValue(root="tokenspeed_scheduler_v1"),
+            "worker_protocol": SettingValue(root="tokenspeed.grpc.scheduler.TokenSpeedScheduler"),
             "policy": SettingValue(root="least_load"),
-            "retries": SettingValue(root=False),
-            "circuit_breaker": SettingValue(root=False),
+            **inferlab_gateway_smg.gateway_settings(),
         },
         endpoint=_public_endpoint(),
-        readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/readiness")),
+        readiness=inferlab_gateway_smg.gateway_readiness(),
         ports=["prometheus"],
         targets=[GatewayTarget(root=GatewayTargetEngine(role=role.id))],
         render_inputs=[],
@@ -400,9 +384,9 @@ def _require_gateway(allocation: object, engine_role: str) -> ServeProcessAlloca
         )
     gateway = allocation.gateway
     if (
-        gateway.backend != _GATEWAY_BACKEND
-        or gateway.implementation != _GATEWAY_IMPLEMENTATION
-        or gateway.implementation_version != _smg_version()
+        gateway.backend != inferlab_gateway_smg.BACKEND
+        or gateway.implementation != inferlab_gateway_smg.IMPLEMENTATION
+        or gateway.implementation_version != inferlab_gateway_smg.installed_version()
         or gateway.render_source != RenderSource.integration
         or allocation.pd_router is not None
         or allocation.process_role != gateway.co_rendering.process_role
@@ -500,30 +484,12 @@ def _render_gateway(
         )
     return rendered_frontend(
         allocation,
-        ProcessSpec(
-            argv=[
-                "smg",
-                "launch",
-                "--host",
-                allocation.endpoint.host,
-                "--port",
-                str(allocation.endpoint.port),
-                "--prometheus-port",
-                str(prometheus.port),
-                "--worker-startup-timeout-secs",
-                str(ROUTER_WORKER_STARTUP_TIMEOUT_SECS),
-                "--worker-urls",
-                f"grpc://{engine_endpoint.host}:{engine_endpoint.port}",
-                "--model-path",
-                engine.model_locator,
-                "--tokenizer-path",
-                engine.model_locator,
-                "--policy",
-                "least_load",
-                "--disable-retries",
-                "--disable-circuit-breaker",
-            ],
-            env={},
+        inferlab_gateway_smg.routed_single_command(
+            endpoint=allocation.endpoint,
+            prometheus=prometheus,
+            model_locator=engine.model_locator,
+            worker=engine_endpoint,
+            policy="least_load",
         ),
     )
 
@@ -531,7 +497,7 @@ def _render_gateway(
 def render_serve(input: RenderServeInput) -> RenderServeResult:
     if (
         input.topology != ServeTopology.single
-        or input.gateway_backend != _GATEWAY_BACKEND
+        or input.gateway_backend != inferlab_gateway_smg.BACKEND
         or input.pd_router_backend is not None
         or input.kv_transfer is not None
     ):

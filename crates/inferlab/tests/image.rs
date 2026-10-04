@@ -221,13 +221,26 @@ impl TestWorkspace {
         git(root.path(), &["add", "."])?;
         git(root.path(), &["commit", "-qm", "fixture"])?;
         let data_home = root.path().join("data");
-        Ok(Self {
+        let workspace = Self {
             reaper,
             root,
             bin,
             data_home,
             scenario_path,
-        })
+        };
+        // Package builds need the toolchain's image-packaging runtime.
+        let install = workspace
+            .command()
+            .args(["toolchain", "install"])
+            .output()?;
+        if !install.status.success() {
+            return Err(format!(
+                "toolchain fixture install failed: {}",
+                String::from_utf8_lossy(&install.stderr)
+            )
+            .into());
+        }
+        Ok(workspace)
     }
 
     /// A spawn primed with no injected fault.
@@ -562,7 +575,43 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
         .filter_map(|package| package["package"].as_str())
         .collect();
     assert_eq!(package_names, ["vllm", "flashinfer"]);
+    // Every package is made path-neutral and verified, with the maps and
+    // the runtime that did it ([[RFC-0007:C-IMAGE-BUILD]]).
+    for package in packages {
+        let neutrality = &package["neutrality"];
+        assert_eq!(neutrality["runtime"]["patchelf_version"], "0.19.2");
+        let targets: Vec<&str> = neutrality["path_maps"]
+            .as_array()
+            .ok_or("path maps")?
+            .iter()
+            .filter_map(|map| map["to"].as_str())
+            .collect();
+        assert_eq!(
+            targets.first().copied(),
+            Some("/opt/inferlab-workspace"),
+            "the fallback map comes first"
+        );
+        assert_eq!(targets.last().copied(), Some("/opt/inferlab-src"));
+        assert!(
+            neutrality["verified_members"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+    }
     let commands = assembly["native_commands"].as_array().ok_or("commands")?;
+    assert!(
+        commands.iter().any(|command| {
+            command["argv"].as_array().is_some_and(|argv| {
+                argv.iter().any(|arg| {
+                    arg.as_str().is_some_and(|arg| {
+                        arg.starts_with("-Xcompiler -ffile-prefix-map=")
+                            && arg.ends_with("=/opt/inferlab-src")
+                    })
+                })
+            })
+        }),
+        "each package build receives the compiler path maps"
+    );
     assert!(
         commands
             .iter()
@@ -841,6 +890,75 @@ const LISTING_PREFIX: &str = r#"[
 /// hashes. It is an artifact location, never a source-backed project.
 const UNHASHED_REGISTRY_ROW: &str = r#"  {"name": "unhashed-index-wheel", "kind": "pypi", "url": "https://index.example/unhashed_index_wheel-1.0-py3-none-any.whl", "sha256": null, "source": "https://index.example"},
 "#;
+
+#[test]
+fn package_builds_require_the_image_packaging_runtime() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let toolchains = workspace.data_home.join("inferlab/toolchains");
+    for entry in fs::read_dir(&toolchains)? {
+        for platform in fs::read_dir(entry?.path())? {
+            let complete = platform?.path().join("complete.json");
+            if complete.exists() {
+                fs::remove_file(complete)?;
+            }
+        }
+    }
+    for args in [
+        &["deepseek-v4-flash-runtime", "--dry-run"][..],
+        &["deepseek-v4-flash-runtime"][..],
+    ] {
+        let output = workspace.build(args)?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("error[E4003]") && stderr.contains("inferlab toolchain install"),
+            "{stderr}"
+        );
+    }
+    assert!(
+        !workspace.root.path().join(".inferlab/records").exists(),
+        "the rejection precedes any record"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_built_package_that_embeds_the_workspace_path_fails_verification() -> Result<(), Box<dyn Error>>
+{
+    let workspace = TestWorkspace::new()?;
+    let root = workspace.root.path().display().to_string();
+    let output = workspace
+        .command()
+        .env(
+            "FIXTURE_WHEEL_EXTRA",
+            format!("built at {root}/vendor/vllm"),
+        )
+        .args(["image", "build", "deepseek-v4-flash-runtime"])
+        .output()?;
+    assert!(!output.status.success());
+    let report = stdout_json(&output)?;
+    let record_id = report["record_id"].as_str().ok_or("record id")?;
+    let record = workspace.load_json(&format!(".inferlab/records/{record_id}/record.json"))?;
+    let outcome = record["assemblies"][0]["outcome"].to_string();
+    assert!(
+        outcome.contains("payload.txt") && outcome.contains("embeds the workspace root"),
+        "the failure names the member and what it leaked: {outcome}"
+    );
+    let cache = workspace.root.path().join(".inferlab/cache/wheels");
+    let cached = fs::read_dir(&cache)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .flat_map(|entry| fs::read_dir(entry.path()).into_iter().flatten())
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        cached, 0,
+        "a package that fails verification is never cached"
+    );
+    Ok(())
+}
 
 #[test]
 fn packages_build_at_the_project_directories_pixi_reports() -> Result<(), Box<dyn Error>> {

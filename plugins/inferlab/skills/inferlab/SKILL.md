@@ -58,7 +58,7 @@ inferlab workspace show
 # write .inferlab/local.toml (copy .inferlab/local.example.toml when provided)
 pixi install --locked --all
 inferlab stack status
-inferlab toolchain install                            # only for lm-eval Evals or serving Benches
+inferlab toolchain install                            # for lm-eval Evals, serving Benches, or image package builds
 ```
 
 `workspace show` needs no local bindings. `stack status` checks the selected

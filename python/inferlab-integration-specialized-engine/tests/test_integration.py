@@ -3,7 +3,6 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
-import inferlab_integration_specialized_engine as integration
 import pytest
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
@@ -69,7 +68,7 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
     assert result.pd_router is None
     assert result.gateway is not None
     assert result.gateway.backend == "smg"
-    assert result.gateway.implementation == "tokenspeed-smg"
+    assert result.gateway.implementation == "smg"
     assert result.gateway.render_source.value == "integration"
     assert result.gateway.endpoint.server_metrics is not None
     assert result.gateway.endpoint.server_metrics.model_dump(mode="json") == {
@@ -89,6 +88,12 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
         is PromptCacheReadZeroRepresentation.explicit
     )
     assert result.gateway.effective_settings["policy"].root == "least_load"
+    # The worker protocol is the published service, not an InferLab label
+    # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    assert (
+        result.gateway.effective_settings["worker_protocol"].root
+        == "tokenspeed.grpc.scheduler.TokenSpeedScheduler"
+    )
     target = result.gateway.targets[0].root
     assert isinstance(target, GatewayTargetEngine)
     assert target.role == "serve"
@@ -191,7 +196,9 @@ def test_plan_reads_the_tokenspeed_smg_distribution_version(
         requested.append(distribution)
         return "1.7.0"
 
-    monkeypatch.setattr(integration, "version", package_version)
+    import inferlab_gateway_smg
+
+    monkeypatch.setattr(inferlab_gateway_smg, "version", package_version)
 
     result = plan_serve(_plan_input())
 
@@ -201,7 +208,7 @@ def test_plan_reads_the_tokenspeed_smg_distribution_version(
 
 
 def test_plan_rejects_non_contract_topologies_and_engine_specific_settings() -> None:
-    with pytest.raises(AdapterOperationError, match="Gateway backend smg"):
+    with pytest.raises(AdapterOperationError, match='select "smg"'):
         plan_serve(_plan_input(gateway_backend=None))
     with pytest.raises(AdapterOperationError, match="P/D Router"):
         plan_serve(_plan_input(pd_router_backend="smg"))

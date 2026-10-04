@@ -71,6 +71,20 @@ configuration and dataset selection, and includes that closure in source
 identity. Release-bundled tasks are addressed only by their catalog name and
 carry a release-owned closure digest.
 
+When the expected score depends on the model, key thresholds by workspace model
+instead of copying the Eval per model; `threshold` stays the default:
+
+```toml
+[evals.builtin.model_thresholds]
+qwen3-8b = 0.96
+```
+
+Every key must name a declared model. A recipe or image validation that runs
+the Eval against a server for that model uses its entry, and the plan records
+the effective threshold and the model that selected it. `--set` overrides the
+declared fields first: `evals.builtin.threshold=…` changes the default, and
+`evals.builtin.model_thresholds.qwen3-8b=…` changes that model's entry.
+
 `openai-smoke` is the smallest completion-path correctness Eval. An lm-eval
 definition controls its request fragment (`request_body`), sample limit
 (`limit`), few-shot count (`few_shot`), `seed`, `trials`, output bound

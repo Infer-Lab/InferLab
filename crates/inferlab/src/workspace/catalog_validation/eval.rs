@@ -11,6 +11,19 @@ use crate::workspace::source::{is_safe_relative, reject_symlink_components};
 use std::ffi::OsStr;
 use std::path::Path;
 
+/// One pass threshold: finite, and a pass rate when trials repeat.
+fn validate_threshold(id: &str, field: &str, value: f64, trials: u32) -> Result<(), InferlabError> {
+    if !value.is_finite() {
+        return invalid(format!("eval {id:?} {field} must be finite"));
+    }
+    if trials > 1 && !(0.0..=1.0).contains(&value) {
+        return invalid(format!(
+            "eval {id:?} {field} must be between zero and one for repeated trials"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(), InferlabError> {
     match definition {
         EvalDefinition::OpenAiSmoke {
@@ -35,6 +48,7 @@ pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(),
             metric,
             metric_filter,
             threshold,
+            model_thresholds,
             timeout_seconds,
             ..
         } => {
@@ -66,13 +80,9 @@ pub(crate) fn validate_eval(id: &str, definition: &EvalDefinition) -> Result<(),
             }
             require_optional_positive("max_tokens", id, max_tokens.map(u64::from))?;
             require_optional_positive("concurrency", id, concurrency.map(u64::from))?;
-            if !threshold.is_finite() {
-                return invalid(format!("eval {id:?} threshold must be finite"));
-            }
-            if *trials > 1 && !(0.0..=1.0).contains(threshold) {
-                return invalid(format!(
-                    "eval {id:?} threshold must be between zero and one for repeated trials"
-                ));
+            validate_threshold(id, "threshold", *threshold, *trials)?;
+            for (model, value) in model_thresholds {
+                validate_threshold(id, &format!("model_thresholds.{model}"), *value, *trials)?;
             }
             require_positive("timeout_seconds", id, *timeout_seconds)
         }
@@ -119,6 +129,32 @@ pub(crate) fn validate_eval_task_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_keyed_threshold_follows_the_repeated_trial_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition: EvalDefinition = toml::from_str(
+            r#"
+kind = "lm-eval"
+task = "gsm8k"
+metric = "exact_match"
+threshold = 0.9
+trials = 8
+timeout_seconds = 300
+
+[model_thresholds]
+demo-model = 1.5
+"#,
+        )?;
+        let Err(error) = validate_eval("gsm8k", &definition) else {
+            return Err(std::io::Error::other("a keyed pass rate above one must fail").into());
+        };
+        assert!(
+            error.to_string().contains("model_thresholds.demo-model"),
+            "{error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn a_flat_eval_rejects_a_server_owned_chat_template_control()

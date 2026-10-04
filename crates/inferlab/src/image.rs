@@ -9,6 +9,7 @@
 mod entrypoint;
 pub(crate) mod launch;
 mod materialization;
+mod neutrality;
 mod package_closure;
 mod portable_context;
 pub(crate) mod record;
@@ -160,6 +161,18 @@ impl ResolvedImageBuild {
     }
 }
 
+/// The installed image-packaging runtime, or the rejection naming its
+/// installation.
+pub(crate) fn require_image_packaging()
+-> Result<crate::toolchain::InstalledImageToolchain, InferlabError> {
+    crate::toolchain::require_image().map_err(|error| InferlabError::ImageBuild {
+        message: format!(
+            "building image packages requires the toolchain's image-packaging runtime: \
+             {error}; run `inferlab toolchain install`"
+        ),
+    })
+}
+
 pub(crate) fn resolve_image<T: BuilderTool, C: AdapterClient>(
     workspace: &LoadedWorkspace,
     request: &ImageBuildRequest<'_>,
@@ -221,6 +234,12 @@ pub(crate) fn resolve_image<T: BuilderTool, C: AdapterClient>(
     } else {
         package_closure::package_project_directories(&locked, &selected, &stack.pixi_environment)?
     };
+    if !wheel_sources.is_empty() {
+        // Built packages are rewritten and verified with the toolchain's
+        // image-packaging runtime; its absence rejects the build before a
+        // record or builder effect, dry-run included ([[RFC-0007:C-IMAGE-BUILD]]).
+        require_image_packaging()?;
+    }
     let image = ImagePlan {
         id: request.image.to_owned(),
         stack: definition.stack.clone(),

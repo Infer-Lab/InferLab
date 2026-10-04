@@ -20,6 +20,15 @@ c-compiler = "1.*"
 [feature.bench.pypi-dependencies]
 aiperf = { git = "https://github.com/lucifer1004/aiperf.git", rev = "8f3ac49a51ff6b07b22cd5afcfd0495902106572" }
 
+# Image-packaging tools ([[RFC-0007:C-IMAGE-BUILD]]): search-path rewriting,
+# device-code extraction for verification, and wheel repacking.
+[feature.image.dependencies]
+python = "3.12.*"
+patchelf = "==0.19.2"
+cuda-cuobjdump = "==13.4.92"
+wheel = "==0.48.0"
+
 [environments]
 eval = ["eval"]
 bench = ["bench"]
+image = ["image"]

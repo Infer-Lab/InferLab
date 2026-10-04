@@ -20,7 +20,9 @@ pub(super) const GENERATOR_IDENTITY: &str =
 /// Epoch 3: checks execute through a generated runner that frames per-check
 /// results into the builder log, so a failed build still attributes which
 /// checks ran and how they exited.
-pub(super) const IMAGE_CONTEXT_EPOCH: u32 = 3;
+/// Epoch 4: built wheels install from a build-time bind mount of the
+/// wheelhouse, so no layer carries the wheel payload.
+pub(super) const IMAGE_CONTEXT_EPOCH: u32 = 4;
 
 /// The framing prefix the generated check runner emits per check; the
 /// builder log is scanned for it to reconstruct per-check evidence.
@@ -268,9 +270,9 @@ fn render_dockerfile(inputs: &ContextInputs<'_>) -> String {
          COPY pip-requirements.txt /tmp/pip-requirements.txt\n\
          RUN {ENV_PREFIX}/bin/python -m pip install --no-cache-dir --no-deps \\\n\
          \x20   --require-hashes -r /tmp/pip-requirements.txt\n\
-         COPY wheelhouse/ /wheelhouse/\n\
          COPY wheel-requirements.txt /tmp/wheel-requirements.txt\n\
-         RUN {ENV_PREFIX}/bin/python -m pip install --no-cache-dir --no-deps --no-index \\\n\
+         RUN --mount=type=bind,source=wheelhouse,target=/wheelhouse \\\n\
+         \x20   {ENV_PREFIX}/bin/python -m pip install --no-cache-dir --no-deps --no-index \\\n\
          \x20   --require-hashes -r /tmp/wheel-requirements.txt\n\
          COPY inferlab-entrypoint.sh {ENTRYPOINT_PATH}\n\
          RUN chmod 0755 {ENTRYPOINT_PATH}\n"
@@ -313,6 +315,36 @@ fn write_text(path: &Path, content: &str) -> Result<(), InferlabError> {
 mod tests {
     use super::{ContextInputs, ContextScript, render_checks_runner, render_dockerfile};
     use std::path::Path;
+
+    /// Built wheels reach the image only as installed packages
+    /// ([[RFC-0007:C-IMAGE-BUILD]]): the install step reads them from a
+    /// build-time mount, and no layer carries the wheel payload.
+    #[test]
+    fn wheels_install_from_a_mounted_wheelhouse_that_no_layer_keeps() {
+        let inputs = ContextInputs {
+            context_dir: Path::new("unused"),
+            base_image: "example.com/base:1",
+            base_image_digest: "sha256:0000",
+            entrypoint: "#!/bin/sh\n",
+            built_wheels: &[],
+            checks: &[],
+            postprocess: &[],
+        };
+
+        let dockerfile = render_dockerfile(&inputs);
+        assert!(
+            !dockerfile.contains("COPY wheelhouse"),
+            "no layer copies the wheel payload: {dockerfile}"
+        );
+        assert!(
+            dockerfile.contains(concat!(
+                "RUN --mount=type=bind,source=wheelhouse,target=/wheelhouse \\\n",
+                "    /opt/inferlab-env/bin/python -m pip install --no-cache-dir --no-deps --no-index \\\n",
+                "    --require-hashes -r /tmp/wheel-requirements.txt"
+            )),
+            "wheels install from the mounted wheelhouse: {dockerfile}"
+        );
+    }
 
     #[test]
     fn dockerfile_runs_postprocess_then_checks_through_the_entrypoint() {

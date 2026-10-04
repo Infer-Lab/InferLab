@@ -35,6 +35,18 @@ pub(super) fn validate_workspace(
         require_id("eval", id)?;
         validate_eval(id, eval)?;
         validate_eval_task_source(root, id, eval)?;
+        if let crate::workspace::EvalDefinition::LmEval {
+            model_thresholds, ..
+        } = eval
+        {
+            for model in model_thresholds.keys() {
+                if !config.models.contains_key(model) {
+                    return invalid(format!(
+                        "eval {id:?} model_thresholds names {model:?}, which is not a declared model"
+                    ));
+                }
+            }
+        }
     }
 
     for (id, suite) in &config.workload_suites {

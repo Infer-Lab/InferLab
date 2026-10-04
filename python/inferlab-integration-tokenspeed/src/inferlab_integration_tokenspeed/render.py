@@ -1,7 +1,8 @@
+import inferlab_gateway_smg
 from inferlab_adapter_sdk import (
-    ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterErrorCode,
     AdapterOperationError,
+    EndpointAssignment,
     ParallelismAttention,
     ParallelismExperts,
     ParallelismOuter,
@@ -179,26 +180,7 @@ def _render_router(
             AdapterErrorCode.invalid_request,
             "TokenSpeed SMG requires a public endpoint and one serving model locator",
         )
-    endpoint = allocation.endpoint
-    argv = [
-        "python3",
-        "-m",
-        "smg",
-        "launch",
-        "--host",
-        endpoint.host,
-        "--port",
-        str(endpoint.port),
-        "--prometheus-port",
-        str(prometheus.port),
-        "--worker-startup-timeout-secs",
-        str(ROUTER_WORKER_STARTUP_TIMEOUT_SECS),
-        "--model-path",
-        model_locator,
-        "--tokenizer-path",
-        model_locator,
-        "--pd-disaggregation",
-    ]
+    prefill_targets: list[tuple[EndpointAssignment, int]] = []
     for item in prefill:
         bootstrap = item.ports.get("bootstrap")
         if bootstrap is None:
@@ -211,33 +193,27 @@ def _render_router(
                 AdapterErrorCode.invalid_request,
                 f"prefill allocation {item.process!r} has no endpoint",
             )
-        argv.extend(
-            [
-                "--prefill",
-                f"grpc://{item.endpoint.host}:{item.endpoint.port}",
-                str(bootstrap.port),
-            ]
-        )
+        prefill_targets.append((item.endpoint, bootstrap.port))
+    decode_targets: list[EndpointAssignment] = []
     for item in decode:
         if item.endpoint is None:
             raise AdapterOperationError(
                 AdapterErrorCode.invalid_request,
                 f"decode allocation {item.process!r} has no endpoint",
             )
-        argv.extend(["--decode", f"grpc://{item.endpoint.host}:{item.endpoint.port}"])
-    argv.extend(
-        [
-            "--policy",
-            "round_robin",
-            "--prefill-policy",
-            "round_robin",
-            "--decode-policy",
-            "round_robin",
-            "--disable-retries",
-            "--disable-circuit-breaker",
-        ]
+        decode_targets.append(item.endpoint)
+    return rendered_frontend(
+        allocation,
+        inferlab_gateway_smg.prefill_decode_command(
+            endpoint=allocation.endpoint,
+            prometheus=prometheus,
+            model_locator=model_locator,
+            prefill=prefill_targets,
+            decode=decode_targets,
+            prefill_policy="round_robin",
+            decode_policy="round_robin",
+        ),
     )
-    return rendered_frontend(allocation, ProcessSpec(argv=argv, env={}))
 
 
 def render_serve(input: RenderServeInput) -> RenderServeResult:
@@ -266,8 +242,8 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
         elif isinstance(allocation, ServeProcessAllocationFrontend):
             require_integration_fused_frontend(
                 allocation,
-                gateway_backend="tokenspeed-smg",
-                pd_router_backend="tokenspeed-smg",
+                gateway_backend=inferlab_gateway_smg.BACKEND,
+                pd_router_backend=inferlab_gateway_smg.BACKEND,
             )
             processes.append(_render_router(allocation, model_allocations))
     return RenderServeResult(integration=_identity(), processes=processes)

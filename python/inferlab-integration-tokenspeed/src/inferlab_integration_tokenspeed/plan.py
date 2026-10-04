@@ -1,3 +1,4 @@
+import inferlab_gateway_smg
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
@@ -16,7 +17,6 @@ from inferlab_adapter_sdk import (
     PlanServeResult,
     ReadinessProbe,
     ReadinessProbeHttp,
-    ReadinessProbeHttpTargetRegistry,
     ReadinessProbeProcessAlive,
     RenderSource,
     ServeReplicaRequirement,
@@ -228,12 +228,8 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "TokenSpeed prefill/decode only supports Mooncake KV transfer",
         )
-    backend_pair = (input.gateway_backend, input.pd_router_backend)
-    if backend_pair != ("tokenspeed-smg", "tokenspeed-smg"):
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"TokenSpeed does not support Gateway/P/D Router pair {backend_pair!r}",
-        )
+    inferlab_gateway_smg.require_backend(input.gateway_backend, component="Gateway")
+    inferlab_gateway_smg.require_backend(input.pd_router_backend, component="P/D Router")
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
     process_alive = ReadinessProbe(root=ReadinessProbeProcessAlive())
@@ -277,30 +273,18 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             )
         ),
     ]
-    identity = _identity()
     gateway, pd_router = fused_pd_frontend_plans(
-        gateway_backend="tokenspeed-smg",
-        pd_router_backend="tokenspeed-smg",
-        implementation="tokenspeed-smg",
-        implementation_version=identity.adapter_version,
+        gateway_backend=inferlab_gateway_smg.BACKEND,
+        pd_router_backend=inferlab_gateway_smg.BACKEND,
+        implementation=inferlab_gateway_smg.IMPLEMENTATION,
+        implementation_version=inferlab_gateway_smg.installed_version(),
         render_source=RenderSource.integration,
         endpoint=_endpoint_declaration(),
-        gateway_readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/readiness")),
-        pd_router_readiness=ReadinessProbe(
-            root=ReadinessProbeHttpTargetRegistry(
-                readiness_path="/readiness",
-                registry_path="/workers",
-                targets_field="workers",
-                target_url_field="url",
-                target_role_field="worker_type",
-                target_healthy_field="is_healthy",
-                target_bootstrap_port_field="bootstrap_port",
-                target_scheme=TargetEndpointScheme.grpc,
-                prefill_role_value="prefill",
-                decode_role_value="decode",
-                prefill_bootstrap_port="bootstrap",
-            )
+        gateway_readiness=inferlab_gateway_smg.gateway_readiness(),
+        pd_router_readiness=inferlab_gateway_smg.pd_router_readiness(
+            prefill_bootstrap_port="bootstrap"
         ),
+        gateway_settings=inferlab_gateway_smg.gateway_settings(),
         policies=PdRoutingPolicies(prefill="round_robin", decode="round_robin"),
         prefill_role=prefill.id,
         decode_role=decode.id,

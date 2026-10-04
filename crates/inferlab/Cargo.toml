@@ -31,13 +31,15 @@ crossterm.workspace = true
 flate2.workspace = true
 form_urlencoded.workspace = true
 fs2.workspace = true
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.16" }
-inferlab-profiler = { path = "../inferlab-profiler", version = "0.16" }
-inferlab-proxy = { path = "../inferlab-proxy", version = "0.16" }
-inferlab-runtime = { path = "../inferlab-runtime", version = "0.16" }
-inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.16" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.17" }
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.17" }
+inferlab-proxy = { path = "../inferlab-proxy", version = "0.17" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.17" }
+inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.17" }
 humantime.workspace = true
 maud.workspace = true
+memchr.workspace = true
+object.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
@@ -64,6 +66,7 @@ flate2.workspace = true
 tar.workspace = true
 
 [dev-dependencies]
+object = { workspace = true, features = ["write"] }
 fs2.workspace = true
 insta.workspace = true
 serde_json.workspace = true

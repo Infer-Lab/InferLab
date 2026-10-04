@@ -1,4 +1,14 @@
 #!/bin/sh
+# Answers the toolchain host-platform probe like the main fixture pixi.
+if [ "$1" = info ] && [ "$2" = --json ]; then
+  case "$(uname -m)" in
+    x86_64) detected_platform=linux-64 ;;
+    aarch64) detected_platform=linux-aarch64 ;;
+    *) detected_platform=unsupported ;;
+  esac
+  printf '{"platform":"%s","virtual_packages":["__unix=0=0","__linux=6.11.0=0","__glibc=2.35=0"]}\n' "$detected_platform"
+  exit 0
+fi
 if [ "$1" = list ] && [ "$2" = --json ]; then
   cat <<'JSON'
 [
@@ -22,6 +32,9 @@ fi
 if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   shift 4
   while [ $# -gt 0 ] && printf '%s' "$1" | grep -q =; do shift; done
+fi
+if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
+  shift 6
 fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
   printf 'stray\n' > vendor/vllm/stray-build-artifact.txt

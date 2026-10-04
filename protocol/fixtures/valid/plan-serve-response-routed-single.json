@@ -10,7 +10,7 @@
           "process_role": "gateway"
         },
         "effective_settings": {
-          "worker_protocol": "tokenspeed_scheduler_v1",
+          "worker_protocol": "tokenspeed.grpc.scheduler.TokenSpeedScheduler",
           "policy": "least_load",
           "retries": false,
           "circuit_breaker": false
@@ -31,7 +31,7 @@
             "port": "prometheus"
           }
         },
-        "implementation": "tokenspeed-smg",
+        "implementation": "smg",
         "implementation_version": "fixture-frontend-version",
         "ports": [
           "prometheus"

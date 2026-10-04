@@ -684,3 +684,81 @@ fn missing_eval_toolchain_reports_the_explicit_install_action() -> Result<(), Bo
     assert!(!workspace.root.path().join(".inferlab/records").exists());
     Ok(())
 }
+
+/// A threshold keyed by the server's model is the effective gate threshold
+/// ([[RFC-0004:C-LM-EVAL]]): the plan carries only the selected value and
+/// names the model whose entry selected it.
+#[test]
+fn a_model_keyed_threshold_is_the_effective_eval_threshold() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let path = workspace.root.path().join(".inferlab/workspace.toml");
+    let keyed = |entry: &str| -> Result<String, Box<dyn Error>> {
+        Ok(fs::read_to_string(&path)?.replace(
+            "[benches.c8k1k]",
+            &format!("[evals.gsm8k.model_thresholds]\n{entry}\n\n[benches.c8k1k]"),
+        ))
+    };
+    let gsm8k = |plan: &serde_json::Value| -> Result<serde_json::Value, Box<dyn Error>> {
+        Ok(plan["measurements"]["evals"]
+            .as_array()
+            .ok_or("evals")?
+            .iter()
+            .find(|eval| eval["id"] == "gsm8k")
+            .ok_or("gsm8k is planned")?
+            .clone())
+    };
+    let original = fs::read_to_string(&path)?;
+    fs::write(&path, keyed("deepseek-v4-flash = 0.96")?)?;
+
+    let eval = gsm8k(&workspace.run_json(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--dry-run",
+    ])?)?;
+    assert_eq!(eval["definition"]["threshold"], 0.96);
+    assert!(
+        eval["definition"].get("model_thresholds").is_none(),
+        "the effective definition carries only the selected threshold"
+    );
+    assert_eq!(
+        eval["declared_definition"]["model_thresholds"]["deepseek-v4-flash"],
+        0.96
+    );
+    assert_eq!(eval["threshold_model"], "deepseek-v4-flash");
+
+    let overridden = gsm8k(&workspace.run_json(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "evals.gsm8k.model_thresholds.deepseek-v4-flash=0.5",
+        "--set",
+        "evals.gsm8k.threshold=0.7",
+        "--dry-run",
+    ])?)?;
+    assert_eq!(
+        overridden["definition"]["threshold"], 0.5,
+        "the model entry stays effective; the threshold override changes only the default"
+    );
+
+    fs::write(&path, original)?;
+    let unkeyed = gsm8k(&workspace.run_json(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--dry-run",
+    ])?)?;
+    assert_eq!(unkeyed["definition"]["threshold"], 0.9);
+    assert!(unkeyed.get("threshold_model").is_none());
+
+    fs::write(&path, keyed("deepseek-v4-flsh = 0.96")?)?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("deepseek-v4-flsh") && stderr.contains("model"),
+        "a misspelled model key fails loading: {stderr}"
+    );
+    Ok(())
+}

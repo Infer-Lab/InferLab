@@ -159,7 +159,7 @@ def test_plan_tp_only_shape_fills_every_component() -> None:
 
 def _prefill_decode_plan_input(
     *,
-    frontend_backend: str = "tokenspeed-smg",
+    frontend_backend: str = "smg",
     transport: KvTransferMechanism = KvTransferMechanism.mooncake,
     extra_args: list[str] | None = None,
     prefill_replicas: int = 2,
@@ -248,12 +248,34 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
     }
-    assert result.gateway.backend == "tokenspeed-smg"
+    assert result.gateway.backend == "smg"
+    assert result.gateway.implementation == "smg"
     assert result.gateway.render_source == RenderSource.integration
     assert result.gateway.endpoint.prefix_cache_reset is not None
     assert result.gateway.endpoint.prefix_cache_reset.path == "/flush_cache"
-    assert result.pd_router.backend == "tokenspeed-smg"
+    assert result.pd_router.backend == "smg"
+    assert result.pd_router.implementation == "smg"
     assert result.pd_router.ports == ["prometheus"]
+
+
+def test_the_former_smg_backend_name_is_rejected_with_the_rename() -> None:
+    with pytest.raises(AdapterOperationError, match='select "smg"') as rejected:
+        plan_serve(_prefill_decode_plan_input(frontend_backend="tokenspeed-smg"))
+    assert rejected.value.code == AdapterErrorCode.invalid_settings
+
+
+def test_frontend_evidence_records_the_installed_smg_distribution_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inferlab_gateway_smg
+
+    monkeypatch.setattr(inferlab_gateway_smg, "version", lambda distribution: "1.7.0")
+
+    result = plan_serve(_prefill_decode_plan_input())
+
+    assert result.gateway is not None and result.pd_router is not None
+    assert result.gateway.implementation_version == "1.7.0"
+    assert result.pd_router.implementation_version == "1.7.0"
 
 
 def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
@@ -597,7 +619,7 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
         assert process.command.env["TOKENSPEED_SKIP_GRPC_WARMUP"] == "1"
 
     gateway = result.processes[-1].root.command.argv
-    assert gateway[:4] == ["python3", "-m", "smg", "launch"]
+    assert gateway[:2] == ["smg", "launch"]
     assert gateway[gateway.index("--host") + 1] == "gateway.example"
     assert [gateway[index + 1] for index, arg in enumerate(gateway) if arg == "--prefill"] == [
         "grpc://node-0.example:8000",

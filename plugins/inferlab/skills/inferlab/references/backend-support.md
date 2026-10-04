@@ -31,11 +31,12 @@ states the adapter protocol version a binary speaks:
 | --- | --- | --- | --- |
 | 0.13.2–0.13.3 | v9 | 0.9.0 | 0.8.0 (vLLM, SGLang, TensorRT-LLM, TokenSpeed, Specialized Engine) |
 | 0.14.0–0.14.2 | v10 | 0.10.0 | 0.9.0 (vLLM, SGLang, TensorRT-LLM, TokenSpeed, Specialized Engine) |
-| 0.15.0–0.15.4 | v11 | 0.11.0 | 0.10.0 (vLLM, SGLang, TensorRT-LLM, TokenSpeed); Specialized Engine 0.10.0, 0.10.1 from 0.15.1 |
-| current main (0.15.5 development line) | v11 | 0.11.0 | 0.10.0 (vLLM, SGLang, TensorRT-LLM, TokenSpeed); Specialized Engine 0.10.1 |
+| 0.15.0–0.16.0 | v11 | 0.11.0 | 0.10.0 (vLLM, SGLang, TensorRT-LLM, TokenSpeed); Specialized Engine 0.10.0, 0.10.1 from 0.15.1 |
+| current main (0.16.1 development line) | v11 | 0.11.0 | 0.10.0 (vLLM, SGLang, TensorRT-LLM); TokenSpeed 0.11.0 and Specialized Engine 0.11.0, both on `inferlab-gateway-smg` 0.1.0 |
 
-Each framework integration package pins its Adapter SDK exactly, so pinning the
-integration versions above is sufficient. A Qualified cell describes the
+Each framework integration package pins its Adapter SDK exactly, and the
+TokenSpeed and Specialized Engine integrations also pin the shared SMG gateway
+package, so pinning the integration versions above is sufficient. A Qualified cell describes the
 workflow and shape of the execution records it rests on; its records come from
 the current protocol line unless the cell names an earlier one. Records from
 earlier protocol lines, including the protocol-v7 candidate records some cells
@@ -49,12 +50,12 @@ packages.
 | Integration package | `inferlab-integration-vllm` | `inferlab-integration-sglang` | `inferlab-integration-tensorrt-llm` | `inferlab-integration-tokenspeed` | `inferlab-integration-specialized-engine` |
 | Single-node `single` topology | Qualified for the retained baseline and the protocol-v7 candidate on the Qwen3 MoE SM120 TP1 baseline below | Qualified for the retained baseline and the protocol-v7 candidate on the Qwen3 MoE SM120 TP1 baseline below | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Qualified for the retained baseline below; protocol-v7 candidate Unqualified | Supported: one Engine replica in one rank process with a pure-TP device set; the protocol-v7 `0.3.0` candidate is Unqualified |
 | `single` public component | Qualified for the retained direct-Engine baseline and the protocol-v7 candidate on Qwen3 MoE SM120 TP1 | Qualified for the retained direct-Engine baseline and the protocol-v7 candidate on Qwen3 MoE SM120 TP1 | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Qualified for the retained direct-Engine baseline; protocol-v7 candidate Unqualified | Supported: TokenSpeed SMG Gateway; the protocol-v7 `0.3.0` candidate is Unqualified |
-| Gateway-backed `single` | — | — | — | — | Supported: `smg`, implemented by `tokenspeed-smg`; the protocol-v7 `0.3.0` candidate is Unqualified |
+| Gateway-backed `single` | — | — | — | — | Supported: `smg`, from the `tokenspeed-smg` distribution; the protocol-v7 `0.3.0` candidate is Unqualified |
 | Multi-node replica | Supported | — | — | — | — |
 | Disaggregated prefill/decode | Qualified | Qualified for the pairing-specific baselines below | Qualified: built-in and native `trtllm-disaggregated` frontend pairs | Qualified for the maintained 1P1D pairing below | — |
 | KV-transfer backend | Qualified: Mooncake and NIXL | Qualified: Mooncake and NIXL in the pairing-specific baselines below | Qualified: NIXL with the built-in frontend and native `trtllm-disaggregated` pair | Qualified: Mooncake for the maintained 1P1D pairing below | — |
-| P/D Gateway backend | Supported: `builtin`, `vllm-router` | Supported: `builtin`, `sglang-router` | Supported: `builtin`, `trtllm-disaggregated` | Supported: `tokenspeed-smg` | — |
-| P/D Router backend | Supported: `builtin`, `vllm-router` | Supported: `builtin`, `sglang-router` | Supported: `builtin`, `trtllm-disaggregated` | Supported: `tokenspeed-smg` | — |
+| P/D Gateway backend | Supported: `builtin`, `vllm-router` | Supported: `builtin`, `sglang-router` | Supported: `builtin`, `trtllm-disaggregated` | Supported: `smg` | — |
+| P/D Router backend | Supported: `builtin`, `vllm-router` | Supported: `builtin`, `sglang-router` | Supported: `builtin`, `trtllm-disaggregated` | Supported: `smg` | — |
 | P/D frontend binding | Supported: one `[gateway, pd_router]` process | Supported: one `[gateway, pd_router]` process | Supported: one `[gateway, pd_router]` process | Supported: one `[gateway, pd_router]` process | — |
 | Public workload paths | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` | `/v1/completions`; `/v1/chat/completions` |
 | AIPerf server-metrics capability | Qualified for direct `single` on the public endpoint at `/metrics`: a real protocol-v7 candidate Bench preserved the native export and produced both SPEED acceptance reports; Gateway and P/D public endpoints omit the capability | Qualified for direct `single` on the public endpoint at `/metrics` when effective setting `enable_metrics = true`; Gateway and P/D public endpoints omit the capability | — | — | Supported through SMG's separately allocated `prometheus` port at `/metrics`; `least_load` preserves the single-target routing result while activating canonical Engine load polling; real candidate Bench collection and cleanup are demonstrated from a dirty workspace, so reproducible qualification remains pending |
@@ -110,7 +111,7 @@ requests. A worker-only probe cannot qualify a prefill/decode public endpoint.
 | Gateway-backed `single` endpoint | — | — | — | — | —: the initial token worker contract rejects log-probability requests. |
 | Prefill/decode public endpoint, aggregate | **Unqualified**: no complete route-level prompt-logprob record; worker behavior is not qualification evidence. | **Unqualified**: no complete route-level prompt-logprob record; worker behavior is not qualification evidence. | **Unqualified**: no complete route-level prompt-logprob record; worker behavior is not qualification evidence. | **Unqualified**: no complete route-level prompt-logprob record; worker behavior is not qualification evidence. | — |
 | Built-in Gateway/P/D Router pair | **Unqualified**: `0.4.0` declares Mooncake and NIXL cases, but no public-endpoint record establishes a concrete placement or per-role shape. | **Unqualified** for the maintained single-machine 1P1D TP2/EP2 Mooncake and NIXL pairings. | **Unqualified** for the maintained 1P1D TP2/EP2 NIXL path. | —; the maintained P/D path uses the integration-rendered TokenSpeed pair. | — |
-| Integration-rendered Gateway/P/D Router pair | **Unqualified** for the maintained `vllm-router` Mooncake and NIXL paths. | **Unqualified** for the maintained `sglang-router` Mooncake and NIXL pairings. | **Unqualified** for the maintained `trtllm-disaggregated` NIXL path. | **Unqualified** for the maintained `tokenspeed-smg` Mooncake path. | — |
+| Integration-rendered Gateway/P/D Router pair | **Unqualified** for the maintained `vllm-router` Mooncake and NIXL paths. | **Unqualified** for the maintained `sglang-router` Mooncake and NIXL pairings. | **Unqualified** for the maintained `trtllm-disaggregated` NIXL path. | **Unqualified** for the maintained `smg` Mooncake path. | — |
 
 These direct-route failures do not establish the behavior of another model,
 integration release, built-in frontend, Gateway revision, or P/D Router revision. Requalification must
@@ -146,7 +147,7 @@ does not duplicate every arithmetic constraint enforced by each adapter.
 | vLLM | Source-built DeepSeek-V4 SM120 TP2/EP2 serving; real two-machine 1P1D vLLM Router serving with Mooncake and NIXL; source-built Qwen3 MoE SM120 TP1 direct serving for protocol-v7 Bench qualification | Multi-node replica lowering is supported but unqualified; the maintained cross-machine baseline is 1P1D. |
 | SGLang | Source-built DeepSeek-V4 SM120 TP2/EP2 serving, pairing-specific single-machine 1P1D serving, and source-built Qwen3 MoE SM120 TP1 direct serving for protocol-v7 cache-start qualification | P/D qualification is pairing-specific below; TP4 is outside the maintained baseline. |
 | TensorRT-LLM | Source-built DeepSeek-V4 SM120 TP2/EP2 serving and 1P1D NIXL serving with built-in and native routing | SM120 DeepSeek-V4 serving requires the source integration's FlashInfer sparse-MLA path; the stock NGC image through 1.3.0rc21 is not sufficient. |
-| TokenSpeed | Source-built DeepSeek-V4 SM120 TP2/EP2/dense-TP2 serving; single-machine 1P1D serving with TP2/EP2/dense-TP2 per role, native `tokenspeed-smg` routing, and Mooncake KV transfer | P/D qualification is limited to that concrete routing/transfer pairing; the source-built framework baseline includes its required kernel fixes. |
+| TokenSpeed | Source-built DeepSeek-V4 SM120 TP2/EP2/dense-TP2 serving; single-machine 1P1D serving with TP2/EP2/dense-TP2 per role, native SMG routing, and Mooncake KV transfer | P/D qualification is limited to that concrete routing/transfer pairing; the source-built framework baseline includes its required kernel fixes. |
 | [Specialized Engine](https://github.com/Infer-Lab/InferLab/blob/main/docs/specialized-engine.md) | Grout Qwen3-4B on one NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120), with one TP1 Engine replica behind `tokenspeed-smg==1.7.0.post20260710` | Qualification covers serial greedy scalar completion through the Gateway at TP1. Wider single-process pure TP is Supported but Unqualified; chat, log probabilities, batching, P/D, and other Engine implementations remain unqualified or unsupported as stated above. |
 
 ### SGLang P/D Pairings

@@ -21,6 +21,7 @@ fn repeated_eval_rejects_a_gate_conclusion_that_disagrees_with_its_threshold() {
         metric: "exact_match".to_owned(),
         metric_filter: Some("strict".to_owned()),
         threshold: 0.75,
+        model_thresholds: BTreeMap::new(),
         timeout_seconds: 30,
     };
     let normalized = EvalNormalizedMetric {

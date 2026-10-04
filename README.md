@@ -110,7 +110,7 @@ inferlab workspace show                     # validate and browse public definit
 # write .inferlab/local.toml (copy .inferlab/local.example.toml when provided)
 pixi install --locked --all                 # realize every stack's selected Pixi environment
 inferlab stack status                       # confirm environments and run declared stack checks
-inferlab toolchain install                  # only for lm-eval Evals or serving Benches
+inferlab toolchain install                  # for lm-eval Evals, serving Benches, or image package builds
 inferlab tui                                # observe this workspace; never starts or changes work
 inferlab web                                # browser console; prints a tokenized local URL
 
@@ -121,8 +121,9 @@ inferlab bench random-8k1k --serve <ID>
 inferlab serve stop <ID>
 ```
 
-`inferlab toolchain install` fetches the pinned measurement packages, so it
-needs network access, and it must be rerun after upgrading InferLab.
+`inferlab toolchain install` fetches the pinned measurement and image-packaging
+packages, so it needs network access, and it must be rerun after upgrading
+InferLab.
 
 Non-dry-run `recipe run`, `bench`, and `image build` print JSON naming a
 record under `.inferlab/records/<ID>/`, even when they fail; `serve start`

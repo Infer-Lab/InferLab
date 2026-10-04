@@ -84,9 +84,17 @@ contents are returned in the plan's effective settings and recorded with the
 rendered command, so a run exercised through the hatch demonstrates that exact
 configuration rather than the typed contract alone.
 
-The listener serves the published TokenSpeed scheduler gRPC protocol and the
-standard gRPC health service used by TokenSpeed SMG during worker registration.
-Request execution requires tokenized input. Prompt text is transport metadata
+The listener serves the gRPC service `tokenspeed.grpc.scheduler.TokenSpeedScheduler`
+as defined by the SMG Gateway distribution in the stack, plus the standard gRPC
+health service, which reports `SERVING` once the Engine can admit requests; SMG
+uses both during worker registration
+([RFC-0003:C-SPECIALIZED-ENGINE](rfc/RFC-0003.md)). An Engine implements
+`Generate` (server streaming), `HealthCheck`, `Abort`, `GetModelInfo`,
+`GetServerInfo`, `GetLoads`, and `FlushCache`; other RPCs may answer
+`UNIMPLEMENTED`. InferLab defines no protocol version of its own: the SMG
+distribution owns the wire contract, field additions stay compatible, and the
+Gateway's worker registration is the compatibility check. The recorded worker
+protocol is that service name. Request execution requires tokenized input. Prompt text is transport metadata
 and must not enter the model core; the model core returns token IDs without
 tokenizing or detokenizing them.
 
@@ -120,9 +128,10 @@ who need OS runtime data can opt in through the typed
 
 The common `inferlab-integration-specialized-engine` package owns only planning,
 validation, and rendering for this stable contract. It contains no Grout,
-model, GPU-architecture, or kernel branches. Its Gateway implementation is
-`tokenspeed-smg`, and its recorded version comes from the `tokenspeed-smg`
-distribution in the downstream Pixi environment.
+model, GPU-architecture, or kernel branches. Its Gateway is SMG, lowered by the
+shared `inferlab-gateway-smg` package that the TokenSpeed integration also uses:
+the recorded implementation is `smg`, and its version comes from the
+`tokenspeed-smg` distribution in the downstream Pixi environment.
 
 The downstream workspace owns the concrete Engine source revision, Cargo lock,
 CUDA and compiler closure, model intent, and private local bindings. InferLab

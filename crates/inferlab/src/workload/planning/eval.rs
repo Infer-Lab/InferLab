@@ -37,6 +37,25 @@ fn apply_eval_overrides(
     Ok((definition, override_plan(overrides)))
 }
 
+/// Make the threshold keyed by `model` effective, falling back to the
+/// declared default; the effective definition keeps only the selected value
+/// ([[RFC-0004:C-LM-EVAL]]). Returns the model when its entry was selected.
+fn select_model_threshold(definition: &mut EvalDefinition, model: &str) -> Option<String> {
+    let EvalDefinition::LmEval {
+        threshold,
+        model_thresholds,
+        ..
+    } = definition
+    else {
+        return None;
+    };
+    let selected = model_thresholds.get(model).copied();
+    model_thresholds.clear();
+    let value = selected?;
+    *threshold = value;
+    Some(model.to_owned())
+}
+
 pub(super) fn resolve_eval(
     id: &str,
     definitions: &BTreeMap<String, EvalDefinition>,
@@ -66,6 +85,7 @@ pub(super) fn resolve_eval(
         });
     }
     crate::workspace::validate_eval_task_source(context.workspace_root, id, &definition)?;
+    let threshold_model = select_model_threshold(&mut definition, context.model_id);
     if let EvalDefinition::LmEval {
         task: crate::workspace::EvalTaskSource::WorkspaceYaml { yaml },
         ..
@@ -119,6 +139,7 @@ pub(super) fn resolve_eval(
         overrides: override_plan,
         endpoint: context.endpoint.clone(),
         model: context.model.clone(),
+        threshold_model,
         workspace_source_exclusions: context.workspace_source_exclusions.to_vec(),
         execution,
     })

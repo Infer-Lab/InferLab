@@ -40,6 +40,31 @@ fi
 exec fixture-bench-client "$@"
 PYTHON
   chmod +x "$prefix/.pixi/envs/eval/bin/python" "$prefix/.pixi/envs/bench/bin/python"
+  # The image-packaging tools print what the release-pinned tools print;
+  # `wheel unpack` keeps the real `<name>-<version>/` layout over the
+  # fixture's text payloads, which carry no ELF members.
+  mkdir -p "$prefix/.pixi/envs/image/bin"
+  cat > "$prefix/.pixi/envs/image/bin/python" <<'PYTHON'
+#!/bin/sh
+if [ "$1" = -m ] && [ "$2" = wheel ]; then
+  case "$3" in
+    version) printf 'wheel 0.48.0\n'; exit 0 ;;
+    unpack)
+      dir="$6/$(basename "$4" .whl | cut -d- -f1-2)"
+      mkdir -p "$dir" && cp "$4" "$dir/payload.txt"
+      printf 'Unpacking to: %s...OK\n' "$dir"
+      exit 0 ;;
+    pack)
+      cp "$4/payload.txt" "$6/$(basename "$4")-py3-none-any.whl"
+      exit 0 ;;
+  esac
+fi
+printf 'unexpected image python fixture arguments: %s\n' "$*" >&2
+exit 2
+PYTHON
+  printf '%s\n' '#!/bin/sh' 'printf "patchelf 0.19.2\n"' > "$prefix/.pixi/envs/image/bin/patchelf"
+  printf '%s\n' '#!/bin/sh' 'printf "cuobjdump: NVIDIA (R) fat binary listing tool\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Sep_01_08:45:21_PDT_2026\nCuda compilation tools, release 13.4, V13.4.92\nBuild cuda_13.4.r13.4/compiler.38855100_0\n"' > "$prefix/.pixi/envs/image/bin/cuobjdump"
+  chmod +x "$prefix/.pixi/envs/image/bin/python" "$prefix/.pixi/envs/image/bin/patchelf" "$prefix/.pixi/envs/image/bin/cuobjdump"
   exit 0
 fi
 if [ "$1" = list ] && [ "$2" = --json ]; then
@@ -73,6 +98,11 @@ if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   shift 4
   while [ $# -gt 0 ] && printf '%s' "$1" | grep -q =; do shift; done
 fi
+# The second stage appends the compiler path maps: `sh -c SCRIPT sh HOST NVCC`.
+if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
+  printf '%s\n' "$5" > "${FIXTURE_PATH_MAPS:-/dev/null}"
+  shift 6
+fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
   # Like pip, name the wheel after the project metadata when the build
   # directory declares it; bare fixture trees fall back to the directory name.
@@ -81,6 +111,10 @@ if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-d
   printf 'wheel bytes for %s\n' "$name" > "$8/${name}-1.0-py3-none-any.whl"
   # The payload lists the build tree, so tests can see what the build read.
   (cd "$9" && find . -mindepth 1 -not -path './.git*' | sort) >> "$8/${name}-1.0-py3-none-any.whl"
+  # Lets a test plant content a real build would embed.
+  if [ -n "${FIXTURE_WHEEL_EXTRA:-}" ]; then
+    printf '%s\n' "$FIXTURE_WHEEL_EXTRA" >> "$8/${name}-1.0-py3-none-any.whl"
+  fi
   exit 0
 fi
 exec "$@"

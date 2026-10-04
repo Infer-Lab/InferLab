@@ -11,7 +11,7 @@ use super::record::{
 };
 use super::tool::{BuilderTool, CommandRecorder, NativeCommand};
 use super::{EligibilityPlan, ResolvedImageBuild};
-use super::{entrypoint, materialization, package_closure, portable_context};
+use super::{entrypoint, materialization, neutrality, package_closure, portable_context};
 use crate::InferlabError;
 use crate::adapter::ImageAdapterClient;
 use crate::environment;
@@ -232,8 +232,25 @@ fn assemble<T: BuilderTool>(
         std::collections::BTreeMap::new();
     let mut wheels = Vec::new();
     let mut source_packages = Vec::new();
+    let build_paths = neutrality::BuildPaths {
+        workspace_root: workspace.root.clone(),
+        env_prefix: workspace
+            .root
+            .join(environment::PIXI_ENVS_DIR)
+            .join(&resolved.image.pixi_environment),
+        source_root: copy_root.clone(),
+        build_dir: build_dir.clone(),
+        home: std::env::var_os("HOME").map(PathBuf::from),
+    };
+    let neutral_work = build_dir.join("wheel-build").join("neutral");
     let build_result = (|| -> Result<(), InferlabError> {
         let wheel_total = resolved.image.wheel_sources.len();
+        let tools = if wheel_total == 0 {
+            None
+        } else {
+            Some(super::require_image_packaging()?)
+        };
+        let path_maps = build_paths.path_maps()?;
         for (wheel_index, wheel_source) in resolved.image.wheel_sources.iter().enumerate() {
             let owner = resolved
                 .image
@@ -256,14 +273,26 @@ fn assemble<T: BuilderTool>(
                 &activation_digest,
             )?;
             let cache_dir = wheel_cache_root.join(&cache_key);
-            let (wheel, cached) = match cached_wheel(&cache_dir)? {
+            let tools = tools.as_ref().ok_or_else(|| InferlabError::ImageBuild {
+                message: "image-packaging runtime missing for a selected package".to_owned(),
+            })?;
+            let (wheel, cached, neutral) = match cached_wheel(&cache_dir)? {
                 Some(wheel) => {
                     progress.phase(Phase::named("package-build").item(
                         wheel_source.display().to_string(),
                         wheel_index + 1,
                         wheel_total,
                     ))?;
-                    (wheel, true)
+                    // A reused package was rewritten by the build that made
+                    // it; this assembly verifies it again.
+                    let neutral = neutrality::make_neutral(
+                        &wheel.source_path,
+                        tools,
+                        &build_paths,
+                        &neutral_work,
+                        false,
+                    )?;
+                    (wheel, true, neutral)
                 }
                 None => {
                     if copied.is_empty() {
@@ -311,17 +340,30 @@ fn assemble<T: BuilderTool>(
                             )
                             .log(&log),
                     )?;
-                    let wheel = build_wheel(
+                    let built = build_wheel(
                         &workspace.root,
                         &resolved.image.pixi_environment,
                         wheel_source,
                         &build_path,
                         &build_dir,
-                        &redirects,
+                        &BuildEnvironment {
+                            overrides: &redirects,
+                            path_maps: &path_maps,
+                        },
                         &mut |command| record_command(&mut *store, index, command),
-                    )
-                    .and_then(|wheel| adopt_into_cache(wheel, &cache_dir))?;
-                    (wheel, false)
+                    )?;
+                    // Path-neutral before it is cached: rewrite search paths,
+                    // repack, and verify ([[RFC-0007:C-IMAGE-BUILD]]).
+                    let neutral = neutrality::make_neutral(
+                        &built.source_path,
+                        tools,
+                        &build_paths,
+                        &neutral_work,
+                        true,
+                    )?;
+                    let wheel = wheel_from_path(built.source_path)
+                        .and_then(|wheel| adopt_into_cache(wheel, &cache_dir))?;
+                    (wheel, false, neutral)
                 }
             };
             source_packages.push(wheel.package.clone());
@@ -332,6 +374,7 @@ fn assemble<T: BuilderTool>(
                     filename: wheel.filename.clone(),
                     sha256: wheel.sha256.clone(),
                     cached,
+                    neutrality: Some(neutral),
                 });
             wheels.push(wheel);
         }
@@ -1076,15 +1119,26 @@ fn build_env_redirects(
     Ok(redirects)
 }
 
+/// What a package build receives beyond composed activation: the
+/// sanitized-view overrides and the compiler path maps.
+struct BuildEnvironment<'a> {
+    overrides: &'a [(String, String)],
+    path_maps: &'a [neutrality::PathMap],
+}
+
 fn build_wheel(
     root: &Path,
     pixi_environment: &str,
     wheel_source: &Path,
     build_path: &Path,
     build_dir: &Path,
-    env_overrides: &[(String, String)],
+    environment: &BuildEnvironment<'_>,
     sink: &mut CommandRecorder<'_>,
 ) -> Result<materialization::BuiltWheel, InferlabError> {
+    let BuildEnvironment {
+        overrides: env_overrides,
+        path_maps,
+    } = environment;
     let wheel_dir = wheel_build_dir(build_dir, wheel_source);
     std::fs::create_dir_all(&wheel_dir).map_err(|source| InferlabError::EnvironmentIo {
         path: wheel_dir.clone(),
@@ -1120,6 +1174,16 @@ fn build_wheel(
             .iter()
             .map(|(name, value)| format!("{name}={value}")),
     );
+    // After the sanitized-view overrides, the compiler path maps join the
+    // activation's flags, last so they win ([[RFC-0007:C-IMAGE-BUILD]]).
+    argv.extend([
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        r#"export CFLAGS="${CFLAGS:+$CFLAGS }$1" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$1" NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:+$NVCC_APPEND_FLAGS }$2"; shift 2; exec "$@""#.to_owned(),
+        "sh".to_owned(),
+        neutrality::host_flags(path_maps),
+        neutrality::nvcc_flags(path_maps),
+    ]);
     argv.extend([
         "python".to_owned(),
         "-m".to_owned(),

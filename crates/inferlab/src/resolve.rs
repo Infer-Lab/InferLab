@@ -137,6 +137,7 @@ fn compose_measurements(
                 locator: model_locator,
                 served_name: selection.model.served_name.clone(),
             },
+            model_id: &selection.server.model,
             prefix_cache_reset: public_endpoint.prefix_cache_reset.as_ref().map(|action| {
                 crate::workload::WorkloadHttpAction {
                     method: match action.method {

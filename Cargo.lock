@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "agent-plugin-installer",
  "axum",
@@ -1461,6 +1461,8 @@ dependencies = [
  "inferlab-serve-domain",
  "insta",
  "maud",
+ "memchr",
+ "object",
  "ratatui",
  "reqwest",
  "rustix",
@@ -1485,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-fake-engine"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "clap",
  "futures-util",
@@ -1499,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-profiler"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "inferlab-protocol",
  "inferlab-runtime",
@@ -1512,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-protocol"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -1521,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-proxy"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1536,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-runtime"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ctrlc",
  "reqwest",
@@ -1551,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-serve-domain"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "inferlab-profiler",
  "inferlab-protocol",
@@ -1971,6 +1973,20 @@ name = "objc2-encode"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
+
+[[package]]
+name = "object"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "hashbrown 0.17.1",
+ "indexmap 2.14.2",
+ "memchr",
+ "ruzstd",
+]
 
 [[package]]
 name = "once_cell"
@@ -2682,6 +2698,15 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ruzstd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "ryu"
@@ -3558,6 +3583,12 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "twox-hash"
+version = "2.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
 
 [[package]]
 name = "typed-path"

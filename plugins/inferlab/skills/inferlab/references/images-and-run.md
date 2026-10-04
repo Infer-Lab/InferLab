@@ -22,6 +22,20 @@ one record, assembles and inspects every producible platform, optionally exports
 unique OCI archives, and runs eligible recipe validations. One platform or
 validation failure does not suppress the remaining batch.
 
+An image that selects packages needs `inferlab toolchain install` first, dry-run
+included: its image-packaging runtime makes every built package path-neutral.
+Builds receive compiler path maps, so source, Pixi environment, and workspace
+paths appear as fixed `/opt/inferlab-*` paths; library search paths are
+rewritten to the image environment; and each package, including its device
+code, is verified to contain no workspace, environment, home, or build-tree
+path before it is cached or assembled. A failure names the member and what it
+embeds — usually a build backend that ignores `CFLAGS`, `CXXFLAGS`, or
+`NVCC_APPEND_FLAGS`, or device code compiled with `-lineinfo`. Built wheels
+reach the image only as installed packages. Debug information follows the
+stack's build configuration: set the framework's build type (for vLLM,
+`CMAKE_BUILD_TYPE=Release` in stack activation) to ship smaller images without
+it.
+
 Built images remain in local builder storage; this workflow does not push to a
 registry.
 

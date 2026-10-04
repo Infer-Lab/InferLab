@@ -3,22 +3,22 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "inferlab-measurement-sdk"
-version = "0.17.0"
-description = "Internal generated models and runtime helpers for InferLab measurement clients"
+name = "inferlab-gateway-smg"
+version = "0.1.0"
+description = "Inferlab SMG frontend lowering shared by the integrations that run SMG"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["pydantic>=2.13,<3"]
+dependencies = ["inferlab-adapter-sdk==0.11.0"]
 
 [project.urls]
 Repository = "https://github.com/Infer-Lab/InferLab"
 
 [tool.inferlab.release]
-lifecycle = "product"
+lifecycle = "workspace-side"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/inferlab_measurement_sdk"]
+packages = ["src/inferlab_gateway_smg"]
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tests", "LICENSE", "README.md"]

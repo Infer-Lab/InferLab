@@ -127,8 +127,10 @@ kind = "local-docker"
 [Images and ad-hoc execution](images-and-run.md#build-workflow) covers the
 build workflow.
 
-Portable contexts and image metadata exclude model locators, builder hosts,
-workspace paths, placements, and other machine-private facts. Per-machine
+Portable contexts, image metadata, and built packages exclude model locators,
+builder hosts, workspace paths, placements, and other machine-private facts;
+building packages needs the toolchain's image-packaging runtime
+([Build workflow](images-and-run.md#build-workflow)). Per-machine
 container bindings apply to every server container on that machine, including
 image validations, but not to `inferlab run`. They may pass environment values
 by name, grant absolute device paths, lift the memlock limit, and add only

@@ -146,6 +146,7 @@ pub(crate) fn resolve_manual_bench(
                 locator: model_locator,
                 served_name: recorded.server.model.served_name.clone(),
             },
+            model_id: &recorded.server.model.id,
             prefix_cache_reset: recorded.server.endpoint.prefix_cache_reset.as_ref().map(
                 |action| WorkloadHttpAction {
                     method: match action.method {

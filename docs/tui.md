@@ -16,14 +16,22 @@ workspace dirty state refresh on a slower cadence of at least a minute; press
 `r` to re-read every source, including those, immediately. Opening, refreshing, searching, and
 closing the TUI do not write a UI session or launch an InferLab workflow.
 
+At startup the TUI asks the terminal for its background color, then falls back
+to `COLORFGBG`, and otherwise assumes a dark background; it then uses a palette
+tuned for that background. When the terminal reports its exact color, panels
+are tinted from it. Press `t` to switch to the other palette for the rest of the
+session, for example when a terminal that does not report its colors is light;
+the switched palette is not tinted.
+
 ## Views and sources
 
-- **Overview** summarizes active Operations and top-level Workflows in plain
-  language, then groups visible rows into Attention, Active, Recent, and
-  Workspace. Top-level workflow failures appear before abnormal child servers;
-  running and abnormal recipe-owned servers remain visible without being
-  counted again as top-level workflows. The canonical workspace root is shown
-  in the header, with an explicit ellipsis when the terminal cannot fit it. The
+- **Overview** groups rows into ATTENTION, NOW, RECENT, and WORKSPACE.
+  ATTENTION leads with failed, stale, and unavailable objects; top-level
+  workflow failures appear before abnormal child servers. NOW holds active
+  operations and running servers; an operation that reports an item position
+  shows a progress bar, and its glyph animates while it runs. RECENT groups
+  completed records by calendar day. Running and abnormal recipe-owned servers
+  remain visible without being counted again as top-level workflows. The
   refresh indicator shows the configured automatic cadence while complete
   generations arrive normally. It shows `WAITING` before the first complete
   generation and switches to an elapsed `LAST REFRESH` age only when no new
@@ -35,10 +43,16 @@ closing the TUI do not write a UI session or launch an InferLab workflow.
   A workspace command fails with `E5002` before continuing when it cannot
   establish this required observation; update failures remove the previous
   live observation and are reported rather than silently degrading.
-- **Records** shows top-level records. Recipe-owned server and measurement
-  records remain explicit children of the recipe rather than being flattened.
-  Details lead with outcome and human-readable start, finish, duration, and age,
-  followed by metrics and case state. Exact record identifiers, paths, child
+- **Records** shows top-level records as a timeline grouped by calendar day.
+  Recipe-owned server and measurement records remain explicit children of the
+  recipe rather than being flattened: a parent marked `▸` expands with `→` to
+  show them beneath it (`▾`), each named relative to its parent, and `←`
+  collapses them again from the parent or a child. A child is selectable with
+  its own detail and metrics; a referenced child whose record cannot be read
+  stays beneath its parent as unavailable. Details open with status and
+  authority pills, then human-readable start, finish, duration, and age; a
+  workload record shows its case metrics as one table with a column per case
+  and a trend across the cases, followed by case state. Exact record identifiers, paths, child
   references, scratchpad references, and explicitly referenced logs remain
   available farther down the detail surface; case stdout and stderr artifacts
   remain mapped to their owning case under **Case Artifacts**. Bench records
@@ -66,8 +80,10 @@ Every fact is labeled by its authority: **declared** workspace configuration,
 **observed** live check. The TUI does not convert an observation into evidence
 or reconstruct a record from definitions.
 
-List rows keep these authorities as subdued `DECL`, `REC`, `EPH`, and `OBS`
-badges. A successful read is intentionally implicit. Only exceptional read
+A list row is one line: a status glyph (`✓` succeeded, `×` failed, `◆`
+warning, `●` live or running, a spinner for an active operation), the kind, the
+name with its summary, the lifecycle, a subdued `DECL`, `REC`, `EPH`, or `OBS`
+authority badge, and the age. A successful read is intentionally implicit. Only exceptional read
 health is added to a row, for example `refresh stale` or `refresh unavailable`.
 A record row therefore presents its authoritative recorded lifecycle
 (`running`, `stopped`, `failed`, or a workload outcome) without making a
@@ -101,12 +117,13 @@ values use compact, stable human precision rather than raw floating-point
 serialization.
 
 Source Health distinguishes a current read from `stale`, `unavailable`, or
-`incompatible` data. A failed refresh after an earlier success retains the last
+`incompatible` data. A current read condenses to its authority and observation
+time; an exceptional read lists every observation fact. A failed refresh after an earlier success retains the last
 successful value as stale with its observation time and age. A malformed or
 newer operation schema is isolated to that operation. Refresh generations do
 not overlap; missed ticks coalesce, and the prior complete generation remains
-navigable while the next one is read. The header's refresh indicator describes
-that display schedule only; workspace and object observation health remains on
+navigable while the next one is read. The refresh indicator describes that
+display schedule only; workspace and object observation health remains on
 the corresponding row and detail surface.
 
 ## Navigation and search
@@ -115,6 +132,8 @@ the corresponding row and detail surface.
 | --- | --- |
 | `1`–`4` | Select Overview, Operations, Records, or Workspace |
 | `Tab`, arrows, `j`/`k` | Move views and selection; scroll detail, select a Find result, or select a metric while Metrics is open |
+| `→` / `←` in Records | Expand a collapsed parent's child records / collapse them from the parent or a child; otherwise open and leave detail |
+| `f` | Cycle the Overview or Records status filter through all, issues (failed, stale, or unavailable), and running |
 | `PageUp` / `PageDown` | Scroll detail or a referenced log by ten lines, or advance the Metrics case window |
 | `Enter` / `Esc` | Open detail / return or close search |
 | `m` | Open Metrics for the selected workload record, or return to its record detail |
@@ -122,10 +141,16 @@ the corresponding row and detail surface.
 | `Ctrl+K` | Find operations, top-level records, definitions, and scratchpad entries by typed fields |
 | `/` | Filter the current list, or search the selected explicitly referenced log tail |
 | `r` | Request one immediate non-overlapping refresh |
+| `t` | Switch between the dark and light palettes for this session |
 | `q`, `Ctrl+C` | Exit and restore the terminal |
 
-Wide terminals show list and detail together. Intermediate and narrow terminals
-show one pane at a time so neither pane is squeezed into unreadable columns.
+The widest terminals add a sidebar beside list and detail: the workspace name,
+revision and dirty state, the four views with their counts, the status filter
+with a count per status (Overview and Records), and the refresh indicator.
+Below that width a header carries the same facts. Wide terminals show list and
+detail together. Intermediate and narrow terminals show one pane at a time so
+neither pane is squeezed into unreadable columns. Panels have rounded borders,
+and the focused one is drawn in the brand blue.
 List and detail titles retain the selected object and list position while the
 content scrolls. Long labels and workspace paths use a visible ellipsis instead
 of silent clipping. Empty collections, an empty filter result, and an

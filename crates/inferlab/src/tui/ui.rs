@@ -4,16 +4,17 @@ mod metric_page;
 mod text;
 mod theme;
 
+pub(super) use theme::Palette;
+
 use super::{
     App, DisplayEntry, InputMode, MIN_HEIGHT, MIN_WIDTH, RefreshStatus, State, WIDE_WIDTH, search,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use std::path::Path;
 use text::{display_width, ellipsize_end};
-use theme::{ACCENT, ACCENT_SOFT, MUTED, section_color, state_color, tone_color, tone_symbol};
 
 const LOADING_MARK: [&str; 6] = [
     "   ████  █████▄",
@@ -24,15 +25,35 @@ const LOADING_MARK: [&str; 6] = [
     "█████ ▄██████████▀",
 ];
 const LOADING_MARK_WIDTH: u16 = 18;
+const SIDEBAR_WIDTH: u16 = 24;
+/// The sidebar appears only when the two panes still get the wide width.
+const SIDEBAR_LAYOUT_WIDTH: u16 = WIDE_WIDTH + SIDEBAR_WIDTH;
 const LOADING_MARK_HEIGHT: u16 = 6;
 const LOADING_COPY_HEIGHT: u16 = 2;
 const LOADING_GAP: u16 = 1;
 const BRANDED_LOADING_HEIGHT: u16 = LOADING_MARK_HEIGHT + LOADING_GAP + LOADING_COPY_HEIGHT;
 
 pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App, refresh_status: RefreshStatus) {
+    let p = app.palette;
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        chrome::render_tiny(frame, area);
+        chrome::render_tiny(p, frame, area);
+        return;
+    }
+    if area.width >= SIDEBAR_LAYOUT_WIDTH {
+        // A wide console carries identity, views, the status filter, and the
+        // refresh indicator in a sidebar beside the two panes ([[ADR-0055]]).
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .split(area);
+        chrome::render_sidebar(frame, app, refresh_status, columns[0]);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(2)])
+            .split(columns[1]);
+        render_body(frame, app, rows[0]);
+        chrome::render_footer(frame, app, rows[1]);
         return;
     }
     let rows = Layout::default()
@@ -49,12 +70,13 @@ pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &mut App, refresh_stat
 }
 
 fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
+    let p = app.palette;
     if app.metric_selection.is_some() {
         metric_page::render(frame, app, area);
         return;
     }
     if app.snapshot.is_none() {
-        render_initial_sync(frame, area);
+        render_initial_sync(p, frame, area);
         return;
     }
     let entry_count = app.visible_len();
@@ -67,20 +89,19 @@ fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
         content_areas(area, app.detail)
     };
     if let Some(list_area) = list_area {
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(MUTED))
-            .title(Span::styled(
+        let block = theme::panel(p, global_find || !app.detail || detail_area.is_none()).title(
+            Span::styled(
                 list_title(app, selected, entry_count),
-                Style::default().fg(ACCENT_SOFT),
-            ));
+                Style::default().fg(p.accent_soft),
+            ),
+        );
         if entry_count == 0 {
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::from(""),
                     Line::from(Span::styled(
                         format!("  {}", empty_message(app)),
-                        Style::default().fg(MUTED),
+                        Style::default().fg(p.muted),
                     )),
                 ])
                 .block(block),
@@ -95,13 +116,17 @@ fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
                         .checked_sub(1)
                         .and_then(|previous| app.visible_group(previous));
                     Some(ListItem::new(entry_lines(
+                        p,
                         entry,
-                        index == selected,
-                        group,
-                        group != previous_group,
-                        index > 0,
-                        list_area.width,
-                        global_find,
+                        RowContext {
+                            heading: group.filter(|_| group != previous_group),
+                            has_preceding_entry: index > 0,
+                            selected: index == selected,
+                            width: list_area.width.saturating_sub(2),
+                            presentation_unix_ms,
+                            animation_frame: app.animation_frame,
+                            tree: app.visible_tree_mark(index),
+                        },
                     )))
                 })
                 .collect::<Vec<_>>();
@@ -121,10 +146,18 @@ fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
             || {
                 vec![Line::from(Span::styled(
                     empty_message(app),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(p.muted),
                 ))]
             },
-            |entry| detail::lines(entry, presentation_unix_ms),
+            |entry| {
+                detail::lines(
+                    p,
+                    entry,
+                    presentation_unix_ms,
+                    detail_area.width.saturating_sub(2),
+                    app.record_metrics_of(&entry.key),
+                )
+            },
         );
         let mut log_search = false;
         if let (Some(entry), Some(log)) = (entry, app.loaded_log.as_ref())
@@ -137,6 +170,7 @@ fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
                 log_search = true;
             }
             detail::append_log(
+                p,
                 &mut lines,
                 &log.path,
                 log.index + 1,
@@ -177,10 +211,8 @@ fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
         frame.render_widget(
             Paragraph::new(lines)
                 .block(
-                    Block::default()
-                        .borders(Borders::LEFT | Borders::TOP)
-                        .border_style(Style::default().fg(MUTED))
-                        .title(Span::styled(title, Style::default().fg(ACCENT_SOFT))),
+                    theme::panel(p, app.detail || list_area.is_none())
+                        .title(Span::styled(title, Style::default().fg(p.accent_soft))),
                 )
                 .scroll((app.detail_scroll, 0))
                 .wrap(Wrap { trim: false }),
@@ -189,7 +221,7 @@ fn render_body(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-fn render_initial_sync(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn render_initial_sync(p: Palette, frame: &mut ratatui::Frame<'_>, area: Rect) {
     if area.height < BRANDED_LOADING_HEIGHT {
         let copy_area = Rect::new(
             area.x.saturating_add(2),
@@ -197,7 +229,7 @@ fn render_initial_sync(frame: &mut ratatui::Frame<'_>, area: Rect) {
             area.width.saturating_sub(2),
             LOADING_COPY_HEIGHT,
         );
-        frame.render_widget(Paragraph::new(initial_sync_copy()), copy_area);
+        frame.render_widget(Paragraph::new(initial_sync_copy(p)), copy_area);
         return;
     }
 
@@ -216,7 +248,7 @@ fn render_initial_sync(frame: &mut ratatui::Frame<'_>, area: Rect) {
         .map(|line| {
             Line::from(Span::styled(
                 *line,
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ))
         })
         .collect::<Vec<_>>();
@@ -229,20 +261,20 @@ fn render_initial_sync(frame: &mut ratatui::Frame<'_>, area: Rect) {
         LOADING_COPY_HEIGHT,
     );
     frame.render_widget(
-        Paragraph::new(initial_sync_copy()).alignment(Alignment::Center),
+        Paragraph::new(initial_sync_copy(p)).alignment(Alignment::Center),
         copy_area,
     );
 }
 
-fn initial_sync_copy() -> Vec<Line<'static>> {
+fn initial_sync_copy(p: Palette) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             "SYNCING WORKSPACE",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             "Waiting for the first complete workspace read…",
-            Style::default().fg(MUTED),
+            Style::default().fg(p.muted),
         )),
     ]
 }
@@ -252,9 +284,9 @@ fn content_areas(area: Rect, detail_open: bool) -> (Option<Rect>, Option<Rect>) 
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(43),
+                Constraint::Percentage(50),
                 Constraint::Length(1),
-                Constraint::Percentage(57),
+                Constraint::Percentage(50),
             ])
             .split(area);
         (Some(columns[0]), Some(columns[2]))
@@ -265,73 +297,145 @@ fn content_areas(area: Rect, detail_open: bool) -> (Option<Rect>, Option<Rect>) 
     }
 }
 
-fn entry_lines(
-    entry: &DisplayEntry,
-    selected: bool,
-    group: Option<&str>,
-    group_changed: bool,
+/// Columns of a one-line list row ([[ADR-0055]]): status glyph, kind, name,
+/// outcome or lifecycle, authority badge, and age.
+const KIND_WIDTH: usize = 7;
+const OUTCOME_WIDTH: usize = 10;
+const BADGE_WIDTH: usize = 4;
+const AGE_WIDTH: usize = 3;
+
+struct RowContext<'a> {
+    heading: Option<&'a str>,
     has_preceding_entry: bool,
+    selected: bool,
     width: u16,
-    global_find: bool,
-) -> Vec<Line<'static>> {
+    presentation_unix_ms: u64,
+    animation_frame: usize,
+    tree: Option<crate::tui::app::TreeMark>,
+}
+
+fn entry_lines(p: Palette, entry: &DisplayEntry, row: RowContext<'_>) -> Vec<Line<'static>> {
+    let width = usize::from(row.width);
     let mut lines = Vec::new();
-    if group_changed && let Some(group) = group {
-        if has_preceding_entry {
+    if let Some(group) = row.heading {
+        if row.has_preceding_entry {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(Span::styled(
-            ellipsize_end(&format!("  {group}"), usize::from(width)),
+            ellipsize_end(&format!("  {group}"), width),
             Style::default()
-                .fg(section_color(group))
+                .fg(p.section(group))
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    let title_style = if selected {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    let base = if row.selected {
+        p.selected()
     } else {
-        Style::default().add_modifier(Modifier::BOLD)
+        Style::default()
     };
+    let (kind, name) = entry.kind_and_name();
+    // The outcome column keeps the recorded lifecycle; exceptional read
+    // health qualifies the row beside the name instead of replacing it.
+    let outcome = entry.lifecycle.clone().unwrap_or_default();
+    let outcome_color = p.tone(entry.tone);
+    let age = entry.moment_unix_ms.map_or_else(String::new, |moment| {
+        crate::tui::views::compact_age(row.presentation_unix_ms.saturating_sub(moment))
+    });
+    // A child row hangs from its parent's tree; a parent row shows whether
+    // its children are expanded.
+    let (branch, fold) = match row.tree {
+        Some(crate::tui::app::TreeMark::Child { last }) => (if last { "╰ " } else { "├ " }, ""),
+        Some(crate::tui::app::TreeMark::Parent { expanded }) => {
+            ("", if expanded { " ▾" } else { " ▸" })
+        }
+        None => ("", ""),
+    };
+    let right_width = 1 + OUTCOME_WIDTH + 1 + BADGE_WIDTH + 1 + AGE_WIDTH;
+    let name_width = width.saturating_sub(
+        3 + display_width(branch) + KIND_WIDTH + 1 + right_width + display_width(fold),
+    );
+    let (summary, summary_color) = if entry.state == State::Live {
+        (
+            if entry.summary.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", entry.summary)
+            },
+            p.muted,
+        )
+    } else {
+        (
+            format!("  refresh {}", entry.state.label()),
+            p.state(entry.state),
+        )
+    };
+    let shown_name = ellipsize_end(name, name_width);
+    let shown_summary = ellipsize_end(
+        &summary,
+        name_width.saturating_sub(display_width(&shown_name)),
+    );
+    let padding =
+        name_width.saturating_sub(display_width(&shown_name) + display_width(&shown_summary));
     lines.push(Line::from(vec![
+        Span::styled(if row.selected { "▎" } else { " " }, base.fg(theme::BRAND)),
+        Span::styled(branch, base.fg(p.faint)),
         Span::styled(
-            if selected { "▸ " } else { "  " },
-            Style::default().fg(ACCENT),
+            format!("{} ", row_glyph(entry, row.animation_frame)),
+            base.fg(p.tone(entry.tone)).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            tone_symbol(entry.tone),
-            Style::default().fg(tone_color(entry.tone)),
+            format!("{} ", text::pad_right(kind, KIND_WIDTH)),
+            base.fg(p.muted),
         ),
-        Span::raw(" "),
         Span::styled(
-            ellipsize_end(&entry.title, usize::from(width).saturating_sub(5)),
-            title_style,
+            shown_name,
+            base.fg(if row.selected { p.accent } else { p.text })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(fold, base.fg(p.accent)),
+        Span::styled(shown_summary, base.fg(summary_color)),
+        Span::styled(" ".repeat(padding), base),
+        Span::styled(
+            format!(" {}", text::pad_left(&outcome, OUTCOME_WIDTH)),
+            base.fg(outcome_color),
+        ),
+        Span::styled(
+            format!(" {}", text::pad_right(entry.authority.badge(), BADGE_WIDTH)),
+            base.fg(p.faint),
+        ),
+        Span::styled(
+            format!(" {}", text::pad_left(&age, AGE_WIDTH)),
+            base.fg(p.muted),
         ),
     ]));
-    let mut metadata = if global_find {
-        vec![
-            entry.kind.label().to_owned(),
-            entry.authority.label().to_owned(),
-        ]
-    } else {
-        vec![entry.authority.badge().to_owned()]
-    };
-    if let Some(lifecycle) = entry.lifecycle.as_deref() {
-        metadata.push(lifecycle.to_owned());
+    if let Some((index, total)) = entry.progress.filter(|(_, total)| *total > 0) {
+        let bar_width = width.saturating_sub(16).min(24);
+        let (filled, rest) = theme::smooth_bar(index as f64 / total as f64, bar_width);
+        lines.push(Line::from(vec![
+            Span::styled("     ", base),
+            Span::styled(filled, base.fg(theme::BRAND)),
+            Span::styled(rest, base.bg(p.chip)),
+            Span::styled(format!(" {index}/{total}"), base.fg(p.muted)),
+        ]));
     }
-    if entry.state != State::Live {
-        metadata.push(format!("refresh {}", entry.state.label()));
+    // An exceptional read keeps its reason in view even where no detail pane
+    // shows beside the list.
+    if entry.state != State::Live && !entry.summary.is_empty() {
+        lines.push(Line::from(Span::styled(
+            ellipsize_end(&format!("    {}", entry.summary), width),
+            base.fg(p.state(entry.state)),
+        )));
     }
-    if !entry.summary.is_empty() {
-        metadata.push(entry.summary.clone());
-    }
-    lines.push(Line::from(Span::styled(
-        ellipsize_end(&format!("    {}", metadata.join(" · ")), usize::from(width)),
-        Style::default().fg(if entry.state == State::Live {
-            MUTED
-        } else {
-            state_color(entry.state)
-        }),
-    )));
     lines
+}
+
+/// A live operation animates its glyph; every other row shows its status.
+fn row_glyph(entry: &DisplayEntry, frame: usize) -> &'static str {
+    if entry.kind == crate::tui::EntryKind::Operation && entry.state == State::Live {
+        theme::SPINNER[frame % theme::SPINNER.len()]
+    } else {
+        entry.tone.glyph()
+    }
 }
 
 fn list_title(app: &App, selected: usize, count: usize) -> String {
@@ -469,7 +573,7 @@ mod tests {
                 artifact_refs: Vec::new(),
                 process_observation: None,
             }],
-            child_servers: Vec::new(),
+            child_records: Vec::new(),
             definitions: Vec::new(),
             journal: Vec::new(),
             operations_error: None,
@@ -542,9 +646,67 @@ mod tests {
         assert!(screen.contains("Operations"));
         assert!(screen.contains("Workflows"));
         assert!(screen.contains("ATTENTION"));
-        assert!(screen.contains("ACTIVE"));
+        assert!(screen.contains("NOW"));
         assert!(screen.contains("recent"));
         assert!(screen.contains("WORKSPACE"));
+    }
+
+    /// Text drawn on a fill always carries a color chosen for that fill: the
+    /// terminal's own foreground may be dark on a dark fill, as when the
+    /// dark palette meets a light terminal that did not report its colors.
+    #[test]
+    fn text_on_a_fill_never_takes_the_terminal_foreground() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::tui::appearance::Appearance;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::style::Color;
+        for light in [false, true] {
+            for view in 0..4 {
+                for keys in [
+                    &[][..],
+                    &[KeyCode::Enter][..],
+                    &[KeyCode::Enter, KeyCode::Char('m')][..],
+                ] {
+                    let mut app = App::default();
+                    app.palette = super::Palette::for_appearance(Appearance {
+                        light,
+                        background: None,
+                    });
+                    app.accept(snapshot());
+                    app.select_view(view);
+                    for key in keys {
+                        let _ = app.handle_key(KeyEvent::new(*key, KeyModifiers::NONE));
+                    }
+                    let mut terminal = Terminal::new(TestBackend::new(160, 40))?;
+                    terminal.draw(|frame| {
+                        render(
+                            frame,
+                            &mut app,
+                            RefreshStatus::Healthy {
+                                interval: Duration::from_secs(1),
+                            },
+                        );
+                    })?;
+                    let buffer = terminal.backend().buffer();
+                    for y in 0..40 {
+                        for x in 0..160 {
+                            let Some(cell) = buffer.cell((x, y)) else {
+                                continue;
+                            };
+                            assert!(
+                                cell.bg == Color::Reset
+                                    || cell.symbol().trim().is_empty()
+                                    || cell.fg != Color::Reset,
+                                "light={light} view={view} keys={keys:?}: {:?} at ({x}, {y}) is on {:?} in the terminal foreground",
+                                cell.symbol(),
+                                cell.bg
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -556,7 +718,7 @@ mod tests {
 
         assert!(screen.contains("1 Overview"));
         assert!(screen.contains("bench random-8k1k"));
-        assert!(screen.contains("Ctrl+K Find"));
+        assert!(screen.contains(" Ctrl+K  Find"));
         assert!(!screen.contains("DETAILS"));
     }
 
@@ -573,8 +735,8 @@ mod tests {
         assert!(screen.contains("Recent"));
         assert!(screen.contains("AUTO"));
         assert!(screen.contains("4 Workspace"));
-        assert!(screen.contains("r Sync"));
-        assert!(screen.contains("q Quit"));
+        assert!(screen.contains(" r  Sync"));
+        assert!(screen.contains(" q  Quit"));
     }
 
     #[test]
@@ -598,10 +760,10 @@ mod tests {
         let screen = rendered(50, 20, &mut app);
         let footer = screen.lines().last().unwrap_or_default();
 
-        assert!(footer.contains("Esc Back"));
-        assert!(footer.contains("↑↓ Scroll"));
-        assert!(footer.contains("r Sync"));
-        assert!(footer.contains("q Quit"));
+        assert!(footer.contains(" Esc  Back"));
+        assert!(footer.contains(" ↑↓  Scroll"));
+        assert!(footer.contains(" r  Sync"));
+        assert!(footer.contains(" q  Quit"));
         Ok(())
     }
 
@@ -761,7 +923,11 @@ mod tests {
         let screen = rendered(80, 24, &mut app);
 
         assert!(screen.contains("BENCH"));
-        assert!(screen.contains("DECL · standalone"));
+        let declaration = row(&screen, "random-8k1k");
+        assert!(
+            declaration.contains("standalone") && declaration.contains("DECL"),
+            "{screen}"
+        );
         assert!(!screen.contains("refresh live"));
     }
 
@@ -785,8 +951,10 @@ mod tests {
 
         let screen = rendered(120, 40, &mut app);
 
-        assert!(screen.contains("Data age      1.0 min ago"));
-        assert!(screen.contains("Refreshed     1970-01-01 00:00:02 UTC · 1.0 min ago"));
+        assert!(
+            screen.contains("refreshed 1970-01-01 00:00:02 UTC · 1.0 min ago"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -810,8 +978,10 @@ mod tests {
 
         let screen = rendered(120, 40, &mut app);
 
-        assert!(screen.contains("Data age      2.0 min ago"));
-        assert!(screen.contains("Refreshed     1970-01-01 00:00:02 UTC · 2.0 min ago"));
+        assert!(
+            screen.contains("refreshed 1970-01-01 00:00:02 UTC · 2.0 min ago"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -822,9 +992,15 @@ mod tests {
 
         let screen = rendered(80, 24, &mut app);
 
-        assert!(screen.contains("REC · failed"));
-        assert!(!screen.contains("refresh live"));
-        assert!(!screen.contains("REC · live"));
+        let record = row(&screen, "record-failed");
+        assert!(
+            record.contains("failed") && record.contains("REC"),
+            "{screen}"
+        );
+        assert!(
+            !record.contains("refresh"),
+            "a current read adds no qualifier"
+        );
     }
 
     #[test]
@@ -839,7 +1015,7 @@ mod tests {
 
         let screen = rendered(120, 40, &mut app);
 
-        assert!(screen.contains("Status        unknown"));
+        assert!(screen.contains("Status  unknown"));
         assert!(screen.contains("refresh stale"));
         assert!(!screen.contains("Status        stale"));
     }
@@ -860,9 +1036,15 @@ mod tests {
         app.accept(current);
         app.select_view(2);
 
-        let screen = rendered(120, 80, &mut app);
+        let screen = rendered(160, 80, &mut app);
 
-        assert!(screen.contains("REC · running · OBS process alive"));
+        let server = row(&screen, "record-failed");
+        assert!(
+            server.contains("running")
+                && server.contains("REC")
+                && server.contains("OBS process alive"),
+            "{screen}"
+        );
         assert!(screen.contains("PROCESS LIVENESS"));
         assert!(screen.contains("Authority     observed"));
         assert!(screen.contains("Read health   current"));
@@ -1016,7 +1198,7 @@ mod tests {
             observed_unix_ms: 2_000,
             last_success_unix_ms: Some(2_000),
         });
-        current.child_servers.push(child);
+        current.child_records.push(child);
 
         let records = current.entries(View::Records);
 
@@ -1046,7 +1228,7 @@ mod tests {
             observed_unix_ms: 2_000,
             last_success_unix_ms: Some(2_000),
         });
-        current.child_servers.push(child);
+        current.child_records.push(child);
 
         let overview = current.entries(View::Overview);
         let workflow = overview
@@ -1081,7 +1263,7 @@ mod tests {
             observed_unix_ms: 2_000,
             last_success_unix_ms: Some(2_000),
         });
-        current.child_servers.push(child);
+        current.child_records.push(child);
 
         let overview = current.entries(View::Overview);
 
@@ -1095,26 +1277,64 @@ mod tests {
     }
 
     #[test]
-    fn record_detail_summarizes_metrics_without_flattening_case_values() {
+    fn record_detail_tabulates_case_metrics_without_flattening_case_values() {
         let mut app = App::default();
         app.accept(snapshot());
         app.select_view(2);
 
-        let screen = rendered(120, 38, &mut app);
+        let screen = rendered(160, 50, &mut app);
 
         assert!(screen.contains("OUTCOME"));
         assert!(screen.contains("TIMING"));
-        assert!(screen.contains("Finished"));
-        assert!(screen.contains("1.0 s"));
         assert!(screen.contains("METRICS"));
-        assert!(screen.contains("Available"));
-        assert!(screen.contains("press m"));
+        let header = row_in_detail(&screen, "c8");
+        assert!(header.contains("c1"), "one column per case:\n{screen}");
+        let throughput = row_in_detail(&screen, "Request throughput");
+        assert!(
+            throughput.contains("7.41") && throughput.contains("1.25"),
+            "a metric row holds every case's value:\n{screen}"
+        );
+        assert!(
+            throughput
+                .chars()
+                .any(|character| "▁▂▃▄▅▆▇█".contains(character)),
+            "a trend sparkline follows the values:\n{screen}"
+        );
         assert!(!screen.contains("long-context.p95_ttft_ms"));
-        app.detail_scroll = 16;
-        let scrolled = rendered(120, 38, &mut app);
-        assert!(scrolled.contains("DETAIL · bench / record-failed · 1/1"));
-        assert!(scrolled.contains("REFERENCES"));
-        assert!(scrolled.contains("SOURCE HEALTH"));
+        assert!(
+            screen.contains(" m "),
+            "the comparison surface stays reachable"
+        );
+    }
+
+    #[test]
+    fn detail_opens_with_status_and_authority_pills_and_condensed_health() {
+        let mut app = App::default();
+        app.accept(snapshot());
+        app.select_view(2);
+
+        let screen = rendered(160, 60, &mut app);
+        assert!(
+            row_in_detail(&screen, "FAILED").contains("REC recorded"),
+            "status and authority open the detail as pills:\n{screen}"
+        );
+        assert!(
+            row_in_detail(&screen, "current").contains("recorded"),
+            "a current read condenses to one line:\n{screen}"
+        );
+        assert!(!screen.contains("Last success"), "{screen}");
+
+        let mut stale = snapshot();
+        stale.records[0].state = State::Stale;
+        stale.records[0].reason = Some("record refresh failed".to_owned());
+        let mut app = App::default();
+        app.accept(stale);
+        app.select_view(2);
+        let screen = rendered(160, 60, &mut app);
+        assert!(
+            screen.contains("Last success"),
+            "an exceptional read expands:\n{screen}"
+        );
     }
 
     #[test]
@@ -1176,8 +1396,8 @@ mod tests {
         assert!(screen.contains("THROUGHPUT"));
         assert!(screen.contains("c1"));
         assert!(screen.contains("c8"));
-        assert!(screen.contains("↑↓ Metric"));
-        assert!(screen.contains("PgUp/PgDn Cases"));
+        assert!(screen.contains(" ↑↓  Metric"));
+        assert!(screen.contains(" PgUp/PgDn  Cases"));
     }
 
     #[test]
@@ -1193,8 +1413,8 @@ mod tests {
         let screen = rendered(64, 24, &mut app);
         let footer = screen.lines().last().unwrap_or_default();
 
-        assert!(footer.contains("r Refresh"));
-        assert!(footer.contains("q Quit"));
+        assert!(footer.contains(" r  Refresh"));
+        assert!(footer.contains(" q  Quit"));
     }
 
     #[test]
@@ -1290,8 +1510,11 @@ mod tests {
         assert!(screen.contains("GLOBAL FIND"));
         assert!(screen.contains("OPERATIONS"));
         assert!(screen.contains("RECORDS"));
-        assert!(screen.contains("operation · ephemeral"));
-        assert!(screen.contains("record · recorded"));
+        assert!(
+            row(&screen, "bench random-8k1k").contains("EPH"),
+            "{screen}"
+        );
+        assert!(row(&screen, "record-failed").contains("REC"), "{screen}");
         assert!(!screen.contains("DETAIL ·"));
     }
 
@@ -1361,6 +1584,347 @@ mod tests {
         let bench = screen.find("BENCH");
         let model = screen.find("MODEL");
         assert!(matches!((bench, model), (Some(bench), Some(model)) if bench < model));
+    }
+
+    #[test]
+    fn detail_labels_keep_their_gap_and_wrapped_values_keep_their_column() {
+        let mut current = snapshot();
+        current.definitions = vec![DefinitionView {
+            kind: "bench".to_owned(),
+            id: "random-8k1k".to_owned(),
+            relationship: "requests · random".to_owned(),
+            fact_sections: vec![crate::tui::FactSection {
+                title: "POPULATION",
+                rows: vec![
+                    ("Warmup prompts / concurrency".to_owned(), "1".to_owned()),
+                    (
+                        "Note".to_owned(),
+                        "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango".to_owned(),
+                    ),
+                ],
+            }],
+            state: State::Live,
+            observed_unix_ms: 2_000,
+            last_success_unix_ms: 2_000,
+            reason: None,
+        }];
+        let mut app = App::default();
+        app.accept(current);
+        app.select_view(3);
+
+        let screen = rendered(120, 40, &mut app);
+        let lines = screen.lines().collect::<Vec<_>>();
+        assert!(
+            screen.contains("Warmup prompts / concurrency  1"),
+            "a long label keeps a gap before its value:\n{screen}"
+        );
+        let note = lines
+            .iter()
+            .position(|line| line.contains("Note"))
+            .unwrap_or(usize::MAX);
+        let value_column = lines
+            .get(note)
+            .and_then(|line| line.find("alpha"))
+            .unwrap_or(usize::MAX);
+        let continuation = lines.get(note + 1).copied().unwrap_or_default();
+        assert_eq!(
+            continuation
+                .char_indices()
+                .find(|(_, character)| character.is_alphabetic())
+                .map(|(index, _)| index),
+            Some(value_column),
+            "a wrapped value continues under its value column:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn glyphs_carry_status_and_the_focus_ring_follows_focus() -> Result<(), String> {
+        let mut current = snapshot();
+        let mut succeeded = current.records[0].clone();
+        succeeded.id = Some("record-succeeded".to_owned());
+        succeeded.status = Some("succeeded".to_owned());
+        succeeded.error = None;
+        current.records.push(succeeded);
+        let mut app = App::default();
+        app.accept(current);
+        app.select_view(2);
+
+        let border = |app: &mut App, x: u16| {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).map_err(|error| error.to_string())?;
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        app,
+                        RefreshStatus::Healthy {
+                            interval: Duration::from_secs(1),
+                        },
+                    );
+                })
+                .map_err(|error| error.to_string())?;
+            let buffer = terminal.backend().buffer().clone();
+            let cell = buffer.cell((x, 4)).ok_or("no cell")?;
+            Ok::<_, String>((cell.symbol().to_owned(), cell.fg))
+        };
+        let screen = rendered(120, 30, &mut app);
+        assert!(
+            row(&screen, "record-failed").contains("× bench"),
+            "{screen}"
+        );
+        assert!(
+            row(&screen, "record-succeeded").contains("✓ bench"),
+            "{screen}"
+        );
+
+        let (corner, list_focused) = border(&mut app, 0)?;
+        assert_eq!(corner, "╭");
+        assert_eq!(list_focused, super::theme::BRAND);
+        let _ = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let (_, list_unfocused) = border(&mut app, 0)?;
+        assert_eq!(list_unfocused, app.palette.rule, "focus moved to detail");
+        Ok(())
+    }
+
+    /// The list pane's part of the rendered line that holds a needle, for
+    /// one-line row assertions; the detail pane beside it is cut off.
+    fn row<'a>(screen: &'a str, needle: &str) -> &'a str {
+        screen
+            .lines()
+            .map(|line| {
+                ["│ │", "│ ╭", "╮ ╭", "╯ ╰"]
+                    .iter()
+                    .filter_map(|boundary| line.find(boundary))
+                    .min()
+                    .map_or(line, |end| &line[..end])
+            })
+            .find(|list| list.contains(needle) && !list.contains("DETAIL ·"))
+            .unwrap_or_default()
+    }
+
+    /// The detail pane's part of the rendered line that holds a needle.
+    fn row_in_detail<'a>(screen: &'a str, needle: &str) -> &'a str {
+        screen
+            .lines()
+            .filter_map(|line| line.rfind("│ │").map(|start| &line[start + "│ │".len()..]))
+            .find(|detail| detail.contains(needle))
+            .unwrap_or_default()
+    }
+
+    fn key(app: &mut App, code: crossterm::event::KeyCode) {
+        let _ = app.handle_key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+
+    fn two_records() -> Snapshot {
+        let mut current = snapshot();
+        let mut succeeded = current.records[0].clone();
+        succeeded.id = Some("record-succeeded".to_owned());
+        succeeded.status = Some("succeeded".to_owned());
+        succeeded.error = None;
+        current.records.push(succeeded);
+        current
+    }
+
+    #[test]
+    fn a_wide_console_shows_the_sidebar_and_one_line_rows() {
+        let mut app = App::default();
+        app.accept(two_records());
+        app.select_view(2);
+
+        let screen = rendered(160, 30, &mut app);
+        let lines = screen.lines().collect::<Vec<_>>();
+        assert!(screen.contains("◆ InferLab"), "{screen}");
+        assert!(screen.contains("inferlab-vllm"), "{screen}");
+        assert!(
+            screen.contains("AUTO"),
+            "the refresh indicator lives in the sidebar"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("3 Records") && line.contains('2')),
+            "views carry their counts:\n{screen}"
+        );
+        let row = lines
+            .iter()
+            .find(|line| line.contains("record-failed"))
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            row.contains("bench") && row.contains("failed") && row.contains("REC"),
+            "one row carries kind, name, outcome, and authority: {row}"
+        );
+        assert!(
+            !screen.contains("REC · failed"),
+            "the two-line metadata row is gone:\n{screen}"
+        );
+
+        let narrow = rendered(120, 30, &mut app);
+        assert!(
+            !narrow.contains("◆ InferLab"),
+            "below the sidebar width the header returns"
+        );
+        assert!(narrow.contains("1 Overview"));
+    }
+
+    #[test]
+    fn f_cycles_the_status_filter_and_shows_counts() {
+        let mut app = App::default();
+        app.accept(two_records());
+        app.select_view(2);
+
+        let all = rendered(160, 30, &mut app);
+        assert!(all.contains("record-failed") && all.contains("record-succeeded"));
+        assert!(
+            all.lines()
+                .any(|line| line.contains("issues") && line.contains('1')),
+            "{all}"
+        );
+
+        key(&mut app, crossterm::event::KeyCode::Char('f'));
+        let issues = rendered(160, 30, &mut app);
+        assert!(issues.contains("record-failed"), "{issues}");
+        assert!(!issues.contains("record-succeeded"), "{issues}");
+
+        key(&mut app, crossterm::event::KeyCode::Char('f'));
+        let running = rendered(160, 30, &mut app);
+        assert!(!running.contains("record-failed"), "{running}");
+
+        key(&mut app, crossterm::event::KeyCode::Char('f'));
+        let cycled = rendered(160, 30, &mut app);
+        assert!(
+            cycled.contains("record-succeeded"),
+            "the filter cycles back to all"
+        );
+
+        app.select_view(3);
+        key(&mut app, crossterm::event::KeyCode::Char('f'));
+        let workspace = rendered(160, 30, &mut app);
+        assert!(
+            !workspace.contains("STATUS"),
+            "Workspace has no status filter:\n{workspace}"
+        );
+    }
+
+    #[test]
+    fn overview_shows_attention_then_now_then_recent_by_day() {
+        let mut current = two_records();
+        // 2026-01-02 and 2026-01-01, midday UTC.
+        current.records[1].finished_unix_ms = Some(1_767_355_200_000);
+        let mut older = current.records[1].clone();
+        older.id = Some("record-older".to_owned());
+        older.finished_unix_ms = Some(1_767_268_800_000);
+        current.records.push(older);
+        let mut app = App::default();
+        app.accept(current);
+
+        let screen = rendered(160, 40, &mut app);
+        let at = |needle: &str| screen.find(needle).unwrap_or(usize::MAX);
+        assert!(at("ATTENTION") < at("NOW"), "{screen}");
+        assert!(at("NOW") < at("RECENT · Jan 2"), "{screen}");
+        assert!(at("RECENT · Jan 2") < at("RECENT · Jan 1"), "{screen}");
+        assert!(at("record-succeeded") < at("RECENT · Jan 1"), "{screen}");
+        assert!(at("RECENT · Jan 1") < at("record-older"), "{screen}");
+    }
+
+    #[test]
+    fn an_active_operation_shows_its_progress_and_animates() {
+        let mut app = App::default();
+        app.accept(snapshot());
+
+        let first = rendered(160, 40, &mut app);
+        let progress = first
+            .lines()
+            .find(|line| line.contains("64/100"))
+            .unwrap_or_default();
+        assert!(
+            progress.contains('█'),
+            "a progress bar accompanies the position:\n{first}"
+        );
+        assert!(app.animates(), "an active operation animates its glyph");
+        let glyph = |screen: &str| {
+            row(screen, "bench random-8k1k")
+                .chars()
+                .find(|character| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(*character))
+        };
+        let before = glyph(&first);
+        app.advance_animation();
+        let after = glyph(&rendered(160, 40, &mut app));
+        assert!(
+            before.is_some() && after.is_some() && before != after,
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn records_fold_children_beneath_their_parent_by_day() {
+        let mut current = snapshot();
+        current.operations.clear();
+        let parent = &mut current.records[0];
+        parent.id = Some("parent-run".to_owned());
+        parent.kind = "recipe".to_owned();
+        parent.child_refs = vec![
+            "child-serve".to_owned(),
+            "parent-run-bench-000".to_owned(),
+            "child-missing".to_owned(),
+        ];
+        // 2026-01-02, midday UTC.
+        parent.finished_unix_ms = Some(1_767_355_200_000);
+        let mut server = current.records[0].clone();
+        server.id = Some("child-serve".to_owned());
+        server.kind = "server".to_owned();
+        server.status = Some("stopped".to_owned());
+        server.child_refs = Vec::new();
+        let mut bench = server.clone();
+        bench.id = Some("parent-run-bench-000".to_owned());
+        bench.kind = "bench".to_owned();
+        bench.status = Some("succeeded".to_owned());
+        current.child_records = vec![server, bench];
+        let mut app = App::default();
+        app.accept(current);
+        app.select_view(2);
+
+        let collapsed = rendered(160, 30, &mut app);
+        assert!(
+            collapsed.contains("Jan 2"),
+            "records group by day:\n{collapsed}"
+        );
+        assert!(row(&collapsed, "parent-run").contains('▸'), "{collapsed}");
+        assert!(!collapsed.contains("bench-000"), "children start collapsed");
+
+        key(&mut app, crossterm::event::KeyCode::Right);
+        let expanded = rendered(160, 30, &mut app);
+        assert!(row(&expanded, "parent-run").contains('▾'), "{expanded}");
+        assert!(row(&expanded, "child-serve").contains('├'), "{expanded}");
+        assert!(
+            row(&expanded, "child-missing").contains("refresh unavail"),
+            "{expanded}"
+        );
+        assert!(
+            expanded.contains("child record cannot be read"),
+            "{expanded}"
+        );
+        assert!(row(&expanded, "child-missing").contains('╰'), "{expanded}");
+
+        key(&mut app, crossterm::event::KeyCode::Down);
+        key(&mut app, crossterm::event::KeyCode::Down);
+        let child = rendered(160, 30, &mut app);
+        assert!(child.contains("DETAIL · bench / bench-000"), "{child}");
+        assert!(
+            !row(&child, "bench-000").contains("parent-run-bench"),
+            "a child is named relative to its parent:\n{child}"
+        );
+
+        key(&mut app, crossterm::event::KeyCode::Left);
+        let folded = rendered(160, 30, &mut app);
+        assert!(!folded.contains("bench-000"), "{folded}");
+        assert!(folded.contains("DETAIL · recipe / parent-run"), "{folded}");
     }
 
     #[test]

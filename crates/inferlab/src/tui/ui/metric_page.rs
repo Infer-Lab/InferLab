@@ -1,17 +1,19 @@
 use super::text::{display_width, ellipsize_end, pad_left, pad_right};
-use super::theme::{ACCENT, ACCENT_SOFT, CRITICAL, MUTED, SECONDARY, WARNING};
+use super::theme::{BRAND, Palette};
+use crate::console::metrics::human_number;
 use crate::tui::metrics::{MetricDescriptor, MetricPoint, MetricUnit};
 use crate::tui::{App, WIDE_WIDTH};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let p = app.palette;
     let Some(page) = app.metric_page() else {
         frame.render_widget(
             Paragraph::new("Selected record metrics are no longer available")
-                .style(Style::default().fg(WARNING)),
+                .style(Style::default().fg(p.warning)),
             area,
         );
         return;
@@ -28,14 +30,15 @@ pub(super) fn render(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                 Constraint::Min(20),
             ])
             .split(area);
-        render_selector(frame, columns[0], page.catalog, page.selected);
-        render_chart(frame, columns[2], &page, metric);
+        render_selector(p, frame, columns[0], page.catalog, page.selected);
+        render_chart(p, frame, columns[2], &page, metric);
     } else {
-        render_chart(frame, area, &page, metric);
+        render_chart(p, frame, area, &page, metric);
     }
 }
 
 fn render_selector(
+    p: Palette,
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     catalog: &[MetricDescriptor],
@@ -52,7 +55,7 @@ fn render_selector(
             lines.push(Line::from(Span::styled(
                 format!("  {}", metric.family.label()),
                 Style::default()
-                    .fg(ACCENT_SOFT)
+                    .fg(p.accent_soft)
                     .add_modifier(Modifier::BOLD),
             )));
             family = Some(metric.family);
@@ -63,14 +66,14 @@ fn render_selector(
         lines.push(Line::from(vec![
             Span::styled(
                 if index == selected { "▸ " } else { "  " },
-                Style::default().fg(ACCENT),
+                Style::default().fg(p.accent),
             ),
             Span::styled(
                 ellipsize_end(&metric.label, usize::from(area.width).saturating_sub(2)),
                 if index == selected {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(SECONDARY)
+                    Style::default().fg(p.secondary)
                 },
             ),
         ]));
@@ -79,21 +82,17 @@ fn render_selector(
     let scroll = selected_line.saturating_sub(visible_height.saturating_sub(2));
     frame.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(MUTED))
-                    .title(Span::styled(
-                        " METRIC SELECTOR ",
-                        Style::default().fg(ACCENT_SOFT),
-                    )),
-            )
+            .block(super::theme::panel(p, true).title(Span::styled(
+                " METRIC SELECTOR ",
+                Style::default().fg(p.accent_soft),
+            )))
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         area,
     );
 }
 
 fn render_chart(
+    p: Palette,
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     page: &crate::tui::app::MetricPage<'_>,
@@ -102,18 +101,15 @@ fn render_chart(
     let record_context = &page.record.record_context;
     let context_width = usize::from(area.width)
         .saturating_sub(display_width(" METRICS · ") + display_width(" · REC "));
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(MUTED))
-        .title(Line::from(vec![
-            Span::styled(" METRICS ", Style::default().fg(ACCENT_SOFT)),
-            Span::styled("· ", Style::default().fg(MUTED)),
-            Span::styled(
-                ellipsize_end(record_context, context_width),
-                Style::default().fg(SECONDARY),
-            ),
-            Span::styled(" · REC ", Style::default().fg(ACCENT_SOFT)),
-        ]));
+    let block = super::theme::panel(p, false).title(Line::from(vec![
+        Span::styled(" METRICS ", Style::default().fg(p.accent_soft)),
+        Span::styled("· ", Style::default().fg(p.muted)),
+        Span::styled(
+            ellipsize_end(record_context, context_width),
+            Style::default().fg(p.secondary),
+        ),
+        Span::styled(" · REC ", Style::default().fg(p.accent_soft)),
+    ]));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = Layout::default()
@@ -124,17 +120,17 @@ fn render_chart(
     let case_start = app_scroll(page, points.len());
     let case_end = visible_case_end(points, case_start, usize::from(rows[1].height));
     render_metric_header(
+        p,
         frame,
         rows[0],
         page,
         metric,
-        case_start,
-        case_end,
+        case_start..case_end,
         points.len(),
     );
     let scroll = chart_line_offset(points, case_start);
     frame.render_widget(
-        Paragraph::new(chart_lines(points, metric, rows[1].width))
+        Paragraph::new(chart_lines(p, points, metric, rows[1].width))
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .wrap(Wrap { trim: false }),
         rows[1],
@@ -142,12 +138,12 @@ fn render_chart(
 }
 
 fn render_metric_header(
+    p: Palette,
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     page: &crate::tui::app::MetricPage<'_>,
     metric: &MetricDescriptor,
-    case_start: usize,
-    case_end: usize,
+    visible_cases: std::ops::Range<usize>,
     case_count: usize,
 ) {
     let unit = metric.unit.label();
@@ -161,8 +157,8 @@ fn render_metric_header(
         .saturating_sub(display_width(&position) + display_width(&suffix) + display_width("  "));
     let case_suffix = format!(
         "  ·  cases {}–{}/{}",
-        case_start.saturating_add(1).min(case_count),
-        case_end,
+        visible_cases.start.saturating_add(1).min(case_count),
+        visible_cases.end,
         case_count
     );
     let family_and_name = format!("{} · {}", metric.family.label(), metric.name);
@@ -172,25 +168,26 @@ fn render_metric_header(
             Line::from(vec![
                 Span::styled(
                     format!("{}  ", ellipsize_end(&metric.heading(), heading_width)),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(position, Style::default().fg(MUTED)),
-                Span::styled(suffix, Style::default().fg(SECONDARY)),
+                Span::styled(position, Style::default().fg(p.muted)),
+                Span::styled(suffix, Style::default().fg(p.secondary)),
             ]),
             Line::from(vec![
                 Span::styled(
                     ellipsize_end(&family_and_name, name_width),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(p.muted),
                 ),
-                Span::styled(case_suffix, Style::default().fg(MUTED)),
+                Span::styled(case_suffix, Style::default().fg(p.muted)),
             ]),
-            Line::from(scale_line(page, metric, area.width)),
+            Line::from(scale_line(p, page, metric, area.width)),
         ]),
         area,
     );
 }
 
 fn scale_line(
+    p: Palette,
     page: &crate::tui::app::MetricPage<'_>,
     metric: &MetricDescriptor,
     width: u16,
@@ -199,13 +196,14 @@ fn scale_line(
     let label = value_text(maximum, metric.unit);
     let rule_width = usize::from(width).saturating_sub(display_width(&label) + 12);
     vec![
-        Span::styled("scale  0 ", Style::default().fg(MUTED)),
-        Span::styled("─".repeat(rule_width), Style::default().fg(ACCENT_SOFT)),
-        Span::styled(format!(" {label}"), Style::default().fg(MUTED)),
+        Span::styled("scale  0 ", Style::default().fg(p.muted)),
+        Span::styled("─".repeat(rule_width), Style::default().fg(p.accent_soft)),
+        Span::styled(format!(" {label}"), Style::default().fg(p.muted)),
     ]
 }
 
 fn chart_lines(
+    p: Palette,
     points: &[MetricPoint],
     metric: &MetricDescriptor,
     width: u16,
@@ -253,7 +251,7 @@ fn chart_lines(
             lines.push(Line::from(Span::styled(
                 point.group.label(),
                 Style::default()
-                    .fg(ACCENT_SOFT)
+                    .fg(p.accent_soft)
                     .add_modifier(Modifier::BOLD),
             )));
             group = Some(point.group);
@@ -276,21 +274,21 @@ fn chart_lines(
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{} ", pad_right(&point.label, label_width)),
-                Style::default().fg(SECONDARY),
+                Style::default().fg(p.secondary),
             ),
-            Span::styled("█".repeat(fill), Style::default().fg(ACCENT)),
+            Span::styled("█".repeat(fill), Style::default().fg(BRAND)),
             Span::raw(" ".repeat(bar_width.saturating_sub(fill))),
             Span::styled(
                 format!(" {}", pad_left(&values[index], value_width)),
                 Style::default().fg(if point.value.is_some() {
-                    SECONDARY
+                    p.secondary
                 } else {
-                    MUTED
+                    p.muted
                 }),
             ),
             Span::styled(
                 format!(" {}", pad_left(&status, status_width)),
-                Style::default().fg(status_color(&point.status)),
+                Style::default().fg(status_color(p, &point.status)),
             ),
         ]));
     }
@@ -357,7 +355,7 @@ fn scale_maximum(points: &[MetricPoint], unit: MetricUnit) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn value_text(value: f64, unit: MetricUnit) -> String {
+pub(super) fn value_text(value: f64, unit: MetricUnit) -> String {
     let number = human_number(value);
     if unit.label().is_empty() {
         number
@@ -366,47 +364,11 @@ fn value_text(value: f64, unit: MetricUnit) -> String {
     }
 }
 
-fn human_number(value: f64) -> String {
-    if !value.is_finite() {
-        return value.to_string();
-    }
-    if value == 0.0 {
-        return "0".to_owned();
-    }
-    let absolute = value.abs();
-    if absolute > 0.0 && absolute < 0.001 {
-        return format!("{value:.3e}");
-    }
-    let decimals = if absolute >= 1_000.0 {
-        0
-    } else if absolute >= 100.0 {
-        1
-    } else if absolute >= 10.0 {
-        2
-    } else if absolute >= 1.0 {
-        3
-    } else if absolute >= 0.1 {
-        4
-    } else if absolute >= 0.01 {
-        5
-    } else {
-        6
-    };
-    let formatted = format!("{value:.decimals$}");
-    if decimals == 0 {
-        return formatted;
-    }
-    formatted
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_owned()
-}
-
-fn status_color(status: &str) -> ratatui::style::Color {
+fn status_color(p: Palette, status: &str) -> ratatui::style::Color {
     match status {
-        "failed" => CRITICAL,
-        "succeeded" => MUTED,
-        _ => WARNING,
+        "failed" => p.critical,
+        "succeeded" => p.muted,
+        _ => p.warning,
     }
 }
 

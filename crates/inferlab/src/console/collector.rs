@@ -139,7 +139,7 @@ struct ProcessObserver {
     next_server: Option<String>,
 }
 
-pub(super) struct Collector {
+pub(crate) struct Collector {
     declared_schedule: DeclaredSchedule,
     workspace: Option<ObjectState<WorkspaceView>>,
     definitions: Vec<DefinitionView>,
@@ -150,7 +150,7 @@ pub(super) struct Collector {
 }
 
 impl Collector {
-    pub(super) fn new(display_interval: Duration) -> Self {
+    pub(crate) fn new(display_interval: Duration) -> Self {
         Self {
             declared_schedule: DeclaredSchedule::new(display_interval),
             workspace: None,
@@ -162,7 +162,7 @@ impl Collector {
         }
     }
 
-    pub(super) fn collect(
+    pub(crate) fn collect(
         &mut self,
         root: &Path,
         local: Option<&Path>,
@@ -213,7 +213,7 @@ impl Collector {
             record_collection
                 .records
                 .iter_mut()
-                .chain(record_collection.child_servers.iter_mut()),
+                .chain(record_collection.child_records.iter_mut()),
             observed_unix_ms,
             || !bound.is_expired(),
             |root, id| {
@@ -239,7 +239,7 @@ impl Collector {
                 .map(|operation| operation_view(operation, observed_unix_ms))
                 .collect(),
             records: record_collection.records,
-            child_servers: record_collection.child_servers,
+            child_records: record_collection.child_records,
             definitions: self.definitions.clone(),
             journal,
             operations_error: operation_collection.error,
@@ -558,7 +558,11 @@ fn definition_views(
         definition(
             "workload-suite",
             id,
-            format!("evals {:?} · benches {:?}", suite.evals, suite.benches),
+            format!(
+                "evals {} · benches {}",
+                suite.evals.join(", "),
+                suite.benches.join(", ")
+            ),
         )
     }));
     definitions.extend(config.recipes.into_iter().map(|(id, recipe)| {
@@ -588,8 +592,8 @@ fn definition_views(
 #[cfg(test)]
 mod tests {
     use super::{DeclaredSchedule, JournalReader, ProcessObserver, ServerProbe, server_probe};
+    use crate::console::{RecordView, State};
     use crate::server::{ServerProcessStatusReport, ServerStatus};
-    use crate::tui::{RecordView, State};
     use inferlab_runtime::server::ProcessStatus;
     use std::io::Write;
     use std::path::PathBuf;

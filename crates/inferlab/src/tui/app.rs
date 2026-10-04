@@ -4,35 +4,9 @@ pub(super) use metric_state::{MetricPage, MetricSelection};
 
 use super::presentation::{EntryIdentity, EntrySource, Presentation};
 use super::{DisplayEntry, EntryKind, RecordView, Snapshot, State, records};
+use crate::console::{StatusFilter, View};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum View {
-    #[default]
-    Overview,
-    Operations,
-    Records,
-    Workspace,
-}
-
-impl View {
-    pub(super) const ALL: [Self; 4] = [
-        Self::Overview,
-        Self::Operations,
-        Self::Records,
-        Self::Workspace,
-    ];
-
-    pub(super) const fn title(self) -> &'static str {
-        match self {
-            Self::Overview => "Overview",
-            Self::Operations => "Operations",
-            Self::Records => "Records",
-            Self::Workspace => "Workspace",
-        }
-    }
-}
 
 #[derive(Default)]
 pub(super) struct App {
@@ -50,6 +24,29 @@ pub(super) struct App {
     pub(super) search_target: Option<SearchTarget>,
     pub(super) metric_selection: Option<MetricSelection>,
     presentation_unix_ms: u64,
+    pub(super) palette: super::ui::Palette,
+    /// What the terminal reported at startup; `t` switches away from it.
+    detected: super::appearance::Appearance,
+    light: bool,
+    overview_filter: StatusFilter,
+    records_filter: StatusFilter,
+    pub(super) animation_frame: usize,
+    /// Records parents whose child references are expanded, by entry key.
+    expanded: HashSet<String>,
+}
+
+/// Whether an item stands in its view on its own rather than beneath a parent.
+fn is_top_level(presentation: &Presentation, source: EntrySource, position: usize) -> bool {
+    presentation
+        .item(source, position)
+        .is_some_and(|item| item.child_of.is_none())
+}
+
+/// Where a Records row sits in its parent's tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TreeMark {
+    Parent { expanded: bool },
+    Child { last: bool },
 }
 
 pub(super) struct LoadedLog {
@@ -130,8 +127,8 @@ impl App {
                 snapshot.observed_unix_ms,
             );
             reconcile_records(
-                &mut snapshot.child_servers,
-                &previous.child_servers,
+                &mut snapshot.child_records,
+                &previous.child_records,
                 snapshot.records_error.as_deref(),
                 snapshot.observed_unix_ms,
             );
@@ -191,12 +188,42 @@ impl App {
         self.presentation_unix_ms
     }
 
+    /// Use the palette for the terminal's detected appearance.
+    pub(super) fn use_appearance(&mut self, detected: super::appearance::Appearance) {
+        self.detected = detected;
+        self.light = detected.light;
+        self.palette = super::ui::Palette::for_appearance(detected);
+    }
+
+    /// Switch between the dark and light palettes for this session. Surface
+    /// tints come from the detected background, so the other palette goes
+    /// without them.
+    fn toggle_appearance(&mut self) {
+        self.light = !self.light;
+        self.palette = super::ui::Palette::for_appearance(super::appearance::Appearance {
+            light: self.light,
+            background: self
+                .detected
+                .background
+                .filter(|_| self.light == self.detected.light),
+        });
+        self.status = if self.light {
+            "light palette".to_owned()
+        } else {
+            "dark palette".to_owned()
+        };
+    }
+
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return AppAction::Quit;
         }
         if self.input != InputMode::Normal {
             return self.handle_input(key);
+        }
+        if (key.code, key.modifiers) == (KeyCode::Char('t'), KeyModifiers::NONE) {
+            self.toggle_appearance();
+            return AppAction::Continue;
         }
         if self.metric_selection.is_some() {
             return self.handle_metric_key(key);
@@ -210,6 +237,10 @@ impl App {
             }
             (KeyCode::Char('k'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.start_global_find();
+                AppAction::Continue
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                self.cycle_status_filter();
                 AppAction::Continue
             }
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
@@ -274,6 +305,8 @@ impl App {
                 self.move_log(-1);
                 AppAction::Continue
             }
+            (KeyCode::Right, _) if self.expand_selected() => AppAction::Continue,
+            (KeyCode::Left, _) if self.collapse_selected() => AppAction::Continue,
             (KeyCode::Right, _) => {
                 self.detail = true;
                 self.detail_scroll = 0;
@@ -573,17 +606,172 @@ impl App {
 
     fn rebuild_visible(&mut self) {
         let source = self.entry_source();
+        let query = self.searches_entries().then_some(self.query.as_str());
+        let filter = self
+            .status_filter()
+            .filter(|_| source != EntrySource::Global)
+            .unwrap_or_default();
         self.visible = self
             .presentation
             .as_ref()
             .map_or_else(Vec::new, |presentation| {
-                if self.searches_entries() {
-                    presentation.matching_positions(source, &self.query)
-                } else {
-                    (0..presentation.len(source)).collect()
-                }
+                presentation.visible(source, query, filter, |key| self.expanded.contains(key))
             });
         self.clamp_selection();
+    }
+
+    /// The selected Records item's place in its tree: its position, the
+    /// parent position of a child, and whether it has children.
+    fn selected_tree(&self) -> Option<(usize, Option<usize>, bool)> {
+        if self.view != View::Records || self.input == InputMode::GlobalFind {
+            return None;
+        }
+        let source = self.entry_source();
+        let position = *self.visible.get(self.selected)?;
+        let presentation = self.presentation.as_ref()?;
+        let item = presentation.item(source, position)?;
+        let has_children = !presentation.children(source, position).is_empty();
+        Some((position, item.child_of, has_children))
+    }
+
+    /// `→` on a collapsed parent expands it ([[RFC-0010:C-NAVIGATION]]).
+    fn expand_selected(&mut self) -> bool {
+        let Some((position, None, true)) = self.selected_tree() else {
+            return false;
+        };
+        let source = self.entry_source();
+        let Some(key) = self
+            .presentation
+            .as_ref()
+            .and_then(|presentation| presentation.entry(source, position))
+            .map(|entry| entry.key.clone())
+        else {
+            return false;
+        };
+        if !self.expanded.insert(key) {
+            return false;
+        }
+        let identity = self.selected_identity();
+        self.rebuild_visible();
+        if let Some(identity) = identity {
+            self.reanchor(&identity);
+        }
+        true
+    }
+
+    /// `←` on an expanded parent or one of its children collapses them and
+    /// selects the parent.
+    fn collapse_selected(&mut self) -> bool {
+        let Some((position, child_of, _)) = self.selected_tree() else {
+            return false;
+        };
+        let parent = child_of.unwrap_or(position);
+        let source = self.entry_source();
+        let Some((key, identity)) = self.presentation.as_ref().and_then(|presentation| {
+            let entry = presentation.entry(source, parent)?;
+            Some((entry.key.clone(), presentation.identity(source, parent)?))
+        }) else {
+            return false;
+        };
+        if !self.expanded.remove(&key) {
+            return false;
+        }
+        self.detail = false;
+        self.detail_scroll = 0;
+        self.rebuild_visible();
+        self.reanchor(&identity);
+        true
+    }
+
+    /// The tree mark of a visible Records row.
+    pub(super) fn visible_tree_mark(&self, visible: usize) -> Option<TreeMark> {
+        if self.view != View::Records || self.input == InputMode::GlobalFind {
+            return None;
+        }
+        let source = self.entry_source();
+        let position = *self.visible.get(visible)?;
+        let presentation = self.presentation.as_ref()?;
+        let item = presentation.item(source, position)?;
+        if let Some(parent) = item.child_of {
+            let last = presentation.children(source, parent).last() == Some(&position);
+            return Some(TreeMark::Child { last });
+        }
+        if presentation.children(source, position).is_empty() {
+            return None;
+        }
+        let expanded = presentation
+            .entry(source, position)
+            .is_some_and(|entry| self.expanded.contains(&entry.key));
+        Some(TreeMark::Parent { expanded })
+    }
+
+    /// Whether an active operation animates its glyph ([[ADR-0055]]).
+    pub(super) fn animates(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .operations
+                .iter()
+                .any(|operation| operation.state == State::Live)
+        })
+    }
+
+    pub(super) fn advance_animation(&mut self) {
+        self.animation_frame = self.animation_frame.wrapping_add(1);
+    }
+
+    /// How many objects each top-level view holds, for the sidebar.
+    pub(super) fn view_counts(&self) -> [usize; 4] {
+        View::ALL.map(|view| {
+            let source = EntrySource::View(view);
+            self.presentation.as_ref().map_or(0, |presentation| {
+                (0..presentation.len(source))
+                    .filter(|position| is_top_level(presentation, source, *position))
+                    .count()
+            })
+        })
+    }
+
+    /// The current view's status filter, when the view has one.
+    pub(super) fn status_filter(&self) -> Option<StatusFilter> {
+        match self.view {
+            View::Overview => Some(self.overview_filter),
+            View::Records => Some(self.records_filter),
+            View::Operations | View::Workspace => None,
+        }
+    }
+
+    /// How many of the current view's objects each status filter admits.
+    pub(super) fn status_counts(&self) -> [(StatusFilter, usize); 3] {
+        let source = EntrySource::View(self.view);
+        StatusFilter::ALL.map(|filter| {
+            let count = self.presentation.as_ref().map_or(0, |presentation| {
+                (0..presentation.len(source))
+                    .filter(|position| {
+                        is_top_level(presentation, source, *position)
+                            && presentation
+                                .entry(source, *position)
+                                .is_some_and(|entry| filter.admits(entry))
+                    })
+                    .count()
+            });
+            (filter, count)
+        })
+    }
+
+    fn cycle_status_filter(&mut self) {
+        let identity = self.selected_identity();
+        match self.view {
+            View::Overview => self.overview_filter = self.overview_filter.next(),
+            View::Records => self.records_filter = self.records_filter.next(),
+            View::Operations | View::Workspace => {
+                self.status = "the status filter applies to Overview and Records".to_owned();
+                return;
+            }
+        }
+        self.rebuild_visible();
+        if let Some(identity) = identity {
+            self.reanchor(&identity);
+        }
     }
 
     fn reanchor(&mut self, identity: &EntryIdentity) {
@@ -633,9 +821,9 @@ impl App {
                 .map(|entry| entry.kind.group_label());
         }
         let item = self.presentation.as_ref()?.item(source, position)?;
-        item.section
-            .map(|section| section.label())
-            .or(item.group.as_deref())
+        item.group
+            .as_deref()
+            .or_else(|| item.section.map(|section| section.label()))
     }
 
     pub(super) fn visible_len(&self) -> usize {
@@ -722,7 +910,7 @@ mod tests {
             },
             operations: Vec::new(),
             records: Vec::new(),
-            child_servers: Vec::new(),
+            child_records: Vec::new(),
             definitions: Vec::new(),
             journal: Vec::new(),
             operations_error: None,
@@ -804,6 +992,36 @@ mod tests {
             last_success_unix_ms: 1,
             reason: None,
         }
+    }
+
+    #[test]
+    fn t_switches_the_palette_and_a_query_keeps_it_as_text() {
+        use crate::tui::appearance::Appearance;
+        use crate::tui::ui::Palette;
+        let detected = Appearance {
+            light: false,
+            background: Some((12, 14, 18)),
+        };
+        let mut app = App::default();
+        app.use_appearance(detected);
+        assert_eq!(app.palette, Palette::for_appearance(detected));
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(
+            app.palette,
+            Palette::for_appearance(Appearance {
+                light: true,
+                background: None,
+            }),
+            "the other palette, without tints taken from the detected background"
+        );
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.palette, Palette::for_appearance(detected));
+
+        app.input = InputMode::GlobalFind;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.query, "t");
+        assert_eq!(app.palette, Palette::for_appearance(detected));
     }
 
     #[test]

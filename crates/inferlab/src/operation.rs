@@ -229,6 +229,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn local_identity() -> Result<ProducerIdentity, std::io::Error> {
+    process_identity(std::process::id())
+}
+
+/// The producer identity of a live process on this host and boot.
+pub(crate) fn process_identity(pid: u32) -> Result<ProducerIdentity, std::io::Error> {
     let host = rustix::system::uname()
         .nodename()
         .to_string_lossy()
@@ -236,7 +241,6 @@ fn local_identity() -> Result<ProducerIdentity, std::io::Error> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim()
         .to_owned();
-    let pid = std::process::id();
     let process_start_ticks = process_start_ticks(pid)?;
     Ok(ProducerIdentity {
         host,

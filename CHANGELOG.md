@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-03
+
+### Added
+
+- `inferlab web` serves a browser console over registered workspaces
+  ([[RFC-0012]], [[ADR-0056]]); see the [web console guide](docs/web.md):
+  - It listens on loopback by default and prints one URL carrying an access
+    token generated at each start; the token becomes an HttpOnly cookie.
+  - Workspaces are registered when the console starts in one, whose views the
+    printed URL then opens, or from the page's directory browser, and persist
+    per user across restarts.
+  - Each workspace shows the TUI's Overview, Operations, Records, and
+    Workspace views, refreshes in the background, and updates open pages live.
+  - **Compare** charts one metric across Bench records from any registered
+    workspaces, one series per record placed by recorded load, with a table of
+    the same values.
+  - **Jobs** launches `serve start`, `serve stop`, `recipe run`, `bench`, and
+    `scratchpad note` from typed forms. The first three preview their
+    `--dry-run` before launch. Jobs run detached under
+    `.inferlab/runtime/jobs/`, survive a console restart, and can be
+    interrupted like Ctrl+C after an identity check.
+  - Browser notifications for ended jobs and dead server processes stay off
+    until enabled in the browser.
+  - Console failures, including a job supervisor that cannot start or record
+    its job, report `E9002`.
+
+### Changed
+
+- `inferlab tui` has a redesigned console ([[ADR-0055]]):
+  - It picks a dark or light palette from the terminal's reported background,
+    falling back to `COLORFGBG` and then dark.
+  - Wide terminals get a sidebar with the workspace, views and their counts,
+    a status filter, and the refresh indicator.
+  - List rows are one line: glyph, kind, name, lifecycle, authority, and age.
+  - Overview orders ATTENTION, NOW (with operation progress and an activity
+    spinner), and RECENT grouped by day.
+  - Records is a day-grouped timeline whose recipes expand (`→`/`←`) into
+    selectable child records.
+  - A detail opens with status and authority pills, and a workload record
+    tabulates its case metrics with a trend across cases.
+  - `f` cycles the Overview and Records status filter.
+  - `t` switches between the dark and light palettes for the session, for a
+    terminal whose background was not detected. Text on keycaps, chips, pills,
+    and the selection bar keeps a color chosen for its fill, so it stays
+    readable in either palette.
+  - Detail labels no longer run into their values, wrapped values keep their
+    column, values no longer show JSON quoting, and ages past two days read
+    in days.
+
+### Fixed
+
+- Case loads recorded by requests of an earlier request protocol are read
+  again, so the TUI labels and orders those sweeps by load instead of by case
+  identifier.
+
 ## [0.15.5] - 2026-10-02
 
 ### Added

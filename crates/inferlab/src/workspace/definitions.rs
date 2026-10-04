@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-pub(super) const WORKSPACE_FILE: &str = concat!(state_dir!(), "/workspace.toml");
+pub(crate) const WORKSPACE_FILE: &str = concat!(state_dir!(), "/workspace.toml");
 pub(super) const WORKSPACE_FRAGMENT_DIR: &str = concat!(state_dir!(), "/workspace.d");
 pub(super) const DEFAULT_LOCAL_FILE: &str = concat!(state_dir!(), "/local.toml");
 

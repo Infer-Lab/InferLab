@@ -1443,13 +1443,15 @@ dependencies = [
 
 [[package]]
 name = "inferlab"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "agent-plugin-installer",
+ "axum",
  "base64 0.22.1",
  "clap",
  "crossterm",
  "flate2",
+ "form_urlencoded",
  "fs2",
  "humantime",
  "inferlab-profiler",
@@ -1458,6 +1460,7 @@ dependencies = [
  "inferlab-runtime",
  "inferlab-serve-domain",
  "insta",
+ "maud",
  "ratatui",
  "reqwest",
  "rustix",
@@ -1467,9 +1470,11 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "terminal-colorsaurus",
  "thiserror",
  "time",
  "tokio",
+ "tokio-stream",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -1480,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-fake-engine"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "clap",
  "futures-util",
@@ -1494,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-profiler"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "inferlab-protocol",
  "inferlab-runtime",
@@ -1507,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-protocol"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -1516,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-proxy"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1531,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-runtime"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "ctrlc",
  "reqwest",
@@ -1546,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "inferlab-serve-domain"
-version = "0.15.5"
+version = "0.16.0"
 dependencies = [
  "inferlab-profiler",
  "inferlab-protocol",
@@ -1851,6 +1856,30 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "maud"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8156733e27020ea5c684db5beac5d1d611e1272ab17901a49466294b84fc217e"
+dependencies = [
+ "axum-core",
+ "http",
+ "itoa",
+ "maud_macros",
+]
+
+[[package]]
+name = "maud_macros"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7261b00f3952f617899bc012e3dbd56e4f0110a038175929fa5d18e5a19913ca"
+dependencies = [
+ "proc-macro2",
+ "proc-macro2-diagnostics",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "memchr"
@@ -2183,6 +2212,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro2-diagnostics"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af066a9c399a26e020ada66a034357a868728e72cd426f3adcd35f80d88d88c8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "version_check",
+]
+
+[[package]]
 name = "prost"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2504,6 +2545,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -3131,6 +3173,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal-colorsaurus"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a46bb5364467da040298c573c8a95dbf9a512efc039630409a03126e3703e90"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "memchr",
+ "mio",
+ "terminal-trx",
+ "windows-sys 0.61.2",
+ "xterm-color",
+]
+
+[[package]]
+name = "terminal-trx"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b3f27d9a8a177e57545481faec87acb45c6e854ed1e5a3658ad186c106f38ed"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3218,6 +3286,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -3927,6 +3996,12 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "xterm-color"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7008a9d8ba97a7e47d9b2df63fcdb8dade303010c5a7cd5bf2469d4da6eba673"
 
 [[package]]
 name = "yaml_serde"

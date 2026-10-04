@@ -52,9 +52,18 @@ you can inspect, compare, and reproduce.
   concurrent CLI work, records, referenced logs, and journal context.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Infer-Lab/InferLab/main/docs/assets/inferlab-tui-demo.png" width="976" alt="InferLab view-only TUI showing an active recipe, a running server, a completed benchmark, and workspace evidence">
+  <img src="https://raw.githubusercontent.com/Infer-Lab/InferLab/main/docs/assets/inferlab-tui-demo.png" width="976" alt="InferLab view-only TUI: a sidebar with views and status counts, an Overview of issues, current work, and recent records by day, and a benchmark record with its per-case metrics">
 </p>
 <p align="center"><sub>Rendered by the real InferLab TUI with synthetic demo data; no local workspace or machine identifiers are shown.</sub></p>
+
+- **Web console** — the same views in a browser over several workspaces,
+  Bench comparison across records, and serve, recipe, bench, and journal
+  workflows launched as detached CLI jobs behind a per-start access token.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Infer-Lab/InferLab/main/docs/assets/inferlab-web-compare.png" width="976" alt="InferLab web console comparing output-token throughput across three Bench records from two workspaces, one line per record over concurrency on a log scale, with a table of the same values">
+</p>
+<p align="center"><sub>Rendered by the real InferLab web console with synthetic demo data; no local workspace or machine identifiers are shown.</sub></p>
 
 ## Install
 
@@ -103,6 +112,7 @@ pixi install --locked --all                 # realize every stack's selected Pix
 inferlab stack status                       # confirm environments and run declared stack checks
 inferlab toolchain install                  # only for lm-eval Evals or serving Benches
 inferlab tui                                # observe this workspace; never starts or changes work
+inferlab web                                # browser console; prints a tokenized local URL
 
 inferlab recipe run my-recipe --dry-run     # validate placement, devices, commands, environment
 inferlab recipe run my-recipe --case tp2    # closed loop: serve + eval/bench + cleanup
@@ -132,6 +142,8 @@ on those commands resolves and validates without launching or writing one.
   and integration package names.
 - [View-only TUI](docs/tui.md): workspace observation, source labels, views,
   keys, search, refresh, and stale-state semantics.
+- [Web console](docs/web.md): browser access, registered workspaces, Bench
+  comparison, launched jobs, and notifications.
 - [Specialized Engines](docs/specialized-engine.md): the reusable token-worker
   Engine contract for hardware-by-model specialized backends.
 - [RFC-0001 — Specification Overview And Authority Map](docs/rfc/RFC-0001.md):
@@ -139,7 +151,7 @@ on those commands resolves and validates without launching or writing one.
   [docs/rfc/](docs/rfc/) own workspaces/stacks, servers/execution,
   measurements/toolchains, evidence, the integration protocol, runtime
   images, agent plugin distribution, runtime time bounds, the view-only TUI,
-  and the public website.
+  the public website, and the web console.
 - [Architecture decisions](docs/adr/): accepted ADRs plus superseded and
   rejected historical decisions.
 - [`plugins/inferlab/skills/inferlab/SKILL.md`](plugins/inferlab/skills/inferlab/SKILL.md):

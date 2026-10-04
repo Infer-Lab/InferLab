@@ -12,6 +12,23 @@ pub(crate) enum AtomicJsonError {
     },
 }
 
+impl std::fmt::Display for AtomicJsonError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encode(source) => write!(formatter, "could not encode: {source}"),
+            Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "could not {operation} {}: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
 pub(crate) fn write(path: &Path, value: &impl Serialize) -> Result<(), AtomicJsonError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| AtomicJsonError::Io {

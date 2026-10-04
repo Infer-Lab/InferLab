@@ -10,7 +10,7 @@ use inferlab_protocol::{
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct CaptureProjection {
+pub(crate) struct CaptureProjection {
     status: String,
     #[serde(default)]
     windows: Vec<serde_json::Value>,
@@ -22,7 +22,7 @@ pub(in crate::tui) struct CaptureProjection {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(in crate::tui) enum RequestSourceProjection {
+pub(crate) enum RequestSourceProjection {
     Random {
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
@@ -46,7 +46,7 @@ pub(in crate::tui) enum RequestSourceProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct PopulationPreparationProjection {
+pub(crate) struct PopulationPreparationProjection {
     #[serde(default)]
     result: Option<PopulationPreparationResultProjection>,
 }
@@ -57,7 +57,7 @@ struct PopulationPreparationResultProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct DatasetRequestSourceProjection {
+pub(crate) struct DatasetRequestSourceProjection {
     catalog: DatasetCatalogProjection,
     #[serde(default)]
     acquisition: Option<AcquisitionProjection>,
@@ -68,7 +68,7 @@ pub(in crate::tui) struct DatasetRequestSourceProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct SessionSourceProjection {
+pub(crate) struct SessionSourceProjection {
     catalog: DatasetCatalogProjection,
     #[serde(default)]
     acquisition: Option<AcquisitionProjection>,
@@ -79,7 +79,7 @@ pub(in crate::tui) struct SessionSourceProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct AgenticSourceProjection {
+pub(crate) struct AgenticSourceProjection {
     #[serde(default)]
     preparation_attempt_id: Option<String>,
     dataset: String,
@@ -107,7 +107,7 @@ struct AgenticCatalogProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct AcquisitionProjection {
+pub(crate) struct AcquisitionProjection {
     outcome: AcquisitionOutcomeProjection,
     #[serde(default)]
     error: Option<String>,
@@ -123,7 +123,7 @@ enum AcquisitionOutcomeProjection {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(in crate::tui) enum PopulationSliceProjection {
+pub(crate) enum PopulationSliceProjection {
     Requests {
         population_sha256: String,
         warmup_count: u32,
@@ -139,14 +139,14 @@ pub(in crate::tui) enum PopulationSliceProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct PrefixCacheResetProjection {
+pub(crate) struct PrefixCacheResetProjection {
     succeeded: bool,
     #[serde(default)]
     error: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct PrefixCacheConditioningRankProjection {
+pub(crate) struct PrefixCacheConditioningRankProjection {
     rank: u32,
     #[serde(default)]
     target: Option<String>,
@@ -157,7 +157,7 @@ pub(in crate::tui) struct PrefixCacheConditioningRankProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct PrefixCacheConditioningProjection {
+pub(crate) struct PrefixCacheConditioningProjection {
     succeeded: bool,
     prompt_tokens: u32,
     #[serde(default)]
@@ -167,7 +167,7 @@ pub(in crate::tui) struct PrefixCacheConditioningProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct CachePreparationProjection {
+pub(crate) struct CachePreparationProjection {
     start: String,
     reset: PrefixCacheResetProjection,
     #[serde(default)]
@@ -175,30 +175,30 @@ pub(in crate::tui) struct CachePreparationProjection {
 }
 
 #[derive(Deserialize)]
-pub(in crate::tui) struct CaseSloProjection {
+pub(crate) struct CaseSloProjection {
     #[serde(default)]
     aggregate_slos: Vec<serde_json::Value>,
     passed: bool,
 }
 
-pub(in crate::tui) struct CaseEvidence<'a> {
-    pub(in crate::tui) id: Option<&'a str>,
-    pub(in crate::tui) cache_preparation: Option<&'a CachePreparationProjection>,
-    pub(in crate::tui) slo: Option<&'a CaseSloProjection>,
-    pub(in crate::tui) population_slice: Option<&'a PopulationSliceProjection>,
-    pub(in crate::tui) completed_requests: Option<u64>,
-    pub(in crate::tui) failed_requests: Option<u64>,
-    pub(in crate::tui) normalization_schema: Option<&'a str>,
-    pub(in crate::tui) request_unavailable: bool,
-    pub(in crate::tui) session: Option<&'a BenchSessionResultEvidence>,
-    pub(in crate::tui) session_unavailable: bool,
-    pub(in crate::tui) agentic: Option<&'a BenchAgenticResultEvidence>,
-    pub(in crate::tui) agentic_unavailable: bool,
-    pub(in crate::tui) prompt_token_reconciliation: &'a [BenchPromptTokenReconciliation],
-    pub(in crate::tui) raw_artifacts: &'a [RawArtifact],
+pub(crate) struct CaseEvidence<'a> {
+    pub(crate) id: Option<&'a str>,
+    pub(crate) cache_preparation: Option<&'a CachePreparationProjection>,
+    pub(crate) slo: Option<&'a CaseSloProjection>,
+    pub(crate) population_slice: Option<&'a PopulationSliceProjection>,
+    pub(crate) completed_requests: Option<u64>,
+    pub(crate) failed_requests: Option<u64>,
+    pub(crate) normalization_schema: Option<&'a str>,
+    pub(crate) request_unavailable: bool,
+    pub(crate) session: Option<&'a BenchSessionResultEvidence>,
+    pub(crate) session_unavailable: bool,
+    pub(crate) agentic: Option<&'a BenchAgenticResultEvidence>,
+    pub(crate) agentic_unavailable: bool,
+    pub(crate) prompt_token_reconciliation: &'a [BenchPromptTokenReconciliation],
+    pub(crate) raw_artifacts: &'a [RawArtifact],
 }
 
-pub(in crate::tui) fn record_source(
+pub(crate) fn record_source(
     schema_version: Option<u32>,
     request: Option<&RequestSourceProjection>,
     session: Option<&SessionSourceProjection>,
@@ -270,7 +270,7 @@ pub(in crate::tui) fn record_source(
     }
 }
 
-pub(in crate::tui) fn case_evidence(evidence: CaseEvidence<'_>) -> (Vec<FactSection>, Vec<String>) {
+pub(crate) fn case_evidence(evidence: CaseEvidence<'_>) -> (Vec<FactSection>, Vec<String>) {
     let case = evidence.id.unwrap_or("unnamed case");
     let mut sections = Vec::new();
     let mut common = vec![fact("Case", case)];
@@ -396,7 +396,7 @@ pub(in crate::tui) fn case_evidence(evidence: CaseEvidence<'_>) -> (Vec<FactSect
     (sections, artifacts)
 }
 
-pub(in crate::tui) fn capture_summary(capture: &CaptureProjection) -> String {
+pub(crate) fn capture_summary(capture: &CaptureProjection) -> String {
     let mut summary = format!(
         "{} · {} window(s) · {} report(s)",
         capture.status,

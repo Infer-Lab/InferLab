@@ -152,6 +152,17 @@ impl App {
         })
     }
 
+    /// A record's tabulated case metrics, for its detail.
+    pub(in crate::tui) fn record_metrics_of(
+        &self,
+        record_key: &str,
+    ) -> Option<&crate::tui::metrics::RecordMetrics> {
+        self.presentation
+            .as_ref()
+            .and_then(|presentation| presentation.record_metrics(record_key))
+            .filter(|record| !record.catalog.is_empty())
+    }
+
     pub(in crate::tui) fn selected_record_has_metrics(&self) -> bool {
         self.selected_entry()
             .filter(|entry| entry.kind == EntryKind::Record)

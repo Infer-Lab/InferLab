@@ -77,6 +77,10 @@ fn representative_errors() -> Vec<InferlabError> {
         InferlabError::Agent {
             message: "fixture".to_owned(),
         },
+        InferlabError::WebRegistry {
+            path: PathBuf::from("fixture"),
+            message: "fixture".to_owned(),
+        },
         InferlabError::AdHocRun {
             message: "fixture".to_owned(),
         },

@@ -24,13 +24,25 @@ pub(super) const TUI: &str = "Observe operations, records, workspace definitions
 
 The TUI does not launch workflows, mutate records, or write a UI session. Refreshes label facts by authority and retain the last successful observation as stale when a later read fails.";
 
+pub(super) const WEB: &str = "Serve a browser console over registered workspaces: their operations, records, and definitions, record comparison, and the serve, recipe, bench, and scratchpad workflows, each run by invoking this CLI.
+
+The console listens on 127.0.0.1 unless --bind selects another address, and prints one access URL on stdout. The URL carries a token generated at each start; anyone holding it has every capability of the console, so share it only with people you trust. Reach a remote host's console through SSH port forwarding. Started inside a workspace, the console registers it and the URL opens it; add or remove others from the page.";
+
+pub(super) const WEB_EXAMPLES: &str = "EXAMPLES:
+  inferlab web
+  inferlab web --port 8800
+  ssh -L 8800:127.0.0.1:8800 gpu-host   # then open the printed URL locally";
+
 pub(super) const TUI_KEYS: &str = "KEYS:
   1-4       Select Overview, Operations, Records, or Workspace
   arrows    Navigate; Enter opens details; Esc returns
+            In Records, → expands a parent's child records and ← collapses them
+  f         Cycle the Overview or Records status filter: all, issues, running
   Ctrl+K    Find typed objects
   /         Filter the current list or search a referenced log
   m         Compare one recorded metric across cases in one workload
   r         Request a refresh
+  t         Switch between the dark and light palettes
   q         Exit";
 
 pub(super) const STACK_STATUS: &str = "Report Pixi confirmation, declared realization-check evidence, and overall readiness for one stack or every declared stack.

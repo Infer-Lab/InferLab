@@ -1,8 +1,8 @@
 mod definition;
 mod record;
 
-pub(super) use definition::definition;
-pub(super) use record::{
+pub(crate) use definition::definition;
+pub(crate) use record::{
     AgenticSourceProjection, CachePreparationProjection, CaptureProjection, CaseEvidence,
     CaseSloProjection, PopulationSliceProjection, RequestSourceProjection, SessionSourceProjection,
     capture_summary, case_evidence, record_source,

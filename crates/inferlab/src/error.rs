@@ -406,6 +406,38 @@ pub enum InferlabError {
     #[error("ad-hoc execution failed: {message}")]
     AdHocRun { message: String },
 
+    #[error("web console could not listen on {address}: {source}")]
+    WebListener {
+        address: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("web console workspace registry {}: {message}", path.display())]
+    WebRegistry { path: PathBuf, message: String },
+
+    #[error("web console stopped serving: {source}")]
+    WebServe {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("web console could not install its interruption handler: {source}")]
+    WebInterrupt {
+        #[source]
+        source: inferlab_runtime::interrupt::InterruptInstallError,
+    },
+
+    #[error("web console could not {step}: {source}")]
+    WebStart {
+        step: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("web console job {}: {message}", path.display())]
+    WebJob { path: PathBuf, message: String },
+
     #[error("ad-hoc execution failed: {source}")]
     AdHocInterrupt {
         #[source]
@@ -582,6 +614,12 @@ impl InferlabError {
             Self::WriteOutput { .. } | Self::TuiInterrupt { .. } | Self::EncodeOutput { .. } => {
                 "E9001"
             }
+            Self::WebListener { .. }
+            | Self::WebRegistry { .. }
+            | Self::WebServe { .. }
+            | Self::WebInterrupt { .. }
+            | Self::WebStart { .. }
+            | Self::WebJob { .. } => "E9002",
         }
     }
 }

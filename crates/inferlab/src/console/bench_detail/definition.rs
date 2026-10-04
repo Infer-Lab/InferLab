@@ -5,12 +5,12 @@ use crate::workspace::{
     BenchSharedSystemContent, BenchTokenSelector, RequestRate,
 };
 
-pub(in crate::tui) struct DefinitionDetail {
-    pub(in crate::tui) relationship: String,
-    pub(in crate::tui) sections: Vec<FactSection>,
+pub(crate) struct DefinitionDetail {
+    pub(crate) relationship: String,
+    pub(crate) sections: Vec<FactSection>,
 }
 
-pub(in crate::tui) fn definition(definition: &BenchDefinition) -> DefinitionDetail {
+pub(crate) fn definition(definition: &BenchDefinition) -> DefinitionDetail {
     match definition {
         BenchDefinition::Serving {
             request_source,
@@ -381,7 +381,7 @@ fn images_summary(images: Option<&BenchImagesDeclaration>) -> String {
         None => "none".to_owned(),
     }
 }
-pub(super) fn token_selector(selector: &BenchTokenSelector) -> String {
+pub(crate) fn token_selector(selector: &BenchTokenSelector) -> String {
     match selector {
         BenchTokenSelector::Fixed(value) => format!("{value} tok"),
         BenchTokenSelector::InclusiveUniform { min, max } => {
@@ -389,7 +389,7 @@ pub(super) fn token_selector(selector: &BenchTokenSelector) -> String {
         }
     }
 }
-pub(super) fn prefix_summary(prefix: Option<&BenchPrefixSharing>) -> String {
+pub(crate) fn prefix_summary(prefix: Option<&BenchPrefixSharing>) -> String {
     match prefix {
         Some(BenchPrefixSharing::Tokens {
             shared_prefix_tokens,
@@ -400,17 +400,17 @@ pub(super) fn prefix_summary(prefix: Option<&BenchPrefixSharing>) -> String {
         None => "none".to_owned(),
     }
 }
-pub(super) fn shared_system_summary(content: Option<&BenchSharedSystemContent>) -> String {
+pub(crate) fn shared_system_summary(content: Option<&BenchSharedSystemContent>) -> String {
     match content {
         Some(BenchSharedSystemContent::Tokens { tokens }) => format!("{tokens} tok"),
         Some(BenchSharedSystemContent::Ratio { ratio }) => format!("{}%", ratio * 100.0),
         None => "none".to_owned(),
     }
 }
-pub(super) fn fact(label: impl Into<String>, value: impl Into<String>) -> (String, String) {
+pub(crate) fn fact(label: impl Into<String>, value: impl Into<String>) -> (String, String) {
     (label.into(), value.into())
 }
-pub(super) fn optional_text(value: Option<&str>) -> String {
+pub(crate) fn optional_text(value: Option<&str>) -> String {
     value.unwrap_or("—").to_owned()
 }
 
@@ -459,6 +459,6 @@ fn request_rate_list(values: &[RequestRate]) -> String {
         .join(", ")
 }
 
-pub(super) const fn yes_no(value: bool) -> &'static str {
+pub(crate) const fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }

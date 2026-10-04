@@ -46,6 +46,11 @@ const fixedEntries = [
     description: 'Use the view-only workspace console.',
   },
   {
+    source: 'docs/web.md',
+    target: 'src/content/docs/docs/guides/web.md',
+    description: 'Use the browser console over registered workspaces.',
+  },
+  {
     source: 'plugins/inferlab/skills/inferlab/references/backend-support.md',
     target: 'src/content/docs/docs/reference/backend-support.md',
     description: 'Qualified backend capabilities exposed by InferLab.',

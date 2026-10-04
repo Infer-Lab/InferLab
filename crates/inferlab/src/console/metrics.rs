@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum MetricFamily {
+pub(crate) enum MetricFamily {
     Throughput,
     PromptTokens,
     RequestLatency,
@@ -17,7 +17,7 @@ pub(super) enum MetricFamily {
 }
 
 impl MetricFamily {
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Throughput => "THROUGHPUT",
             Self::PromptTokens => "INPUT · OBSERVED",
@@ -33,7 +33,7 @@ impl MetricFamily {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MetricUnit {
+pub(crate) enum MetricUnit {
     None,
     Milliseconds,
     Tokens,
@@ -43,7 +43,7 @@ pub(super) enum MetricUnit {
 }
 
 impl MetricUnit {
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::None => "",
             Self::Milliseconds => "ms",
@@ -54,7 +54,7 @@ impl MetricUnit {
         }
     }
 
-    pub(super) const fn display_value(self, value: f64) -> f64 {
+    pub(crate) const fn display_value(self, value: f64) -> f64 {
         match self {
             Self::Ratio => value * 100.0,
             _ => value,
@@ -63,16 +63,16 @@ impl MetricUnit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct MetricDescriptor {
-    pub(super) name: String,
-    pub(super) label: String,
-    pub(super) family: MetricFamily,
-    pub(super) unit: MetricUnit,
+pub(crate) struct MetricDescriptor {
+    pub(crate) name: String,
+    pub(crate) label: String,
+    pub(crate) family: MetricFamily,
+    pub(crate) unit: MetricUnit,
     rank: usize,
 }
 
 impl MetricDescriptor {
-    pub(super) fn heading(&self) -> String {
+    pub(crate) fn heading(&self) -> String {
         match self.family {
             MetricFamily::RequestLatency => format!("{} request latency", self.label),
             MetricFamily::Ttft => format!("{} TTFT", self.label),
@@ -83,7 +83,7 @@ impl MetricDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LoadGroup {
+pub(crate) enum LoadGroup {
     Concurrency,
     RequestRate,
     Unbounded,
@@ -91,7 +91,7 @@ pub(super) enum LoadGroup {
 }
 
 impl LoadGroup {
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Concurrency => "CONCURRENCY",
             Self::RequestRate => "REQUEST RATE",
@@ -111,24 +111,27 @@ impl LoadGroup {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct MetricPoint {
-    pub(super) label: String,
-    pub(super) group: LoadGroup,
-    pub(super) value: Option<f64>,
-    pub(super) status: String,
+pub(crate) struct MetricPoint {
+    pub(crate) label: String,
+    pub(crate) group: LoadGroup,
+    /// The case's typed effective load, for placing the point on a shared
+    /// load axis when records are compared ([[RFC-0012:C-VIEWS]]).
+    pub(crate) load: CaseLoad,
+    pub(crate) value: Option<f64>,
+    pub(crate) status: String,
     sort_value: Option<f64>,
     source_index: usize,
 }
 
-pub(super) struct RecordMetrics {
-    pub(super) record_key: String,
-    pub(super) record_context: String,
-    pub(super) catalog: Vec<MetricDescriptor>,
-    pub(super) points: Vec<Vec<MetricPoint>>,
-    pub(super) case_count: usize,
+pub(crate) struct RecordMetrics {
+    pub(crate) record_key: String,
+    pub(crate) record_context: String,
+    pub(crate) catalog: Vec<MetricDescriptor>,
+    pub(crate) points: Vec<Vec<MetricPoint>>,
+    pub(crate) case_count: usize,
 }
 
-pub(super) fn presentation(record: &super::RecordView) -> Option<RecordMetrics> {
+pub(crate) fn presentation(record: &super::RecordView) -> Option<RecordMetrics> {
     let record_key = record.id.clone()?;
     let catalog = catalog(&record.cases);
     let points = catalog
@@ -144,7 +147,7 @@ pub(super) fn presentation(record: &super::RecordView) -> Option<RecordMetrics> 
     })
 }
 
-pub(super) fn catalog(cases: &[CaseView]) -> Vec<MetricDescriptor> {
+pub(crate) fn catalog(cases: &[CaseView]) -> Vec<MetricDescriptor> {
     let names = cases
         .iter()
         .flat_map(|case| case.metrics.keys().cloned())
@@ -159,7 +162,7 @@ pub(super) fn catalog(cases: &[CaseView]) -> Vec<MetricDescriptor> {
     metrics
 }
 
-pub(super) fn points(cases: &[CaseView], metric: &str) -> Vec<MetricPoint> {
+pub(crate) fn points(cases: &[CaseView], metric: &str) -> Vec<MetricPoint> {
     let mut points = cases
         .iter()
         .enumerate()
@@ -189,6 +192,7 @@ pub(super) fn points(cases: &[CaseView], metric: &str) -> Vec<MetricPoint> {
             MetricPoint {
                 label,
                 group,
+                load: case.load.clone(),
                 value: case.metrics.get(metric).copied(),
                 status: case.status.clone().unwrap_or_else(|| "unknown".to_owned()),
                 sort_value,
@@ -210,13 +214,18 @@ pub(super) fn points(cases: &[CaseView], metric: &str) -> Vec<MetricPoint> {
 }
 
 fn compact_record_context(record: &super::RecordView) -> String {
+    format!("{} · {}", record.kind, record_label(record))
+}
+
+/// A record's identifier without its timestamp and kind prefix.
+pub(crate) fn record_label(record: &super::RecordView) -> String {
     let id = record.id.as_deref().unwrap_or("unreadable-record");
     let without_time = id.split_once("Z-").map_or(id, |(_, remainder)| remainder);
-    let label = without_time
+    without_time
         .strip_prefix(&record.kind)
         .and_then(|remainder| remainder.strip_prefix('-'))
-        .unwrap_or(without_time);
-    format!("{} · {label}", record.kind)
+        .unwrap_or(without_time)
+        .to_owned()
 }
 
 fn descriptor(name: String) -> MetricDescriptor {
@@ -316,7 +325,45 @@ const fn statistic_presentation(statistic: DistributionStatistic) -> (&'static s
     }
 }
 
-pub(super) fn concise_number(value: f64) -> String {
+/// A metric value with compact, stable human precision, as both surfaces
+/// show it.
+pub(crate) fn human_number(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    let absolute = value.abs();
+    if absolute > 0.0 && absolute < 0.001 {
+        return format!("{value:.3e}");
+    }
+    let decimals = if absolute >= 1_000.0 {
+        0
+    } else if absolute >= 100.0 {
+        1
+    } else if absolute >= 10.0 {
+        2
+    } else if absolute >= 1.0 {
+        3
+    } else if absolute >= 0.1 {
+        4
+    } else if absolute >= 0.01 {
+        5
+    } else {
+        6
+    };
+    let formatted = format!("{value:.decimals$}");
+    if decimals == 0 {
+        return formatted;
+    }
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+pub(crate) fn concise_number(value: f64) -> String {
     if value.fract().abs() < f64::EPSILON {
         format!("{value:.0}")
     } else {
@@ -331,7 +378,7 @@ pub(super) fn concise_number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{LoadGroup, MetricFamily, MetricUnit, catalog, points};
-    use crate::tui::{CaseLoad, CaseView};
+    use crate::console::{CaseLoad, CaseView};
     use std::collections::BTreeMap;
 
     fn case(load: CaseLoad, metrics: &[(&str, f64)]) -> CaseView {
@@ -405,5 +452,17 @@ mod tests {
         assert_eq!(points[1].value, None);
         assert_eq!(points[2].label, "r8");
         assert_eq!(points[2].group, LoadGroup::RequestRate);
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| point.load.clone())
+                .collect::<Vec<_>>(),
+            [
+                CaseLoad::Concurrency(1),
+                CaseLoad::Concurrency(16),
+                CaseLoad::RequestRate(8.0)
+            ],
+            "comparison places points by the typed load, not the label"
+        );
     }
 }

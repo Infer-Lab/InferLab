@@ -1,12 +1,12 @@
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum MatchRank {
+pub(crate) enum MatchRank {
     Exact,
     Prefix,
     Contains,
     Fuzzy,
 }
 
-pub(super) fn match_rank(query: &str, value: &str) -> Option<MatchRank> {
+pub(crate) fn match_rank(query: &str, value: &str) -> Option<MatchRank> {
     let query = query.to_lowercase();
     let value = value.to_lowercase();
     match_rank_normalized(&query, &value)
@@ -30,7 +30,7 @@ fn match_rank_normalized(query: &str, value: &str) -> Option<MatchRank> {
 }
 
 #[cfg(test)]
-pub(super) fn match_rank_fields(query: &str, fields: &[String]) -> Option<(MatchRank, usize)> {
+pub(crate) fn match_rank_fields(query: &str, fields: &[String]) -> Option<(MatchRank, usize)> {
     let query = query.to_lowercase();
     let fields = fields
         .iter()
@@ -39,7 +39,7 @@ pub(super) fn match_rank_fields(query: &str, fields: &[String]) -> Option<(Match
     match_rank_normalized_fields(&query, &fields)
 }
 
-pub(super) fn match_rank_normalized_fields(
+pub(crate) fn match_rank_normalized_fields(
     query: &str,
     fields: &[String],
 ) -> Option<(MatchRank, usize)> {

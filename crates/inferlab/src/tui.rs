@@ -1,18 +1,23 @@
 //! Responsive, strictly view-only workspace terminal interface.
 
 mod app;
-mod bench_detail;
-mod collector;
-mod metrics;
-mod presentation;
-mod records;
+mod appearance;
 #[cfg(test)]
 mod scale_qualification;
-mod search;
 mod ui;
-mod views;
 
-use app::{App, AppAction, InputMode, View};
+use app::{App, AppAction, InputMode};
+
+// The workspace read model is shared with the web console ([[ADR-0056]]).
+#[cfg(test)]
+use crate::console::{
+    CaseLoad, CaseView, DefinitionView, FactSection, JournalView, ObjectState, OperationView,
+    OverviewSection, WorkspaceView,
+};
+use crate::console::{
+    DetailSection, DisplayEntry, DisplayTone, EntryKind, OverviewSummary, RecordView, Snapshot,
+    State, View, collector, metrics, presentation, records, search, views,
+};
 
 use crate::InferlabError;
 use crossterm::event::{self, Event};
@@ -22,7 +27,6 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use std::collections::BTreeMap;
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -32,8 +36,10 @@ use std::time::{Duration, Instant};
 const MIN_WIDTH: u16 = 50;
 const MIN_HEIGHT: u16 = 12;
 const WIDE_WIDTH: u16 = 112;
-const LOG_TAIL_BYTES: u64 = 64 * 1024;
 const PRESENTATION_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
+/// Frame interval of an active operation's glyph; redrawn from the last
+/// complete generation, so animation never starts a refresh.
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) fn run(
     root: PathBuf,
@@ -47,6 +53,9 @@ pub(crate) fn run(
     }
     inferlab_runtime::interrupt::prepare()
         .map_err(|source| InferlabError::TuiInterrupt { source })?;
+    // Before the TUI takes over the terminal: the query consumes the
+    // terminal's replies itself, so none reaches key input.
+    let detected = appearance::detect();
     let mut terminal = TerminalSession::enter()?;
     let (request_tx, request_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
@@ -56,6 +65,7 @@ pub(crate) fn run(
         .map_err(|source| InferlabError::WriteOutput { source })?;
 
     let mut app = App::default();
+    app.use_appearance(detected);
     let mut in_flight = request_tx
         .send(RefreshRequest::Refresh {
             force_declared: true,
@@ -65,6 +75,7 @@ pub(crate) fn run(
     let mut refresh_indicator = RefreshIndicatorClock::new(refresh_interval);
     let mut next_refresh = Instant::now() + refresh_interval;
     let mut next_presentation_clock = Instant::now() + PRESENTATION_CLOCK_INTERVAL;
+    let mut next_animation = Instant::now() + ANIMATION_INTERVAL;
     let mut redraw = true;
     let result = loop {
         if inferlab_runtime::interrupt::received() {
@@ -93,6 +104,11 @@ pub(crate) fn run(
         if refresh_indicator.consume_due_transition(now) {
             redraw = true;
         }
+        if app.animates() && now >= next_animation {
+            next_animation = advance_tick(next_animation, ANIMATION_INTERVAL, now);
+            app.advance_animation();
+            redraw = true;
+        }
         if redraw {
             let refresh_status = refresh_indicator.status(Instant::now());
             terminal
@@ -107,11 +123,14 @@ pub(crate) fn run(
             redraw = true;
         }
         let now = Instant::now();
-        let next_scheduled_wake = refresh_indicator
+        let mut next_scheduled_wake = refresh_indicator
             .next_transition()
             .map_or(next_refresh.min(next_presentation_clock), |transition| {
                 next_refresh.min(next_presentation_clock).min(transition)
             });
+        if app.animates() {
+            next_scheduled_wake = next_scheduled_wake.min(next_animation);
+        }
         let until_tick = next_scheduled_wake.saturating_duration_since(now);
         let poll_for = until_tick.min(Duration::from_millis(100));
         if event::poll(poll_for).map_err(|source| InferlabError::WriteOutput { source })? {
@@ -193,50 +212,6 @@ fn refresh_status(
         RefreshStatus::Overdue { elapsed }
     } else {
         RefreshStatus::Healthy { interval }
-    }
-}
-
-#[cfg(test)]
-mod refresh_status_tests {
-    use super::{RefreshIndicatorClock, RefreshStatus, refresh_status};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn completion_receipt_starts_the_monotonic_overdue_window() {
-        let received = Instant::now();
-        let interval = Duration::from_secs(1);
-
-        let healthy = refresh_status(
-            interval,
-            Some(received),
-            received + Duration::from_millis(1_999),
-        );
-        let overdue = refresh_status(interval, Some(received), received + Duration::from_secs(2));
-
-        assert_eq!(healthy, RefreshStatus::Healthy { interval });
-        assert_eq!(
-            overdue,
-            RefreshStatus::Overdue {
-                elapsed: Duration::from_secs(2)
-            }
-        );
-    }
-
-    #[test]
-    fn nonaligned_completion_schedules_the_exact_overdue_redraw() {
-        let tick_anchor = Instant::now();
-        let received = tick_anchor + Duration::from_millis(100);
-        let mut clock = RefreshIndicatorClock::new(Duration::from_secs(1));
-
-        clock.completed(received);
-
-        assert_eq!(
-            clock.next_transition(),
-            Some(tick_anchor + Duration::from_millis(2_100))
-        );
-        assert!(!clock.consume_due_transition(tick_anchor + Duration::from_secs(2)));
-        assert!(clock.consume_due_transition(tick_anchor + Duration::from_millis(2_100)));
-        assert_eq!(clock.next_transition(), None);
     }
 }
 
@@ -322,280 +297,46 @@ impl Drop for TerminalSession {
     }
 }
 
-#[derive(Clone)]
-struct Snapshot {
-    root: PathBuf,
-    observed_unix_ms: u64,
-    workspace: ObjectState<WorkspaceView>,
-    operations: Vec<OperationView>,
-    records: Vec<RecordView>,
-    child_servers: Vec<RecordView>,
-    definitions: Vec<DefinitionView>,
-    journal: Vec<JournalView>,
-    operations_error: Option<String>,
-    records_error: Option<String>,
-    definitions_error: Option<String>,
-    journal_error: Option<String>,
-}
+#[cfg(test)]
+mod refresh_status_tests {
+    use super::{RefreshIndicatorClock, RefreshStatus, refresh_status};
+    use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum State {
-    Live,
-    Stale,
-    Unavailable,
-    Incompatible,
-}
+    #[test]
+    fn completion_receipt_starts_the_monotonic_overdue_window() {
+        let received = Instant::now();
+        let interval = Duration::from_secs(1);
 
-impl State {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Live => "live",
-            Self::Stale => "stale",
-            Self::Unavailable => "unavailable",
-            Self::Incompatible => "incompatible",
-        }
-    }
-}
+        let healthy = refresh_status(
+            interval,
+            Some(received),
+            received + Duration::from_millis(1_999),
+        );
+        let overdue = refresh_status(interval, Some(received), received + Duration::from_secs(2));
 
-#[derive(Clone)]
-struct ObjectState<T> {
-    state: State,
-    value: Option<T>,
-    reason: Option<String>,
-    observed_unix_ms: u64,
-    last_success_unix_ms: Option<u64>,
-}
-
-#[derive(Clone)]
-struct WorkspaceView {
-    revision: String,
-    dirty: bool,
-}
-
-#[derive(Clone)]
-struct OperationView {
-    key: String,
-    state: State,
-    reason: Option<String>,
-    command: Option<String>,
-    phase: Option<String>,
-    item: Option<String>,
-    record_ref: Option<String>,
-    log_ref: Option<String>,
-    started_unix_ms: Option<u64>,
-    updated_unix_ms: Option<u64>,
-    observed_unix_ms: u64,
-    last_success_unix_ms: Option<u64>,
-    schema_version: Option<u32>,
-    producer: Option<crate::operation::ProducerIdentity>,
-    position: Option<crate::operation::OperationPosition>,
-    lock: Option<String>,
-    readiness_failure: Option<String>,
-}
-
-#[derive(Clone)]
-struct RecordView {
-    path: PathBuf,
-    state: State,
-    reason: Option<String>,
-    id: Option<String>,
-    kind: String,
-    status: Option<String>,
-    definition_ids: Vec<String>,
-    case: Option<String>,
-    workflow: Option<String>,
-    error: Option<String>,
-    started_unix_ms: Option<u64>,
-    finished_unix_ms: Option<u64>,
-    log_refs: Vec<String>,
-    observed_unix_ms: u64,
-    last_success_unix_ms: Option<u64>,
-    child_refs: Vec<String>,
-    topology: Option<String>,
-    cases: Vec<CaseView>,
-    outcome_facts: Vec<(String, String)>,
-    bench_details: Vec<FactSection>,
-    artifact_refs: Vec<String>,
-    process_observation: Option<ObjectState<bool>>,
-}
-
-#[derive(Clone)]
-struct CaseView {
-    id: Option<String>,
-    load: CaseLoad,
-    status: Option<String>,
-    stdout: Option<String>,
-    stderr: Option<String>,
-    error: Option<String>,
-    metrics: BTreeMap<String, f64>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum CaseLoad {
-    Concurrency(u32),
-    RequestRate(f64),
-    UnboundedRequestRate,
-    Unknown,
-}
-
-#[derive(Clone)]
-struct DefinitionView {
-    kind: String,
-    id: String,
-    relationship: String,
-    fact_sections: Vec<FactSection>,
-    state: State,
-    observed_unix_ms: u64,
-    last_success_unix_ms: u64,
-    reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FactSection {
-    title: &'static str,
-    rows: Vec<(String, String)>,
-}
-
-#[derive(Clone)]
-struct JournalView {
-    timestamp: String,
-    topic: Option<String>,
-    author: String,
-    text: String,
-    records: Vec<String>,
-    state: State,
-    observed_unix_ms: u64,
-    last_success_unix_ms: u64,
-    reason: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum EntryKind {
-    Workspace,
-    Operation,
-    Record,
-    Definition,
-    Journal,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Authority {
-    Declared,
-    Recorded,
-    Ephemeral,
-    Observed,
-}
-
-impl Authority {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Declared => "declared",
-            Self::Recorded => "recorded",
-            Self::Ephemeral => "ephemeral",
-            Self::Observed => "observed",
-        }
+        assert_eq!(healthy, RefreshStatus::Healthy { interval });
+        assert_eq!(
+            overdue,
+            RefreshStatus::Overdue {
+                elapsed: Duration::from_secs(2)
+            }
+        );
     }
 
-    const fn badge(self) -> &'static str {
-        match self {
-            Self::Declared => "DECL",
-            Self::Recorded => "REC",
-            Self::Ephemeral => "EPH",
-            Self::Observed => "OBS",
-        }
+    #[test]
+    fn nonaligned_completion_schedules_the_exact_overdue_redraw() {
+        let tick_anchor = Instant::now();
+        let received = tick_anchor + Duration::from_millis(100);
+        let mut clock = RefreshIndicatorClock::new(Duration::from_secs(1));
+
+        clock.completed(received);
+
+        assert_eq!(
+            clock.next_transition(),
+            Some(tick_anchor + Duration::from_millis(2_100))
+        );
+        assert!(!clock.consume_due_transition(tick_anchor + Duration::from_secs(2)));
+        assert!(clock.consume_due_transition(tick_anchor + Duration::from_millis(2_100)));
+        assert_eq!(clock.next_transition(), None);
     }
-}
-
-impl EntryKind {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Workspace => "workspace",
-            Self::Operation => "operation",
-            Self::Record => "record",
-            Self::Definition => "definition",
-            Self::Journal => "note",
-        }
-    }
-
-    const fn group_label(self) -> &'static str {
-        match self {
-            Self::Workspace => "WORKSPACE",
-            Self::Operation => "OPERATIONS",
-            Self::Record => "RECORDS",
-            Self::Definition => "DEFINITIONS",
-            Self::Journal => "SCRATCHPAD",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum OverviewSection {
-    Attention,
-    Active,
-    Recent,
-    Workspace,
-}
-
-impl OverviewSection {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Attention => "ATTENTION",
-            Self::Active => "ACTIVE",
-            Self::Recent => "RECENT",
-            Self::Workspace => "WORKSPACE",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct OverviewSummary {
-    ephemeral_active: usize,
-    ephemeral_attention: usize,
-    recorded_active: usize,
-    recorded_attention: usize,
-    recorded_recent: usize,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum DisplayTone {
-    Normal,
-    Success,
-    Active,
-    Warning,
-    Critical,
-}
-
-#[derive(Clone)]
-struct DetailSection {
-    title: &'static str,
-    rows: Vec<(String, DetailValue)>,
-    body: Vec<String>,
-}
-
-#[derive(Clone)]
-enum DetailValue {
-    Text(String),
-    Age(Option<u64>),
-    TimestampWithAge(Option<u64>),
-    Elapsed {
-        start: Option<u64>,
-        finish: Option<u64>,
-        advances: bool,
-    },
-}
-
-#[derive(Clone)]
-struct DisplayEntry {
-    kind: EntryKind,
-    key: String,
-    record_ref: Option<String>,
-    title: String,
-    summary: String,
-    authority: Authority,
-    state: State,
-    lifecycle: Option<String>,
-    tone: DisplayTone,
-    details: Vec<DetailSection>,
-    search_fields: Vec<String>,
-    log_refs: Vec<String>,
 }

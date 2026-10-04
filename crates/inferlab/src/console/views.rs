@@ -1,7 +1,7 @@
 #[cfg(test)]
 use super::OverviewSummary;
 #[cfg(test)]
-use super::app::View;
+use super::View;
 use super::metrics;
 #[cfg(test)]
 use super::presentation::{EntrySource, Presentation};
@@ -11,7 +11,7 @@ use super::{
 };
 use std::path::Path;
 
-pub(super) fn workspace_display(snapshot: &Snapshot) -> DisplayEntry {
+pub(crate) fn workspace_display(snapshot: &Snapshot) -> DisplayEntry {
     match &snapshot.workspace.value {
         Some(workspace) => DisplayEntry {
             kind: EntryKind::Workspace,
@@ -60,6 +60,8 @@ pub(super) fn workspace_display(snapshot: &Snapshot) -> DisplayEntry {
                 snapshot.root.display().to_string(),
             ],
             log_refs: Vec::new(),
+            moment_unix_ms: None,
+            progress: None,
         },
         None => unavailable_entry(
             EntryKind::Workspace,
@@ -75,7 +77,7 @@ pub(super) fn workspace_display(snapshot: &Snapshot) -> DisplayEntry {
     }
 }
 
-pub(super) fn record_display(record: &RecordView, notes: Option<&[String]>) -> DisplayEntry {
+pub(crate) fn record_display(record: &RecordView, notes: Option<&[String]>) -> DisplayEntry {
     let mut display = record.display();
     if let Some(notes) = notes
         && !notes.is_empty()
@@ -87,7 +89,7 @@ pub(super) fn record_display(record: &RecordView, notes: Option<&[String]>) -> D
     display
 }
 
-pub(super) fn definition_display(snapshot: &Snapshot, definition: &DefinitionView) -> DisplayEntry {
+pub(crate) fn definition_display(snapshot: &Snapshot, definition: &DefinitionView) -> DisplayEntry {
     let mut display = definition.display();
     if let Some(workspace) = &snapshot.workspace.value {
         display.details.push(detail(
@@ -103,7 +105,7 @@ pub(super) fn definition_display(snapshot: &Snapshot, definition: &DefinitionVie
 
 #[cfg(test)]
 impl Snapshot {
-    pub(super) fn entries(&self, view: View) -> Vec<DisplayEntry> {
+    pub(crate) fn entries(&self, view: View) -> Vec<DisplayEntry> {
         let presentation = Presentation::from_snapshot(self);
         let source = EntrySource::View(view);
         (0..presentation.len(source))
@@ -111,12 +113,12 @@ impl Snapshot {
             .collect()
     }
 
-    pub(super) fn overview_summary(&self) -> OverviewSummary {
+    pub(crate) fn overview_summary(&self) -> OverviewSummary {
         Presentation::from_snapshot(self).overview_summary()
     }
 }
 
-pub(super) fn unavailable_entry(
+pub(crate) fn unavailable_entry(
     kind: EntryKind,
     key: &str,
     authority: Authority,
@@ -142,15 +144,17 @@ pub(super) fn unavailable_entry(
         )],
         search_fields: vec![label.to_owned(), reason.to_owned()],
         log_refs: Vec::new(),
+        moment_unix_ms: None,
+        progress: None,
     }
 }
 
 impl OperationView {
-    pub(super) fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
 
-    pub(super) fn refresh_failed(mut self, reason: &str, observed_unix_ms: u64) -> Self {
+    pub(crate) fn refresh_failed(mut self, reason: &str, observed_unix_ms: u64) -> Self {
         self.state = if self.last_success_unix_ms.is_some() {
             State::Stale
         } else {
@@ -161,7 +165,7 @@ impl OperationView {
         self
     }
 
-    pub(super) fn display(&self) -> DisplayEntry {
+    pub(crate) fn display(&self) -> DisplayEntry {
         let command = self.command.as_deref().unwrap_or("unreadable operation");
         let phase = self.phase.as_deref().unwrap_or("unknown phase");
         let producer = self.producer.as_ref().map_or_else(
@@ -273,12 +277,16 @@ impl OperationView {
             .flatten()
             .collect(),
             log_refs: self.log_ref.iter().cloned().collect(),
+            moment_unix_ms: self.updated_unix_ms.or(self.started_unix_ms),
+            progress: self
+                .position
+                .map(|position| (position.index, position.total)),
         }
     }
 }
 
 impl RecordView {
-    pub(super) fn needs_attention(&self) -> bool {
+    pub(crate) fn needs_attention(&self) -> bool {
         self.state != State::Live
             || matches!(self.status.as_deref(), Some("failed" | "skipped"))
             || self
@@ -292,7 +300,7 @@ impl RecordView {
                 && self.process_observation.is_none()
     }
 
-    pub(super) fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         if self.status.as_deref() != Some("running") {
             return false;
         }
@@ -305,7 +313,7 @@ impl RecordView {
                 })
     }
 
-    pub(super) fn refresh_failed(mut self, reason: &str, observed_unix_ms: u64) -> Self {
+    pub(crate) fn refresh_failed(mut self, reason: &str, observed_unix_ms: u64) -> Self {
         self.state = if self.last_success_unix_ms.is_some() {
             State::Stale
         } else {
@@ -316,7 +324,7 @@ impl RecordView {
         self
     }
 
-    pub(super) fn display(&self) -> DisplayEntry {
+    pub(crate) fn display(&self) -> DisplayEntry {
         let id = self.id.as_deref().unwrap_or_else(|| {
             self.path
                 .parent()
@@ -510,11 +518,7 @@ impl RecordView {
             key: id.to_owned(),
             record_ref: Some(id.to_owned()),
             title: format!("{} / {}", self.kind, record_label(id, &self.kind)),
-            summary: compact_join([
-                process_summary.as_deref(),
-                self.case.as_deref(),
-                Some(record_time(id)),
-            ]),
+            summary: compact_join([process_summary.as_deref(), self.case.as_deref()]),
             authority: Authority::Recorded,
             state: self.state,
             lifecycle: self.status.clone(),
@@ -522,19 +526,21 @@ impl RecordView {
             details,
             search_fields,
             log_refs: self.log_refs.clone(),
+            moment_unix_ms: self.finished_unix_ms.or(self.started_unix_ms),
+            progress: None,
         }
     }
 }
 
 impl DefinitionView {
-    pub(super) fn into_stale(mut self, observed_unix_ms: u64, reason: &str) -> Self {
+    pub(crate) fn into_stale(mut self, observed_unix_ms: u64, reason: &str) -> Self {
         self.state = State::Stale;
         self.observed_unix_ms = observed_unix_ms;
         self.reason = Some(reason.to_owned());
         self
     }
 
-    pub(super) fn display(&self) -> DisplayEntry {
+    pub(crate) fn display(&self) -> DisplayEntry {
         let mut details = vec![detail(
             "IDENTITY",
             [
@@ -579,6 +585,8 @@ impl DefinitionView {
             details,
             search_fields,
             log_refs: Vec::new(),
+            moment_unix_ms: None,
+            progress: None,
         }
     }
 }
@@ -595,14 +603,14 @@ fn fact_detail(title: &'static str, rows: &[(String, String)]) -> DetailSection 
 }
 
 impl JournalView {
-    pub(super) fn into_stale(mut self, observed_unix_ms: u64, reason: &str) -> Self {
+    pub(crate) fn into_stale(mut self, observed_unix_ms: u64, reason: &str) -> Self {
         self.state = State::Stale;
         self.observed_unix_ms = observed_unix_ms;
         self.reason = Some(reason.to_owned());
         self
     }
 
-    pub(super) fn display(&self, source_ordinal: usize) -> DisplayEntry {
+    pub(crate) fn display(&self, source_ordinal: usize) -> DisplayEntry {
         DisplayEntry {
             kind: EntryKind::Journal,
             key: format!("journal:{source_ordinal}:{}", self.timestamp),
@@ -645,6 +653,8 @@ impl JournalView {
                 .chain(self.records.iter().cloned())
                 .collect(),
             log_refs: Vec::new(),
+            moment_unix_ms: None,
+            progress: None,
         }
     }
 }
@@ -723,7 +733,7 @@ fn age_label(observed_unix_ms: u64, value: Option<u64>) -> String {
 }
 
 impl DetailValue {
-    pub(super) fn render(&self, reference_unix_ms: u64) -> String {
+    pub(crate) fn render(&self, reference_unix_ms: u64) -> String {
         match self {
             Self::Text(value) => value.clone(),
             Self::Age(value) => age_label(reference_unix_ms, *value),
@@ -748,12 +758,24 @@ fn relative_age(milliseconds: u64) -> String {
     }
 }
 
+/// A list row's age: one number and one unit letter.
+pub(crate) fn compact_age(milliseconds: u64) -> String {
+    match milliseconds {
+        0..=999 => "now".to_owned(),
+        1_000..=59_999 => format!("{}s", milliseconds / 1_000),
+        60_000..=3_599_999 => format!("{}m", milliseconds / 60_000),
+        3_600_000..=172_799_999 => format!("{}h", milliseconds / 3_600_000),
+        _ => format!("{}d", milliseconds / 86_400_000),
+    }
+}
+
 fn elapsed_duration(milliseconds: u64) -> String {
     match milliseconds {
         0..=999 => format!("{milliseconds} ms"),
         1_000..=59_999 => format!("{:.1} s", milliseconds as f64 / 1_000.0),
         60_000..=3_599_999 => format!("{:.1} min", milliseconds as f64 / 60_000.0),
-        _ => format!("{:.1} h", milliseconds as f64 / 3_600_000.0),
+        3_600_000..=172_799_999 => format!("{:.1} h", milliseconds as f64 / 3_600_000.0),
+        _ => format!("{} d", milliseconds / 86_400_000),
     }
 }
 
@@ -764,7 +786,7 @@ fn elapsed_between(start: Option<u64>, finish: Option<u64>) -> String {
     }
 }
 
-fn timestamp_with_age(reference_unix_ms: u64, value: Option<u64>) -> String {
+pub(crate) fn timestamp_with_age(reference_unix_ms: u64, value: Option<u64>) -> String {
     let Some(value) = value else {
         return "—".to_owned();
     };
@@ -773,6 +795,27 @@ fn timestamp_with_age(reference_unix_ms: u64, value: Option<u64>) -> String {
         timestamp_label(value),
         relative_age(reference_unix_ms.saturating_sub(value))
     )
+}
+
+/// A calendar day in UTC for grouping a timeline, such as `Jan 2`.
+pub(crate) fn day_label(unix_ms: u64) -> Option<String> {
+    let nanoseconds = i128::from(unix_ms) * 1_000_000;
+    let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(nanoseconds).ok()?;
+    let month = timestamp.month().to_string();
+    Some(format!(
+        "{} {}",
+        month.get(..3).unwrap_or(&month),
+        timestamp.day()
+    ))
+}
+
+/// A calendar day in UTC with its year, for the Records timeline.
+pub(crate) fn full_day_label(unix_ms: u64) -> Option<String> {
+    let nanoseconds = i128::from(unix_ms) * 1_000_000;
+    let year = time::OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
+        .ok()?
+        .year();
+    Some(format!("{} · {year}", day_label(unix_ms)?))
 }
 
 fn timestamp_label(unix_ms: u64) -> String {
@@ -874,10 +917,6 @@ fn record_label<'a>(id: &'a str, kind: &str) -> &'a str {
         .unwrap_or(without_time)
 }
 
-fn record_time(id: &str) -> &str {
-    id.split_once("Z-").map_or("", |(timestamp, _)| timestamp)
-}
-
 fn short_revision(revision: &str) -> &str {
     revision.get(..12).unwrap_or(revision)
 }
@@ -898,5 +937,13 @@ mod tests {
     fn elapsed_duration_retains_subsecond_precision() {
         assert_eq!(elapsed_duration(1), "1 ms");
         assert_eq!(elapsed_duration(999), "999 ms");
+    }
+
+    #[test]
+    fn ages_past_two_days_read_in_days() {
+        let hour = 3_600_000;
+        assert_eq!(elapsed_duration(47 * hour), "47.0 h");
+        assert_eq!(elapsed_duration(48 * hour), "2 d");
+        assert_eq!(relative_age(1_319 * hour), "54 d ago");
     }
 }

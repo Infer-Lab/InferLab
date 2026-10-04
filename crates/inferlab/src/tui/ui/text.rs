@@ -34,6 +34,49 @@ pub(super) fn ellipsize_middle(value: &str, max_width: usize) -> String {
     )
 }
 
+/// Word-wrap a value to a display width, breaking at spaces and splitting a
+/// word only when it alone exceeds the width.
+pub(super) fn wrap(value: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in value.split(' ') {
+        let mut word = word.to_owned();
+        loop {
+            let separator = usize::from(!line.is_empty());
+            if display_width(&line) + separator + display_width(&word) <= width {
+                if separator == 1 {
+                    line.push(' ');
+                }
+                line.push_str(&word);
+                break;
+            }
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                continue;
+            }
+            // A word wider than the line: split it at the width.
+            let mut head = take_width(&word, width, false);
+            if head.is_empty() {
+                // A grapheme wider than the whole line still has to go somewhere.
+                head = UnicodeSegmentation::graphemes(word.as_str(), true)
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            word = word.get(head.len()..).unwrap_or_default().to_owned();
+            lines.push(head);
+            if word.is_empty() {
+                break;
+            }
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 pub(super) fn pad_right(value: &str, width: usize) -> String {
     let value = ellipsize_end(value, width);
     format!(

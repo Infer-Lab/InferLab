@@ -22,6 +22,7 @@ pub(crate) use composition::{
 pub(crate) use composition::{snapshot_workspace, soft_local_bindings, workspace_identity};
 #[cfg(test)]
 pub(crate) use definitions::BenchRandomShape;
+pub(crate) use definitions::WORKSPACE_FILE;
 pub(crate) use definitions::{
     AggregateSlo, BenchAgenticSource, BenchArtifactLevel, BenchCacheStart, BenchDefinition,
     BenchRequestSource, BenchSessionSource, BenchTokenSelector, BenchTpotApplicability,

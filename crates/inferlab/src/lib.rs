@@ -6,6 +6,7 @@ mod bench_agentic_catalog;
 mod bench_dataset_catalog;
 mod bench_metric;
 mod cli;
+mod console;
 mod digest;
 mod environment;
 mod error;
@@ -21,6 +22,7 @@ mod server;
 mod toml_override;
 mod toolchain;
 mod tui;
+mod web;
 mod workload;
 mod workspace;
 

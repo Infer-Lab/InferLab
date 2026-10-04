@@ -1,29 +1,29 @@
-use super::app::View;
 use super::views::{definition_display, record_display, unavailable_entry, workspace_display};
 use super::{
     Authority, DisplayEntry, EntryKind, JournalView, OverviewSection, OverviewSummary, Snapshot,
     State, metrics, search,
 };
+use super::{StatusFilter, View};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum EntrySource {
+pub(crate) enum EntrySource {
     View(View),
     Global,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct EntryIdentity {
+pub(crate) struct EntryIdentity {
     kind: EntryKind,
     key: String,
 }
 
 impl EntryIdentity {
-    pub(super) fn new(kind: EntryKind, key: String) -> Self {
+    pub(crate) fn new(kind: EntryKind, key: String) -> Self {
         Self { kind, key }
     }
 
-    pub(super) fn of(entry: &DisplayEntry) -> Self {
+    pub(crate) fn of(entry: &DisplayEntry) -> Self {
         Self {
             kind: entry.kind,
             key: entry.key.clone(),
@@ -32,10 +32,13 @@ impl EntryIdentity {
 }
 
 #[derive(Clone)]
-pub(super) struct ViewItem {
+pub(crate) struct ViewItem {
     entry: usize,
-    pub(super) section: Option<OverviewSection>,
-    pub(super) group: Option<String>,
+    pub(crate) section: Option<OverviewSection>,
+    pub(crate) group: Option<String>,
+    /// The position of the parent this item is an explicit child reference
+    /// of, in the same view.
+    pub(crate) child_of: Option<usize>,
 }
 
 #[derive(Default)]
@@ -61,6 +64,7 @@ impl ViewIndex {
             entry,
             section,
             group,
+            child_of: None,
         });
         self.positions
             .entry(EntryIdentity::of(display))
@@ -69,6 +73,15 @@ impl ViewIndex {
 
     fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// Place an explicit child reference beneath the item at `parent`.
+    fn push_child(&mut self, entry: usize, display: &DisplayEntry, parent: usize) {
+        let group = self.items.get(parent).and_then(|item| item.group.clone());
+        self.push_with(entry, display, None, group);
+        if let Some(item) = self.items.last_mut() {
+            item.child_of = Some(parent);
+        }
     }
 
     fn item(&self, position: usize) -> Option<&ViewItem> {
@@ -80,7 +93,7 @@ impl ViewIndex {
     }
 }
 
-pub(super) struct Presentation {
+pub(crate) struct Presentation {
     entries: Vec<DisplayEntry>,
     overview: ViewIndex,
     operations: ViewIndex,
@@ -92,7 +105,7 @@ pub(super) struct Presentation {
 }
 
 impl Presentation {
-    pub(super) fn from_snapshot(snapshot: &Snapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &Snapshot) -> Self {
         let mut presentation = Self {
             entries: Vec::new(),
             overview: ViewIndex::default(),
@@ -103,6 +116,7 @@ impl Presentation {
             record_metrics: snapshot
                 .records
                 .iter()
+                .chain(&snapshot.child_records)
                 .filter_map(metrics::presentation)
                 .map(|record| (record.record_key.clone(), record))
                 .collect(),
@@ -152,7 +166,7 @@ impl Presentation {
             })
             .collect::<Vec<_>>();
         let child_entries = snapshot
-            .child_servers
+            .child_records
             .iter()
             .map(|record| push_display(&mut presentation, record.display()))
             .collect::<Vec<_>>();
@@ -234,10 +248,50 @@ impl Presentation {
                 .operations
                 .push(*entry, &presentation.entries[*entry]);
         }
-        for entry in &records_order {
+        // Records is a day-grouped timeline; each parent carries its explicit
+        // child references, available or not, beneath it.
+        let children_by_id = snapshot
+            .child_records
+            .iter()
+            .filter_map(|record| record.id.as_deref().map(|id| (id, record)))
+            .collect::<HashMap<_, _>>();
+        let parents = snapshot
+            .records
+            .iter()
+            .map(Some)
+            .chain(std::iter::repeat(None));
+        for (entry, record) in records_order.iter().zip(parents) {
+            let day = presentation.entries[*entry]
+                .moment_unix_ms
+                .and_then(super::views::full_day_label);
+            let parent = presentation.records.len();
             presentation
                 .records
-                .push(*entry, &presentation.entries[*entry]);
+                .push_with(*entry, &presentation.entries[*entry], None, day);
+            for child in record.map_or(&[][..], |record| record.child_refs.as_slice()) {
+                let display = children_by_id.get(child.as_str()).map_or_else(
+                    || {
+                        unavailable_entry(
+                            EntryKind::Record,
+                            child,
+                            Authority::Recorded,
+                            child,
+                            "child record cannot be read",
+                        )
+                    },
+                    |record| {
+                        let mut display = record_display(record, None);
+                        relative_to_parent(&mut display, &presentation.entries[*entry].title);
+                        display
+                    },
+                );
+                let child_entry = push_display(&mut presentation, display);
+                presentation.records.push_child(
+                    child_entry,
+                    &presentation.entries[child_entry],
+                    parent,
+                );
+            }
         }
         let mut workspace_order = Vec::new();
         for (group, _, entry) in definition_entries {
@@ -284,7 +338,7 @@ impl Presentation {
         let mut active_operations = Vec::new();
         let mut active_records = Vec::new();
         let mut child_server_attention = Vec::new();
-        let mut active_child_servers = Vec::new();
+        let mut active_child_records = Vec::new();
         let mut recent = Vec::new();
         let mut summary = OverviewSummary {
             ephemeral_active: 0,
@@ -322,11 +376,14 @@ impl Presentation {
                 recent.push(*entry);
             }
         }
-        for (server, entry) in snapshot.child_servers.iter().zip(&child_entries) {
+        for (server, entry) in snapshot.child_records.iter().zip(&child_entries) {
+            if server.kind != "server" {
+                continue;
+            }
             if server.needs_attention() {
                 child_server_attention.push(*entry);
             } else if server.is_active() {
-                active_child_servers.push(*entry);
+                active_child_records.push(*entry);
             }
         }
         let mut overview = Vec::new();
@@ -346,7 +403,7 @@ impl Presentation {
         extend_overview_section(
             &mut overview,
             &active_records,
-            &active_child_servers,
+            &active_child_records,
             5,
             OverviewSection::Active,
         );
@@ -358,39 +415,94 @@ impl Presentation {
         );
         overview.push((workspace_entry, OverviewSection::Workspace));
         for (entry, section) in overview {
+            // RECENT groups its records by calendar day.
+            let group = (section == OverviewSection::Recent)
+                .then(|| presentation.entries[entry].moment_unix_ms)
+                .flatten()
+                .and_then(super::views::day_label)
+                .map(|day| format!("{} · {day}", section.label()));
             presentation.overview.push_with(
                 entry,
                 &presentation.entries[entry],
                 Some(section),
-                None,
+                group,
             );
         }
         presentation.overview_summary = summary;
         presentation
     }
 
-    pub(super) fn entry(&self, source: EntrySource, position: usize) -> Option<&DisplayEntry> {
+    pub(crate) fn entry(&self, source: EntrySource, position: usize) -> Option<&DisplayEntry> {
         let item = self.index(source).item(position)?;
         self.entries.get(item.entry)
     }
 
-    pub(super) fn item(&self, source: EntrySource, position: usize) -> Option<&ViewItem> {
+    /// The visible positions of a view, the one rule both surfaces apply
+    /// ([[RFC-0010:C-NAVIGATION]]): top-level items matching the query and the
+    /// status filter, each followed by its children when it is expanded.
+    pub(crate) fn visible(
+        &self,
+        source: EntrySource,
+        query: Option<&str>,
+        filter: StatusFilter,
+        expanded: impl Fn(&str) -> bool,
+    ) -> Vec<usize> {
+        let positions = match query {
+            Some(query) => self.matching_positions(source, query),
+            None => (0..self.len(source)).collect(),
+        };
+        positions
+            .into_iter()
+            .filter(|position| {
+                self.item(source, *position)
+                    .is_none_or(|item| item.child_of.is_none())
+                    && self
+                        .entry(source, *position)
+                        .is_some_and(|entry| filter.admits(entry))
+            })
+            .flat_map(|position| {
+                let open = self
+                    .entry(source, position)
+                    .is_some_and(|entry| expanded(&entry.key));
+                std::iter::once(position).chain(if open {
+                    self.children(source, position)
+                } else {
+                    Vec::new()
+                })
+            })
+            .collect()
+    }
+
+    /// The explicit child references placed beneath the item at `position`.
+    pub(crate) fn children(&self, source: EntrySource, position: usize) -> Vec<usize> {
+        let index = self.index(source);
+        index
+            .items
+            .iter()
+            .enumerate()
+            .skip(position + 1)
+            .take_while(|(_, item)| item.child_of == Some(position))
+            .map(|(child, _)| child)
+            .collect()
+    }
+
+    pub(crate) fn item(&self, source: EntrySource, position: usize) -> Option<&ViewItem> {
         self.index(source).item(position)
     }
 
-    pub(super) fn len(&self, source: EntrySource) -> usize {
+    pub(crate) fn len(&self, source: EntrySource) -> usize {
         self.index(source).len()
     }
 
-    pub(super) fn identity(&self, source: EntrySource, position: usize) -> Option<EntryIdentity> {
+    pub(crate) fn identity(&self, source: EntrySource, position: usize) -> Option<EntryIdentity> {
         self.entry(source, position).map(EntryIdentity::of)
     }
 
-    pub(super) fn position(&self, source: EntrySource, identity: &EntryIdentity) -> Option<usize> {
+    pub(crate) fn position(&self, source: EntrySource, identity: &EntryIdentity) -> Option<usize> {
         self.index(source).position(identity)
     }
 
-    pub(super) fn matching_positions(&self, source: EntrySource, query: &str) -> Vec<usize> {
+    pub(crate) fn matching_positions(&self, source: EntrySource, query: &str) -> Vec<usize> {
         let query = query.to_lowercase();
         let mut matches = (0..self.len(source))
             .filter_map(|position| {
@@ -403,11 +515,11 @@ impl Presentation {
         matches.into_iter().map(|(position, _)| position).collect()
     }
 
-    pub(super) fn overview_summary(&self) -> OverviewSummary {
+    pub(crate) fn overview_summary(&self) -> OverviewSummary {
         self.overview_summary
     }
 
-    pub(super) fn record_metrics(&self, record_key: &str) -> Option<&metrics::RecordMetrics> {
+    pub(crate) fn record_metrics(&self, record_key: &str) -> Option<&metrics::RecordMetrics> {
         self.record_metrics.get(record_key)
     }
 
@@ -442,6 +554,24 @@ fn journal_by_record(journal: &[JournalView]) -> HashMap<&str, Vec<String>> {
     by_record
 }
 
+/// A child reference reads relative to its parent: a recipe's bench
+/// `…-1890795-bench-000-serving` becomes `bench-000-serving` beneath it.
+fn relative_to_parent(child: &mut DisplayEntry, parent_title: &str) {
+    let Some((_, parent)) = parent_title.split_once(" / ") else {
+        return;
+    };
+    let Some((kind, name)) = child.title.split_once(" / ") else {
+        return;
+    };
+    if let Some(relative) = name
+        .find(&format!("{parent}-"))
+        .and_then(|start| name.get(start + parent.len() + 1..))
+        .filter(|relative| !relative.is_empty())
+    {
+        child.title = format!("{kind} / {relative}");
+    }
+}
+
 fn push_display(presentation: &mut Presentation, mut display: DisplayEntry) -> usize {
     Presentation::normalize_search_fields(&mut display);
     let entry = presentation.entries.len();
@@ -452,11 +582,11 @@ fn push_display(presentation: &mut Presentation, mut display: DisplayEntry) -> u
 fn extend_overview_section(
     entries: &mut Vec<(usize, OverviewSection)>,
     primary: &[usize],
-    child_servers: &[usize],
+    child_records: &[usize],
     limit: usize,
     section: OverviewSection,
 ) {
-    let reserved = usize::from(!child_servers.is_empty());
+    let reserved = usize::from(!child_records.is_empty());
     let start = entries.len();
     entries.extend(
         primary
@@ -467,7 +597,7 @@ fn extend_overview_section(
     );
     let remaining = limit.saturating_sub(entries.len().saturating_sub(start));
     entries.extend(
-        child_servers
+        child_records
             .iter()
             .copied()
             .take(remaining)

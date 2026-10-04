@@ -3,11 +3,11 @@ use super::bench_detail::{
     PopulationSliceProjection, RequestSourceProjection, SessionSourceProjection,
 };
 use super::{CaseView, LOG_TAIL_BYTES, RecordView, State};
+use inferlab_protocol::BenchLoadInput;
 use inferlab_protocol::{
     BenchAgenticResultEvidence, BenchPromptTokenReconciliation, BenchSessionResultEvidence,
     RawArtifact,
 };
-use inferlab_protocol::{BenchClientRequest, BenchLoadInput};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -200,9 +200,9 @@ struct ValidationProjection {
     outcome: serde_json::Value,
 }
 
-pub(super) struct RecordCollection {
+pub(crate) struct RecordCollection {
     pub records: Vec<RecordView>,
-    pub child_servers: Vec<RecordView>,
+    pub child_records: Vec<RecordView>,
     pub error: Option<String>,
 }
 
@@ -219,14 +219,14 @@ struct CachedRecord {
 }
 
 #[derive(Default)]
-pub(super) struct RecordReader {
+pub(crate) struct RecordReader {
     finalized: HashMap<PathBuf, CachedRecord>,
     #[cfg(test)]
     body_reads: usize,
 }
 
 impl RecordReader {
-    pub(super) fn read(&mut self, root: &Path, observed_unix_ms: u64) -> RecordCollection {
+    pub(crate) fn read(&mut self, root: &Path, observed_unix_ms: u64) -> RecordCollection {
         let directory = root.join(crate::record::RECORDS_DIR);
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -234,14 +234,14 @@ impl RecordReader {
                 self.finalized.clear();
                 return RecordCollection {
                     records: Vec::new(),
-                    child_servers: Vec::new(),
+                    child_records: Vec::new(),
                     error: None,
                 };
             }
             Err(error) => {
                 return RecordCollection {
                     records: Vec::new(),
-                    child_servers: Vec::new(),
+                    child_records: Vec::new(),
                     error: Some(format!("failed to read {}: {error}", directory.display())),
                 };
             }
@@ -331,19 +331,19 @@ fn organize_records(
         .iter()
         .flat_map(|record| record.child_refs.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut child_servers = records
+    // Every explicitly referenced child stays available beneath its parent;
+    // Overview takes its running and abnormal servers from the same list.
+    let mut child_records = records
         .iter()
-        .filter(|record| {
-            record.kind == "server" && record.id.as_ref().is_some_and(|id| child_ids.contains(id))
-        })
+        .filter(|record| record.id.as_ref().is_some_and(|id| child_ids.contains(id)))
         .cloned()
         .collect::<Vec<_>>();
     records.retain(|record| record.id.as_ref().is_none_or(|id| !child_ids.contains(id)));
     records.sort_by_key(|record| std::cmp::Reverse(record.started_unix_ms.unwrap_or(0)));
-    child_servers.sort_by_key(|record| std::cmp::Reverse(record.started_unix_ms.unwrap_or(0)));
+    child_records.sort_by_key(|record| std::cmp::Reverse(record.started_unix_ms.unwrap_or(0)));
     RecordCollection {
         records,
-        child_servers,
+        child_records,
         error: collection_error,
     }
 }
@@ -428,7 +428,10 @@ fn read_record(root: &Path, path: PathBuf, observed_unix_ms: u64) -> RecordView 
         .as_ref()
         .and_then(|resolved| resolved.server.as_ref())
         .and_then(|server| server.topology.as_ref())
-        .and_then(|topology| serde_json::to_string(topology).ok());
+        .and_then(|topology| match serde_json::to_value(topology) {
+            Ok(serde_json::Value::String(topology)) => Some(topology),
+            _ => None,
+        });
     let mut child_refs = projection
         .server
         .iter()
@@ -687,6 +690,18 @@ fn resolved_prompt(resolved: &ResolvedProjection) -> Option<&PromptProjection> {
         .and_then(|definition| definition.prompt.as_ref())
 }
 
+/// Only the load a case request carries: requests of earlier protocols
+/// differ elsewhere but record the load in the same typed shape.
+#[derive(Deserialize)]
+struct CaseRequestProjection {
+    case: CaseLoadProjection,
+}
+
+#[derive(Deserialize)]
+struct CaseLoadProjection {
+    load_shape: BenchLoadInput,
+}
+
 fn read_case_load(root: &Path, reference: Option<&Path>) -> Option<super::CaseLoad> {
     let reference = reference?;
     let path = if reference.is_absolute() {
@@ -697,7 +712,7 @@ fn read_case_load(root: &Path, reference: Option<&Path>) -> Option<super::CaseLo
     let Ok(bytes) = fs::read(path) else {
         return None;
     };
-    let Ok(request) = serde_json::from_slice::<BenchClientRequest>(&bytes) else {
+    let Ok(request) = serde_json::from_slice::<CaseRequestProjection>(&bytes) else {
         return None;
     };
     Some(match request.case.load_shape {
@@ -775,7 +790,23 @@ fn unavailable_record(path: PathBuf, reason: String, observed_unix_ms: u64) -> R
     }
 }
 
-pub(super) fn read_log_tail(root: &Path, reference: &str) -> String {
+pub(crate) fn read_log_tail(root: &Path, reference: &str) -> String {
+    read_log_page(root, reference, 0).text
+}
+
+/// One bounded window of a referenced log, counted back from its end; page 0
+/// is the tail.
+pub(crate) struct LogPage {
+    pub(crate) text: String,
+    /// Whether the log holds earlier bytes than this page.
+    pub(crate) earlier: bool,
+}
+
+pub(crate) fn read_log_page(root: &Path, reference: &str, page: u64) -> LogPage {
+    let unavailable = |text: String| LogPage {
+        text,
+        earlier: false,
+    };
     let reference = Path::new(reference);
     let path = if reference.is_absolute() {
         reference.to_path_buf()
@@ -784,24 +815,28 @@ pub(super) fn read_log_tail(root: &Path, reference: &str) -> String {
     };
     let mut file = match fs::File::open(&path) {
         Ok(file) => file,
-        Err(error) => return format!("[unavailable] {}: {error}", path.display()),
+        Err(error) => return unavailable(format!("[unavailable] {}: {error}", path.display())),
     };
     let length = file.metadata().map_or(0, |metadata| metadata.len());
-    let start = length.saturating_sub(LOG_TAIL_BYTES);
+    let end = length.saturating_sub(page.saturating_mul(LOG_TAIL_BYTES));
+    let start = end.saturating_sub(LOG_TAIL_BYTES);
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return format!("[unavailable] could not seek {}", path.display());
+        return unavailable(format!("[unavailable] could not seek {}", path.display()));
     }
     let mut bytes = Vec::new();
-    if file.take(LOG_TAIL_BYTES).read_to_end(&mut bytes).is_err() {
-        return format!("[unavailable] could not read {}", path.display());
+    if file.take(end - start).read_to_end(&mut bytes).is_err() {
+        return unavailable(format!("[unavailable] could not read {}", path.display()));
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    LogPage {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        earlier: start > 0,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{RecordReader, State, read_log_tail, read_record, read_records};
-    use crate::tui::CaseLoad;
+    use crate::console::CaseLoad;
 
     #[test]
     fn an_eval_record_surfaces_the_prompt_authority_that_produced_its_metric()
@@ -1099,8 +1134,31 @@ mod tests {
         assert_eq!(collection.records.len(), 1);
         assert_eq!(collection.records[0].id.as_deref(), Some("recipe-1"));
         assert_eq!(collection.records[0].child_refs, ["serve-1", "eval-1"]);
-        assert_eq!(collection.child_servers.len(), 1);
-        assert_eq!(collection.child_servers[0].id.as_deref(), Some("serve-1"));
+        assert_eq!(
+            collection
+                .child_records
+                .iter()
+                .map(|record| record.id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("serve-1"), Some("eval-1")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn topology_renders_as_text_not_json() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join(".inferlab/records/serve-1");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("record.json"),
+            r#"{"id":"serve-1","kind":"server","status":"stopped","started_unix_ms":1,"resolved":{"server":{"id":"pd","topology":"prefill_decode"}}}"#,
+        )?;
+        let collection = read_records(root.path(), 10);
+        assert_eq!(
+            collection.records[0].topology.as_deref(),
+            Some("prefill_decode")
+        );
         Ok(())
     }
 
@@ -1199,6 +1257,34 @@ mod tests {
         assert_eq!(
             collection.records[0].cases[0].load,
             CaseLoad::Concurrency(16)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn case_loads_survive_requests_of_an_earlier_protocol() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let case_dir = root
+            .path()
+            .join(".inferlab/records/bench-1/cases/concurrency-000");
+        std::fs::create_dir_all(&case_dir)?;
+        // An earlier request protocol: the case carries no warmup count and
+        // the endpoint and definition differ, but the load shape is the same.
+        std::fs::write(
+            case_dir.join("request.json"),
+            r#"{"protocol_version":"3","endpoint":{"base_url":"http://127.0.0.1:8000"},"model":"test","definition":{},"case":{"load_shape":{"kind":"concurrency_limited","concurrency":4},"request_count":4},"artifact_dir":"artifacts"}"#,
+        )?;
+        std::fs::write(
+            root.path().join(".inferlab/records/bench-1/record.json"),
+            r#"{"id":"bench-1","kind":"bench","status":"succeeded","started_unix_ms":1,"cases":[{"id":"concurrency-000","status":"succeeded","request":".inferlab/records/bench-1/cases/concurrency-000/request.json","metrics":{"request_throughput":1.0}}]}"#,
+        )?;
+
+        let collection = read_records(root.path(), 10);
+
+        assert_eq!(
+            collection.records[0].cases[0].load,
+            CaseLoad::Concurrency(4)
         );
         Ok(())
     }

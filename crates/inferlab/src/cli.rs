@@ -53,6 +53,9 @@ enum Command {
     /// Observe the current workspace in a view-only terminal interface.
     #[command(long_about = help::TUI, after_long_help = help::TUI_KEYS)]
     Tui(TuiArgs),
+    /// Serve a token-protected browser console over registered workspaces.
+    #[command(long_about = help::WEB, after_long_help = help::WEB_EXAMPLES)]
+    Web(WebArgs),
     /// Maintain the committed workspace.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
@@ -98,6 +101,19 @@ struct TuiArgs {
     /// Alternate machine-local bindings file.
     #[arg(long, value_name = "FILE")]
     local: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct WebArgs {
+    /// Address to listen on; a non-loopback address exposes the console to the network.
+    #[arg(long, default_value = "127.0.0.1")]
+    bind: std::net::IpAddr,
+    /// Port to listen on; a free port when omitted.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    /// Fixed refresh interval of every workspace.
+    #[arg(long, default_value = "1s", value_parser = humantime::parse_duration)]
+    refresh_interval: Duration,
 }
 
 #[derive(Debug, Subcommand)]
@@ -221,6 +237,14 @@ struct InternalArgs {
 enum InternalCommand {
     /// Run a built-in HTTP proxy.
     Proxy(InternalProxyArgs),
+    /// Supervise one web console job ([[RFC-0012:C-ACTIONS]]).
+    JobSupervise(JobSuperviseArgs),
+}
+
+#[derive(Debug, Args)]
+struct JobSuperviseArgs {
+    /// The job directory whose recorded vector to run.
+    directory: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -489,6 +513,20 @@ struct BenchArgs {
 pub fn run(cli: Cli) -> Result<(), InferlabError> {
     let Cli { workspace, command } = cli;
     match command {
+        Command::Web(args) => {
+            // An explicit --workspace must name one; discovery that finds none
+            // registers none ([[RFC-0012:C-WORKSPACES]]).
+            let selected = match workspace.as_deref() {
+                Some(explicit) => Some(discover_workspace(Some(explicit))?),
+                None => discover_workspace(None).ok(),
+            };
+            crate::web::run(crate::web::WebOptions {
+                bind: args.bind,
+                port: args.port,
+                refresh_interval: args.refresh_interval,
+                workspace: selected,
+            })
+        }
         Command::Tui(args) => {
             let root = discover_workspace(workspace.as_deref())?;
             crate::tui::run(root, args.refresh_interval, args.local)
@@ -795,6 +833,7 @@ fn run_image_build(
 
 fn run_internal(args: InternalArgs) -> Result<(), InferlabError> {
     match args.command {
+        InternalCommand::JobSupervise(args) => crate::web::supervise_job(&args.directory),
         InternalCommand::Proxy(args) => match args.command {
             InternalProxyCommand::VllmMooncake(args) => {
                 inferlab_proxy::vllm_mooncake::run(inferlab_proxy::vllm_mooncake::Config {

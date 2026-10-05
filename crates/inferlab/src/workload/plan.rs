@@ -3,7 +3,7 @@
 
 use super::domain::{
     BenchPopulation, MeasurementModel, ResolvedBenchDefinition, ResolvedBenchPrompt,
-    ResolvedBenchSloPolicy, WorkloadEndpoint, WorkloadHttpAction,
+    ResolvedBenchSloPolicy, WorkloadEndpoint, WorkloadHttpAction, WorkloadReplicaReset,
 };
 use crate::execution::ResolvedExecution;
 use crate::toolchain::{BenchToolchainIdentity, BundledEvalTask, EvalToolchainIdentity};
@@ -183,6 +183,10 @@ pub(crate) struct BenchClientPlan {
     pub command: ClientCommandPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<WorkloadHttpAction>,
+    /// The per-target reset of every model-serving replica, used instead of
+    /// a public reset action ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replica_prefix_cache_resets: Vec<WorkloadReplicaReset>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_conditioning: Option<BenchPrefixCacheConditioningPlan>,
 }
@@ -352,6 +356,9 @@ pub(crate) struct MeasurementResolveContext<'a> {
     /// model-keyed Eval threshold ([[RFC-0004:C-LM-EVAL]]).
     pub model_id: &'a str,
     pub prefix_cache_reset: Option<WorkloadHttpAction>,
+    /// The per-target reset of every model-serving replica
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub replica_prefix_cache_resets: Vec<WorkloadReplicaReset>,
     /// The Gateway frontend's conditioning fan-out action, when the selected
     /// frontend backend declares one ([[RFC-0004:C-BENCH-CACHE-STATE]]).
     pub prefix_cache_conditioning: Option<WorkloadHttpAction>,

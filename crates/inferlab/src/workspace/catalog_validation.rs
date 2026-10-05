@@ -680,7 +680,7 @@ readiness_timeout_seconds = 60
             let digest = match digest_override {
                 Some(digest) => digest.to_owned(),
                 None => match curve_text {
-                    Some(text) => format!("{:x}", Sha256::digest(text.as_bytes())),
+                    Some(text) => base16ct::lower::encode_string(&Sha256::digest(text.as_bytes())),
                     None => "a".repeat(64),
                 },
             };

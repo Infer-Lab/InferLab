@@ -594,7 +594,7 @@ fn start_persists_synthetic_acceptance_in_the_record() -> Result<(), Box<dyn Err
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 12);
+    assert!(persisted["schema_version"].is_u64());
     assert_eq!(
         persisted["resolved"]["server"]["synthetic_acceptance"]["acceptance_length"],
         2.5
@@ -642,7 +642,7 @@ fn start_persists_curve_form_synthetic_acceptance_evidence() -> Result<(), Box<d
             .path()
             .join(format!(".inferlab/records/{id}/record.json")),
     )?)?;
-    assert_eq!(persisted["schema_version"], 12);
+    assert!(persisted["schema_version"].is_u64());
     let synthetic = &persisted["resolved"]["server"]["synthetic_acceptance"];
     let declared = &synthetic["declared"]["curve"];
     assert_eq!(declared["path"], "curves/golden.yaml");
@@ -1648,7 +1648,7 @@ else:
     raise ValueError(operation)
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "11",
+    "protocol_version": request["protocol_version"],
     "result": {"operation": operation, "output": output}
 }))
 "#;

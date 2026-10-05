@@ -107,11 +107,13 @@ def test_plan_single_declares_cuda_profiler_window_control() -> None:
                 "method": "post",
                 "path": "/start_profile",
                 "body": {"activities": ["CUDA_PROFILER"]},
+                "success": None,
             },
             "stop": {
                 "method": "post",
                 "path": "/stop_profile",
                 "body": None,
+                "success": None,
             },
         },
     }
@@ -234,11 +236,13 @@ def test_plan_prefill_decode_declares_every_replica_as_a_capture_target() -> Non
             "method": "post",
             "path": "/start_profile",
             "body": {"activities": ["CUDA_PROFILER"]},
+            "success": None,
         }
         assert control.stop.model_dump(mode="json") == {
             "method": "post",
             "path": "/stop_profile",
             "body": None,
+            "success": None,
         }
 
 
@@ -942,11 +946,13 @@ def test_plan_engine_trace_declares_torch_window_control() -> None:
                 "method": "post",
                 "path": "/start_profile",
                 "body": {"activities": ["GPU"]},
+                "success": None,
             },
             "stop": {
                 "method": "post",
                 "path": "/stop_profile",
                 "body": None,
+                "success": None,
             },
         },
     }

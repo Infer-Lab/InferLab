@@ -487,7 +487,9 @@ fn content_closure(
 fn closure_digest(closure: &BTreeMap<String, String>) -> Result<String, InferlabError> {
     let canonical =
         serde_json::to_string(closure).map_err(|source| InferlabError::EncodeOutput { source })?;
-    Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+    Ok(base16ct::lower::encode_string(&Sha256::digest(
+        canonical.as_bytes(),
+    )))
 }
 
 fn assembly_for_platform(

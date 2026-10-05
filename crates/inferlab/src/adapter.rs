@@ -487,7 +487,7 @@ fn invoke_adapter(
         raw_protocol_version(&payload).ok_or_else(|| InferlabError::AdapterProtocolVersion {
             message: "the serialized adapter request omitted its protocol version".to_owned(),
         })?;
-    let request_sha256 = format!("{:x}", Sha256::digest(&payload));
+    let request_sha256 = base16ct::lower::encode_string(&Sha256::digest(&payload));
     let adapter_io = |source| InferlabError::AdapterIo {
         integration: integration.to_owned(),
         source,
@@ -580,7 +580,7 @@ fn invoke_adapter(
         source,
         diagnostics: diagnostics.clone(),
     })?;
-    let response_sha256 = format!("{:x}", Sha256::digest(&stdout));
+    let response_sha256 = base16ct::lower::encode_string(&Sha256::digest(&stdout));
     ensure_adapter_active(&bound, integration, timeout)?;
     match response {
         AdapterResponse::Ok { result, .. } => Ok(AdapterInvocation {

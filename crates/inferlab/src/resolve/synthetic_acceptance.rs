@@ -96,7 +96,7 @@ fn resolve_curve(
             format!("the curve file is missing or unreadable: {source}"),
         )
     })?;
-    let observed = format!("{:x}", Sha256::digest(&bytes));
+    let observed = base16ct::lower::encode_string(&Sha256::digest(&bytes));
     if observed != curve.expected_sha256 {
         return Err(InferlabError::InvalidConfig {
             message: format!(
@@ -149,7 +149,7 @@ mod tests {
             acceptance_length: None,
             curve: Some(SyntheticAcceptanceCurveDefinition {
                 path: PathBuf::from(path),
-                expected_sha256: format!("{:x}", Sha256::digest(bytes)),
+                expected_sha256: base16ct::lower::encode_string(&Sha256::digest(bytes)),
                 model_key: "model".to_owned(),
                 thinking_mode: None,
             }),
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(shipped_text, text);
         assert_eq!(
             sha256,
-            format!("{:x}", Sha256::digest(text.as_bytes())),
+            base16ct::lower::encode_string(&Sha256::digest(text.as_bytes())),
             "the shipped digest is the digest-verified declaration pin"
         );
         Ok(())

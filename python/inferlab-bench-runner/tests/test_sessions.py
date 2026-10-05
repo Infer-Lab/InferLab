@@ -12,6 +12,7 @@ from inferlab_bench_runner.population_sharegpt import (
 )
 from inferlab_bench_runner.result_sessions import session_result_evidence
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     BenchClientRequest,
     BenchPopulationPreparationRequest,
     ClientStatus,
@@ -41,7 +42,7 @@ def session_request(tmp_path: Path, artifact_level: str = "diagnostic") -> Bench
     )
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -115,7 +116,7 @@ def session_preparation_request(
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

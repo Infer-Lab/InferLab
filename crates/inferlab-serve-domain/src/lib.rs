@@ -4,7 +4,8 @@ use inferlab_profiler::plan::{
     CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan, NsysEscapes, ProcessCapturePlan,
 };
 use inferlab_protocol::{
-    AuxiliaryModelKind, CaptureMechanism, EndpointAssignment, EndpointProtocol, FrontendComponents,
+    AuxiliaryModelKind, CaptureMechanism, DiscoveryBinding, DiscoveryProcessRole,
+    DiscoveryRequirement, EndpointAssignment, EndpointProtocol, FrontendComponents,
     FrontendProcessRole, GatewayPlan, Parallelism, PdRouterPlan, PlanServeResult, ReadinessProbe,
     RenderedServeProcess, ServeProcessAllocation, ServeRoleKind, ServeRoleLink, SettingValue,
     SuppliedRenderInput,
@@ -80,6 +81,10 @@ pub struct ProcessPlan {
     pub container: Option<ContainerPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_target: Option<ProcessCapturePlan>,
+    /// A process-owned directory the control plane empties immediately
+    /// before launch ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_directory: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -100,6 +105,12 @@ pub enum ProcessIdentityPlan {
         process_role: FrontendProcessRole,
         components: FrontendComponents,
     },
+    /// The discovery service a Gateway backend requires
+    /// ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+    Discovery {
+        process_role: DiscoveryProcessRole,
+        components: DiscoveryBinding,
+    },
 }
 
 impl ProcessPlan {
@@ -107,7 +118,7 @@ impl ProcessPlan {
     pub const fn rank(&self) -> Option<u32> {
         match &self.identity {
             ProcessIdentityPlan::ModelRank { rank, .. } => Some(*rank),
-            ProcessIdentityPlan::Frontend { .. } => None,
+            ProcessIdentityPlan::Frontend { .. } | ProcessIdentityPlan::Discovery { .. } => None,
         }
     }
 }
@@ -239,6 +250,22 @@ pub struct EndpointPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_read_zero_representation:
         Option<inferlab_protocol::PromptCacheReadZeroRepresentation>,
+    /// The per-target prefix-cache reset of every model-serving replica, in
+    /// process order; empty unless every role declares one
+    /// ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replica_prefix_cache_resets: Vec<ReplicaPrefixCacheResetPlan>,
+}
+
+/// One model-serving replica's prefix-cache reset, resolved against its
+/// entry process endpoint ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReplicaPrefixCacheResetPlan {
+    pub process: String,
+    pub role: String,
+    pub replica: u32,
+    pub url: String,
+    pub action: inferlab_protocol::HttpActionSpec,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -270,6 +297,12 @@ pub enum ProcessRequirementIdentity {
         links: Vec<ServeRoleLink>,
         render_inputs: Vec<SuppliedRenderInput>,
     },
+    /// The discovery service declared by the Gateway result; placed on the
+    /// Gateway's machine.
+    Discovery {
+        requirement: Box<DiscoveryRequirement>,
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
 }
 
 #[derive(Clone)]
@@ -291,6 +324,7 @@ pub struct PendingCaptureWindowActionPlan {
     method: CaptureWindowHttpMethodPlan,
     path: String,
     body: Option<BTreeMap<String, SettingValue>>,
+    success: Option<inferlab_protocol::JsonValueMatch>,
 }
 
 #[derive(Clone)]
@@ -364,7 +398,8 @@ impl ProcessRequirement {
     pub fn placement_role(&self) -> &str {
         match &self.identity {
             ProcessRequirementIdentity::ModelRank { role_id, .. } => role_id,
-            ProcessRequirementIdentity::Frontend { .. } => "gateway",
+            ProcessRequirementIdentity::Frontend { .. }
+            | ProcessRequirementIdentity::Discovery { .. } => "gateway",
         }
     }
 }
@@ -417,8 +452,17 @@ impl PendingCaptureWindowActionPlan {
         method: CaptureWindowHttpMethodPlan,
         path: String,
         body: Option<BTreeMap<String, SettingValue>>,
+        success: Option<inferlab_protocol::JsonValueMatch>,
     ) -> Self {
-        Self { method, path, body }
+        Self {
+            method,
+            path,
+            body,
+            success,
+        }
+    }
+    pub fn success(&self) -> Option<&inferlab_protocol::JsonValueMatch> {
+        self.success.as_ref()
     }
     pub const fn method(&self) -> CaptureWindowHttpMethodPlan {
         self.method
@@ -508,37 +552,44 @@ impl ResolvedProcessAllocation {
     pub fn process(&self) -> &str {
         match &self.wire {
             ServeProcessAllocation::ModelRank { process, .. }
-            | ServeProcessAllocation::Frontend { process, .. } => process,
+            | ServeProcessAllocation::Frontend { process, .. }
+            | ServeProcessAllocation::Discovery { process, .. } => process,
         }
     }
     pub fn machine(&self) -> &str {
         match &self.wire {
             ServeProcessAllocation::ModelRank { machine, .. }
-            | ServeProcessAllocation::Frontend { machine, .. } => machine,
+            | ServeProcessAllocation::Frontend { machine, .. }
+            | ServeProcessAllocation::Discovery { machine, .. } => machine,
         }
     }
     pub fn devices(&self) -> &[u32] {
         match &self.wire {
             ServeProcessAllocation::ModelRank { devices, .. }
-            | ServeProcessAllocation::Frontend { devices, .. } => devices,
+            | ServeProcessAllocation::Frontend { devices, .. }
+            | ServeProcessAllocation::Discovery { devices, .. } => devices,
         }
     }
     pub fn endpoint(&self) -> Option<&EndpointAssignment> {
         match &self.wire {
             ServeProcessAllocation::ModelRank { endpoint, .. } => endpoint.as_ref(),
-            ServeProcessAllocation::Frontend { endpoint, .. } => Some(endpoint),
+            ServeProcessAllocation::Frontend { endpoint, .. }
+            | ServeProcessAllocation::Discovery { endpoint, .. } => Some(endpoint),
         }
     }
     pub fn ports(&self) -> &BTreeMap<String, EndpointAssignment> {
         match &self.wire {
             ServeProcessAllocation::ModelRank { ports, .. }
-            | ServeProcessAllocation::Frontend { ports, .. } => ports,
+            | ServeProcessAllocation::Frontend { ports, .. }
+            | ServeProcessAllocation::Discovery { ports, .. } => ports,
         }
     }
     pub fn model_locator(&self) -> Option<&str> {
         match &self.wire {
             ServeProcessAllocation::ModelRank { model_locator, .. } => Some(model_locator),
-            ServeProcessAllocation::Frontend { .. } => None,
+            ServeProcessAllocation::Frontend { .. } | ServeProcessAllocation::Discovery { .. } => {
+                None
+            }
         }
     }
 }

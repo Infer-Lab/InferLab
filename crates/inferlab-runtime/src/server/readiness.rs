@@ -1,11 +1,14 @@
 use super::{
     ProcessHandle, ProcessObserver, ProcessStatus, ReadinessAttemptEvidence, ReadinessEvidence,
-    ReadinessFailure, ReadinessFailureKind, ReadinessObserver, SystemProcessRuntime,
-    TargetRegistryMatchEvidence,
+    ReadinessFailure, ReadinessFailureKind, ReadinessObserver, RegistryMemberMatchEvidence,
+    RegistryObservationEvidence, SystemProcessRuntime, TargetRegistryMatchEvidence,
 };
 use crate::interrupt;
 use crate::operation_bound::{AttemptBound, OperationBound, OperationTerminalCause, Remaining};
-use crate::plan::{ProcessEndpointPlan, ReadinessPlan, TargetRegistryExpectedTarget};
+use crate::plan::{
+    JsonValueMatchPlan, ModelListPlan, ProcessEndpointPlan, ReadinessPlan, RegistryMemberTarget,
+    TargetRegistryExpectedTarget,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -185,6 +188,7 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
                     effective_bound_ms,
                     succeeded: true,
                     error: None,
+                    registry: None,
                 });
                 let ready_unix_ms = unix_time_millis().map_err(|failure| {
                     timed_readiness_failure(
@@ -222,6 +226,7 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
                     effective_bound_ms,
                     succeeded: false,
                     error: Some(error.clone()),
+                    registry: None,
                 });
                 error
             }
@@ -284,6 +289,7 @@ fn process_status_evidence(
                     .unwrap_or_else(|| "server process group is not alive".to_owned()),
             )
         },
+        registry: None,
     }
 }
 
@@ -315,22 +321,25 @@ fn attempt_remaining(attempt: &AttemptBound) -> Result<Duration, ReadinessProbeE
     }
 }
 
-pub(super) fn wait_http_target_registry_ready(
+/// One readiness probe attempt: the attempt evidence it produced and either
+/// its ready result or the error that keeps the process unready.
+struct PolledAttempt<T> {
+    evidence: Vec<ReadinessAttemptEvidence>,
+    outcome: Result<T, String>,
+}
+
+/// The shared poll loop for JSON-registry readiness: process liveness gates
+/// every attempt, the one readiness owner bounds the whole wait, and the
+/// attempt cadence backs off ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+fn wait_polled_ready<T>(
     status: impl Fn(&OperationBound) -> ProcessStatus,
-    endpoint: &ProcessEndpointPlan,
-    probe: HttpTargetRegistryProbe<'_>,
     attempt_timeout_seconds: u64,
     bound: &OperationBound,
     on_probe_failure: &mut dyn FnMut(&str),
+    late_completion: &str,
+    mut attempt: impl FnMut(&OperationBound) -> PolledAttempt<T>,
+    finish: impl FnOnce(T, u32, u64, Vec<ReadinessAttemptEvidence>) -> ReadinessEvidence,
 ) -> Result<ReadinessEvidence, ReadinessFailure> {
-    let readiness_url = format!(
-        "http://{}:{}{}",
-        endpoint.host, endpoint.port, probe.readiness_path
-    );
-    let registry_url = format!(
-        "http://{}:{}{}",
-        endpoint.host, endpoint.port, probe.registry_path
-    );
     let mut attempts = 0_u32;
     let mut diagnostic_attempts = Vec::new();
     let mut probe_interval = POLL_INTERVAL;
@@ -404,103 +413,29 @@ pub(super) fn wait_http_target_registry_ready(
             )
         })?;
         attempts = attempts.saturating_add(1);
-        let public_attempt = probe_http_attempt(
-            &endpoint.host,
-            endpoint.port,
-            probe.readiness_path,
-            bound,
-            attempt_timeout_seconds,
-        );
-        let public_effective_bound_ms = public_attempt.effective_bound_ms;
-        let last_error = match public_attempt.outcome {
-            Ok(()) => {
-                let registry_attempt = probe_target_registry_attempt(
-                    &endpoint.host,
-                    endpoint.port,
-                    &probe,
-                    bound,
-                    attempt_timeout_seconds,
-                );
-                let registry_effective_bound_ms = registry_attempt.effective_bound_ms;
-                match registry_attempt.outcome {
-                    Ok(matched_targets) => {
-                        diagnostic_attempts.extend([
-                            ReadinessAttemptEvidence {
-                                operation: "public_http_readiness".to_owned(),
-                                effective_bound_ms: public_effective_bound_ms,
-                                succeeded: true,
-                                error: None,
-                            },
-                            ReadinessAttemptEvidence {
-                                operation: "target_registry".to_owned(),
-                                effective_bound_ms: registry_effective_bound_ms,
-                                succeeded: true,
-                                error: None,
-                            },
-                        ]);
-                        let ready_unix_ms = unix_time_millis().map_err(|failure| {
-                            timed_readiness_failure(
-                                failure,
-                                bound,
-                                OperationTerminalCause::Failed,
-                                diagnostic_attempts.clone(),
-                            )
-                        })?;
-                        ensure_readiness_active(
-                            bound,
-                            "the target registry response completed after the deadline",
-                        )
-                        .map_err(|failure| {
-                            timed_readiness_failure(
-                                failure,
-                                bound,
-                                OperationTerminalCause::TimedOut,
-                                diagnostic_attempts.clone(),
-                            )
-                        })?;
-                        return Ok(ReadinessEvidence::HttpTargetRegistry {
-                            readiness_url,
-                            registry_url,
-                            attempts,
-                            ready_unix_ms,
-                            matched_targets,
-                            timing: bound.timing(
-                                READINESS_START_BOUNDARY,
-                                OperationTerminalCause::Succeeded,
-                            ),
-                            diagnostic_attempts,
-                        });
-                    }
-                    Err(error) => {
-                        let error = error.to_string();
-                        diagnostic_attempts.extend([
-                            ReadinessAttemptEvidence {
-                                operation: "public_http_readiness".to_owned(),
-                                effective_bound_ms: public_effective_bound_ms,
-                                succeeded: true,
-                                error: None,
-                            },
-                            ReadinessAttemptEvidence {
-                                operation: "target_registry".to_owned(),
-                                effective_bound_ms: registry_effective_bound_ms,
-                                succeeded: false,
-                                error: Some(error.clone()),
-                            },
-                        ]);
-                        error
-                    }
-                }
+        let polled = attempt(bound);
+        diagnostic_attempts.extend(polled.evidence);
+        let last_error = match polled.outcome {
+            Ok(ready) => {
+                let ready_unix_ms = unix_time_millis().map_err(|failure| {
+                    timed_readiness_failure(
+                        failure,
+                        bound,
+                        OperationTerminalCause::Failed,
+                        diagnostic_attempts.clone(),
+                    )
+                })?;
+                ensure_readiness_active(bound, late_completion).map_err(|failure| {
+                    timed_readiness_failure(
+                        failure,
+                        bound,
+                        OperationTerminalCause::TimedOut,
+                        diagnostic_attempts.clone(),
+                    )
+                })?;
+                return Ok(finish(ready, attempts, ready_unix_ms, diagnostic_attempts));
             }
-            Err(error) => {
-                let error = error.to_string();
-                diagnostic_attempts.push(ReadinessAttemptEvidence {
-                    operation: "public_http_readiness".to_owned(),
-                    effective_bound_ms: public_effective_bound_ms,
-                    succeeded: false,
-                    error: Some(error.clone()),
-                });
-                format!("public readiness probe failed: {error}")
-            }
+            Err(error) => error,
         };
         on_probe_failure(&last_error);
         if bound.is_expired() {
@@ -520,6 +455,353 @@ pub(super) fn wait_http_target_registry_ready(
         sleep_within_readiness(bound, probe_interval);
         probe_interval = next_probe_interval(probe_interval);
     }
+}
+
+fn attempt_evidence(
+    operation: &str,
+    effective_bound_ms: u64,
+    error: Option<String>,
+) -> ReadinessAttemptEvidence {
+    ReadinessAttemptEvidence {
+        operation: operation.to_owned(),
+        effective_bound_ms,
+        succeeded: error.is_none(),
+        error,
+        registry: None,
+    }
+}
+
+pub(super) fn wait_http_target_registry_ready(
+    status: impl Fn(&OperationBound) -> ProcessStatus,
+    endpoint: &ProcessEndpointPlan,
+    probe: HttpTargetRegistryProbe<'_>,
+    attempt_timeout_seconds: u64,
+    bound: &OperationBound,
+    on_probe_failure: &mut dyn FnMut(&str),
+) -> Result<ReadinessEvidence, ReadinessFailure> {
+    let readiness_url = format!(
+        "http://{}:{}{}",
+        endpoint.host, endpoint.port, probe.readiness_path
+    );
+    let registry_url = format!(
+        "http://{}:{}{}",
+        endpoint.host, endpoint.port, probe.registry_path
+    );
+    wait_polled_ready(
+        status,
+        attempt_timeout_seconds,
+        bound,
+        on_probe_failure,
+        "the target registry response completed after the deadline",
+        |bound| {
+            let public_attempt = probe_http_attempt(
+                &endpoint.host,
+                endpoint.port,
+                probe.readiness_path,
+                bound,
+                attempt_timeout_seconds,
+            );
+            let public_effective_bound_ms = public_attempt.effective_bound_ms;
+            if let Err(error) = public_attempt.outcome {
+                let error = error.to_string();
+                return PolledAttempt {
+                    evidence: vec![attempt_evidence(
+                        "public_http_readiness",
+                        public_effective_bound_ms,
+                        Some(error.clone()),
+                    )],
+                    outcome: Err(format!("public readiness probe failed: {error}")),
+                };
+            }
+            let registry_attempt = probe_target_registry_attempt(
+                &endpoint.host,
+                endpoint.port,
+                &probe,
+                bound,
+                attempt_timeout_seconds,
+            );
+            let registry_error = registry_attempt
+                .outcome
+                .as_ref()
+                .err()
+                .map(ToString::to_string);
+            PolledAttempt {
+                evidence: vec![
+                    attempt_evidence("public_http_readiness", public_effective_bound_ms, None),
+                    attempt_evidence(
+                        "target_registry",
+                        registry_attempt.effective_bound_ms,
+                        registry_error.clone(),
+                    ),
+                ],
+                outcome: registry_attempt
+                    .outcome
+                    .map_err(|_| registry_error.unwrap_or_default()),
+            }
+        },
+        |matched_targets, attempts, ready_unix_ms, diagnostic_attempts| {
+            ReadinessEvidence::HttpTargetRegistry {
+                readiness_url,
+                registry_url,
+                attempts,
+                ready_unix_ms,
+                matched_targets,
+                timing: bound.timing(READINESS_START_BOUNDARY, OperationTerminalCause::Succeeded),
+                diagnostic_attempts,
+            }
+        },
+    )
+}
+
+pub(super) struct RegistryMembershipProbe<'a> {
+    pub(super) registry_path: &'a str,
+    pub(super) entries_pointer: &'a str,
+    pub(super) entry_filter: Option<&'a JsonValueMatchPlan>,
+    pub(super) role_pointer: &'a str,
+    pub(super) address_pointer: &'a str,
+    pub(super) model_list: Option<&'a ModelListPlan>,
+    pub(super) expected_targets: &'a [RegistryMemberTarget],
+}
+
+/// Registry-membership readiness ([[RFC-0006:C-INTEGRATIONS]]): the registry
+/// response itself proves the owning process serves HTTP, every expected
+/// target must appear, and a declared model list must name the served model.
+pub(super) fn wait_registry_membership_ready(
+    status: impl Fn(&OperationBound) -> ProcessStatus,
+    endpoint: &ProcessEndpointPlan,
+    probe: RegistryMembershipProbe<'_>,
+    attempt_timeout_seconds: u64,
+    bound: &OperationBound,
+    on_probe_failure: &mut dyn FnMut(&str),
+) -> Result<ReadinessEvidence, ReadinessFailure> {
+    let registry_url = format!(
+        "http://{}:{}{}",
+        endpoint.host, endpoint.port, probe.registry_path
+    );
+    let model_list_url = probe
+        .model_list
+        .map(|list| format!("http://{}:{}{}", endpoint.host, endpoint.port, list.path));
+    wait_polled_ready(
+        status,
+        attempt_timeout_seconds,
+        bound,
+        on_probe_failure,
+        "the registry response completed after the deadline",
+        |bound| {
+            let registry = probe_http_json_attempt(
+                &endpoint.host,
+                endpoint.port,
+                probe.registry_path,
+                "registry",
+                bound,
+                attempt_timeout_seconds,
+            );
+            let observation = match registry.outcome {
+                Ok(document) => match match_registry_membership(&document, &probe) {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        return PolledAttempt {
+                            evidence: vec![attempt_evidence(
+                                "registry_membership",
+                                registry.effective_bound_ms,
+                                Some(error.clone()),
+                            )],
+                            outcome: Err(error),
+                        };
+                    }
+                },
+                Err(error) => {
+                    let error = error.to_string();
+                    return PolledAttempt {
+                        evidence: vec![attempt_evidence(
+                            "registry_membership",
+                            registry.effective_bound_ms,
+                            Some(error.clone()),
+                        )],
+                        outcome: Err(error),
+                    };
+                }
+            };
+            // Every parsed registry document records its observation, so an
+            // attempt that fails only on the model list still preserves the
+            // unexpected entries it saw.
+            let missing_error = (!observation.missing.is_empty()).then(|| {
+                format!(
+                    "registry lists no entry for {}",
+                    observation.missing.join(", ")
+                )
+            });
+            let mut evidence = vec![ReadinessAttemptEvidence {
+                registry: Some(RegistryObservationEvidence {
+                    missing: observation.missing,
+                    unexpected: observation.unexpected,
+                }),
+                ..attempt_evidence(
+                    "registry_membership",
+                    registry.effective_bound_ms,
+                    missing_error.clone(),
+                )
+            }];
+            if let Some(error) = missing_error {
+                return PolledAttempt {
+                    evidence,
+                    outcome: Err(error),
+                };
+            }
+            if let Some(list) = probe.model_list {
+                let models = probe_http_json_attempt(
+                    &endpoint.host,
+                    endpoint.port,
+                    &list.path,
+                    "model list",
+                    bound,
+                    attempt_timeout_seconds,
+                );
+                let listed =
+                    models
+                        .outcome
+                        .map_err(|error| error.to_string())
+                        .and_then(|document| {
+                            model_list_names(&document, list)
+                                .map(|names| names.iter().any(|name| name == &list.served_model))
+                        });
+                let error = match listed {
+                    Ok(true) => None,
+                    Ok(false) => Some(format!(
+                        "model list does not name served model {:?}",
+                        list.served_model
+                    )),
+                    Err(error) => Some(error),
+                };
+                evidence.push(attempt_evidence(
+                    "model_list",
+                    models.effective_bound_ms,
+                    error.clone(),
+                ));
+                if let Some(error) = error {
+                    return PolledAttempt {
+                        evidence,
+                        outcome: Err(error),
+                    };
+                }
+            }
+            PolledAttempt {
+                evidence,
+                outcome: Ok(observation.matched),
+            }
+        },
+        |matched_targets, attempts, ready_unix_ms, diagnostic_attempts| {
+            ReadinessEvidence::RegistryMembership {
+                registry_url,
+                model_list_url,
+                attempts,
+                ready_unix_ms,
+                matched_targets,
+                timing: bound.timing(READINESS_START_BOUNDARY, OperationTerminalCause::Succeeded),
+                diagnostic_attempts,
+            }
+        },
+    )
+}
+
+pub(super) struct RegistryObservation {
+    pub(super) matched: Vec<RegistryMemberMatchEvidence>,
+    pub(super) missing: Vec<String>,
+    pub(super) unexpected: Vec<String>,
+}
+
+/// Matches every expected target against the filtered registry entries: an
+/// entry matches when its role equals the target's role and its address
+/// begins with the target's `host:port` followed by its end or a `/`.
+pub(super) fn match_registry_membership(
+    document: &serde_json::Value,
+    probe: &RegistryMembershipProbe<'_>,
+) -> Result<RegistryObservation, String> {
+    let entries = document
+        .pointer(probe.entries_pointer)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("registry has no entry array at {:?}", probe.entries_pointer))?;
+    let entries = entries
+        .iter()
+        .filter(|entry| {
+            probe.entry_filter.is_none_or(|filter| {
+                entry
+                    .pointer(&filter.pointer)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(filter.value.as_str())
+            })
+        })
+        .map(|entry| {
+            (
+                entry
+                    .pointer(probe.role_pointer)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                entry
+                    .pointer(probe.address_pointer)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let address_matches = |address: &str, target: &RegistryMemberTarget| {
+        address
+            .strip_prefix(target.address.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    let mut matched = Vec::new();
+    let mut missing = Vec::new();
+    for target in probe.expected_targets {
+        match entries
+            .iter()
+            .find(|(role, address)| *role == target.role && address_matches(address, target))
+        {
+            Some((_, address)) => matched.push(RegistryMemberMatchEvidence {
+                process: target.process.clone(),
+                role: target.role.clone(),
+                address: target.address.clone(),
+                entry_address: (*address).to_owned(),
+            }),
+            None => missing.push(format!(
+                "{} ({} at {})",
+                target.process, target.role, target.address
+            )),
+        }
+    }
+    let unexpected = entries
+        .iter()
+        .filter(|(role, address)| {
+            !probe
+                .expected_targets
+                .iter()
+                .any(|target| *role == target.role && address_matches(address, target))
+        })
+        .map(|(role, address)| format!("{role} at {address}"))
+        .collect();
+    Ok(RegistryObservation {
+        matched,
+        missing,
+        unexpected,
+    })
+}
+
+fn model_list_names(
+    document: &serde_json::Value,
+    list: &ModelListPlan,
+) -> Result<Vec<String>, String> {
+    let models = document
+        .pointer(&list.models_pointer)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("model list has no array at {:?}", list.models_pointer))?;
+    Ok(models
+        .iter()
+        .filter_map(|model| {
+            model
+                .pointer(&list.name_pointer)
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn probe_target_registry_attempt(
@@ -925,6 +1207,30 @@ impl ReadinessObserver for SystemProcessRuntime {
                     target_role_field,
                     target_healthy_field,
                     target_bootstrap_port_field,
+                    expected_targets,
+                },
+                attempt_timeout_seconds,
+                bound,
+                on_probe_failure,
+            ),
+            ReadinessPlan::RegistryMembership {
+                registry_path,
+                entries_pointer,
+                entry_filter,
+                role_pointer,
+                address_pointer,
+                model_list,
+                expected_targets,
+            } => wait_registry_membership_ready(
+                |bound| self.status_with_bound(handle, bound),
+                endpoint,
+                RegistryMembershipProbe {
+                    registry_path,
+                    entries_pointer,
+                    entry_filter: entry_filter.as_ref(),
+                    role_pointer,
+                    address_pointer,
+                    model_list: model_list.as_ref(),
                     expected_targets,
                 },
                 attempt_timeout_seconds,

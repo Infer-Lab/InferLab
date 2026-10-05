@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inferlab-gateway-dynamo"
+version = "0.1.0"
+description = "Inferlab Dynamo frontend and discovery lowering shared by the integrations that run Dynamo"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["inferlab-adapter-sdk==0.12.0"]
+
+[project.urls]
+Repository = "https://github.com/Infer-Lab/InferLab"
+
+[tool.inferlab.release]
+lifecycle = "workspace-side"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inferlab_gateway_dynamo"]
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "LICENSE", "README.md"]

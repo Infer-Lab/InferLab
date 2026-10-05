@@ -20,8 +20,8 @@ use inferlab_protocol::{
 use inferlab_runtime::plan::{CommandPlan, ProcessEndpointPlan};
 use inferlab_serve_domain::{
     PendingCaptureWindowActionPlan, PlannedServeStage, ProcessRequirement,
-    ProcessRequirementIdentity, RenderedServeStage, ResolvedProcessAllocation,
-    RuntimeRealizationParts,
+    ProcessRequirementIdentity, RenderedServeStage, ReplicaPrefixCacheResetPlan,
+    ResolvedProcessAllocation, RuntimeRealizationParts,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,7 +66,8 @@ fn resolve_capture_target(
                             ServeProcessAllocation::ModelRank {
                                 capture_storage, ..
                             } => capture_storage.clone(),
-                            ServeProcessAllocation::Frontend { .. } => None,
+                            ServeProcessAllocation::Frontend { .. }
+                            | ServeProcessAllocation::Discovery { .. } => None,
                         })
                         .ok_or_else(|| InferlabError::InvalidConfig {
                             message: format!(
@@ -100,6 +101,7 @@ fn resolve_capture_window_action(
         path: action.path().to_owned(),
         body: action.body().cloned(),
         effective_url: format!("{}{}", endpoint_url(endpoint), action.path()),
+        success: action.success().cloned(),
     }
 }
 
@@ -210,6 +212,36 @@ pub(super) fn realize_runtime(
                     command,
                     launch_files,
                     gateway.render_source == RenderSource::Integration,
+                )
+            }
+            (
+                ProcessRequirementIdentity::Discovery { .. },
+                ServeProcessAllocation::Discovery {
+                    process,
+                    process_role,
+                    components,
+                    ..
+                },
+                RenderedServeProcess::Discovery {
+                    process: rendered_id,
+                    process_role: rendered_role,
+                    components: rendered_components,
+                    command,
+                    launch_files,
+                },
+            ) if process == requirement.id()
+                && rendered_id == requirement.id()
+                && rendered_role == process_role
+                && rendered_components == components =>
+            {
+                (
+                    ProcessIdentityPlan::Discovery {
+                        process_role: *process_role,
+                        components: components.clone(),
+                    },
+                    command,
+                    launch_files,
+                    true,
                 )
             }
             _ => {
@@ -336,6 +368,7 @@ pub(super) fn realize_runtime(
                 prefix_cache_conditioning: endpoint_requirement.prefix_cache_conditioning.clone(),
                 prompt_cache_read_zero_representation: endpoint_requirement
                     .prompt_cache_read_zero_representation,
+                replica_prefix_cache_resets: Vec::new(),
             });
         }
         device_count += requirement.device_count();
@@ -371,18 +404,62 @@ pub(super) fn realize_runtime(
                 cwd: runtime_cwd,
             },
             launch_files,
-            readiness: readiness_plan(requirement.readiness(), allocations)?,
+            readiness: readiness_plan(
+                requirement.readiness(),
+                allocations,
+                &selection.model.served_name,
+            )?,
             endpoint,
             container: None,
             capture_target: resolve_capture_target(requirement, gateway_process_id, allocations)?,
+            data_directory: match allocation.wire() {
+                ServeProcessAllocation::Discovery { data_directory, .. } => {
+                    Some(std::path::PathBuf::from(data_directory))
+                }
+                ServeProcessAllocation::ModelRank { .. }
+                | ServeProcessAllocation::Frontend { .. } => None,
+            },
         });
     }
-    let public_endpoint = public_endpoint.ok_or_else(|| InferlabError::AdapterSemantics {
+    let mut public_endpoint = public_endpoint.ok_or_else(|| InferlabError::AdapterSemantics {
         message: format!(
             "integration {:?} did not plan a public endpoint",
             selection.stack.integration
         ),
     })?;
+    // Per-target reset resolves against each replica's entry process
+    // ([[RFC-0006:C-INTEGRATIONS]]); planning accepted it only when every
+    // model-serving role declares it.
+    for allocation in allocations {
+        let ServeProcessAllocation::ModelRank {
+            process,
+            role,
+            replica,
+            rank: 0,
+            endpoint: Some(endpoint),
+            ..
+        } = allocation.wire()
+        else {
+            continue;
+        };
+        let Some(action) = planned
+            .roles
+            .iter()
+            .find(|planned_role| &planned_role.id == role)
+            .and_then(|planned_role| planned_role.replica_prefix_cache_reset.as_ref())
+        else {
+            continue;
+        };
+        public_endpoint
+            .replica_prefix_cache_resets
+            .push(ReplicaPrefixCacheResetPlan {
+                process: process.clone(),
+                role: role.clone(),
+                replica: *replica,
+                url: format!("{}{}", endpoint_url(endpoint), action.path),
+                action: action.clone(),
+            });
+    }
     if request.image.is_some() {
         crate::image::launch::gate_placement(&processes)?;
     }
@@ -437,12 +514,20 @@ pub(super) fn realize_runtime(
     })
 }
 
+/// The resolved process hierarchy: model roles, the frontend boundary, and
+/// the discovery process a Gateway backend may require.
+pub(super) struct ProcessHierarchy {
+    pub(super) roles: Vec<RolePlan>,
+    pub(super) frontend: Option<FrontendPlan>,
+    pub(super) discovery: Option<ProcessPlan>,
+}
+
 pub(super) fn assemble_process_hierarchy(
     integration: &str,
     effective: &EffectiveServerInput,
     planned_stage: &PlannedServeStage,
     processes: Vec<ProcessPlan>,
-) -> Result<(Vec<RolePlan>, Option<FrontendPlan>), InferlabError> {
+) -> Result<ProcessHierarchy, InferlabError> {
     let planned = planned_stage.planned();
     let requirements = planned_stage.requirements();
     let process_count = processes.len();
@@ -597,10 +682,40 @@ pub(super) fn assemble_process_hierarchy(
             });
         }
     };
+    // The discovery process belongs to the server, not the frontend
+    // ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+    let discovery = requirements
+        .iter()
+        .find(|requirement| {
+            matches!(
+                requirement.identity(),
+                ProcessRequirementIdentity::Discovery { .. }
+            )
+        })
+        .map(|requirement| {
+            processes_by_id
+                .remove(requirement.id())
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "resolved discovery service references missing process {:?}",
+                        requirement.id()
+                    ),
+                })
+        })
+        .transpose()?;
+    if discovery.is_some() && frontend.is_none() {
+        return Err(InferlabError::InvalidConfig {
+            message: "resolved a discovery process without a Gateway component".to_owned(),
+        });
+    }
     if !processes_by_id.is_empty() {
         return Err(InferlabError::InvalidConfig {
             message: "resolved topology contains a process outside its owning hierarchy".to_owned(),
         });
     }
-    Ok((role_plans, frontend))
+    Ok(ProcessHierarchy {
+        roles: role_plans,
+        frontend,
+        discovery,
+    })
 }

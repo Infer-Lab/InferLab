@@ -88,10 +88,11 @@ fn case_request(
     let directory = format!(".inferlab/records/{record}/cases/{case}");
     fs::create_dir_all(root.join(&directory))?;
     let artifacts = serde_json::to_string(&root.join(&directory).join("artifacts"))?;
+    let protocol_version = inferlab_protocol::ProtocolVersion::CURRENT.as_str();
     fs::write(
         root.join(&directory).join("request.json"),
         format!(
-            r#"{{"protocol_version":"11","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null,"shared_system_content":null}},"prompt":{{"kind":"server_chat","request_representation":"structured_messages","route":"chat_completions","rendering_authority":"server"}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"cache_start":"uncontrolled"}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{artifacts}}}"#
+            r#"{{"protocol_version":"{protocol_version}","endpoint":{{"protocol":"http","host":"127.0.0.1","port":8000,"completions_path":"/v1/completions","chat_completions_path":"/v1/chat/completions","server_metrics":null}},"model":{{"locator":"/models/test","served_name":"test"}},"definition":{{"request_source":{{"kind":"random","input_tokens":8,"output_tokens":1,"prefix_sharing":null,"shared_system_content":null}},"prompt":{{"kind":"server_chat","request_representation":"structured_messages","route":"chat_completions","rendering_authority":"server"}},"server_metrics":false,"seed":7,"request_body":{{}},"request_slo":null,"timeout_seconds":120,"cache_start":"uncontrolled"}},"case":{{"load_shape":{load_shape},"request_count":4,"warmup_request_count":0}},"case_budget_seconds":120.0,"artifact_dir":{artifacts}}}"#
         ),
     )?;
     Ok(format!("{directory}/request.json"))

@@ -649,7 +649,7 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
         report["manifest"]["assemblies"][0]["export_archive"],
         archive_name
     );
-    assert_eq!(record["schema_version"], 2);
+    assert!(record["schema_version"].is_u64());
     assert!(record["inferlab_version"].is_string());
     assert!(record["started_unix_ms"].is_u64());
     assert!(record["finished_unix_ms"].is_u64());

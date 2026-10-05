@@ -606,7 +606,7 @@ pub(crate) fn acquire_dataset_snapshot(
             error,
         )));
     }
-    let observed_sha256 = format!("{:x}", digest.finalize());
+    let observed_sha256 = base16ct::lower::encode_string(&digest.finalize());
     if observed_sha256 != expected_sha256 {
         let error = InferlabError::DatasetDigest {
             path: cache_path.to_path_buf(),
@@ -674,7 +674,7 @@ pub(super) fn hash_dataset_file(path: &Path) -> Result<(u64, String), InferlabEr
         bytes = bytes.saturating_add(read as u64);
         digest.update(&buffer[..read]);
     }
-    Ok((bytes, format!("{:x}", digest.finalize())))
+    Ok((bytes, base16ct::lower::encode_string(&digest.finalize())))
 }
 
 pub(super) fn failed_acquisition(
@@ -800,7 +800,9 @@ pub(super) fn validate_population_preparation(
                     .as_ref()
                     .is_none_or(|template| {
                         template.sha256
-                            == format!("{:x}", Sha256::digest(template.content.as_bytes()))
+                            == base16ct::lower::encode_string(&Sha256::digest(
+                                template.content.as_bytes(),
+                            ))
                     });
             let template_policy_valid = match synthetic_prompt {
                 Some(BenchPrompt::Flat) => {

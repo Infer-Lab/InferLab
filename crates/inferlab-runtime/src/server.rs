@@ -261,11 +261,42 @@ pub enum ReadinessEvidence {
         timing: OperationTimingEvidence,
         diagnostic_attempts: Vec<ReadinessAttemptEvidence>,
     },
+    /// Registry-membership readiness ([[RFC-0006:C-INTEGRATIONS]]).
+    RegistryMembership {
+        registry_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_list_url: Option<String>,
+        attempts: u32,
+        ready_unix_ms: u64,
+        matched_targets: Vec<RegistryMemberMatchEvidence>,
+        timing: OperationTimingEvidence,
+        diagnostic_attempts: Vec<ReadinessAttemptEvidence>,
+    },
     ProcessAlive {
         ready_unix_ms: u64,
         timing: OperationTimingEvidence,
         diagnostic_attempts: Vec<ReadinessAttemptEvidence>,
     },
+}
+
+/// One expected registry target and the entry address that matched it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryMemberMatchEvidence {
+    pub process: String,
+    pub role: String,
+    pub address: String,
+    pub entry_address: String,
+}
+
+/// The last registry observation of an unready registry-membership attempt:
+/// expected targets with no matching entry, and filtered entries matching no
+/// expected target.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryObservationEvidence {
+    pub missing: Vec<String>,
+    pub unexpected: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,6 +306,8 @@ pub struct ReadinessAttemptEvidence {
     pub effective_bound_ms: u64,
     pub succeeded: bool,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<RegistryObservationEvidence>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -299,6 +332,9 @@ pub struct ProcessSpec<'a> {
     pub command: &'a CommandPlan,
     pub launch_files: &'a [LaunchFilePlan],
     pub cache_root: &'a Path,
+    /// A process-owned directory emptied immediately before launch, so the
+    /// process starts from no prior state ([[RFC-0006:C-INTEGRATIONS]]).
+    pub data_directory: Option<&'a Path>,
     pub stdout: &'a Path,
     pub stderr: &'a Path,
     pub remote_dir: &'a Path,
@@ -830,7 +866,7 @@ mod tests {
     }
 
     fn launch_file(root: &Path, text: &str, name: &str) -> LaunchFilePlan {
-        let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let sha256 = base16ct::lower::encode_string(&Sha256::digest(text.as_bytes()));
         let relative_path = format!("launch-files/{sha256}/{name}");
         LaunchFilePlan {
             resolved_path: root.join(&relative_path),
@@ -1004,6 +1040,7 @@ mod tests {
             stderr: &root.path().join("stderr.log"),
             remote_dir: &root.path().join("remote"),
             container: None,
+            data_directory: None,
         });
 
         let failure = match result {
@@ -1019,6 +1056,60 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&launch_file.resolved_path).map_err(|error| error.to_string())?,
             "stale\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_launch_empties_the_data_directory_before_the_process_starts() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache = root.path().join("cache");
+        let state = cache.join("state");
+        fs::create_dir_all(&state).map_err(|error| error.to_string())?;
+        fs::write(state.join("stale-registration"), "previous run\n")
+            .map_err(|error| error.to_string())?;
+        let listing = root.path().join("listing");
+        let command = CommandPlan {
+            argv: vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                // Publish the listing atomically so a reader never sees a
+                // partially written file.
+                format!(
+                    "ls -A {state} > {listing}.tmp && mv {listing}.tmp {listing}",
+                    state = shell_quote_path(&state),
+                    listing = shell_quote_path(&listing)
+                ),
+            ],
+            env: BTreeMap::new(),
+            explicit_env: Vec::new(),
+            pass_env: Vec::new(),
+            cwd: root.path().to_path_buf(),
+        };
+
+        let handle = spawn_local(ProcessSpec {
+            launch: &LaunchPlan::Local,
+            command: &command,
+            launch_files: &[],
+            cache_root: &cache,
+            stdout: &root.path().join("stdout.log"),
+            stderr: &root.path().join("stderr.log"),
+            remote_dir: &root.path().join("remote"),
+            container: None,
+            data_directory: Some(&state),
+        })
+        .map_err(|failure| failure.message())?;
+        for _ in 0..200 {
+            if listing.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = terminate_local(&handle, CleanupTrigger::StartupRollback);
+        assert!(state.is_dir());
+        assert_eq!(
+            fs::read_to_string(&listing).map_err(|error| error.to_string())?,
+            ""
         );
         Ok(())
     }
@@ -1235,6 +1326,289 @@ mod tests {
         assert!(diagnostic_attempts.iter().all(|attempt| {
             attempt.succeeded && (1..=1_000).contains(&attempt.effective_bound_ms)
         }));
+        Ok(())
+    }
+
+    /// Serves path-routed JSON documents until `lifetime` elapses.
+    fn json_routes_endpoint(
+        routes: Vec<(&'static str, String)>,
+        lifetime: Duration,
+    ) -> Result<(ProcessEndpointPlan, thread::JoinHandle<Result<(), String>>), String> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
+        let server = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + lifetime;
+            while std::time::Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| error.to_string())?;
+                let mut request_line = String::new();
+                let mut reader =
+                    BufReader::new(stream.try_clone().map_err(|error| error.to_string())?);
+                reader
+                    .read_line(&mut request_line)
+                    .map_err(|error| error.to_string())?;
+                loop {
+                    let mut header = String::new();
+                    reader
+                        .read_line(&mut header)
+                        .map_err(|error| error.to_string())?;
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                }
+                let body = routes
+                    .iter()
+                    .find(|(path, _)| request_line.starts_with(&format!("GET {path} ")))
+                    .map_or("{}", |(_, body)| body.as_str());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        });
+        Ok((
+            ProcessEndpointPlan {
+                host: "127.0.0.1".to_owned(),
+                port,
+            },
+            server,
+        ))
+    }
+
+    fn registry_members() -> Vec<crate::plan::RegistryMemberTarget> {
+        vec![
+            crate::plan::RegistryMemberTarget {
+                process: "prefill-0-rank-0".to_owned(),
+                role: "prefill".to_owned(),
+                address: "10.0.0.1:20001".to_owned(),
+            },
+            crate::plan::RegistryMemberTarget {
+                process: "decode-0-rank-0".to_owned(),
+                role: "backend".to_owned(),
+                address: "10.0.0.2:20002".to_owned(),
+            },
+        ]
+    }
+
+    fn registry_probe<'a>(
+        targets: &'a [crate::plan::RegistryMemberTarget],
+        filter: &'a crate::plan::JsonValueMatchPlan,
+        model_list: &'a crate::plan::ModelListPlan,
+    ) -> readiness::RegistryMembershipProbe<'a> {
+        readiness::RegistryMembershipProbe {
+            registry_path: "/health",
+            entries_pointer: "/instances",
+            entry_filter: Some(filter),
+            role_pointer: "/component",
+            address_pointer: "/transport/tcp",
+            model_list: Some(model_list),
+            expected_targets: targets,
+        }
+    }
+
+    #[test]
+    fn registry_membership_is_ready_when_every_target_and_the_served_model_appear()
+    -> Result<(), String> {
+        let registry = serde_json::json!({"instances": [
+            {"component": "prefill", "endpoint": "generate", "transport": {"tcp": "10.0.0.1:20001/a1/generate"}},
+            {"component": "prefill", "endpoint": "kv_query", "transport": {"tcp": "10.0.0.9:29999/zz/kv_query"}},
+            {"component": "backend", "endpoint": "generate", "transport": {"tcp": "10.0.0.2:20002/b2/generate"}}
+        ]});
+        let models = serde_json::json!({"data": [{"id": "fixture-model"}]});
+        let (endpoint, server) = json_routes_endpoint(
+            vec![
+                ("/health", registry.to_string()),
+                ("/v1/models", models.to_string()),
+            ],
+            Duration::from_millis(800),
+        )?;
+        let targets = registry_members();
+        let filter = crate::plan::JsonValueMatchPlan {
+            pointer: "/endpoint".to_owned(),
+            value: "generate".to_owned(),
+        };
+        let model_list = crate::plan::ModelListPlan {
+            path: "/v1/models".to_owned(),
+            models_pointer: "/data".to_owned(),
+            name_pointer: "/id".to_owned(),
+            served_model: "fixture-model".to_owned(),
+        };
+        let bound = OperationBound::finite(Duration::from_secs(2));
+
+        let evidence = readiness::wait_registry_membership_ready(
+            |_| alive_status(),
+            &endpoint,
+            registry_probe(&targets, &filter, &model_list),
+            1,
+            &bound,
+            &mut |_| {},
+        )
+        .map_err(|failure| failure.message)?;
+        server
+            .join()
+            .map_err(|_| "registry fixture panicked".to_owned())??;
+
+        let ReadinessEvidence::RegistryMembership {
+            matched_targets, ..
+        } = evidence
+        else {
+            return Err("expected registry-membership evidence".to_owned());
+        };
+        let matched = matched_targets
+            .iter()
+            .map(|target| (target.process.as_str(), target.entry_address.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matched,
+            [
+                ("prefill-0-rank-0", "10.0.0.1:20001/a1/generate"),
+                ("decode-0-rank-0", "10.0.0.2:20002/b2/generate")
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_membership_records_missing_targets_and_unexpected_entries() -> Result<(), String> {
+        let registry = serde_json::json!({"instances": [
+            {"component": "prefill", "endpoint": "generate", "transport": {"tcp": "10.0.0.1:20001/a1/generate"}},
+            {"component": "backend", "endpoint": "generate", "transport": {"tcp": "10.0.0.7:20002/foreign/generate"}}
+        ]});
+        let models = serde_json::json!({"data": [{"id": "fixture-model"}]});
+        let (endpoint, server) = json_routes_endpoint(
+            vec![
+                ("/health", registry.to_string()),
+                ("/v1/models", models.to_string()),
+            ],
+            Duration::from_millis(1_200),
+        )?;
+        let targets = registry_members();
+        let filter = crate::plan::JsonValueMatchPlan {
+            pointer: "/endpoint".to_owned(),
+            value: "generate".to_owned(),
+        };
+        let model_list = crate::plan::ModelListPlan {
+            path: "/v1/models".to_owned(),
+            models_pointer: "/data".to_owned(),
+            name_pointer: "/id".to_owned(),
+            served_model: "fixture-model".to_owned(),
+        };
+        let bound = OperationBound::finite(Duration::from_millis(600));
+
+        let failure = match readiness::wait_registry_membership_ready(
+            |_| alive_status(),
+            &endpoint,
+            registry_probe(&targets, &filter, &model_list),
+            1,
+            &bound,
+            &mut |_| {},
+        ) {
+            Err(failure) => failure,
+            Ok(evidence) => {
+                return Err(format!(
+                    "partial registry unexpectedly became ready: {evidence:?}"
+                ));
+            }
+        };
+        server
+            .join()
+            .map_err(|_| "registry fixture panicked".to_owned())??;
+
+        assert_eq!(failure.kind, ReadinessFailureKind::Timeout);
+        let observation = failure
+            .diagnostic_attempts
+            .iter()
+            .find_map(|attempt| attempt.registry.as_ref())
+            .ok_or_else(|| "the unready attempt records no registry observation".to_owned())?;
+        assert_eq!(
+            observation.missing,
+            ["decode-0-rank-0 (backend at 10.0.0.2:20002)"]
+        );
+        assert_eq!(
+            observation.unexpected,
+            ["backend at 10.0.0.7:20002/foreign/generate"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_membership_records_unexpected_entries_when_only_the_model_list_fails()
+    -> Result<(), String> {
+        let registry = serde_json::json!({"instances": [
+            {"component": "prefill", "endpoint": "generate", "transport": {"tcp": "10.0.0.1:20001/a1/generate"}},
+            {"component": "backend", "endpoint": "generate", "transport": {"tcp": "10.0.0.2:20002/b2/generate"}},
+            {"component": "backend", "endpoint": "generate", "transport": {"tcp": "10.0.0.7:20002/foreign/generate"}}
+        ]});
+        let models = serde_json::json!({"data": [{"id": "other-model"}]});
+        let (endpoint, server) = json_routes_endpoint(
+            vec![
+                ("/health", registry.to_string()),
+                ("/v1/models", models.to_string()),
+            ],
+            Duration::from_millis(1_200),
+        )?;
+        let targets = registry_members();
+        let filter = crate::plan::JsonValueMatchPlan {
+            pointer: "/endpoint".to_owned(),
+            value: "generate".to_owned(),
+        };
+        let model_list = crate::plan::ModelListPlan {
+            path: "/v1/models".to_owned(),
+            models_pointer: "/data".to_owned(),
+            name_pointer: "/id".to_owned(),
+            served_model: "fixture-model".to_owned(),
+        };
+        let bound = OperationBound::finite(Duration::from_millis(600));
+
+        let failure = match readiness::wait_registry_membership_ready(
+            |_| alive_status(),
+            &endpoint,
+            registry_probe(&targets, &filter, &model_list),
+            1,
+            &bound,
+            &mut |_| {},
+        ) {
+            Err(failure) => failure,
+            Ok(evidence) => {
+                return Err(format!(
+                    "an unlisted served model unexpectedly became ready: {evidence:?}"
+                ));
+            }
+        };
+        server
+            .join()
+            .map_err(|_| "registry fixture panicked".to_owned())??;
+
+        let observation = failure
+            .diagnostic_attempts
+            .iter()
+            .rev()
+            .find_map(|attempt| attempt.registry.as_ref())
+            .ok_or_else(|| "the unready attempt records no registry observation".to_owned())?;
+        assert!(observation.missing.is_empty(), "{observation:?}");
+        assert_eq!(
+            observation.unexpected,
+            ["backend at 10.0.0.7:20002/foreign/generate"]
+        );
         Ok(())
     }
 

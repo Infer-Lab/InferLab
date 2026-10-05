@@ -6,8 +6,8 @@ use inferlab_protocol::{
     EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
     MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
     Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, ProtocolVersion,
-    ReadinessProbe, RenderInputDeclaration, SettingValue, SuppliedRenderInput,
-    TargetEndpointScheme, measurement_schema, protocol_schema,
+    ReadinessProbe, RenderInputDeclaration, ServeProcessAllocation, SettingValue,
+    SuppliedRenderInput, TargetEndpointScheme, measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -44,10 +44,6 @@ const INVALID_RESPONSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/invalid/response-wrong-shape.json"
 ));
-const INVALID_PROTOCOL_V10_REQUEST: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/fixtures/invalid/request-protocol-version-10.json"
-));
 const VALID_PLAN_REQUEST_AUXILIARY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/plan-serve-request-auxiliary-models.json"
@@ -69,6 +65,14 @@ const VALID_RENDER_REQUEST_ROUTED_SINGLE: &str = include_str!(concat!(
     "/../../protocol/fixtures/valid/render-serve-request-routed-single.json"
 ));
 
+const VALID_PLAN_RESPONSE_DISCOVERY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/plan-serve-response-discovery.json"
+));
+const VALID_RENDER_REQUEST_DISCOVERY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/render-serve-request-discovery.json"
+));
 const VALID_HTTP_TARGET_REGISTRY_READINESS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/http-target-registry-readiness.json"
@@ -147,7 +151,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v11.schema.json"
+    "/../../protocol/schema/adapter-protocol-v12.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -155,27 +159,14 @@ const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
 ));
 
 #[test]
-fn protocol_v6_requests_are_rejected_instead_of_partially_interpreted() {
-    let request = r#"{
-        "operation": "plan_serve",
-        "protocol_version": "6",
-        "input": {
-            "model": {"id": "model", "served_name": "model"},
-            "topology": "single",
-            "roles": [],
-            "profiling": "managed_collection"
-        }
-    }"#;
-
-    assert!(serde_json::from_str::<AdapterRequest>(request).is_err());
-}
-
-#[test]
-fn protocol_v10_requests_are_rejected_instead_of_partially_interpreted() {
-    // The fixture is a well-formed protocol-v10 plan request carrying the
-    // auxiliary-model member; protocol v11 MUST reject it outright rather
-    // than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
-    assert!(serde_json::from_str::<AdapterRequest>(INVALID_PROTOCOL_V10_REQUEST).is_err());
+fn requests_at_another_protocol_version_are_rejected_instead_of_partially_interpreted()
+-> Result<(), Box<dyn Error>> {
+    // Any version other than the current one is refused before its shape is
+    // read ([[RFC-0006:C-INTEGRATIONS]]).
+    let mut request: serde_json::Value = serde_json::from_str(VALID_PLAN_REQUEST)?;
+    request["protocol_version"] = serde_json::Value::from("0");
+    assert!(serde_json::from_value::<AdapterRequest>(request).is_err());
+    Ok(())
 }
 /// The auxiliary-model fixtures: planning carries the logical identities and
 /// each model-rank rendering allocation carries the machine-resolved locator
@@ -567,7 +558,7 @@ fn failed_agentic_source_fixture_preserves_partial_evidence() -> Result<(), Box<
 }
 
 #[test]
-fn protocol_v11_rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
+fn rejects_the_pre_binding_capture_control_shape() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     let capture_target = response
         .pointer_mut("/result/output/replicas/0/capture_target")
@@ -587,7 +578,7 @@ fn protocol_v11_rejects_the_pre_binding_capture_control_shape() -> Result<(), Bo
 }
 
 #[test]
-fn protocol_v11_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
+fn preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["replicas"][0]["capture_target"]["window_control"]["start"]["body"] =
         serde_json::json!({"activities": ["CUDA_PROFILER"]});
@@ -612,8 +603,7 @@ fn protocol_v11_preserves_a_typed_capture_action_body() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn protocol_v11_does_not_attach_capture_bodies_to_prefix_cache_actions()
--> Result<(), Box<dyn Error>> {
+fn does_not_attach_capture_bodies_to_prefix_cache_actions() -> Result<(), Box<dyn Error>> {
     let mut response: serde_json::Value = serde_json::from_str(VALID_PLAN_RESPONSE)?;
     response["result"]["output"]["roles"][0]["public_endpoint"]["prefix_cache_reset"] = serde_json::json!({
         "method": "post",
@@ -651,16 +641,10 @@ fn valid_fixtures_deserialize_and_round_trip() -> Result<(), Box<dyn Error>> {
     let launch_file_response: AdapterResponse = serde_json::from_str(VALID_LAUNCH_FILE_RESPONSE)?;
     let error_response: AdapterResponse = serde_json::from_str(VALID_ERROR_RESPONSE)?;
 
-    assert_eq!(plan_request.protocol_version(), ProtocolVersion::V11);
-    assert_eq!(plan_response.protocol_version(), ProtocolVersion::V11);
-    assert_eq!(render_request.protocol_version(), ProtocolVersion::V11);
-    assert_eq!(render_response.protocol_version(), ProtocolVersion::V11);
-    assert_eq!(error_response.protocol_version(), ProtocolVersion::V11);
-
     // The projected string form must stay identical to the wire spelling.
     assert_eq!(
         ProtocolVersion::CURRENT.as_str(),
-        serde_json::to_value(ProtocolVersion::V11)?
+        serde_json::to_value(ProtocolVersion::CURRENT)?
             .as_str()
             .ok_or("protocol version must serialize as a string")?
     );
@@ -910,7 +894,6 @@ fn eval_client_fixture_preserves_workspace_yaml_task_source() -> Result<(), Box<
         return Err("fixture did not contain a workspace YAML task source".into());
     };
 
-    assert_eq!(request.protocol_version, ProtocolVersion::V11);
     assert_eq!(request.endpoint.completions_path, "/v1/completions");
     assert_eq!(
         request.endpoint.chat_completions_path,
@@ -1043,10 +1026,9 @@ fn plan_response_rejects_legacy_endpoint_path_fields() -> Result<(), Box<dyn Err
 
 #[test]
 fn data_asset_preparation_fixtures_preserve_opaque_readiness() -> Result<(), Box<dyn Error>> {
-    let request = serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
+    serde_json::from_str::<MeasurementDataAssetPreparationRequest>(
         VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL,
     )?;
-    assert_eq!(request.protocol_version, ProtocolVersion::V11);
     let result = serde_json::from_str::<MeasurementDataAssetPreparationResult>(
         VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE,
     )?;
@@ -1188,5 +1170,69 @@ fn parallelism_field_projection_covers_every_wire_field() -> Result<(), Box<dyn 
         }
     }
     assert_eq!(projected, wire_names);
+    Ok(())
+}
+
+#[test]
+fn discovery_registry_membership_and_per_target_reset_fixtures_round_trip()
+-> Result<(), Box<dyn Error>> {
+    let response: AdapterResponse = serde_json::from_str(VALID_PLAN_RESPONSE_DISCOVERY)?;
+    let AdapterResponse::Ok { result, .. } = &response else {
+        return Err("expected a successful response".into());
+    };
+    let AdapterResult::PlanServe { output } = result.as_ref() else {
+        return Err("expected plan output".into());
+    };
+    let gateway = output.gateway.as_ref().ok_or("gateway")?;
+    let discovery = gateway.discovery.as_ref().ok_or("discovery requirement")?;
+    assert_eq!(discovery.ports, ["peer"]);
+    let pd_router = output.pd_router.as_ref().ok_or("pd_router")?;
+    assert_eq!(pd_router.target_scheme, TargetEndpointScheme::Tcp);
+    let ReadinessProbe::RegistryMembership(registry) = &pd_router.readiness else {
+        return Err("expected registry-membership readiness".into());
+    };
+    assert_eq!(registry.target_port, "request");
+    assert_eq!(registry.role_values.decode.as_deref(), Some("backend"));
+    assert!(registry.model_list.is_some());
+    for role in &output.roles {
+        let reset = role
+            .replica_prefix_cache_reset
+            .as_ref()
+            .ok_or("per-target reset")?;
+        assert_eq!(
+            reset
+                .success
+                .as_ref()
+                .map(|m| (m.pointer.as_str(), m.value.as_str())),
+            Some(("/status", "ok"))
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(&response)?,
+        serde_json::from_str::<serde_json::Value>(VALID_PLAN_RESPONSE_DISCOVERY)?
+    );
+
+    let request: AdapterRequest = serde_json::from_str(VALID_RENDER_REQUEST_DISCOVERY)?;
+    let AdapterRequest::RenderServe { input, .. } = &request else {
+        return Err("expected a render_serve request".into());
+    };
+    let mut discovery_processes = 0;
+    for allocation in &input.allocations {
+        match allocation {
+            ServeProcessAllocation::Discovery { devices, .. } => {
+                assert!(devices.is_empty());
+                discovery_processes += 1;
+            }
+            ServeProcessAllocation::ModelRank { discovery, .. } => {
+                assert_eq!(discovery.as_deref(), Some("discovery"));
+            }
+            ServeProcessAllocation::Frontend { .. } => {}
+        }
+    }
+    assert_eq!(discovery_processes, 1);
+    assert_eq!(
+        serde_json::to_value(&request)?,
+        serde_json::from_str::<serde_json::Value>(VALID_RENDER_REQUEST_DISCOVERY)?
+    );
     Ok(())
 }

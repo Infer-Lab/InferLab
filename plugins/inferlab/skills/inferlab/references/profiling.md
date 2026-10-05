@@ -28,7 +28,10 @@ session. Under engine trace there is no per-rank Nsight Systems session:
 InferLab assigns each engine-trace replica a persistent record-owned trace
 directory, the framework profiler writes one trace artifact per model-serving
 rank into it, and coverage verifies a storage delta of at least one new
-artifact per model device of the replica.
+artifact per model device of the replica. The vLLM integration disables vLLM's
+`profiler_out_*.txt` summary table, whose computation would block the engine
+for minutes after the window closes; derive summaries from the trace artifacts
+instead.
 
 InferLab enumerates the expected semantic windows, arms every selected target,
 opens the framework range before the bound measurement phase, closes it after

@@ -25,10 +25,12 @@ from inferlab_adapter_sdk import (
     ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
     ReadinessProbeProcessAlive,
+    ReadinessProbeRegistryMembership,
     RenderedServeProcessFrontend,
     RenderedServeProcessModelRank,
     RenderInputDeclaration,
     RenderSource,
+    ServeProcessAllocationDiscovery,
     ServeProcessAllocationFrontend,
     ServeProcessAllocationModelRank,
     ServeReplicaRequirement,
@@ -58,6 +60,7 @@ from inferlab_adapter_sdk._generated import (
     AdapterResultPlanServe,
     AdapterResultRenderServe,
 )
+from inferlab_adapter_sdk.runtime import SUPPORTED_PROTOCOL_VERSION
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, ConfigDict
@@ -65,7 +68,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v11.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v12.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -349,6 +352,38 @@ def test_generated_models_preserve_render_inputs() -> None:
     assert supplied.sha256 == "898caa1654c13bd4b1f2eba75d17c09b8fc3ea1370e5532a5111be220d50baa3"
 
 
+def test_generated_models_preserve_discovery_registry_and_per_target_reset() -> None:
+    plan = AdapterResponse.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-response-discovery.json")
+    ).root
+    assert isinstance(plan, AdapterResponseOk)
+    output = plan.result.root
+    assert isinstance(output, AdapterResultPlanServe)
+    gateway = output.output.gateway
+    assert gateway is not None and gateway.discovery is not None
+    assert gateway.discovery.ports == ["peer"]
+    pd_router = output.output.pd_router
+    assert pd_router is not None
+    assert pd_router.target_scheme == TargetEndpointScheme.tcp
+    readiness = pd_router.readiness.root
+    assert isinstance(readiness, ReadinessProbeRegistryMembership)
+    assert readiness.target_port == "request"
+    for role in output.output.roles:
+        reset = role.replica_prefix_cache_reset
+        assert reset is not None and reset.success is not None
+        assert (reset.success.pointer, reset.success.value) == ("/status", "ok")
+
+    render = AdapterRequest.model_validate(
+        load_json(FIXTURES / "valid" / "render-serve-request-discovery.json")
+    ).root
+    assert isinstance(render, AdapterRequestRenderServe)
+    allocations = [allocation.root for allocation in render.input.allocations]
+    discovery = [a for a in allocations if isinstance(a, ServeProcessAllocationDiscovery)]
+    assert len(discovery) == 1 and discovery[0].devices == []
+    ranks = [a for a in allocations if isinstance(a, ServeProcessAllocationModelRank)]
+    assert ranks and all(rank.discovery == "discovery" for rank in ranks)
+
+
 def test_generated_models_preserve_http_target_registry_readiness() -> None:
     readiness = ReadinessProbe.model_validate(
         load_json(FIXTURES / "valid" / "http-target-registry-readiness.json")
@@ -419,21 +454,8 @@ def test_unsupported_request_protocol_version_is_reported_before_shape(
     response_error = response.root
     assert isinstance(response_error, AdapterResponseError)
     assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
-
-
-def test_protocol_v10_request_is_rejected_instead_of_partially_interpreted() -> None:
-    # The fixture is a well-formed protocol-v10 plan request carrying the
-    # auxiliary-model member; protocol v11 MUST reject it outright rather
-    # than partially interpret it ([[RFC-0006:C-INTEGRATIONS]]).
-    payload = (FIXTURES / "invalid" / "request-protocol-version-10.json").read_text()
-
-    response = handle_request(payload, fixture_plan_serve)
-
-    response_error = response.root
-    assert isinstance(response_error, AdapterResponseError)
-    assert response_error.error.code == AdapterErrorCode.unsupported_protocol_version
-    assert "received protocol version 10" in response_error.error.message
-    assert "protocol version 11" in response_error.error.message
+    assert "received protocol version 2" in response_error.error.message
+    assert f"protocol version {SUPPORTED_PROTOCOL_VERSION}" in response_error.error.message
 
 
 def test_malformed_request_json_stays_invalid_request() -> None:

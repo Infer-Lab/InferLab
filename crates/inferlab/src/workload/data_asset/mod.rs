@@ -16,4 +16,4 @@ pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 /// request-source evidence and the effective vision-mode selection on the
 /// built-in OpenAI smoke definition
 /// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]], [[RFC-0004:C-MEASUREMENTS]]).
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 20;
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 21;

@@ -10,7 +10,7 @@ use super::plan::{
 };
 use super::{
     MeasurementModel, WorkloadEndpoint, WorkloadEndpointProtocol, WorkloadHttpAction,
-    WorkloadHttpMethod, WorkloadServerMetricsEndpoint,
+    WorkloadServerMetricsEndpoint,
 };
 use crate::InferlabError;
 use crate::record::STATE_DIR;
@@ -115,63 +115,62 @@ pub(crate) fn resolve_manual_bench(
             )
         }),
     );
-    let context =
-        MeasurementResolveContext {
-            workspace_root: root,
-            workspace_source_exclusions: &snapshot.source_exclusions,
-            endpoint: WorkloadEndpoint {
-                protocol: match recorded.server.endpoint.protocol {
-                    inferlab_protocol::EndpointProtocol::Http => WorkloadEndpointProtocol::Http,
-                },
-                host: recorded.server.endpoint.host.clone(),
-                port: recorded.server.endpoint.port,
-                completions_path: recorded.server.endpoint.completions_path.clone(),
-                chat_completions_path: recorded.server.endpoint.chat_completions_path.clone(),
-                server_metrics: recorded
-                    .server
-                    .endpoint
-                    .server_metrics
-                    .as_ref()
-                    .map(|metrics| WorkloadServerMetricsEndpoint {
-                        path: metrics.path.clone(),
-                        port_name: metrics.port_name.clone(),
-                        url: metrics.url.clone(),
-                    }),
-                prompt_cache_read_zero_representation: recorded
-                    .server
-                    .endpoint
-                    .prompt_cache_read_zero_representation,
+    let context = MeasurementResolveContext {
+        workspace_root: root,
+        workspace_source_exclusions: &snapshot.source_exclusions,
+        endpoint: WorkloadEndpoint {
+            protocol: match recorded.server.endpoint.protocol {
+                inferlab_protocol::EndpointProtocol::Http => WorkloadEndpointProtocol::Http,
             },
-            model: MeasurementModel {
-                locator: model_locator,
-                served_name: recorded.server.model.served_name.clone(),
-            },
-            model_id: &recorded.server.model.id,
-            prefix_cache_reset: recorded.server.endpoint.prefix_cache_reset.as_ref().map(
-                |action| WorkloadHttpAction {
-                    method: match action.method {
-                        inferlab_protocol::HttpMethod::Post => WorkloadHttpMethod::Post,
-                    },
-                    path: action.path.clone(),
-                },
-            ),
-            prefix_cache_conditioning: recorded
+            host: recorded.server.endpoint.host.clone(),
+            port: recorded.server.endpoint.port,
+            completions_path: recorded.server.endpoint.completions_path.clone(),
+            chat_completions_path: recorded.server.endpoint.chat_completions_path.clone(),
+            server_metrics: recorded
                 .server
                 .endpoint
-                .prefix_cache_conditioning
+                .server_metrics
                 .as_ref()
-                .map(|action| WorkloadHttpAction {
-                    method: match action.method {
-                        inferlab_protocol::HttpMethod::Post => WorkloadHttpMethod::Post,
-                    },
-                    path: action.path.clone(),
+                .map(|metrics| WorkloadServerMetricsEndpoint {
+                    path: metrics.path.clone(),
+                    port_name: metrics.port_name.clone(),
+                    url: metrics.url.clone(),
                 }),
-            conditioning_serving,
-            synthetic_acceptance: recorded.server.synthetic_acceptance.is_some(),
-            capture_ids: &capture_ids,
-            command_env: &command_env,
-            command_cwd: &root.join(STATE_DIR),
-        };
+            prompt_cache_read_zero_representation: recorded
+                .server
+                .endpoint
+                .prompt_cache_read_zero_representation,
+        },
+        model: MeasurementModel {
+            locator: model_locator,
+            served_name: recorded.server.model.served_name.clone(),
+        },
+        model_id: &recorded.server.model.id,
+        prefix_cache_reset: recorded
+            .server
+            .endpoint
+            .prefix_cache_reset
+            .as_ref()
+            .map(WorkloadHttpAction::from_wire),
+        replica_prefix_cache_resets: recorded
+            .server
+            .endpoint
+            .replica_prefix_cache_resets
+            .iter()
+            .map(crate::workload::WorkloadReplicaReset::from_plan)
+            .collect(),
+        prefix_cache_conditioning: recorded
+            .server
+            .endpoint
+            .prefix_cache_conditioning
+            .as_ref()
+            .map(WorkloadHttpAction::from_wire),
+        conditioning_serving,
+        synthetic_acceptance: recorded.server.synthetic_acceptance.is_some(),
+        capture_ids: &capture_ids,
+        command_env: &command_env,
+        command_cwd: &root.join(STATE_DIR),
+    };
     let bench = build_bench_plan(
         bench_id,
         declared_definition,

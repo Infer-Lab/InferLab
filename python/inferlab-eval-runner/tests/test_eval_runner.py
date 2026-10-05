@@ -58,6 +58,7 @@ from inferlab_eval_runner.task_resolution import (
     workspace_yaml_include_closure,
 )
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     CaseDeadline,
     ClientStatus,
     EvalClientRequest,
@@ -88,7 +89,7 @@ def lm_eval_request(
 ) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "workspace_root": str(tmp_path),
             "workspace_source_exclusions": [],
             "endpoint": {
@@ -129,7 +130,7 @@ def lm_eval_request(
 def openai_smoke_request(tmp_path: Path) -> EvalClientRequest:
     return EvalClientRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "workspace_root": str(tmp_path),
             "workspace_source_exclusions": [],
             "endpoint": {
@@ -992,7 +993,7 @@ def test_workspace_eval_source_is_prepared_as_explicitly_opaque(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "phase": {"kind": "resolve"},
             "source": {
                 "kind": "eval",
@@ -1062,7 +1063,7 @@ def test_workspace_eval_local_files_are_snapshotted_and_bound(
         },
     )
     request_value = {
-        "protocol_version": "11",
+        "protocol_version": PROTOCOL_VERSION,
         "source": {
             "kind": "eval",
             "workspace_root": str(tmp_path),
@@ -1169,7 +1170,7 @@ def test_builtin_eval_source_stays_opaque_without_materializing_the_task(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "phase": {"kind": "resolve"},
             "source": {
                 "kind": "eval",
@@ -1248,7 +1249,7 @@ def test_bundled_eval_source_preparation_closes_verified_release_assets(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "phase": {"kind": "resolve"},
             "source": {
                 "kind": "eval",

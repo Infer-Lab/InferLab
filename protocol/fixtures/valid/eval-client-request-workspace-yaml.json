@@ -1,5 +1,5 @@
 {
-  "protocol_version": "11",
+  "protocol_version": "12",
   "workspace_root": "/workspace",
   "workspace_source_exclusions": [
     ".inferlab/cache",

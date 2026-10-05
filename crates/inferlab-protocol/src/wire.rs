@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `11` (serialized as the
-/// string `"11"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `12` (serialized as the
+/// string `"12"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 11.
-    #[serde(rename = "11")]
-    V11,
+    /// Protocol version 12.
+    #[serde(rename = "12")]
+    V12,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V11;
+    pub const CURRENT: Self = Self::V12;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V11 => "11",
+            Self::V12 => "12",
         }
     }
 }
@@ -626,6 +626,12 @@ pub struct ServeRoleResult {
     /// declaration on Gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_endpoint: Option<EndpointDeclaration>,
+    /// A prefix-cache reset invoked on the entry endpoint of every replica of
+    /// this role; a Gateway-backed server has a per-target reset capability
+    /// only when every model-serving role declares one
+    /// ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_prefix_cache_reset: Option<HttpActionSpec>,
     #[serde(default)]
     pub render_inputs: Vec<RenderInputDeclaration>,
 }
@@ -781,8 +787,69 @@ pub enum ReadinessProbe {
     /// Ready when the public endpoint succeeds and its HTTP target registry
     /// contains every control-plane-derived serving target.
     HttpTargetRegistry(Box<HttpTargetRegistryReadiness>),
+    /// Ready when a JSON registry lists every rank-zero model-serving process
+    /// under its role at its allocated address and, when declared, a model
+    /// list names the served model ([[RFC-0006:C-INTEGRATIONS]]).
+    RegistryMembership(Box<RegistryMembershipReadiness>),
     /// Ready as soon as the process is alive.
     ProcessAlive,
+}
+
+/// A framework-neutral registry-membership readiness contract. Every pointer
+/// is an RFC 6901 JSON Pointer; entry pointers are evaluated against one
+/// registry entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryMembershipReadiness {
+    /// Absolute HTTP path of the registry on the owning process's endpoint.
+    pub registry_path: String,
+    /// Logical port of each model-serving process whose allocated `host:port`
+    /// the registry entries carry.
+    pub target_port: String,
+    /// Pointer from the registry document to the entry array.
+    pub entries_pointer: String,
+    /// Entries whose value at the pointer differs from the expected value are
+    /// ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_filter: Option<JsonValueMatch>,
+    pub role_pointer: String,
+    pub role_values: RegistryRoleValues,
+    pub address_pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_list: Option<ModelListRequirement>,
+}
+
+/// The registry role value expected for each model-serving role kind present
+/// in the topology.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryRoleValues {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode: Option<String>,
+}
+
+/// A served-model list that must name the served model.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelListRequirement {
+    /// Absolute HTTP path of the list on the owning process's endpoint.
+    pub path: String,
+    /// Pointer from the list document to the model array.
+    pub models_pointer: String,
+    /// Pointer from one model element to its name.
+    pub name_pointer: String,
+}
+
+/// A JSON Pointer and the string value expected at it.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonValueMatch {
+    pub pointer: String,
+    pub value: String,
 }
 
 /// The integration-owned HTTP registry contract for target-aware readiness.
@@ -808,6 +875,10 @@ pub struct HttpTargetRegistryReadiness {
 pub struct HttpActionSpec {
     pub method: HttpMethod,
     pub path: String,
+    /// When present, a 2xx response succeeds only if its JSON body holds the
+    /// expected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<JsonValueMatch>,
 }
 
 // Capture window control ([[RFC-0004:C-WORKLOAD-PROFILING]]).
@@ -854,6 +925,10 @@ pub struct CaptureWindowHttpActionSpec {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<BTreeMap<String, SettingValue>>,
+    /// When present, a 2xx response succeeds only if its JSON body holds the
+    /// expected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<JsonValueMatch>,
 }
 
 /// One concrete process allocation supplied to `RenderServe`. Model-rank and
@@ -892,6 +967,10 @@ pub enum ServeProcessAllocation {
         links: Vec<ServeRoleLink>,
         #[serde(default)]
         dependencies: Vec<String>,
+        /// The discovery process this process registers with, when the
+        /// topology has one ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discovery: Option<String>,
         #[serde(default)]
         render_inputs: Vec<SuppliedRenderInput>,
     },
@@ -912,6 +991,30 @@ pub enum ServeProcessAllocation {
         links: Vec<ServeRoleLink>,
         #[serde(default)]
         dependencies: Vec<String>,
+        /// The discovery process this process registers with, when the
+        /// topology has one ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discovery: Option<String>,
+        #[serde(default)]
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
+    /// The discovery service a Gateway result requires
+    /// ([[RFC-0003:C-SERVE-TOPOLOGY]]): process-only, zero devices, placed on
+    /// the Gateway's machine, with an internal (not public) endpoint.
+    Discovery {
+        process: String,
+        process_role: DiscoveryProcessRole,
+        components: DiscoveryBinding,
+        machine: String,
+        devices: Vec<u32>,
+        endpoint: EndpointAssignment,
+        ports: BTreeMap<String, EndpointAssignment>,
+        cache: String,
+        /// The control-plane-assigned empty data directory under the
+        /// machine's runtime cache.
+        data_directory: String,
+        launch: AllocationLaunch,
+        discovery: Box<DiscoveryRequirement>,
         #[serde(default)]
         render_inputs: Vec<SuppliedRenderInput>,
     },
@@ -955,6 +1058,13 @@ pub enum RenderedServeProcess {
         launch_files: Vec<LaunchFileDeclaration>,
         command: ProcessSpec,
     },
+    Discovery {
+        process: String,
+        process_role: DiscoveryProcessRole,
+        components: DiscoveryBinding,
+        launch_files: Vec<LaunchFileDeclaration>,
+        command: ProcessSpec,
+    },
 }
 
 /// One immutable text input a rendered process requires before it can launch.
@@ -991,6 +1101,44 @@ pub enum RenderSource {
 #[serde(rename_all = "snake_case")]
 pub enum FrontendProcessRole {
     Gateway,
+}
+
+/// The canonical process role of the discovery process.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryProcessRole {
+    Discovery,
+}
+
+/// The only member of the closed discovery component binding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryComponent {
+    Discovery,
+}
+
+/// The closed `["discovery"]` component binding.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct DiscoveryBinding(pub [DiscoveryComponent; 1]);
+
+impl DiscoveryBinding {
+    #[must_use]
+    pub const fn discovery() -> Self {
+        Self([DiscoveryComponent::Discovery])
+    }
+}
+
+/// A discovery service a Gateway backend requires: its logical ports beyond
+/// its endpoint, readiness, and render inputs ([[RFC-0006:C-INTEGRATIONS]]).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryRequirement {
+    #[serde(default)]
+    pub ports: Vec<String>,
+    pub readiness: ReadinessProbe,
+    #[serde(default)]
+    pub render_inputs: Vec<RenderInputDeclaration>,
 }
 
 /// The fixed co-rendering requirement shared by compatible frontend plans.
@@ -1084,6 +1232,10 @@ pub struct GatewayPlan {
     pub render_inputs: Vec<RenderInputDeclaration>,
     pub render_source: RenderSource,
     pub co_rendering: FrontendCoRendering,
+    /// The discovery service this Gateway backend requires; its presence
+    /// derives one `discovery` process ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryRequirement>,
 }
 
 /// Independent policies for choosing prefill and decode targets.
@@ -1133,6 +1285,8 @@ pub enum TargetEndpointScheme {
     Http,
     /// gRPC serving endpoint.
     Grpc,
+    /// A framework's own TCP request plane, such as Dynamo's.
+    Tcp,
 }
 
 // Measurement-client shared base.

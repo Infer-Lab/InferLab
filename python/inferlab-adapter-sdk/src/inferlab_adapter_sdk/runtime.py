@@ -41,6 +41,7 @@ from ._generated import (
     ProtocolVersion,
     ReadinessProbe,
     RenderedServeProcess,
+    RenderedServeProcessDiscovery,
     RenderedServeProcessFrontend,
     RenderedServeProcessModelRank,
     RenderInputDeclaration,
@@ -48,6 +49,7 @@ from ._generated import (
     RenderServeResult,
     RenderSource,
     ServeProcessAllocation,
+    ServeProcessAllocationDiscovery,
     ServeProcessAllocationFrontend,
     ServeProcessAllocationModelRank,
     ServeRoleInput,
@@ -59,10 +61,14 @@ from ._generated import (
 
 type PlanServeHandler = Callable[[PlanServeInput], PlanServeResult]
 type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
-type ServeAllocation = ServeProcessAllocationModelRank | ServeProcessAllocationFrontend
+type ServeAllocation = (
+    ServeProcessAllocationModelRank
+    | ServeProcessAllocationFrontend
+    | ServeProcessAllocationDiscovery
+)
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-PROTOCOL_V11 = ProtocolVersion()
+CURRENT_PROTOCOL_VERSION = ProtocolVersion()
 
 # Inferlab owns readiness; the router's internal guard must not expire first.
 ROUTER_WORKER_STARTUP_TIMEOUT_SECS = 2_147_483_647
@@ -319,6 +325,24 @@ def rendered_frontend(
         )
     return RenderedServeProcess(
         root=RenderedServeProcessFrontend(
+            process=allocation.process,
+            process_role=allocation.process_role,
+            components=allocation.components,
+            command=command,
+            launch_files=list(launch_files or []),
+        )
+    )
+
+
+def rendered_discovery(
+    allocation: ServeProcessAllocationDiscovery,
+    command: ProcessSpec,
+    *,
+    launch_files: list[LaunchFileDeclaration] | None = None,
+) -> RenderedServeProcess:
+    """Preserve a discovery allocation identity in an adapter render result."""
+    return RenderedServeProcess(
+        root=RenderedServeProcessDiscovery(
             process=allocation.process,
             process_role=allocation.process_role,
             components=allocation.components,
@@ -588,13 +612,13 @@ def consistent_acceptance_outcome(
 def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
     return AdapterResponse(
         root=AdapterResponseError(
-            protocol_version=PROTOCOL_V11,
+            protocol_version=CURRENT_PROTOCOL_VERSION,
             error=AdapterError(code=code, message=message),
         )
     )
 
 
-SUPPORTED_PROTOCOL_VERSION: str = PROTOCOL_V11.root
+SUPPORTED_PROTOCOL_VERSION: str = CURRENT_PROTOCOL_VERSION.root
 
 
 def handle_request(
@@ -645,7 +669,7 @@ def handle_request(
 
     return AdapterResponse(
         root=AdapterResponseOk(
-            protocol_version=PROTOCOL_V11,
+            protocol_version=CURRENT_PROTOCOL_VERSION,
             result=AdapterResult(root=result),
         )
     )

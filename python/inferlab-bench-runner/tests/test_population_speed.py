@@ -7,6 +7,7 @@ from inferlab_bench_runner.result_population import (
     population_identity_error,
 )
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     BenchPopulationPreparationRequest,
     ClientStatus,
 )
@@ -38,7 +39,7 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
     )
     request_value = BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

@@ -15,10 +15,9 @@ pub(crate) const ENV_PREFIX: &str = "/opt/inferlab-env";
 /// behavior-affecting closure inputs, while the closure map itself carries no
 /// in-image program paths.
 pub(super) fn entrypoint_contract_digest(rendered_entrypoint: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{ENTRYPOINT_PATH}\u{1e}{rendered_entrypoint}").as_bytes())
-    )
+    base16ct::lower::encode_string(&Sha256::digest(
+        format!("{ENTRYPOINT_PATH}\u{1e}{rendered_entrypoint}").as_bytes(),
+    ))
 }
 
 /// The selected environment's feature composition: the named features in

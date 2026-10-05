@@ -194,7 +194,7 @@ pub(super) fn locked_closure_digest(packages: &[PackageSpec]) -> String {
             )
         })
         .collect();
-    format!("{:x}", Sha256::digest(canonical.join("\u{1e}").as_bytes()))
+    base16ct::lower::encode_string(&Sha256::digest(canonical.join("\u{1e}").as_bytes()))
 }
 
 /// Content identities for editable packages installed outside the stack sources
@@ -288,7 +288,7 @@ fn tree_digest(path: &Path) -> Result<String, InferlabError> {
         }
         hasher.update([0]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(base16ct::lower::encode_string(&hasher.finalize()))
 }
 
 /// PEP 503 package-name normalization for wheel/lock comparisons.

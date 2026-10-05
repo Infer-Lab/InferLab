@@ -140,23 +140,26 @@ pub(super) fn build_bench_plan(
             });
         }
     }
-    let prefix_cache_reset = if matches!(
+    // The reset capability is the public action or the per-target reset of
+    // every model-serving replica ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    let (prefix_cache_reset, replica_prefix_cache_resets) = if matches!(
         resolved_definition.cache_start,
         BenchCacheStart::Cold | BenchCacheStart::Primed
     ) {
-        Some(
-            context
-                .prefix_cache_reset
-                .clone()
-                .ok_or_else(|| InferlabError::InvalidConfig {
-                    message: format!(
-                        "bench {id:?} selects cache.start = {:?}, but the server exposes no prefix-cache reset capability",
-                        resolved_definition.cache_start
-                    ),
-                })?,
+        if context.prefix_cache_reset.is_none() && context.replica_prefix_cache_resets.is_empty() {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "bench {id:?} selects cache.start = {:?}, but the server exposes no prefix-cache reset capability",
+                    resolved_definition.cache_start
+                ),
+            });
+        }
+        (
+            context.prefix_cache_reset.clone(),
+            context.replica_prefix_cache_resets.clone(),
         )
     } else {
-        None
+        (None, Vec::new())
     };
     let prefix_cache_conditioning = prefix_cache_conditioning_plan(
         id,
@@ -202,6 +205,7 @@ pub(super) fn build_bench_plan(
                 cwd: context.command_cwd.to_path_buf(),
             },
             prefix_cache_reset,
+            replica_prefix_cache_resets,
             prefix_cache_conditioning,
         },
     })
@@ -745,7 +749,7 @@ fn resolve_bench_request_source(
                 // locally, absent when the file is unreadable.
                 let observed_sha256 = std::fs::read(&resolved_path)
                     .ok()
-                    .map(|bytes| format!("{:x}", Sha256::digest(&bytes)));
+                    .map(|bytes| base16ct::lower::encode_string(&Sha256::digest(&bytes)));
                 ResolvedBenchCorpus {
                     path: corpus.path.clone(),
                     expected_sha256: corpus.expected_sha256.clone(),
@@ -889,7 +893,7 @@ fn observe_replay_population(resolved_path: &Path) -> Result<ReplayObservation, 
     let Ok(bytes) = std::fs::read(resolved_path) else {
         return Ok(unavailable);
     };
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = base16ct::lower::encode_string(&Sha256::digest(&bytes));
     let mut entries = 0_u32;
     let mut saw_output_one = false;
     let mut saw_output_many = false;
@@ -1245,7 +1249,8 @@ timeout_seconds = 60
         };
         assert_eq!(path, "populations/x.jsonl");
         assert_eq!(resolved_path, &population);
-        let expected = format!("{:x}", sha2::Sha256::digest(std::fs::read(&population)?));
+        let expected =
+            base16ct::lower::encode_string(&sha2::Sha256::digest(std::fs::read(&population)?));
         assert_eq!(observed_sha256, &expected);
         assert_eq!(resolved.prompt.definition, BenchPrompt::Flat);
         Ok(())
@@ -1395,7 +1400,8 @@ timeout_seconds = 60
         };
         assert_eq!(path, "corpus/shakespeare.txt");
         assert_eq!(resolved_path, &corpus);
-        let expected = format!("{:x}", sha2::Sha256::digest(std::fs::read(&corpus)?));
+        let expected =
+            base16ct::lower::encode_string(&sha2::Sha256::digest(std::fs::read(&corpus)?));
         assert_eq!(observed_sha256, &expected);
 
         let missing = toml::from_str::<BenchDefinition>(

@@ -123,6 +123,7 @@ from .client import (
     write_result,
 )
 from .runtime import (
+    PROTOCOL_VERSION,
     CaseBudgetExpired,
     CaseDeadline,
     JsonObject,
@@ -135,6 +136,7 @@ from .runtime import (
 
 __all__ = [
     "HUGGINGFACE_HUB_CACHE_PURPOSE",
+    "PROTOCOL_VERSION",
     "SCHEMA_VERSION",
     "BenchAgenticAcquisitionOutcome",
     "BenchAgenticBranchStats",

@@ -1371,13 +1371,13 @@ const UNSUPPORTED_VERSION_ADAPTER: &str = r#"#!/usr/bin/env python3
 import json
 import sys
 
-json.load(sys.stdin)
+request = json.load(sys.stdin)
 print(json.dumps({
     "status": "error",
-    "protocol_version": "11",
+    "protocol_version": request["protocol_version"],
     "error": {
         "code": "unsupported_protocol_version",
-        "message": "received protocol version 11; this integration supports protocol version 6",
+        "message": f"received protocol version {request['protocol_version']}; this integration supports protocol version 6",
     },
 }))
 "#;
@@ -1385,6 +1385,10 @@ print(json.dumps({
 #[test]
 fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
+    let current = format!(
+        "protocol version {}",
+        inferlab_protocol::ProtocolVersion::CURRENT.as_str()
+    );
 
     // A raw-stamped foreign version is caught before the response even
     // deserializes; the failure names both versions and the remedy.
@@ -1399,7 +1403,7 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 2") && stderr.contains("protocol version 11"),
+        stderr.contains("protocol version 2") && stderr.contains(&current),
         "the mismatch names both versions: {stderr}"
     );
     assert!(
@@ -1421,7 +1425,7 @@ fn protocol_version_mismatch_names_both_versions_and_the_remedy() -> Result<(), 
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("protocol version 11") && stderr.contains("protocol version 6"),
+        stderr.contains(&current) && stderr.contains("protocol version 6"),
         "the structured rejection names both versions: {stderr}"
     );
     assert!(

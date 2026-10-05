@@ -136,8 +136,8 @@ def test_plan_profiles_the_engine_through_the_smg_gateway_window() -> None:
         "mechanism": "managed_collection",
         "window_control": {
             "endpoint": "gateway",
-            "start": {"method": "post", "path": "/start_profile", "body": None},
-            "stop": {"method": "post", "path": "/stop_profile", "body": None},
+            "start": {"method": "post", "path": "/start_profile", "body": None, "success": None},
+            "stop": {"method": "post", "path": "/stop_profile", "body": None, "success": None},
         },
     }
 

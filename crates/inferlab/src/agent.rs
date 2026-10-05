@@ -584,7 +584,7 @@ fn embedded_package_path() -> Result<PathBuf, String> {
                 "embedded plugin package: neither XDG_DATA_HOME nor HOME is set".to_owned()
             })?
     };
-    let digest = format!("{:x}", Sha256::digest(EMBEDDED_PLUGIN_TAR_GZ));
+    let digest = base16ct::lower::encode_string(&Sha256::digest(EMBEDDED_PLUGIN_TAR_GZ));
     Ok(data_home
         .join("inferlab/agent-plugins")
         .join(format!("{INFERLAB_VERSION}-{digest}")))

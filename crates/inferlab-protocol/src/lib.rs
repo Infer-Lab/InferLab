@@ -35,26 +35,27 @@ pub use wire::{
     BenchSharedSystemContentSummary, BenchTokenCountSummary, BenchTokenDistributionKindInput,
     BenchTokenSelectorInput, CaptureMechanism, CaptureTargetRequirement,
     CaptureWindowControlEndpoint, CaptureWindowControlRequirement, CaptureWindowHttpActionSpec,
-    ClientEndpointInput, ClientStatus, EndpointAssignment, EndpointDeclaration, EndpointProtocol,
+    ClientEndpointInput, ClientStatus, DiscoveryBinding, DiscoveryComponent, DiscoveryProcessRole,
+    DiscoveryRequirement, EndpointAssignment, EndpointDeclaration, EndpointProtocol,
     EndpointRequirement, EvalClientRequest, EvalClientResult, EvalDefinitionInput, EvalFailureKind,
     EvalMetricComparison, EvalMetricGate, EvalMetricGateConclusion, EvalNormalizedMetric,
     EvalPromptInput, EvalTaskSourceInput, EvalTrialSummary, FrontendCoRendering,
     FrontendComponents, FrontendGatewayComponent, FrontendHandoff, FrontendPdRouterComponent,
     FrontendProcessRole, GatewayFrontendBinding, GatewayPdRouterFrontendBinding, GatewayPlan,
     GatewayTarget, HttpActionSpec, HttpMethod, HttpTargetRegistryReadiness, IntegrationIdentity,
-    KvTransferMechanism, LaunchFileDeclaration, MeasurementModelInput, MeasurementProtocol,
-    Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, PdRouterPlan,
-    PdRoutingPolicies, PlanServeInput, PlanServeResult, ProcessSpec,
-    PromptCacheReadZeroRepresentation, ProtocolVersion, RawArtifact, ReadinessProbe,
-    RenderInputDeclaration, RenderServeInput, RenderServeResult, RenderSource,
-    RenderedServeProcess, ServeModelInput, ServeProcessAllocation, ServeReplicaRequirement,
-    ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeRoleResult, ServeTopology,
-    ServerMetricsEndpointInput, ServerMetricsEndpointRequirement, SettingValue,
-    SuppliedRenderInput, SyntheticAcceptanceCurveInput, SyntheticAcceptanceInput,
+    JsonValueMatch, KvTransferMechanism, LaunchFileDeclaration, MeasurementModelInput,
+    MeasurementProtocol, ModelListRequirement, Parallelism, ParallelismAttention,
+    ParallelismExperts, ParallelismOuter, PdRouterPlan, PdRoutingPolicies, PlanServeInput,
+    PlanServeResult, ProcessSpec, PromptCacheReadZeroRepresentation, ProtocolVersion, RawArtifact,
+    ReadinessProbe, RegistryMembershipReadiness, RegistryRoleValues, RenderInputDeclaration,
+    RenderServeInput, RenderServeResult, RenderSource, RenderedServeProcess, ServeModelInput,
+    ServeProcessAllocation, ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink,
+    ServeRoleResult, ServeTopology, ServerMetricsEndpointInput, ServerMetricsEndpointRequirement,
+    SettingValue, SuppliedRenderInput, SyntheticAcceptanceCurveInput, SyntheticAcceptanceInput,
     SyntheticAcceptanceOutcome, TargetEndpointScheme,
 };
 
-pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v11";
+pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v12";
 pub const MEASUREMENT_SCHEMA_ID: &str = "https://inferlab.dev/schema/measurement-protocol/v1";
 pub const PROTOCOL_WIRE_SOURCE: &str = "crates/inferlab-protocol/src/wire.rs";
 pub const MEASUREMENT_WIRE_SOURCE: &str =

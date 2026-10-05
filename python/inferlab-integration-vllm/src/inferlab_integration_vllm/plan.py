@@ -1,3 +1,4 @@
+import inferlab_gateway_dynamo
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
@@ -45,7 +46,7 @@ from inferlab_adapter_sdk import (
 )
 
 from .auxiliary import validate_auxiliary_models
-from .settings import _settings
+from .settings import VllmServeSettings, _settings
 from .synthetic import apply_synthetic_acceptance
 
 
@@ -175,10 +176,45 @@ def _device_count(parallelism: Parallelism, role_kind: ServeRoleKind) -> int:
     )
 
 
+_FRONTEND_OWNED = "the Dynamo frontend, not vLLM's API server, answers requests"
+
+# vLLM API-server options: the Dynamo worker parses vLLM engine arguments only,
+# so these abort it, and the reasoning parser has no effect there.
+_DYNAMO_FRAMEWORK_OPTIONS = {
+    "--enable-auto-tool-choice": _FRONTEND_OWNED,
+    "--enable-prompt-tokens-details": _FRONTEND_OWNED,
+    "--host": _FRONTEND_OWNED,
+    "--port": _FRONTEND_OWNED,
+    "--reasoning-parser": "set reasoning_parser, which renders as Dynamo's reasoning parser",
+    "--tool-call-parser": _FRONTEND_OWNED,
+}
+
+
+def _require_dynamo_settings(role: ServeRoleInput, settings: VllmServeSettings) -> None:
+    inferlab_gateway_dynamo.validate_escape_hatch(
+        settings.extra_args or [],
+        settings.extra_env or {},
+        framework_options=_DYNAMO_FRAMEWORK_OPTIONS,
+    )
+    if (
+        settings.tool_call_parser is not None
+        or settings.enable_auto_tool_choice
+        or settings.enable_prompt_tokens_details
+    ):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"role {role.id!r}: tool_call_parser, enable_auto_tool_choice, and "
+            "enable_prompt_tokens_details are vLLM API-server settings, unsupported when "
+            "Dynamo serves vLLM; the Dynamo frontend reports cache-read usage itself",
+        )
+
+
 def _plan_role(
     input: PlanServeInput,
     role: ServeRoleInput,
     role_ports: list[str],
+    *,
+    dynamo: bool = False,
 ) -> tuple[ServeRoleResult, list[ServeReplicaRequirement], SyntheticAcceptanceOutcome | None]:
     if role.replica_count < 1:
         raise AdapterOperationError(
@@ -186,6 +222,8 @@ def _plan_role(
             f"role {role.id!r} replica count must be positive",
         )
     settings = _settings(role.settings)
+    if dynamo:
+        _require_dynamo_settings(role, settings)
     outcome: SyntheticAcceptanceOutcome | None = None
     if input.synthetic_acceptance is not None:
         outcome = apply_synthetic_acceptance(settings, input.synthetic_acceptance, role.id)
@@ -195,15 +233,19 @@ def _plan_role(
     mechanism = input.profiling
     for replica_index in range(role.replica_count):
         planned_replica_id = replica_id(role, replica_index)
-        capture_target = (
-            CaptureTargetRequirement(
-                mechanism=mechanism,
-                window_control=CaptureWindowControlRequirement(
-                    endpoint=CaptureWindowControlEndpoint.replica_entry,
-                    start=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/start_profile"),
-                    stop=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/stop_profile"),
-                ),
+        # A Dynamo worker's replica entry endpoint is its control listener,
+        # which also carries the engine's profiling routes.
+        window_control = (
+            inferlab_gateway_dynamo.capture_window_control()
+            if dynamo
+            else CaptureWindowControlRequirement(
+                endpoint=CaptureWindowControlEndpoint.replica_entry,
+                start=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/start_profile"),
+                stop=CaptureWindowHttpActionSpec(method=HttpMethod(), path="/stop_profile"),
             )
+        )
+        capture_target = (
+            CaptureTargetRequirement(mechanism=mechanism, window_control=window_control)
             if mechanism is not None
             else None
         )
@@ -213,9 +255,13 @@ def _plan_role(
                 role_id=role.id,
                 replica_index=replica_index,
                 device_count=device_count,
-                ports=list(role_ports),
-                primary_ports=["master"],
-                primary_readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/v1/models")),
+                ports=[*role_ports, inferlab_gateway_dynamo.REQUEST_PORT]
+                if dynamo
+                else list(role_ports),
+                primary_ports=[] if dynamo else ["master"],
+                primary_readiness=inferlab_gateway_dynamo.worker_readiness()
+                if dynamo
+                else ReadinessProbe(root=ReadinessProbeHttp(path="/v1/models")),
                 worker_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
                 capture_target=capture_target,
             )
@@ -228,6 +274,9 @@ def _plan_role(
             effective_replica_count=role.replica_count,
             effective_settings=effective_settings(settings),
             effective_parallelism=parallelism,
+            replica_prefix_cache_reset=inferlab_gateway_dynamo.prefix_cache_reset()
+            if dynamo
+            else None,
         ),
         replicas,
         outcome,
@@ -240,12 +289,15 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "single topology does not use a KV-transfer mechanism",
         )
-    if input.gateway_backend is not None or input.pd_router_backend is not None:
+    if input.pd_router_backend is not None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            "vLLM single topology does not have a qualified Gateway backend",
+            "single topology does not use a P/D Router",
         )
     role = require_role(input, ServeRoleKind.serve)
+    if input.gateway_backend is not None:
+        inferlab_gateway_dynamo.require_backend(input.gateway_backend, component="Gateway")
+        return _plan_dynamo_single(input, role)
     role_result, replicas, outcome = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
     role_result.public_endpoint = EndpointDeclaration(
@@ -270,6 +322,21 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     )
 
 
+def _plan_dynamo_single(input: PlanServeInput, role: ServeRoleInput) -> PlanServeResult:
+    role_result, replicas, outcome = _plan_role(input, role, [], dynamo=True)
+    return PlanServeResult(
+        integration=_identity(),
+        roles=[role_result],
+        replicas=replicas,
+        links=[
+            ServeRoleLink(root=ServeRoleLinkRequestRouting(source="gateway", targets=[role.id]))
+        ],
+        gateway=inferlab_gateway_dynamo.routed_single_gateway(role.id),
+        pd_router=None,
+        synthetic_acceptance=outcome,
+    )
+
+
 def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     transport = input.kv_transfer
     if transport is None:
@@ -281,6 +348,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     if backend_pair not in {
         ("builtin", "builtin"),
         ("vllm-router", "vllm-router"),
+        (inferlab_gateway_dynamo.BACKEND, inferlab_gateway_dynamo.BACKEND),
     }:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
@@ -293,12 +361,22 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "vLLM prefill_decode requires both frontend backends",
         )
+    dynamo = gateway_backend == inferlab_gateway_dynamo.BACKEND
+    if dynamo and transport != KvTransferMechanism.nixl:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"Dynamo prefill_decode supports only NIXL KV transfer, not {transport.value!r}",
+        )
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
     prefill_ports = ["bootstrap" if transport == KvTransferMechanism.mooncake else "side_channel"]
     decode_ports = [] if transport == KvTransferMechanism.mooncake else ["side_channel"]
-    prefill_result, prefill_replicas, prefill_outcome = _plan_role(input, prefill, prefill_ports)
-    decode_result, decode_replicas, decode_outcome = _plan_role(input, decode, decode_ports)
+    prefill_result, prefill_replicas, prefill_outcome = _plan_role(
+        input, prefill, prefill_ports, dynamo=dynamo
+    )
+    decode_result, decode_replicas, decode_outcome = _plan_role(
+        input, decode, decode_ports, dynamo=dynamo
+    )
     outcome = consistent_acceptance_outcome(prefill_outcome, decode_outcome)
     roles = [prefill_result, decode_result]
     replicas = [*prefill_replicas, *decode_replicas]
@@ -344,6 +422,17 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             )
         )
 
+    if dynamo:
+        gateway, pd_router = inferlab_gateway_dynamo.prefill_decode_frontends(prefill.id, decode.id)
+        return PlanServeResult(
+            integration=_identity(),
+            roles=roles,
+            replicas=replicas,
+            links=links,
+            gateway=gateway,
+            pd_router=pd_router,
+            synthetic_acceptance=outcome,
+        )
     if backend_pair == ("builtin", "builtin"):
         implementation = (
             "vllm_mooncake" if transport == KvTransferMechanism.mooncake else "vllm_nixl"

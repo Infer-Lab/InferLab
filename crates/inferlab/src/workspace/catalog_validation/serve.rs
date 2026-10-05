@@ -462,6 +462,7 @@ mod tests {
             path: "/profile".to_owned(),
             body: None,
             effective_url: "http://127.0.0.1:1/profile".to_owned(),
+            success: None,
         };
         let command = CommandPlan {
             argv: vec!["serve-engine".to_owned()],

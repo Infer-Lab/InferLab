@@ -125,6 +125,10 @@ pub(crate) struct ServerPlan {
     /// not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontend: Option<FrontendPlan>,
+    /// The discovery service a Gateway backend requires; spawned first and
+    /// stopped last ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<ProcessPlan>,
     /// The raw profiler escape declaration as written on the server and
     /// its roles ([[RFC-0004:C-WORKLOAD-PROFILING]]); the merged, effective
     /// inputs ride each capture target.
@@ -261,15 +265,17 @@ pub(crate) struct SyntheticAcceptancePlan {
 
 impl ServerPlan {
     pub(crate) fn processes(&self) -> impl Iterator<Item = &ProcessPlan> {
-        self.roles
-            .iter()
-            .flat_map(|role| &role.replicas)
-            .flat_map(|replica| &replica.ranks)
-            .chain(
-                self.frontend
-                    .iter()
-                    .flat_map(|frontend| &frontend.processes),
-            )
+        self.discovery.iter().chain(
+            self.roles
+                .iter()
+                .flat_map(|role| &role.replicas)
+                .flat_map(|replica| &replica.ranks)
+                .chain(
+                    self.frontend
+                        .iter()
+                        .flat_map(|frontend| &frontend.processes),
+                ),
+        )
     }
 
     pub(crate) fn process_count(&self) -> usize {
@@ -279,15 +285,18 @@ impl ServerPlan {
     pub(crate) fn processes_mut(&mut self) -> impl Iterator<Item = &mut ProcessPlan> {
         let roles = &mut self.roles;
         let frontend = &mut self.frontend;
-        roles
-            .iter_mut()
-            .flat_map(|role| &mut role.replicas)
-            .flat_map(|replica| &mut replica.ranks)
-            .chain(
-                frontend
-                    .iter_mut()
-                    .flat_map(|frontend| &mut frontend.processes),
-            )
+        let discovery = &mut self.discovery;
+        discovery.iter_mut().chain(
+            roles
+                .iter_mut()
+                .flat_map(|role| &mut role.replicas)
+                .flat_map(|replica| &mut replica.ranks)
+                .chain(
+                    frontend
+                        .iter_mut()
+                        .flat_map(|frontend| &mut frontend.processes),
+                ),
+        )
     }
 
     pub(crate) fn process_contexts(&self) -> impl Iterator<Item = ProcessContext<'_>> {
@@ -309,7 +318,13 @@ impl ServerPlan {
                 process,
             })
         });
-        model_ranks.chain(frontend)
+        let discovery = self.discovery.iter().map(|process| ProcessContext {
+            role_id: process.id.as_str(),
+            replica_id: process.id.as_str(),
+            replica_index: 0,
+            process,
+        });
+        discovery.chain(model_ranks).chain(frontend)
     }
 }
 

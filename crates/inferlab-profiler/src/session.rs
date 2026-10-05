@@ -598,12 +598,14 @@ mod tests {
                     path: "/start_profile".to_owned(),
                     body: None,
                     effective_url: "http://127.0.0.1:1/start_profile".to_owned(),
+                    success: None,
                 },
                 stop: CaptureWindowActionPlan {
                     method: CaptureWindowHttpMethodPlan::Post,
                     path: "/stop_profile".to_owned(),
                     body: None,
                     effective_url: "http://127.0.0.1:1/stop_profile".to_owned(),
+                    success: None,
                 },
             },
             command_cwd: temp.path().to_path_buf(),
@@ -686,6 +688,7 @@ mod tests {
             path: path.to_owned(),
             body: None,
             effective_url: format!("http://{address}{path}"),
+            success: None,
         };
         let target = ProfilerTargetRecord {
             process_id: "serve".to_owned(),

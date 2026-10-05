@@ -10,7 +10,7 @@ pub(crate) fn hash_file(path: &Path) -> Result<String, InferlabError> {
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
+    Ok(base16ct::lower::encode_string(&Sha256::digest(&bytes)))
 }
 
 /// The release-owned recursive enumeration digest of an operator image
@@ -50,7 +50,7 @@ pub(crate) fn hash_directory_entries(directory: &Path) -> Result<String, Inferla
         digest.update(Sha256::digest(&bytes));
         digest.update([0x00]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(base16ct::lower::encode_string(&digest.finalize()))
 }
 
 /// Collect each regular file under `current` as its `/`-joined
@@ -145,7 +145,7 @@ mod tests {
             digest.update(Sha256::digest(fs::read(root.join(&relative))?));
             digest.update([0x00]);
         }
-        Ok(format!("{:x}", digest.finalize()))
+        Ok(base16ct::lower::encode_string(&digest.finalize()))
     }
 
     #[test]

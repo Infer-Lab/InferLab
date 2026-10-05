@@ -11,9 +11,9 @@ categories = ["development-tools"]
 include = ["src/**", "LICENSE"]
 
 [dependencies]
-inferlab-profiler = { path = "../inferlab-profiler", version = "0.17" }
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.17" }
-inferlab-runtime = { path = "../inferlab-runtime", version = "0.17" }
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.18" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.18" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.18" }
 serde.workspace = true
 
 [lints]

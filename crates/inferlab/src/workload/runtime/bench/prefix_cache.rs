@@ -2,10 +2,11 @@
 
 use crate::workload::BenchPrefixCacheConditioningPlan;
 use crate::workload::domain::BenchPopulation;
-use crate::workload::domain::{WorkloadEndpoint, WorkloadHttpAction};
+use crate::workload::domain::{WorkloadEndpoint, WorkloadHttpAction, WorkloadReplicaReset};
 use crate::workload::record::{
     BenchCachePreparationEvidence, BenchCachePreparationPhase, BenchCachePreparationTransition,
-    PrefixCacheConditioningEvidence, PrefixCacheConditioningRankEvidence, PrefixCacheResetEvidence,
+    PerTargetPrefixCacheResetEvidence, PrefixCacheConditioningEvidence,
+    PrefixCacheConditioningRankEvidence, PrefixCacheResetEvidence, PrefixCacheResetOutcome,
 };
 use crate::workspace::BenchCacheStart;
 use inferlab_protocol::PromptCacheReadZeroRepresentation;
@@ -37,13 +38,13 @@ struct PromptTokenDetails {
 }
 
 fn reset_prefix_cache(
-    endpoint: &WorkloadEndpoint,
+    url: String,
     action: &WorkloadHttpAction,
+    process: Option<&str>,
     bound: &OperationBound,
 ) -> PrefixCacheResetEvidence {
     let started_ms = bound.elapsed_ms();
-    let url = format!("http://{}:{}{}", endpoint.host, endpoint.port, action.path);
-    let result: Result<u16, CachePreparationError> = (|| {
+    let result: Result<(u16, Option<Vec<u8>>), CachePreparationError> = (|| {
         let remaining = finite_remaining(bound)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(remaining)
@@ -58,43 +59,135 @@ fn reset_prefix_cache(
             .send()
             .map_err(|source| CachePreparationError::Request { source })?;
         let status = response.status().as_u16();
-        response
-            .copy_to(&mut std::io::sink())
-            .map_err(|source| CachePreparationError::Request { source })?;
+        // Only a declared success predicate needs the body.
+        let body = if action.success.is_some() {
+            Some(
+                response
+                    .bytes()
+                    .map_err(|source| CachePreparationError::Request { source })?
+                    .to_vec(),
+            )
+        } else {
+            response
+                .copy_to(&mut std::io::sink())
+                .map_err(|source| CachePreparationError::Request { source })?;
+            None
+        };
         finite_remaining(bound)?;
-        Ok(status)
+        Ok((status, body))
     })();
+    let mut evidence = PrefixCacheResetEvidence {
+        method: action.method,
+        url,
+        succeeded: false,
+        http_status: None,
+        error: None,
+        elapsed_ms: 0,
+        process: process.map(str::to_owned),
+        success: action.success.clone(),
+        observed_value: None,
+    };
     match result {
-        Ok(status) if is_successful_preparation_status(status) => PrefixCacheResetEvidence {
-            method: action.method,
-            url,
-            succeeded: true,
-            http_status: Some(status),
-            error: None,
-            elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
-        },
-        Ok(status) => PrefixCacheResetEvidence {
-            method: action.method,
-            url,
-            succeeded: false,
-            http_status: Some(status),
-            error: Some(format!("prefix-cache reset returned HTTP {status}")),
-            elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
-        },
-        Err(error) => PrefixCacheResetEvidence {
-            method: action.method,
-            url,
-            succeeded: false,
-            http_status: None,
-            error: Some(error.to_string()),
-            elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
-        },
+        Ok((status, body)) => {
+            evidence.http_status = Some(status);
+            if !is_successful_preparation_status(status) {
+                evidence.error = Some(format!("prefix-cache reset returned HTTP {status}"));
+            } else if let Some(success) = &action.success {
+                let observed = body
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+                    .and_then(|document| document.pointer(&success.pointer).cloned());
+                evidence.succeeded = observed.as_ref().and_then(serde_json::Value::as_str)
+                    == Some(success.value.as_str());
+                if !evidence.succeeded {
+                    evidence.error = Some(format!(
+                        "prefix-cache reset reported {} at {:?}, expected {:?}",
+                        observed
+                            .as_ref()
+                            .map_or_else(|| "no value".to_owned(), ToString::to_string),
+                        success.pointer,
+                        success.value
+                    ));
+                }
+                evidence.observed_value = observed;
+            } else {
+                evidence.succeeded = true;
+            }
+        }
+        Err(error) => evidence.error = Some(error.to_string()),
+    }
+    evidence.elapsed_ms = bound.elapsed_ms().saturating_sub(started_ms);
+    evidence
+}
+
+/// The public reset action, or the per-target reset attempted on every
+/// model-serving replica even after an earlier attempt fails
+/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+fn reset_outcome(
+    input: &CachePreparationInput<'_>,
+    bound: &OperationBound,
+) -> PrefixCacheResetOutcome {
+    let targets = match input.reset {
+        ResetCapability::Public(action) => {
+            let url = format!(
+                "http://{}:{}{}",
+                input.endpoint.host, input.endpoint.port, action.path
+            );
+            return PrefixCacheResetOutcome::Public(reset_prefix_cache(url, action, None, bound));
+        }
+        ResetCapability::PerTarget(targets) => targets,
+    };
+    let started_ms = bound.elapsed_ms();
+    let attempts = targets
+        .iter()
+        .map(|target| {
+            reset_prefix_cache(
+                target.url.clone(),
+                &target.action,
+                Some(&target.process),
+                bound,
+            )
+        })
+        .collect::<Vec<_>>();
+    let failed = attempts
+        .iter()
+        .filter(|attempt| !attempt.succeeded)
+        .filter_map(|attempt| attempt.process.as_deref())
+        .collect::<Vec<_>>();
+    PrefixCacheResetOutcome::PerTarget(PerTargetPrefixCacheResetEvidence {
+        succeeded: failed.is_empty(),
+        error: (!failed.is_empty())
+            .then(|| format!("prefix-cache reset failed on {}", failed.join(", "))),
+        elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
+        attempts,
+    })
+}
+
+/// The server's prefix-cache reset capability: its public action or the
+/// per-target reset of every model-serving replica.
+#[derive(Clone, Copy)]
+pub(super) enum ResetCapability<'a> {
+    Public(&'a WorkloadHttpAction),
+    PerTarget(&'a [WorkloadReplicaReset]),
+}
+
+impl<'a> ResetCapability<'a> {
+    /// The capability a Bench plan selected, absent for an uncontrolled start.
+    pub(super) fn of(
+        public: Option<&'a WorkloadHttpAction>,
+        per_target: &'a [WorkloadReplicaReset],
+    ) -> Option<Self> {
+        if per_target.is_empty() {
+            public.map(Self::Public)
+        } else {
+            Some(Self::PerTarget(per_target))
+        }
     }
 }
 
 pub(super) struct CachePreparationInput<'a> {
     pub(super) endpoint: &'a WorkloadEndpoint,
-    pub(super) action: &'a WorkloadHttpAction,
+    pub(super) reset: ResetCapability<'a>,
     pub(super) start: BenchCacheStart,
     pub(super) conditioning: Option<&'a BenchPrefixCacheConditioningPlan>,
     pub(super) population: Option<&'a BenchPopulation>,
@@ -112,12 +205,12 @@ pub(super) fn prepare_prefix_cache(
             elapsed_ms: bound.elapsed_ms(),
         });
     }
-    let reset = reset_prefix_cache(input.endpoint, input.action, bound);
+    let reset = reset_outcome(&input, bound);
     transitions.push(BenchCachePreparationTransition {
         phase: BenchCachePreparationPhase::CacheReset,
         elapsed_ms: bound.elapsed_ms(),
     });
-    let conditioning = if reset.succeeded && input.start == BenchCacheStart::Primed {
+    let conditioning = if reset.succeeded() && input.start == BenchCacheStart::Primed {
         input
             .conditioning
             .zip(input.population)
@@ -500,22 +593,137 @@ mod tests {
         }
     }
 
-    fn reset_target(address: std::net::SocketAddr) -> (WorkloadEndpoint, WorkloadHttpAction) {
+    fn reset_target(address: std::net::SocketAddr) -> (String, WorkloadHttpAction) {
         (
-            WorkloadEndpoint {
-                protocol: WorkloadEndpointProtocol::Http,
-                host: address.ip().to_string(),
-                port: address.port(),
-                completions_path: COMPLETIONS_PATH.to_owned(),
-                chat_completions_path: CHAT_COMPLETIONS_PATH.to_owned(),
-                server_metrics: None,
-                prompt_cache_read_zero_representation: None,
-            },
+            format!("http://{address}/reset_prefix_cache"),
             WorkloadHttpAction {
                 method: WorkloadHttpMethod::Post,
                 path: "/reset_prefix_cache".to_owned(),
+                success: None,
             },
         )
+    }
+
+    fn endpoint_at(address: std::net::SocketAddr) -> WorkloadEndpoint {
+        WorkloadEndpoint {
+            protocol: WorkloadEndpointProtocol::Http,
+            host: address.ip().to_string(),
+            port: address.port(),
+            completions_path: COMPLETIONS_PATH.to_owned(),
+            chat_completions_path: CHAT_COMPLETIONS_PATH.to_owned(),
+            server_metrics: None,
+            prompt_cache_read_zero_representation: None,
+        }
+    }
+
+    /// Serves one canned HTTP response per accepted connection, in order.
+    fn serve_responses(
+        responses: Vec<&'static str>,
+    ) -> std::io::Result<(
+        std::net::SocketAddr,
+        thread::JoinHandle<std::io::Result<()>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            for response in responses {
+                let (mut stream, _) = listener.accept()?;
+                read_request_headers(&mut stream)?;
+                stream.write_all(response.as_bytes())?;
+            }
+            Ok(())
+        });
+        Ok((address, server))
+    }
+
+    const OK_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
+    const ERROR_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"status\":\"error\"}";
+    const SERVER_ERROR: &str =
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    fn predicated(path: &str) -> WorkloadHttpAction {
+        WorkloadHttpAction {
+            method: WorkloadHttpMethod::Post,
+            path: path.to_owned(),
+            success: Some(crate::workload::domain::WorkloadSuccessMatch {
+                pointer: "/status".to_owned(),
+                value: "ok".to_owned(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_success_predicate_turns_a_reported_error_inside_a_200_into_a_failed_reset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (address, server) = serve_responses(vec![ERROR_BODY, OK_BODY])?;
+        let action = predicated("/engine/flush_cache");
+        let bound = OperationBound::finite(Duration::from_secs(5));
+        let url = format!("http://{address}/engine/flush_cache");
+
+        let reported_error = reset_prefix_cache(url.clone(), &action, None, &bound);
+        let reported_ok = reset_prefix_cache(url, &action, None, &bound);
+
+        assert!(!reported_error.succeeded, "{reported_error:?}");
+        assert_eq!(reported_error.http_status, Some(200));
+        assert_eq!(
+            reported_error.observed_value,
+            Some(serde_json::Value::from("error"))
+        );
+        assert!(reported_ok.succeeded, "{reported_ok:?}");
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_per_target_reset_attempts_every_replica_after_a_failure_and_names_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (failing, failing_server) = serve_responses(vec![SERVER_ERROR])?;
+        let (healthy, healthy_server) = serve_responses(vec![OK_BODY])?;
+        let targets = [
+            WorkloadReplicaReset {
+                process: "prefill-0-rank-0".to_owned(),
+                url: format!("http://{failing}/engine/flush_cache"),
+                action: predicated("/engine/flush_cache"),
+            },
+            WorkloadReplicaReset {
+                process: "decode-0-rank-0".to_owned(),
+                url: format!("http://{healthy}/engine/flush_cache"),
+                action: predicated("/engine/flush_cache"),
+            },
+        ];
+        let (_, public) = reset_target(failing);
+        let endpoint = endpoint_at(failing);
+        let reset = ResetCapability::of(Some(&public), &targets).ok_or("reset capability")?;
+        let outcome = reset_outcome(
+            &CachePreparationInput {
+                endpoint: &endpoint,
+                reset,
+                start: BenchCacheStart::Cold,
+                conditioning: None,
+                population: None,
+                warmup_drained: false,
+            },
+            &OperationBound::finite(Duration::from_secs(5)),
+        );
+
+        let PrefixCacheResetOutcome::PerTarget(evidence) = outcome else {
+            return Err("a per-target capability must record per-target evidence".into());
+        };
+        assert!(!evidence.succeeded);
+        assert_eq!(evidence.attempts.len(), 2);
+        assert!(!evidence.attempts[0].succeeded);
+        assert!(evidence.attempts[1].succeeded);
+        assert_eq!(
+            evidence.error.as_deref(),
+            Some("prefix-cache reset failed on prefill-0-rank-0")
+        );
+        failing_server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+        healthy_server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+        Ok(())
     }
 
     #[test]
@@ -529,10 +737,11 @@ mod tests {
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         });
 
-        let (endpoint, action) = reset_target(address);
+        let (url, action) = reset_target(address);
         let evidence = reset_prefix_cache(
-            &endpoint,
+            url.clone(),
             &action,
+            None,
             &OperationBound::finite(Duration::from_secs(3)),
         );
 
@@ -559,8 +768,8 @@ mod tests {
         });
 
         let bound = OperationBound::finite(Duration::from_millis(500));
-        let (endpoint, action) = reset_target(address);
-        let evidence = reset_prefix_cache(&endpoint, &action, &bound);
+        let (url, action) = reset_target(address);
+        let evidence = reset_prefix_cache(url.clone(), &action, None, &bound);
         server.join().map_err(|_| "fixture server panicked")??;
 
         assert!(
@@ -600,8 +809,8 @@ mod tests {
         });
 
         let bound = OperationBound::finite(Duration::from_millis(500));
-        let (endpoint, action) = reset_target(address);
-        let evidence = reset_prefix_cache(&endpoint, &action, &bound);
+        let (url, action) = reset_target(address);
+        let evidence = reset_prefix_cache(url.clone(), &action, None, &bound);
         server.join().map_err(|_| "fixture server panicked")??;
 
         assert!(
@@ -625,10 +834,11 @@ mod tests {
             Ok(())
         });
 
-        let (endpoint, action) = reset_target(address);
+        let (url, action) = reset_target(address);
         let evidence = reset_prefix_cache(
-            &endpoint,
+            url.clone(),
             &action,
+            None,
             &OperationBound::finite(Duration::from_secs(1)),
         );
         server.join().map_err(|_| "fixture server panicked")??;
@@ -677,7 +887,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let prompt_path = dir.path().join("prefix.txt");
         std::fs::write(&prompt_path, "canonical prefix")?;
-        let (endpoint, _action) = reset_target(address);
+        let endpoint = endpoint_at(address);
         let fixture = FanoutFixture {
             _dir: dir,
             endpoint,

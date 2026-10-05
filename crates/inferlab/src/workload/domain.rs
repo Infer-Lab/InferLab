@@ -48,6 +48,50 @@ pub(crate) enum WorkloadHttpMethod {
 pub(crate) struct WorkloadHttpAction {
     pub method: WorkloadHttpMethod,
     pub path: String,
+    /// A 2xx response succeeds only if its JSON body holds `value` at
+    /// `pointer` ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<WorkloadSuccessMatch>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkloadSuccessMatch {
+    pub pointer: String,
+    pub value: String,
+}
+
+/// One model-serving replica's per-target prefix-cache reset, already
+/// resolved to its entry process URL ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkloadReplicaReset {
+    pub process: String,
+    pub url: String,
+    pub action: WorkloadHttpAction,
+}
+
+impl WorkloadHttpAction {
+    pub(crate) fn from_wire(action: &inferlab_protocol::HttpActionSpec) -> Self {
+        Self {
+            method: match action.method {
+                inferlab_protocol::HttpMethod::Post => WorkloadHttpMethod::Post,
+            },
+            path: action.path.clone(),
+            success: action.success.as_ref().map(|success| WorkloadSuccessMatch {
+                pointer: success.pointer.clone(),
+                value: success.value.clone(),
+            }),
+        }
+    }
+}
+
+impl WorkloadReplicaReset {
+    pub(crate) fn from_plan(plan: &inferlab_serve_domain::ReplicaPrefixCacheResetPlan) -> Self {
+        Self {
+            process: plan.process.clone(),
+            url: plan.url.clone(),
+            action: WorkloadHttpAction::from_wire(&plan.action),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -241,6 +241,21 @@ direct `single` server cannot acquire a Gateway from a case or invocation
 patch, while a routed `single` server declares `gateway_backend` on its base
 and may replace only that identity later.
 
+Selecting `dynamo` — `gateway_backend = "dynamo"` on a vLLM routed `single`
+server, or both backend fields on a vLLM `prefill_decode` server with
+`kv_transfer = "nixl"` — runs the Dynamo frontend and `dynamo.vllm` workers,
+and InferLab also starts one etcd discovery process beside the Gateway for that
+server. The stack environment must provide the `ai-dynamo` distribution and an
+`etcd` executable. Dynamo and etcd listen only on IP addresses, so bind the
+machines that run Dynamo processes by IP. Dynamo parses a worker's control port
+as a signed 16-bit value, so those machines must offer ports no higher than
+32767. The vLLM `reasoning_parser` setting renders as Dynamo's reasoning
+parser. The vLLM API-server settings `tool_call_parser`,
+`enable_auto_tool_choice`, and `enable_prompt_tokens_details` are rejected —
+the Dynamo frontend answers requests and reports cache-read usage itself — and
+so are their options, and Dynamo's own discovery and listener options and
+variables, anywhere in `extra_args` or `extra_env`.
+
 ## Context parallelism
 
 Declare attention context parallelism on the server or a canonical role under

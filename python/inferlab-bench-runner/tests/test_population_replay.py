@@ -6,6 +6,7 @@ import pytest
 from inferlab_bench_runner.population import prepare_population
 from inferlab_bench_runner.population_replay import REPLAY_MATERIALIZATION_IDENTITY
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     BenchPopulationPreparationRequest,
     ClientStatus,
 )
@@ -73,7 +74,7 @@ def preparation_request(
 ) -> BenchPopulationPreparationRequest:
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

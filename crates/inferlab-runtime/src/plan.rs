@@ -21,7 +21,46 @@ pub enum ReadinessPlan {
         target_bootstrap_port_field: String,
         expected_targets: Vec<TargetRegistryExpectedTarget>,
     },
+    /// A framework-neutral registry whose entries must list every expected
+    /// target under its role at its allocated `host:port`
+    /// ([[RFC-0006:C-INTEGRATIONS]]). Pointers are RFC 6901 JSON Pointers.
+    RegistryMembership {
+        registry_path: String,
+        entries_pointer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_filter: Option<JsonValueMatchPlan>,
+        role_pointer: String,
+        address_pointer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_list: Option<ModelListPlan>,
+        expected_targets: Vec<RegistryMemberTarget>,
+    },
     ProcessAlive,
+}
+
+/// A JSON Pointer and the string value expected at it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JsonValueMatchPlan {
+    pub pointer: String,
+    pub value: String,
+}
+
+/// A served-model list that must name `served_model`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModelListPlan {
+    pub path: String,
+    pub models_pointer: String,
+    pub name_pointer: String,
+    pub served_model: String,
+}
+
+/// One rank-zero model-serving process a registry must list.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RegistryMemberTarget {
+    pub process: String,
+    pub role: String,
+    /// The allocated `host:port` the entry's address member must begin with.
+    pub address: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

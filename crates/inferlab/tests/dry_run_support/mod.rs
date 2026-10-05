@@ -387,7 +387,7 @@ else:
     raise ValueError(f"unexpected operation {operation}")
 print(json.dumps({
     "status": "ok",
-    "protocol_version": "11",
+    "protocol_version": request["protocol_version"],
     "result": {
         "operation": operation,
         "output": output,
@@ -773,7 +773,7 @@ elif operation == "render_serve":
 else:
     raise ValueError(operation)
 
-print(json.dumps({"status": "ok", "protocol_version": "11", "result": {"operation": operation, "output": output}}))
+print(json.dumps({"status": "ok", "protocol_version": request["protocol_version"], "result": {"operation": operation, "output": output}}))
 "#;
 
 pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> String {

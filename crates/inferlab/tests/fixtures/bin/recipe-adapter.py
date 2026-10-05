@@ -271,7 +271,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "11",
+            "protocol_version": request["protocol_version"],
             "result": {"operation": operation, "output": output},
         }
     )

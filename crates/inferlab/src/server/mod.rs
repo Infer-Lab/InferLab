@@ -265,8 +265,63 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
 
     run_preflight_checks(root, &resolved, &mut session, runtime, progress)?;
     probe_hardware(&resolved, &mut session, runtime, progress)?;
-    let spawned = spawn_processes(&resolved, &mut session, runtime, progress)?;
-    wait_until_ready(&resolved, &mut session, runtime, progress, &spawned)?;
+    let mut spawned = SpawnedProcesses {
+        contexts: resolved.server.process_contexts().collect(),
+        started: Vec::new(),
+        handles: Vec::new(),
+    };
+    let process_total = spawned.contexts.len();
+    if resolved.server.discovery.is_some() {
+        // The discovery process is first in process order: it spawns alone
+        // and must be ready before any model rank spawns, within the same
+        // readiness budget the later waits continue
+        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+        spawn_processes(&mut session, runtime, progress, &mut spawned, 0..1)?;
+        let readiness_bound = readiness_bound(&resolved);
+        wait_until_ready(
+            &resolved,
+            &mut session,
+            runtime,
+            progress,
+            &spawned,
+            &readiness_bound,
+            0..1,
+        )?;
+        spawn_processes(
+            &mut session,
+            runtime,
+            progress,
+            &mut spawned,
+            1..process_total,
+        )?;
+        wait_until_ready(
+            &resolved,
+            &mut session,
+            runtime,
+            progress,
+            &spawned,
+            &readiness_bound,
+            1..process_total,
+        )?;
+    } else {
+        spawn_processes(
+            &mut session,
+            runtime,
+            progress,
+            &mut spawned,
+            0..process_total,
+        )?;
+        let readiness_bound = readiness_bound(&resolved);
+        wait_until_ready(
+            &resolved,
+            &mut session,
+            runtime,
+            progress,
+            &spawned,
+            &readiness_bound,
+            0..process_total,
+        )?;
+    }
 
     fail_if_startup_interrupted(&mut session, runtime, &spawned.started, None)?;
     session.record_mut().status = ServerStatus::Running;
@@ -537,19 +592,20 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     Ok(())
 }
 
+/// Spawns the processes in `range` of the canonical process order,
+/// appending their handles to `spawned`.
 fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
-    resolved: &'a ResolvedExecution,
     session: &mut ServerRecordSession,
     runtime: &R,
     progress: &Progress,
-) -> Result<SpawnedProcesses<'a>, InferlabError> {
-    let process_contexts = resolved.server.process_contexts().collect::<Vec<_>>();
-    let mut started = Vec::new();
-    let mut handles = Vec::with_capacity(process_contexts.len());
-    let process_total = process_contexts.len();
-    for (process_index, context) in process_contexts.iter().enumerate() {
+    spawned: &mut SpawnedProcesses<'a>,
+    range: std::ops::Range<usize>,
+) -> Result<(), InferlabError> {
+    let process_total = spawned.contexts.len();
+    for process_index in range {
+        let context = spawned.contexts[process_index];
         let process = context.process;
-        fail_if_startup_interrupted(session, runtime, &started, Some(&process.id))?;
+        fail_if_startup_interrupted(session, runtime, &spawned.started, Some(&process.id))?;
         let stdout = session.absolute_stdout(&process.id)?;
         let stderr = session.absolute_stderr(&process.id)?;
         progress.phase(
@@ -561,7 +617,8 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
             .command
             .runtime_dir(&session.record().id, &process.id);
         let control_endpoint = process.capture_target.as_ref().and_then(|target| {
-            process_contexts
+            spawned
+                .contexts
                 .iter()
                 .find(|context| context.process.id == target.control_process_id)
                 .map(|context| &context.process.endpoint)
@@ -578,7 +635,8 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
                     crate::execution::ProcessIdentityPlan::ModelRank { rank_count, .. } => {
                         Some(*rank_count)
                     }
-                    crate::execution::ProcessIdentityPlan::Frontend { .. } => None,
+                    crate::execution::ProcessIdentityPlan::Frontend { .. }
+                    | crate::execution::ProcessIdentityPlan::Discovery { .. } => None,
                 },
                 command: &process.command,
                 launch: &process.launch,
@@ -592,7 +650,7 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
                 return Err(fail_with(
                     session,
                     runtime,
-                    &started,
+                    &spawned.started,
                     FailurePhase::Launch,
                     Some(&process.id),
                     message,
@@ -606,6 +664,7 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
             command: &prepared.command,
             launch_files: &process.launch_files,
             cache_root: &process.allocation.runtime_cache.path,
+            data_directory: process.data_directory.as_deref(),
             stdout: &stdout,
             stderr: &stderr,
             remote_dir: &remote_dir,
@@ -652,7 +711,7 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
                 return Err(fail_with(
                     session,
                     runtime,
-                    &started,
+                    &spawned.started,
                     FailurePhase::Launch,
                     Some(&process.id),
                     message,
@@ -661,8 +720,8 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
             }
         };
         session.process_mut(&process.id)?.handle = Some(handle.clone());
-        started.push(process.id.clone());
-        handles.push(handle);
+        spawned.started.push(process.id.clone());
+        spawned.handles.push(handle);
         if let Err(error) = session.rewrite() {
             let message = format!(
                 "failed to persist handle for process {:?}: {error}",
@@ -671,47 +730,60 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
             return Err(fail_after_record_error(
                 session,
                 runtime,
-                &started,
+                &spawned.started,
                 Some(&process.id),
                 message,
             )?);
         }
-        fail_if_startup_interrupted(session, runtime, &started, Some(&process.id))?;
+        fail_if_startup_interrupted(session, runtime, &spawned.started, Some(&process.id))?;
     }
-    Ok(SpawnedProcesses {
-        contexts: process_contexts,
-        started,
-        handles,
-    })
+    Ok(())
 }
 
 /// One readiness owner starts only after every process has spawned and
 /// remains authoritative across every process readiness wait. Capture-
 /// armed startup is intentionally unbounded; ordinary startup uses the
 /// server's one resolved readiness budget.
+/// The server's single readiness budget ([[RFC-0003:C-RESOLUTION]]). A
+/// capture-armed server's readiness wait is unbounded
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): instrumentation multiplies startup
+/// unpredictably, and the wait still terminates on process death or
+/// interruption.
+fn readiness_bound(resolved: &ResolvedExecution) -> OperationBound {
+    if resolved.server.profiling {
+        OperationBound::unbounded()
+    } else {
+        OperationBound::finite(Duration::from_secs(
+            resolved.server.readiness_timeout_seconds,
+        ))
+    }
+}
+
+/// Waits for the processes in `range` under the one readiness owner. The
+/// budget starts after every process spawned, or, when a discovery process
+/// exists, before its own wait, and later waits continue it.
 fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
     resolved: &ResolvedExecution,
     session: &mut ServerRecordSession,
     runtime: &R,
     progress: &Progress,
     spawned: &SpawnedProcesses<'_>,
+    readiness_bound: &OperationBound,
+    range: std::ops::Range<usize>,
 ) -> Result<(), InferlabError> {
-    // One readiness budget covers every process, starting after all have
-    // spawned ([[RFC-0003:C-RESOLUTION]]). A capture-armed server's readiness
-    // wait is unbounded ([[RFC-0004:C-WORKLOAD-PROFILING]]): instrumentation
-    // multiplies startup unpredictably, and the wait still terminates on
-    // process death or interruption.
-    let readiness_bound = if resolved.server.profiling {
-        OperationBound::unbounded()
-    } else {
-        OperationBound::finite(Duration::from_secs(
-            resolved.server.readiness_timeout_seconds,
-        ))
-    };
     let process_total = spawned.contexts.len();
-    for (process_index, (context, handle)) in
-        spawned.contexts.iter().zip(&spawned.handles).enumerate()
-    {
+    for process_index in range {
+        let context = &spawned.contexts[process_index];
+        let handle =
+            spawned
+                .handles
+                .get(process_index)
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "process {:?} has no spawn handle before its readiness wait",
+                        context.process.id
+                    ),
+                })?;
         let process = context.process;
         fail_if_startup_interrupted(session, runtime, &spawned.started, Some(&process.id))?;
         let stderr = session.absolute_stderr(&process.id)?;
@@ -725,7 +797,7 @@ fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
             handle,
             &process.endpoint,
             &process.readiness,
-            &readiness_bound,
+            readiness_bound,
             resolved.server.readiness_attempt_timeout_seconds,
             &mut on_probe_failure,
         ) {
@@ -1291,10 +1363,14 @@ mod tests {
         bounded_status_calls: Cell<usize>,
         readiness_bounds: RefCell<Vec<usize>>,
         residuals: BTreeMap<(String, u32), Result<u64, String>>,
+        /// `spawn` and `ready` in call order.
+        events: RefCell<Vec<&'static str>>,
+        fail_first_readiness: bool,
     }
 
     impl ProcessLauncher for FakeRuntime {
         fn spawn(&self, _spec: ProcessSpec<'_>) -> Result<ProcessHandle, LaunchFailure> {
+            self.events.borrow_mut().push("spawn");
             self.spawn_results
                 .borrow_mut()
                 .pop_front()
@@ -1399,6 +1475,16 @@ mod tests {
             self.readiness_bounds
                 .borrow_mut()
                 .push(std::ptr::from_ref(bound).addr());
+            let first = !self.events.borrow().contains(&"ready");
+            self.events.borrow_mut().push("ready");
+            if self.fail_first_readiness && first {
+                return Err(ReadinessFailure {
+                    kind: ReadinessFailureKind::Exited,
+                    message: "fixture discovery exited".to_owned(),
+                    timing: None,
+                    diagnostic_attempts: Vec::new(),
+                });
+            }
             Ok(ReadinessEvidence::ProcessAlive {
                 ready_unix_ms: 1,
                 diagnostic_attempts: Vec::new(),
@@ -1495,7 +1581,7 @@ mod tests {
         let record = ServerRecordSession::begin(root.path(), &resolved(), None)?.into_record();
         let value = serde_json::to_value(record)?;
 
-        assert_eq!(value["schema_version"], 12);
+        assert_eq!(value["schema_version"], ServerRecord::SCHEMA_VERSION);
         assert_eq!(
             value["resolved"]["server"]["endpoint"]["completions_path"],
             "/v1/completions"
@@ -1540,6 +1626,8 @@ mod tests {
             bounded_status_calls: Cell::new(0),
             readiness_bounds: RefCell::new(Vec::new()),
             residuals: BTreeMap::new(),
+            events: RefCell::new(Vec::new()),
+            fail_first_readiness: false,
         };
 
         let result =
@@ -1588,6 +1676,8 @@ mod tests {
             bounded_status_calls: Cell::new(0),
             readiness_bounds: RefCell::new(Vec::new()),
             residuals: BTreeMap::new(),
+            events: RefCell::new(Vec::new()),
+            fail_first_readiness: false,
         };
         let record =
             start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
@@ -1620,6 +1710,8 @@ mod tests {
             bounded_status_calls: Cell::new(0),
             readiness_bounds: RefCell::new(Vec::new()),
             residuals: BTreeMap::new(),
+            events: RefCell::new(Vec::new()),
+            fail_first_readiness: false,
         };
 
         start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
@@ -1627,6 +1719,84 @@ mod tests {
         let readiness_bounds = runtime.readiness_bounds.borrow();
         assert_eq!(readiness_bounds.len(), 2);
         assert_eq!(readiness_bounds[0], readiness_bounds[1]);
+        Ok(())
+    }
+
+    fn resolved_with_discovery() -> ResolvedExecution {
+        let mut resolved = resolved();
+        let mut discovery = process(9);
+        discovery.id = "discovery".to_owned();
+        discovery.identity = ProcessIdentityPlan::Discovery {
+            process_role: inferlab_protocol::DiscoveryProcessRole::Discovery,
+            components: inferlab_protocol::DiscoveryBinding::discovery(),
+        };
+        discovery.allocation.devices = Vec::new();
+        discovery.allocation.model_locator = None;
+        discovery.allocation.model_locator_source = None;
+        resolved.server.discovery = Some(discovery);
+        resolved
+    }
+
+    fn discovery_runtime(fail_first_readiness: bool) -> FakeRuntime {
+        FakeRuntime {
+            spawn_results: RefCell::new(VecDeque::from([
+                Ok(fake_handle(70)),
+                Ok(fake_handle(71)),
+                Ok(fake_handle(72)),
+            ])),
+            terminated: RefCell::new(Vec::new()),
+            status_calls: Cell::new(0),
+            bounded_status_calls: Cell::new(0),
+            readiness_bounds: RefCell::new(Vec::new()),
+            residuals: BTreeMap::new(),
+            events: RefCell::new(Vec::new()),
+            fail_first_readiness,
+        }
+    }
+
+    /// The discovery process spawns alone and is ready before any model rank
+    /// spawns, and every wait shares the one readiness owner
+    /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[test]
+    fn a_discovery_process_is_ready_before_model_ranks_spawn_under_one_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(false);
+
+        start_with_runtime(
+            root.path(),
+            resolved_with_discovery(),
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
+
+        assert_eq!(
+            *runtime.events.borrow(),
+            ["spawn", "ready", "spawn", "spawn", "ready", "ready"]
+        );
+        let bounds = runtime.readiness_bounds.borrow();
+        assert!(bounds.windows(2).all(|pair| pair[0] == pair[1]));
+        Ok(())
+    }
+
+    #[test]
+    fn a_discovery_readiness_failure_rolls_back_before_any_model_rank_spawns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(true);
+
+        let result = start_with_runtime(
+            root.path(),
+            resolved_with_discovery(),
+            None,
+            &runtime,
+            &Progress::silent(),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(*runtime.events.borrow(), ["spawn", "ready"]);
+        assert_eq!(*runtime.terminated.borrow(), vec![70]);
         Ok(())
     }
 
@@ -1678,6 +1848,7 @@ mod tests {
             },
             container: None,
             capture_target: None,
+            data_directory: None,
         }
     }
 
@@ -1830,7 +2001,9 @@ mod tests {
                     prefix_cache_reset: None,
                     prefix_cache_conditioning: None,
                     prompt_cache_read_zero_representation: None,
+                    replica_prefix_cache_resets: Vec::new(),
                 },
+                discovery: None,
             },
             measurements: None,
         }

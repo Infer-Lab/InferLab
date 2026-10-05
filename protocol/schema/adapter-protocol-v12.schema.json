@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v11",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v12",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -371,12 +371,73 @@
         },
         "path": {
           "type": "string"
+        },
+        "success": {
+          "description": "When present, a 2xx response succeeds only if its JSON body holds the\nexpected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValueMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
         "method",
         "path"
+      ]
+    },
+    "DiscoveryBinding": {
+      "description": "The closed `[\"discovery\"]` component binding.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DiscoveryComponent"
+      },
+      "maxItems": 1,
+      "minItems": 1
+    },
+    "DiscoveryComponent": {
+      "description": "The only member of the closed discovery component binding.",
+      "type": "string",
+      "enum": [
+        "discovery"
+      ]
+    },
+    "DiscoveryProcessRole": {
+      "description": "The canonical process role of the discovery process.",
+      "type": "string",
+      "enum": [
+        "discovery"
+      ]
+    },
+    "DiscoveryRequirement": {
+      "description": "A discovery service a Gateway backend requires: its logical ports beyond\nits endpoint, readiness, and render inputs ([[RFC-0006:C-INTEGRATIONS]]).",
+      "type": "object",
+      "properties": {
+        "ports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "readiness": {
+          "$ref": "#/$defs/ReadinessProbe"
+        },
+        "render_inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RenderInputDeclaration"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "readiness"
       ]
     },
     "EndpointAssignment": {
@@ -548,6 +609,17 @@
         "co_rendering": {
           "$ref": "#/$defs/FrontendCoRendering"
         },
+        "discovery": {
+          "description": "The discovery service this Gateway backend requires; its presence\nderives one `discovery` process ([[RFC-0003:C-SERVE-TOPOLOGY]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiscoveryRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "effective_settings": {
           "type": "object",
           "additionalProperties": {
@@ -649,6 +721,17 @@
         },
         "path": {
           "type": "string"
+        },
+        "success": {
+          "description": "When present, a 2xx response succeeds only if its JSON body holds the\nexpected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValueMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -692,6 +775,23 @@
         "framework_version"
       ]
     },
+    "JsonValueMatch": {
+      "description": "A JSON Pointer and the string value expected at it.",
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "value"
+      ]
+    },
     "KvTransferMechanism": {
       "description": "The KV-transfer mechanism connecting prefill and decode.",
       "oneOf": [
@@ -726,6 +826,30 @@
         "relative_path",
         "text",
         "sha256"
+      ]
+    },
+    "ModelListRequirement": {
+      "description": "A served-model list that must name the served model.",
+      "type": "object",
+      "properties": {
+        "models_pointer": {
+          "description": "Pointer from the list document to the model array.",
+          "type": "string"
+        },
+        "name_pointer": {
+          "description": "Pointer from one model element to its name.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute HTTP path of the list on the owning process's endpoint.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "models_pointer",
+        "name_pointer"
       ]
     },
     "Parallelism": {
@@ -1129,12 +1253,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `11` (serialized as the\nstring `\"11\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `12` (serialized as the\nstring `\"12\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 11.",
+          "description": "Protocol version 12.",
           "type": "string",
-          "const": "11"
+          "const": "12"
         }
       ]
     },
@@ -1218,6 +1342,68 @@
           ]
         },
         {
+          "description": "Ready when a JSON registry lists every rank-zero model-serving process\nunder its role at its allocated address and, when declared, a model\nlist names the served model ([[RFC-0006:C-INTEGRATIONS]]).",
+          "type": "object",
+          "properties": {
+            "address_pointer": {
+              "type": "string"
+            },
+            "entries_pointer": {
+              "description": "Pointer from the registry document to the entry array.",
+              "type": "string"
+            },
+            "entry_filter": {
+              "description": "Entries whose value at the pointer differs from the expected value are\nignored.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JsonValueMatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "registry_membership"
+            },
+            "model_list": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModelListRequirement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "registry_path": {
+              "description": "Absolute HTTP path of the registry on the owning process's endpoint.",
+              "type": "string"
+            },
+            "role_pointer": {
+              "type": "string"
+            },
+            "role_values": {
+              "$ref": "#/$defs/RegistryRoleValues"
+            },
+            "target_port": {
+              "description": "Logical port of each model-serving process whose allocated `host:port`\nthe registry entries carry.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "registry_path",
+            "target_port",
+            "entries_pointer",
+            "role_pointer",
+            "role_values",
+            "address_pointer"
+          ]
+        },
+        {
           "description": "Ready as soon as the process is alive.",
           "type": "object",
           "properties": {
@@ -1232,6 +1418,31 @@
           ]
         }
       ]
+    },
+    "RegistryRoleValues": {
+      "description": "The registry role value expected for each model-serving role kind present\nin the topology.",
+      "type": "object",
+      "properties": {
+        "decode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prefill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serve": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "RenderInputDeclaration": {
       "description": "One workspace-authored UTF-8 source file an integration declares during\nplanning for the control plane to supply during final rendering.",
@@ -1442,6 +1653,42 @@
             "launch_files",
             "command"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "$ref": "#/$defs/ProcessSpec"
+            },
+            "components": {
+              "$ref": "#/$defs/DiscoveryBinding"
+            },
+            "kind": {
+              "type": "string",
+              "const": "discovery"
+            },
+            "launch_files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LaunchFileDeclaration"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "process_role": {
+              "$ref": "#/$defs/DiscoveryProcessRole"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "process_role",
+            "components",
+            "launch_files",
+            "command"
+          ]
         }
       ]
     },
@@ -1499,6 +1746,13 @@
                 "format": "uint32",
                 "minimum": 0
               }
+            },
+            "discovery": {
+              "description": "The discovery process this process registers with, when the\ntopology has one ([[RFC-0003:C-SERVE-TOPOLOGY]]).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "effective_parallelism": {
               "$ref": "#/$defs/Parallelism"
@@ -1620,6 +1874,13 @@
                 "minimum": 0
               }
             },
+            "discovery": {
+              "description": "The discovery process this process registers with, when the\ntopology has one ([[RFC-0003:C-SERVE-TOPOLOGY]]).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "endpoint": {
               "$ref": "#/$defs/EndpointAssignment"
             },
@@ -1686,6 +1947,80 @@
             "cache",
             "launch",
             "gateway"
+          ]
+        },
+        {
+          "description": "The discovery service a Gateway result requires\n([[RFC-0003:C-SERVE-TOPOLOGY]]): process-only, zero devices, placed on\nthe Gateway's machine, with an internal (not public) endpoint.",
+          "type": "object",
+          "properties": {
+            "cache": {
+              "type": "string"
+            },
+            "components": {
+              "$ref": "#/$defs/DiscoveryBinding"
+            },
+            "data_directory": {
+              "description": "The control-plane-assigned empty data directory under the\nmachine's runtime cache.",
+              "type": "string"
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "discovery": {
+              "$ref": "#/$defs/DiscoveryRequirement"
+            },
+            "endpoint": {
+              "$ref": "#/$defs/EndpointAssignment"
+            },
+            "kind": {
+              "type": "string",
+              "const": "discovery"
+            },
+            "launch": {
+              "$ref": "#/$defs/AllocationLaunch"
+            },
+            "machine": {
+              "type": "string"
+            },
+            "ports": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/EndpointAssignment"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "process_role": {
+              "$ref": "#/$defs/DiscoveryProcessRole"
+            },
+            "render_inputs": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SuppliedRenderInput"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "process_role",
+            "components",
+            "machine",
+            "devices",
+            "endpoint",
+            "ports",
+            "cache",
+            "data_directory",
+            "launch",
+            "discovery"
           ]
         }
       ]
@@ -1959,6 +2294,17 @@
           "items": {
             "$ref": "#/$defs/RenderInputDeclaration"
           }
+        },
+        "replica_prefix_cache_reset": {
+          "description": "A prefix-cache reset invoked on the entry endpoint of every replica of\nthis role; a Gateway-backed server has a per-target reset capability\nonly when every model-serving role declares one\n([[RFC-0006:C-INTEGRATIONS]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpActionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -2171,6 +2517,11 @@
           "description": "gRPC serving endpoint.",
           "type": "string",
           "const": "grpc"
+        },
+        {
+          "description": "A framework's own TCP request plane, such as Dynamo's.",
+          "type": "string",
+          "const": "tcp"
         }
       ]
     }

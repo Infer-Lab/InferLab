@@ -62,7 +62,7 @@ fn add_plan(
         .map_err(|error| InferlabError::InvalidConfig {
             message: format!("failed to encode measurement data-asset source key: {error}"),
         })?;
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = base16ct::lower::encode_string(&Sha256::digest(&bytes));
     if let Some(index) = by_key.get(&digest).copied() {
         plans[index].consumers.push(consumer);
         return Ok(index);

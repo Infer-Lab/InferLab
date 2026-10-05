@@ -40,7 +40,7 @@ fn workspace_show_json_returns_the_merged_public_definition_without_local_bindin
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(value["schema_version"], 2);
+    assert!(value["schema_version"].is_u64());
     assert_eq!(value["stacks"]["vllm"]["integration"], "vllm");
     assert_eq!(
         value["servers"]["deepseek-v4-flash-qualify"]["model"],

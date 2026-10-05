@@ -17,7 +17,7 @@ pub(crate) use data_asset::{
 };
 pub(crate) use domain::{
     MeasurementModel, WorkloadEndpoint, WorkloadEndpointProtocol, WorkloadHttpAction,
-    WorkloadHttpMethod, WorkloadServerMetricsEndpoint,
+    WorkloadReplicaReset, WorkloadServerMetricsEndpoint,
 };
 pub(crate) use record::WorkloadStatus;
 pub(crate) use runtime::skip;

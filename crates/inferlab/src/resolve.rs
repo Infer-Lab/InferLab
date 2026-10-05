@@ -24,7 +24,7 @@ use inferlab_serve_domain::{
     ModelLocatorSource, ResolvedProcessAllocation, RuntimeRealizationParts,
 };
 use integration::{plan_integration, render_integration};
-use realization::{assemble_process_hierarchy, realize_runtime};
+use realization::{ProcessHierarchy, assemble_process_hierarchy, realize_runtime};
 use selection::{WorkflowSelection, resolve_effective_server_input, select_workflow};
 use topology::profiler_escapes_plan;
 
@@ -138,26 +138,19 @@ fn compose_measurements(
                 served_name: selection.model.served_name.clone(),
             },
             model_id: &selection.server.model,
-            prefix_cache_reset: public_endpoint.prefix_cache_reset.as_ref().map(|action| {
-                crate::workload::WorkloadHttpAction {
-                    method: match action.method {
-                        inferlab_protocol::HttpMethod::Post => {
-                            crate::workload::WorkloadHttpMethod::Post
-                        }
-                    },
-                    path: action.path.clone(),
-                }
-            }),
-            prefix_cache_conditioning: public_endpoint.prefix_cache_conditioning.as_ref().map(
-                |action| crate::workload::WorkloadHttpAction {
-                    method: match action.method {
-                        inferlab_protocol::HttpMethod::Post => {
-                            crate::workload::WorkloadHttpMethod::Post
-                        }
-                    },
-                    path: action.path.clone(),
-                },
-            ),
+            prefix_cache_reset: public_endpoint
+                .prefix_cache_reset
+                .as_ref()
+                .map(crate::workload::WorkloadHttpAction::from_wire),
+            replica_prefix_cache_resets: public_endpoint
+                .replica_prefix_cache_resets
+                .iter()
+                .map(crate::workload::WorkloadReplicaReset::from_plan)
+                .collect(),
+            prefix_cache_conditioning: public_endpoint
+                .prefix_cache_conditioning
+                .as_ref()
+                .map(crate::workload::WorkloadHttpAction::from_wire),
             conditioning_serving,
             synthetic_acceptance,
             capture_ids: request.captures,
@@ -258,8 +251,11 @@ pub(crate) fn resolve<C: AdapterClient>(
         conditioning_serving,
         rendered_stage.allocations(),
     )?;
-    let (role_plans, frontend) =
-        assemble_process_hierarchy(&stack.integration, &effective, &planned_stage, processes)?;
+    let ProcessHierarchy {
+        roles: role_plans,
+        frontend,
+        discovery,
+    } = assemble_process_hierarchy(&stack.integration, &effective, &planned_stage, processes)?;
     let mut execution = ResolvedExecution {
         workflow: request.workflow,
         workspace: workspace.snapshot.clone(),
@@ -314,6 +310,7 @@ pub(crate) fn resolve<C: AdapterClient>(
                 })
                 .collect(),
             frontend,
+            discovery,
             profiler_escapes: profiler_escapes_plan(server),
             model: ModelPlan {
                 id: server.model.clone(),

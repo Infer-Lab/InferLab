@@ -432,7 +432,7 @@ fn bench_identity(platform: &str, handshake: BenchHandshake) -> BenchToolchainId
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    base16ct::lower::encode_string(&Sha256::digest(bytes))
 }
 
 fn bundled_task_closure_digest() -> String {
@@ -448,7 +448,7 @@ fn bundled_task_closure_digest() -> String {
         digest.update(contents.len().to_le_bytes());
         digest.update(contents);
     }
-    format!("{:x}", digest.finalize())
+    base16ct::lower::encode_string(&digest.finalize())
 }
 
 fn bench_runner_digest() -> String {
@@ -469,7 +469,7 @@ fn runner_digest(runner_prefix: &str) -> String {
         digest.update(contents.len().to_le_bytes());
         digest.update(contents.as_bytes());
     }
-    format!("{:x}", digest.finalize())
+    base16ct::lower::encode_string(&digest.finalize())
 }
 
 fn open_lock(path: &Path) -> Result<File, InferlabError> {

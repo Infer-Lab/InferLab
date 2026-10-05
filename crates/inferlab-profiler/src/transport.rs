@@ -184,7 +184,8 @@ fn engine_trace_close_action(
                   flush_pending: bool,
                   error: Option<String>,
                   succeeded: bool,
-                  terminal_cause: OperationTerminalCause| {
+                  terminal_cause: OperationTerminalCause,
+                  observed_value: Option<serde_json::Value>| {
         CaptureActionRecord::Http {
             process_id: process_id.to_owned(),
             operation: "stop-range".to_owned(),
@@ -198,6 +199,8 @@ fn engine_trace_close_action(
             error,
             succeeded,
             timing: bound.timing(MEASUREMENT_FINALIZATION_START, terminal_cause),
+            success: action.success.clone(),
+            observed_value,
         }
     };
     // With no budget left the dispatch cannot complete; record the pending
@@ -212,29 +215,33 @@ fn engine_trace_close_action(
                 None,
                 true,
                 OperationTerminalCause::TimedOut,
+                None,
             );
         }
         Remaining::Unbounded => None,
     };
     let result = send_control_request(action, timeout, None);
     match result {
-        Ok(status) if status.is_success() => record(
-            Some(status.as_u16()),
+        Ok(response) if response.succeeded() => record(
+            Some(response.status.as_u16()),
             None,
             false,
             None,
             true,
             OperationTerminalCause::Succeeded,
+            response.observed,
         ),
-        // A prompt error status is a delivery failure: window-closing control
-        // failure evidence, adjudicated by coverage verification.
-        Ok(status) => record(
-            Some(status.as_u16()),
+        // A prompt error status or a mismatching success predicate is a
+        // delivery failure: window-closing control failure evidence,
+        // adjudicated by coverage verification.
+        Ok(response) => record(
+            Some(response.status.as_u16()),
             None,
             false,
             None,
             false,
             OperationTerminalCause::Failed,
+            response.observed,
         ),
         // A slow or absent response is neutral flush-pending evidence: no
         // error, no deadline failure kind, no capture failure by itself.
@@ -245,6 +252,7 @@ fn engine_trace_close_action(
             None,
             true,
             OperationTerminalCause::TimedOut,
+            None,
         ),
         Err(error) => record(
             None,
@@ -253,6 +261,7 @@ fn engine_trace_close_action(
             Some(error.record_message()),
             false,
             OperationTerminalCause::Failed,
+            None,
         ),
     }
 }
@@ -305,19 +314,21 @@ fn http_action(
             path: Some(action.path.clone()),
             url,
             body: action.body.clone(),
-            status: Some(response.as_u16()),
+            status: Some(response.status.as_u16()),
             failure_kind: None,
             flush_pending: false,
             error: None,
-            succeeded: response.is_success(),
+            succeeded: response.succeeded(),
             timing: bound.timing(
                 CONTROL_START_BOUNDARY,
-                if response.is_success() {
+                if response.succeeded() {
                     OperationTerminalCause::Succeeded
                 } else {
                     OperationTerminalCause::Failed
                 },
             ),
+            success: action.success.clone(),
+            observed_value: response.observed,
         },
         Err(error) => CaptureActionRecord::Http {
             process_id: process_id.to_owned(),
@@ -339,6 +350,8 @@ fn http_action(
                     OperationTerminalCause::Failed
                 },
             ),
+            success: action.success.clone(),
+            observed_value: None,
         },
     }
 }
@@ -352,7 +365,7 @@ fn send_control_request(
     action: &CaptureWindowActionPlan,
     client_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
-) -> Result<reqwest::StatusCode, CaptureHttpError> {
+) -> Result<ControlResponse, CaptureHttpError> {
     let mut client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
@@ -381,10 +394,36 @@ fn send_control_request(
         .send()
         .map_err(|source| CaptureHttpError::Request { source })?;
     let status = response.status();
-    response
+    let body = response
         .bytes()
         .map_err(|source| CaptureHttpError::Request { source })?;
-    Ok(status)
+    let observed = action.success.as_ref().and_then(|success| {
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|document| document.pointer(&success.pointer).cloned())
+    });
+    let predicate_holds = action.success.as_ref().is_none_or(|success| {
+        observed.as_ref().and_then(serde_json::Value::as_str) == Some(success.value.as_str())
+    });
+    Ok(ControlResponse {
+        status,
+        observed,
+        predicate_holds,
+    })
+}
+
+/// A received window-control response: its status, the value observed at
+/// a declared success pointer, and whether the declared predicate holds.
+struct ControlResponse {
+    status: reqwest::StatusCode,
+    observed: Option<serde_json::Value>,
+    predicate_holds: bool,
+}
+
+impl ControlResponse {
+    fn succeeded(&self) -> bool {
+        self.status.is_success() && self.predicate_holds
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -668,6 +707,7 @@ mod tests {
             path: "/profile".to_owned(),
             body: None,
             effective_url: "http://127.0.0.1:1/profile".to_owned(),
+            success: None,
         };
         ProfilerTargetRecord {
             process_id: "prefill-0".to_owned(),
@@ -804,6 +844,7 @@ mod tests {
             path: "/profile".to_owned(),
             body: None,
             effective_url: format!("http://{address}/profile"),
+            success: None,
         };
 
         let record = http_action("serve", "start-range", &action, 3);
@@ -823,6 +864,7 @@ mod tests {
             path: "/stop_profile".to_owned(),
             body: None,
             effective_url: url,
+            success: None,
         }
     }
 
@@ -948,6 +990,48 @@ mod tests {
         assert_eq!(status, Some(500));
         assert_eq!(error, None);
         assert_eq!(timing.terminal_cause, OperationTerminalCause::Failed);
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    /// A declared success predicate makes a 2xx response whose body reports
+    /// failure a failed window action, preserving the observed value
+    /// ([[RFC-0006:C-INTEGRATIONS]]).
+    #[test]
+    fn a_window_action_success_predicate_fails_a_200_that_reports_an_error()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 1_024];
+            let _ = stream.read(&mut request)?;
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{\"status\":\"error\"}",
+            )?;
+            Ok(())
+        });
+        let mut action =
+            engine_trace_stop(format!("http://{address}/engine/control/start_profile"));
+        action.success = Some(inferlab_protocol::JsonValueMatch {
+            pointer: "/status".to_owned(),
+            value: "ok".to_owned(),
+        });
+
+        let record = http_action("serve", "start-range", &action, 1);
+
+        let CaptureActionRecord::Http {
+            succeeded,
+            status,
+            observed_value,
+            ..
+        } = record
+        else {
+            return Err("window action fixture returned non-HTTP evidence".into());
+        };
+        assert!(!succeeded);
+        assert_eq!(status, Some(200));
+        assert_eq!(observed_value, Some(serde_json::Value::from("error")));
         server.join().map_err(|_| "fixture server panicked")??;
         Ok(())
     }

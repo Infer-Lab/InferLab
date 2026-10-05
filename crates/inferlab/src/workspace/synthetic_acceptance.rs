@@ -39,7 +39,7 @@ pub(crate) fn validate_curve_shape_at_load(
     let Ok(bytes) = std::fs::read(&resolved_path) else {
         return Ok(());
     };
-    if format!("{:x}", Sha256::digest(&bytes)) != curve.expected_sha256 {
+    if base16ct::lower::encode_string(&Sha256::digest(&bytes)) != curve.expected_sha256 {
         return Ok(());
     }
     validate_curve_document(&resolved_path, &bytes, context, curve)?;

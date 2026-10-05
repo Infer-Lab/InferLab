@@ -32,6 +32,26 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
             source,
         })
     })?;
+    if let Some(state) = spec.data_directory {
+        match fs::remove_dir_all(state) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(LaunchFailure::from_error(ServerLaunchError::FileIo {
+                    operation: "empty process state directory",
+                    path: state.to_path_buf(),
+                    source,
+                }));
+            }
+        }
+        fs::create_dir_all(state).map_err(|source| {
+            LaunchFailure::from_error(ServerLaunchError::FileIo {
+                operation: "create process state directory",
+                path: state.to_path_buf(),
+                source,
+            })
+        })?;
+    }
     materialize_local_launch_files(spec.launch_files).map_err(LaunchFailure::from_error)?;
     let (program, args) = spec
         .command
@@ -230,7 +250,7 @@ fn file_sha256(path: &Path) -> Result<String, ServerLaunchError> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(base16ct::lower::encode_string(&digest.finalize()))
 }
 
 /// A one-line human summary of a structured removal outcome for the launch
@@ -246,9 +266,13 @@ pub(super) fn spawn_ssh(
     let command = render_env_command(spec.command).map_err(LaunchFailure::before_launch)?;
     materialize_ssh_launch_files(target, spec.launch_files).map_err(LaunchFailure::from_error)?;
     let script = format!(
-        "set -eu; mkdir -p {dir} {cache}; cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; printf '{marker}%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
+        "set -eu; mkdir -p {dir} {cache}; {state}cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; printf '{marker}%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
         dir = shell_quote_path(spec.remote_dir),
         cache = shell_quote_path(spec.cache_root),
+        state = spec.data_directory.map_or_else(String::new, |state| {
+            let state = shell_quote_path(state);
+            format!("rm -rf {state}; mkdir -p {state}; ")
+        }),
         cwd = shell_quote_path(&spec.command.cwd),
         stdout = shell_quote_path(&remote_stdout),
         stderr = shell_quote_path(&remote_stderr),

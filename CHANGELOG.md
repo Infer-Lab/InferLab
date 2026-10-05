@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-05
+
+### Added
+
+- A Gateway backend may require a discovery service ([[ADR-0060]]): InferLab
+  derives one zero-device `discovery` process on the Gateway's machine,
+  starts it from an emptied data directory, waits for its readiness before any
+  model rank spawns — within the same readiness budget — and stops it last.
+- Registry-membership readiness: a Gateway can be reported ready only when
+  its registry lists every rank-zero model-serving process under its role at
+  the address InferLab allocated, and optionally when its model list names the
+  served model. An unready attempt records the missing targets and the
+  unexpected entries.
+- Prefix-cache reset can be declared per target: every model-serving role
+  declares a reset on its replicas' entry endpoints, InferLab attempts it on
+  every replica even after a failure, and a cold or primed Bench succeeds
+  only when every attempt does. Each attempt is recorded.
+- Prefix-cache reset and capture-window actions may declare a JSON success
+  predicate, so a 2xx response that reports failure in its body fails the
+  action; the predicate and the observed value are recorded.
+- vLLM can be served through Dynamo ([[RFC-0003:C-DYNAMO]]):
+  `gateway_backend = "dynamo"` on a routed `single` server, or the
+  `(dynamo, dynamo)` pair on a `prefill_decode` server over NIXL. InferLab
+  starts one etcd discovery process per server, renders the Dynamo frontend
+  and one `dynamo.vllm` worker per replica, waits until the frontend registry
+  lists every worker at its allocated address, resets the prefix cache on
+  every worker, and controls profiling windows on each worker; its P/D
+  Router records a new `tcp` target endpoint scheme. The new
+  `inferlab-gateway-dynamo` `0.1.0` package carries the Dynamo lowering; the
+  workspace environment provides `ai-dynamo` and `etcd`. Routed single and
+  1P1D on one and two machines are qualified with `ai-dynamo` 1.5.0.
+
+### Changed
+
+- **Breaking:** the adapter protocol hard-cuts to version 12
+  ([[RFC-0006:C-INTEGRATIONS]]); version 11 payloads are rejected. Workspaces
+  move to Adapter SDK `0.12.0` and the matching integrations — vLLM, SGLang,
+  and TensorRT-LLM `0.11.0`, TokenSpeed and Specialized Engine `0.12.0`, on
+  `inferlab-gateway-smg` `0.2.0`, with vLLM on `inferlab-gateway-dynamo`
+  `0.1.0` — and relock.
+- **Breaking:** server record schema version 13 and workload record schema
+  version 21 ([[RFC-0005:C-EVIDENCE]]); this binary does not manage servers
+  started by an earlier release.
+
+### Fixed
+
+- vLLM engine trace no longer blocks the engine after the trace window
+  closes: the integration disables vLLM's `profiler_out` summary table, which
+  vLLM computed inside the engine for minutes on every window close, stalling
+  requests of any following case. The per-rank trace artifacts are unchanged.
+  It ships in `inferlab-integration-vllm` `0.11.0` with the protocol 12
+  integrations.
+
 ## [0.17.1] - 2026-10-04
 
 ### Fixed

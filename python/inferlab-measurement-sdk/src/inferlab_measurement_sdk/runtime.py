@@ -5,7 +5,10 @@ import time
 from pathlib import Path
 from typing import cast
 
-from ._generated import ClientEndpointInput, SettingValue
+from ._generated import ClientEndpointInput, ProtocolVersion, SettingValue
+
+# The measurement protocol version this SDK speaks, from the generated wire model.
+PROTOCOL_VERSION: str = ProtocolVersion().root
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, object]

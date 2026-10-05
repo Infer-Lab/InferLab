@@ -26,6 +26,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+/// The process id of the derived discovery process ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+pub(crate) const DISCOVERY_PROCESS_ID: &str = "discovery";
+
 /// The built-in proxy serving a framework and KV-transfer mechanism, resolved
 /// through the proxy crate's registry ([[RFC-0006:C-INTEGRATIONS]]).
 fn builtin_proxy_spec(
@@ -228,7 +231,7 @@ pub(super) fn load_render_inputs(
                     path,
                     source,
                 })?;
-            let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let sha256 = base16ct::lower::encode_string(&Sha256::digest(text.as_bytes()));
             Ok(SuppliedRenderInput {
                 source_path: declaration.source_path.clone(),
                 text,
@@ -284,7 +287,8 @@ pub(super) fn validate_launch_file_declarations(
                     ),
                 });
             }
-            let actual_sha256 = format!("{:x}", Sha256::digest(declaration.text.as_bytes()));
+            let actual_sha256 =
+                base16ct::lower::encode_string(&Sha256::digest(declaration.text.as_bytes()));
             if declaration.sha256 != actual_sha256 {
                 return Err(InferlabError::AdapterSemantics {
                     message: format!(
@@ -527,6 +531,30 @@ pub(super) fn plan_integration<C: AdapterClient>(
         if gateway.render_source == RenderSource::Integration {
             integration_rendered_process_ids.insert("gateway".to_owned());
         }
+        // A Gateway-declared discovery service follows the Gateway in
+        // requirement order so its machine is known when it is placed beside
+        // it; launch staging spawns it first ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+        if let Some(discovery) = &gateway.discovery {
+            let render_inputs = load_render_inputs(
+                &workspace.root,
+                &stack.integration,
+                &discovery.render_inputs,
+            )?;
+            requirements.push(ProcessRequirement::new(
+                DISCOVERY_PROCESS_ID.to_owned(),
+                ProcessRequirementIdentity::Discovery {
+                    requirement: Box::new(discovery.clone()),
+                    render_inputs,
+                },
+                0,
+                discovery.ports.clone(),
+                discovery.readiness.clone(),
+                Vec::new(),
+                None,
+                None,
+            ));
+            integration_rendered_process_ids.insert(DISCOVERY_PROCESS_ID.to_owned());
+        }
         "gateway".to_owned()
     } else {
         let role = planned
@@ -573,7 +601,8 @@ pub(super) fn plan_integration<C: AdapterClient>(
 pub(super) fn rendered_process_id(process: &RenderedServeProcess) -> &str {
     match process {
         RenderedServeProcess::ModelRank { process, .. }
-        | RenderedServeProcess::Frontend { process, .. } => process,
+        | RenderedServeProcess::Frontend { process, .. }
+        | RenderedServeProcess::Discovery { process, .. } => process,
     }
 }
 
@@ -745,7 +774,7 @@ mod tests {
     use super::*;
 
     fn launch_file(text: &str, name: &str) -> LaunchFileDeclaration {
-        let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let sha256 = base16ct::lower::encode_string(&Sha256::digest(text.as_bytes()));
         LaunchFileDeclaration {
             relative_path: format!("launch-files/{sha256}/{name}"),
             text: text.to_owned(),
@@ -785,13 +814,13 @@ mod tests {
         assert_eq!(supplied[0].text, relative_text);
         assert_eq!(
             supplied[0].sha256,
-            format!("{:x}", Sha256::digest(relative_text.as_bytes()))
+            base16ct::lower::encode_string(&Sha256::digest(relative_text.as_bytes()))
         );
         assert_eq!(supplied[1].source_path, absolute_path);
         assert_eq!(supplied[1].text, absolute_text);
         assert_eq!(
             supplied[1].sha256,
-            format!("{:x}", Sha256::digest(absolute_text.as_bytes()))
+            base16ct::lower::encode_string(&Sha256::digest(absolute_text.as_bytes()))
         );
         Ok(())
     }

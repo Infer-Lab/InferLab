@@ -24,7 +24,7 @@ if fault.get("adapter_reject"):
         json.dumps(
             {
                 "status": "error",
-                "protocol_version": "11",
+                "protocol_version": request["protocol_version"],
                 "error": {"code": "invalid_settings", "message": "fixture rejection"},
             }
         )
@@ -247,7 +247,7 @@ print(
     json.dumps(
         {
             "status": "ok",
-            "protocol_version": "11",
+            "protocol_version": request["protocol_version"],
             "result": {"operation": operation, "output": output},
         }
     )

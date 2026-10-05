@@ -141,7 +141,7 @@ impl ServerRecord {
     /// readiness bound copies ([[RFC-0005:C-EVIDENCE]]) MUST NOT be encoded
     /// under an earlier server record version, so the version gate stops
     /// older records before serde does.
-    pub(crate) const SCHEMA_VERSION: u32 = 12;
+    pub(crate) const SCHEMA_VERSION: u32 = 13;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

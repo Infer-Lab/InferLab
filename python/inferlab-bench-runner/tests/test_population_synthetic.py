@@ -15,6 +15,7 @@ from inferlab_bench_runner.result_population import (
     prompt_token_reconciliation,
 )
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     BenchPopulationPreparationRequest,
     ClientStatus,
 )
@@ -212,7 +213,7 @@ def random_preparation_request(
     effective_prompt = resolved_prompt_input(prompt)
     return BenchPopulationPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "model": {"locator": "/models/deepseek-v4-flash", "served_name": "deepseek-v4-flash"},
             "tokenizer_backend": "huggingface",
             "transformers_version": "5.12.1",

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     BenchClientRequest,
 )
 
@@ -64,7 +65,7 @@ def request(
     effective_prompt = resolved_prompt_input(prompt)
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",

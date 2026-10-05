@@ -216,7 +216,7 @@ fn assemble<T: BuilderTool>(
     let activation_digest = {
         let canonical = serde_json::to_string(&activation)
             .map_err(|source| InferlabError::EncodeOutput { source })?;
-        format!("{:x}", sha2::Sha256::digest(canonical.as_bytes()))
+        base16ct::lower::encode_string(&sha2::Sha256::digest(canonical.as_bytes()))
     };
 
     // Wheels build against a sanitized view of all stack sources: builds
@@ -496,9 +496,8 @@ fn assemble<T: BuilderTool>(
             workspace,
         )?;
     }
-    store.record_mut().assemblies[index].dockerfile_sha256 = Some(format!(
-        "{:x}",
-        sha2::Sha256::digest(prepared.dockerfile.as_bytes())
+    store.record_mut().assemblies[index].dockerfile_sha256 = Some(base16ct::lower::encode_string(
+        &sha2::Sha256::digest(prepared.dockerfile.as_bytes()),
     ));
 
     let tag = image_tag(&resolved.image.id, &assembly.closure_digest);
@@ -673,7 +672,7 @@ fn load_environment_scripts<'a>(
             path: path.clone(),
             source,
         })?;
-        let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let digest = base16ct::lower::encode_string(&sha2::Sha256::digest(&bytes));
         if digest != *sha256 {
             return Err(InferlabError::ImageBuild {
                 message: format!(
@@ -816,10 +815,9 @@ fn wheel_cache_key(
         "epoch": package_closure::WHEEL_BUILD_EPOCH,
         "platform": platform,
     });
-    Ok(format!(
-        "{:x}",
-        sha2::Sha256::digest(canonical.to_string().as_bytes())
-    ))
+    Ok(base16ct::lower::encode_string(&sha2::Sha256::digest(
+        canonical.to_string().as_bytes(),
+    )))
 }
 
 fn cached_wheel(cache_dir: &Path) -> Result<Option<materialization::BuiltWheel>, InferlabError> {

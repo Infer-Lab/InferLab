@@ -4,10 +4,10 @@ use crate::workspace::{PlacementBinding, PlacementRoleBinding, ServerDefinition}
 use inferlab_profiler::plan::{CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan};
 use inferlab_protocol::{
     CaptureMechanism, CaptureWindowControlEndpoint, EndpointAssignment, EndpointDeclaration,
-    EndpointRequirement, FrontendComponents, FrontendProcessRole, GatewayTarget,
-    KvTransferMechanism, PlanServeResult, RenderSource, ServeReplicaRequirement, ServeRoleInput,
-    ServeRoleKind, ServeRoleLink, ServeTopology, SuppliedRenderInput, SyntheticAcceptanceInput,
-    SyntheticAcceptanceOutcome,
+    EndpointRequirement, FrontendComponents, FrontendProcessRole, GatewayTarget, JsonValueMatch,
+    KvTransferMechanism, PlanServeResult, ReadinessProbe, RenderSource, ServeReplicaRequirement,
+    ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeTopology, SuppliedRenderInput,
+    SyntheticAcceptanceInput, SyntheticAcceptanceOutcome,
 };
 use inferlab_serve_domain::{
     FixedDeviceAssignment, PendingCaptureTargetPlan, PendingCaptureWindowActionPlan,
@@ -47,6 +47,184 @@ pub(super) fn validate_workload_endpoint(
                         "integration {integration:?} selected server-metrics port {port:?}, but the public process must declare that non-empty named port exactly once"
                     ),
                 });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An RFC 6901 JSON Pointer: empty, or `/`-separated reference tokens whose
+/// `~` escapes are only `~0` and `~1`.
+fn is_json_pointer(pointer: &str) -> bool {
+    (pointer.is_empty() || pointer.starts_with('/'))
+        && pointer
+            .split('~')
+            .skip(1)
+            .all(|rest| rest.starts_with('0') || rest.starts_with('1'))
+}
+
+fn validate_action_success(
+    integration: &str,
+    label: &str,
+    success: Option<&JsonValueMatch>,
+) -> Result<(), InferlabError> {
+    match success {
+        Some(success) if !is_json_pointer(&success.pointer) => {
+            Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {integration:?} declared {label} success pointer {:?}; expected an RFC 6901 JSON Pointer",
+                    success.pointer
+                ),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_registry_readiness(
+    integration: &str,
+    label: &str,
+    readiness: &ReadinessProbe,
+) -> Result<(), InferlabError> {
+    let ReadinessProbe::RegistryMembership(registry) = readiness else {
+        return Ok(());
+    };
+    let pointers = [
+        Some(registry.entries_pointer.as_str()),
+        registry
+            .entry_filter
+            .as_ref()
+            .map(|filter| filter.pointer.as_str()),
+        Some(registry.role_pointer.as_str()),
+        Some(registry.address_pointer.as_str()),
+        registry
+            .model_list
+            .as_ref()
+            .map(|list| list.models_pointer.as_str()),
+        registry
+            .model_list
+            .as_ref()
+            .map(|list| list.name_pointer.as_str()),
+    ];
+    let paths = [
+        Some(registry.registry_path.as_str()),
+        registry.model_list.as_ref().map(|list| list.path.as_str()),
+    ];
+    if registry.target_port.is_empty()
+        || pointers
+            .into_iter()
+            .flatten()
+            .any(|pointer| !is_json_pointer(pointer))
+        || paths
+            .into_iter()
+            .flatten()
+            .any(|path| !is_absolute_origin_path(path))
+    {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {integration:?} declared an invalid {label} registry-membership readiness: it needs a target port, absolute origin paths, and RFC 6901 JSON Pointers"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Protocol-12 members ([[RFC-0006:C-INTEGRATIONS]]): action success
+/// predicates, registry-membership readiness, the Gateway discovery
+/// requirement, and per-target prefix-cache reset declared by every
+/// model-serving role or none, never beside a public reset action.
+fn validate_discovery_and_registry_members(
+    integration: &str,
+    plan: &PlanServeResult,
+    public_endpoint: &EndpointDeclaration,
+) -> Result<(), InferlabError> {
+    validate_action_success(
+        integration,
+        "prefix-cache reset",
+        public_endpoint
+            .prefix_cache_reset
+            .as_ref()
+            .and_then(|action| action.success.as_ref()),
+    )?;
+    if public_endpoint
+        .prefix_cache_conditioning
+        .as_ref()
+        .is_some_and(|action| action.success.is_some())
+    {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {integration:?} declared a success predicate on a prefix-cache conditioning action"
+            ),
+        });
+    }
+    for replica in &plan.replicas {
+        validate_registry_readiness(integration, "replica", &replica.primary_readiness)?;
+        validate_registry_readiness(integration, "replica", &replica.worker_readiness)?;
+        if let Some(capture) = &replica.capture_target {
+            for action in [&capture.window_control.start, &capture.window_control.stop] {
+                validate_action_success(integration, "capture-window", action.success.as_ref())?;
+            }
+        }
+    }
+    if let Some(gateway) = &plan.gateway {
+        validate_registry_readiness(integration, "Gateway", &gateway.readiness)?;
+        if let Some(discovery) = &gateway.discovery {
+            // A control-plane-rendered Gateway receives no discovery link, so
+            // it could never register with the service it requires.
+            if gateway.render_source != RenderSource::Integration {
+                return Err(InferlabError::AdapterSemantics {
+                    message: format!(
+                        "integration {integration:?} declared a discovery requirement on a control-plane-rendered Gateway"
+                    ),
+                });
+            }
+            match &discovery.readiness {
+                ReadinessProbe::Http { path } if is_absolute_origin_path(path) => {}
+                ReadinessProbe::ProcessAlive => {}
+                _ => {
+                    return Err(InferlabError::AdapterSemantics {
+                        message: format!(
+                            "integration {integration:?} declared discovery readiness other than an HTTP path or process liveness"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    if let Some(pd_router) = &plan.pd_router {
+        validate_registry_readiness(integration, "P/D Router", &pd_router.readiness)?;
+    }
+    let per_target = plan
+        .roles
+        .iter()
+        .filter(|role| role.replica_prefix_cache_reset.is_some())
+        .count();
+    if per_target > 0 {
+        if per_target != plan.roles.len() {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {integration:?} declared a per-target prefix-cache reset on only some model-serving roles"
+                ),
+            });
+        }
+        if public_endpoint.prefix_cache_reset.is_some() {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {integration:?} declared both a public prefix-cache reset and a per-target reset"
+                ),
+            });
+        }
+        for role in &plan.roles {
+            if let Some(action) = &role.replica_prefix_cache_reset {
+                if !is_absolute_origin_path(&action.path) {
+                    return Err(InferlabError::AdapterSemantics {
+                        message: format!(
+                            "integration {integration:?} declared per-target reset path {:?} for role {:?}; expected an absolute origin path",
+                            action.path, role.id
+                        ),
+                    });
+                }
+                validate_action_success(integration, "per-target reset", action.success.as_ref())?;
             }
         }
     }
@@ -218,6 +396,7 @@ fn capture_window_action_plan(
         },
         action.path.clone(),
         action.body.clone(),
+        action.success.clone(),
     )
 }
 
@@ -756,6 +935,11 @@ pub(super) fn validate_serve_graph(
         public_endpoint_declaration(integration, topology, plan)?,
         public_endpoint_ports(integration, topology, plan)?,
     )?;
+    validate_discovery_and_registry_members(
+        integration,
+        plan,
+        public_endpoint_declaration(integration, topology, plan)?,
+    )?;
     if let Some(gateway) = &plan.gateway
         && gateway.render_source == RenderSource::ControlPlane
     {
@@ -1239,6 +1423,7 @@ mod tests {
         endpoint.prefix_cache_reset = Some(inferlab_protocol::HttpActionSpec {
             method: inferlab_protocol::HttpMethod::Post,
             path: "/flush_cache".to_owned(),
+            success: None,
         });
         let error = validate_builtin_proxy_declaration(
             "fixture",
@@ -1367,6 +1552,7 @@ mod tests {
                 effective_parallelism: Parallelism::default(),
                 public_endpoint: None,
                 render_inputs: Vec::new(),
+                replica_prefix_cache_reset: None,
             })
             .collect();
         let replicas = requested_roles
@@ -1453,6 +1639,7 @@ mod tests {
                 render_inputs: Vec::new(),
                 render_source: RenderSource::ControlPlane,
                 co_rendering: co_rendering.clone(),
+                discovery: None,
             }),
             pd_router: Some(PdRouterPlan {
                 backend: "builtin".to_owned(),
@@ -1495,6 +1682,97 @@ mod tests {
             pd_router.render_source = RenderSource::Integration;
         }
         (requested_roles, plan)
+    }
+
+    /// Per-target reset is all-or-nothing across model-serving roles and
+    /// never sits beside a public reset; a conditioning action carries no
+    /// success predicate; only an integration-rendered Gateway may require a
+    /// discovery service ([[RFC-0006:C-INTEGRATIONS]]).
+    #[test]
+    fn per_target_reset_and_success_predicates_are_rejected_where_the_protocol_forbids_them() {
+        let reset = inferlab_protocol::HttpActionSpec {
+            method: inferlab_protocol::HttpMethod::Post,
+            path: "/engine/flush_cache".to_owned(),
+            success: Some(JsonValueMatch {
+                pointer: "/status".to_owned(),
+                value: "ok".to_owned(),
+            }),
+        };
+        let validate = |plan: &PlanServeResult, roles: &[ServeRoleInput]| {
+            validate_serve_graph(
+                "tensorrt-llm",
+                ServeTopology::PrefillDecode,
+                roles,
+                Some("trtllm-disaggregated"),
+                Some("trtllm-disaggregated"),
+                Some(KvTransferMechanism::Nixl),
+                plan,
+            )
+        };
+
+        let (roles, mut plan) = native_trtllm_prefill_decode_plan();
+        if let Some(gateway) = &mut plan.gateway {
+            gateway.endpoint.prefix_cache_reset = None;
+        }
+        for role in &mut plan.roles {
+            role.replica_prefix_cache_reset = Some(reset.clone());
+        }
+        assert!(validate(&plan, &roles).is_ok(), "every role declares it");
+
+        let mut partial = plan.clone();
+        partial.roles[0].replica_prefix_cache_reset = None;
+        assert!(
+            validate(&partial, &roles).is_err(),
+            "only some roles declare it"
+        );
+
+        let mut mixed = plan.clone();
+        if let Some(gateway) = &mut mixed.gateway {
+            gateway.endpoint.prefix_cache_reset = Some(inferlab_protocol::HttpActionSpec {
+                success: None,
+                ..reset.clone()
+            });
+        }
+        assert!(
+            validate(&mixed, &roles).is_err(),
+            "public reset beside per-target"
+        );
+
+        let mut discovering = plan.clone();
+        if let Some(gateway) = &mut discovering.gateway {
+            gateway.discovery = Some(inferlab_protocol::DiscoveryRequirement {
+                ports: vec!["peer".to_owned()],
+                readiness: ReadinessProbe::ProcessAlive,
+                render_inputs: Vec::new(),
+            });
+        }
+        assert!(
+            validate(&discovering, &roles).is_ok(),
+            "discovery beside an integration-rendered Gateway"
+        );
+        if let Some(gateway) = &mut discovering.gateway {
+            gateway.render_source = RenderSource::ControlPlane;
+        }
+        if let Some(pd_router) = &mut discovering.pd_router {
+            pd_router.render_source = RenderSource::ControlPlane;
+        }
+        assert!(
+            matches!(
+                validate(&discovering, &roles),
+                Err(InferlabError::AdapterSemantics { message })
+                    if message.contains("discovery requirement on a control-plane-rendered Gateway")
+            ),
+            "discovery beside a control-plane-rendered Gateway"
+        );
+
+        let mut conditioning = plan;
+        if let Some(gateway) = &mut conditioning.gateway {
+            gateway.endpoint.prefix_cache_conditioning = Some(reset);
+        }
+        assert!(
+            validate(&conditioning, &roles).is_err(),
+            "conditioning with a success predicate"
+        );
     }
 
     #[test]

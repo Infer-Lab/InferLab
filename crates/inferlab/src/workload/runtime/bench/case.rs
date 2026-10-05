@@ -6,7 +6,7 @@ use super::native::{adjudicate_bench_client, run_bench_client};
 use super::phase_barrier::{
     PROFILE_BARRIER_ENV, PROFILE_BARRIER_REQUIRES_WARMUP_ENV, ProfileBarrier,
 };
-use super::prefix_cache::{CachePreparationInput, prepare_prefix_cache};
+use super::prefix_cache::{CachePreparationInput, ResetCapability, prepare_prefix_cache};
 use super::result::evaluate_case_slos;
 use crate::InferlabError;
 use crate::workload::domain::ResolvedBenchSource;
@@ -50,11 +50,15 @@ pub(super) fn run_bench_case(
         .preparation_order
         .contains(&BenchPreparationStep::CacheReset);
     let pre_client_preparation = if controlled_cache && !requires_warmup_barrier {
-        plan.client.prefix_cache_reset.as_ref().map(|action| {
+        ResetCapability::of(
+            plan.client.prefix_cache_reset.as_ref(),
+            &plan.client.replica_prefix_cache_resets,
+        )
+        .map(|reset| {
             prepare_prefix_cache(
                 CachePreparationInput {
                     endpoint: &plan.client.endpoint,
-                    action,
+                    reset,
                     start: plan.client.effective_definition.cache_start,
                     conditioning: plan.client.prefix_cache_conditioning.as_ref(),
                     population: plan.client.population.as_ref(),
@@ -296,11 +300,15 @@ fn run_after_setup_barrier(
         };
         let mut client = Some(client);
         let mut release = Some(release);
-        let mut cache_preparation = plan.client.prefix_cache_reset.as_ref().map(|action| {
+        let mut cache_preparation = ResetCapability::of(
+            plan.client.prefix_cache_reset.as_ref(),
+            &plan.client.replica_prefix_cache_resets,
+        )
+        .map(|reset| {
             prepare_prefix_cache(
                 CachePreparationInput {
                     endpoint: &plan.client.endpoint,
-                    action,
+                    reset,
                     start: plan.client.effective_definition.cache_start,
                     conditioning: plan.client.prefix_cache_conditioning.as_ref(),
                     population: plan.client.population.as_ref(),
@@ -457,7 +465,7 @@ fn finish_after_barrier_failure(
 }
 
 fn cache_preparation_error(preparation: &BenchCachePreparationEvidence) -> Option<&'static str> {
-    if !preparation.reset.succeeded {
+    if !preparation.reset.succeeded() {
         Some("prefix-cache reset failed")
     } else if preparation.start == crate::workspace::BenchCacheStart::Primed
         && preparation

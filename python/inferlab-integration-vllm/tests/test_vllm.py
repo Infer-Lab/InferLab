@@ -283,6 +283,9 @@ def test_render_serve_matches_the_shared_vllm_fixture() -> None:
 
 
 def test_render_engine_trace_injects_the_assigned_torch_profiler_dir() -> None:
+    # vLLM's default summary-table dump runs inside the EngineCore on window
+    # close and blocks serving for minutes; the trace artifacts are the
+    # evidence, so the dump stays off.
     request = AdapterRequest.model_validate(
         load_json(FIXTURES / "valid" / "render-serve-request.json")
     )
@@ -294,6 +297,7 @@ def test_render_engine_trace_injects_the_assigned_torch_profiler_dir() -> None:
     assert json.loads(config) == {
         "profiler": "torch",
         "torch_profiler_dir": "/workspace/.inferlab/runtime/engine-trace/serve-fixture/prefill",
+        "torch_profiler_dump_cuda_time_total": False,
     }
 
 
@@ -422,8 +426,8 @@ def test_plan_role_declares_the_whole_replica_accelerator_requirement() -> None:
         "mechanism": "managed_collection",
         "window_control": {
             "endpoint": "replica_entry",
-            "start": {"method": "post", "path": "/start_profile", "body": None},
-            "stop": {"method": "post", "path": "/stop_profile", "body": None},
+            "start": {"method": "post", "path": "/start_profile", "body": None, "success": None},
+            "stop": {"method": "post", "path": "/stop_profile", "body": None, "success": None},
         },
     }
 

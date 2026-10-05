@@ -25,17 +25,18 @@ readme = "../../README.md"
 [dependencies]
 agent-plugin-installer.workspace = true
 axum.workspace = true
+base16ct.workspace = true
 base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 flate2.workspace = true
 form_urlencoded.workspace = true
 fs2.workspace = true
-inferlab-protocol = { path = "../inferlab-protocol", version = "0.17" }
-inferlab-profiler = { path = "../inferlab-profiler", version = "0.17" }
-inferlab-proxy = { path = "../inferlab-proxy", version = "0.17" }
-inferlab-runtime = { path = "../inferlab-runtime", version = "0.17" }
-inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.17" }
+inferlab-protocol = { path = "../inferlab-protocol", version = "0.18" }
+inferlab-profiler = { path = "../inferlab-profiler", version = "0.18" }
+inferlab-proxy = { path = "../inferlab-proxy", version = "0.18" }
+inferlab-runtime = { path = "../inferlab-runtime", version = "0.18" }
+inferlab-serve-domain = { path = "../inferlab-serve-domain", version = "0.18" }
 humantime.workspace = true
 maud.workspace = true
 memchr.workspace = true

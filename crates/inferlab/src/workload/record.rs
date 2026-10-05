@@ -86,6 +86,44 @@ pub(crate) struct PrefixCacheResetEvidence {
     pub http_status: Option<u16>,
     pub error: Option<String>,
     pub elapsed_ms: u64,
+    /// The model-serving process of a per-target reset attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    /// The declared success predicate and the value observed at its pointer
+    /// ([[RFC-0005:C-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<crate::workload::domain::WorkloadSuccessMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_value: Option<serde_json::Value>,
+}
+
+/// A public reset keeps its original record shape; a per-target reset
+/// records every replica attempt and the aggregate outcome
+/// ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum PrefixCacheResetOutcome {
+    PerTarget(PerTargetPrefixCacheResetEvidence),
+    Public(PrefixCacheResetEvidence),
+}
+
+impl PrefixCacheResetOutcome {
+    pub(crate) const fn succeeded(&self) -> bool {
+        match self {
+            Self::PerTarget(evidence) => evidence.succeeded,
+            Self::Public(evidence) => evidence.succeeded,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PerTargetPrefixCacheResetEvidence {
+    pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub elapsed_ms: u64,
+    pub attempts: Vec<PrefixCacheResetEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -148,7 +186,7 @@ pub(crate) struct BenchCachePreparationTransition {
 pub(crate) struct BenchCachePreparationEvidence {
     pub start: BenchCacheStart,
     pub transitions: Vec<BenchCachePreparationTransition>,
-    pub reset: PrefixCacheResetEvidence,
+    pub reset: PrefixCacheResetOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditioning: Option<PrefixCacheConditioningEvidence>,
 }

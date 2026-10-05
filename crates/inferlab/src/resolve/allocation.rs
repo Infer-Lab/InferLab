@@ -6,10 +6,14 @@ use crate::execution::{
 use crate::record::{CACHE_DIR, RUNTIME_DIR};
 use crate::workspace::{LaunchBinding, LoadedWorkspace, PlacementBinding};
 use inferlab_protocol::{
-    AllocationLaunch, AuxiliaryModelLocator, CaptureMechanism, EndpointAssignment, ReadinessProbe,
+    AllocationLaunch, AuxiliaryModelLocator, CaptureMechanism, DiscoveryBinding,
+    DiscoveryProcessRole, EndpointAssignment, ReadinessProbe, RegistryMembershipReadiness,
     ServeProcessAllocation, ServeRoleKind, TargetEndpointScheme,
 };
-use inferlab_runtime::plan::{LaunchPlan, ReadinessPlan, TargetRegistryExpectedTarget};
+use inferlab_runtime::plan::{
+    JsonValueMatchPlan, LaunchPlan, ModelListPlan, ReadinessPlan, RegistryMemberTarget,
+    TargetRegistryExpectedTarget,
+};
 use inferlab_serve_domain::{
     FixedDeviceAssignment, ProcessRequirement, ProcessRequirementIdentity,
     ResolvedProcessAllocation,
@@ -94,7 +98,18 @@ pub(super) fn allocate_processes(
 ) -> Result<Vec<ResolvedProcessAllocation>, InferlabError> {
     let mut process_ids = BTreeSet::new();
     let mut usage = BTreeMap::<String, MachineAllocationUsage>::new();
-    let mut allocations = Vec::with_capacity(requirements.len());
+    let mut allocations: Vec<ResolvedProcessAllocation> = Vec::with_capacity(requirements.len());
+    // Every model rank and the Gateway register with the discovery process
+    // when the topology has one ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+    let discovery_process = requirements
+        .iter()
+        .find(|requirement| {
+            matches!(
+                requirement.identity(),
+                ProcessRequirementIdentity::Discovery { .. }
+            )
+        })
+        .map(|requirement| requirement.id().to_owned());
 
     for requirement in requirements {
         if requirement.id().is_empty() || !process_ids.insert(requirement.id().to_owned()) {
@@ -125,7 +140,23 @@ pub(super) fn allocate_processes(
             });
         }
 
-        let mut candidates = if let Some(fixed) = requirement.fixed_devices() {
+        let mut candidates = if matches!(
+            requirement.identity(),
+            ProcessRequirementIdentity::Discovery { .. }
+        ) {
+            // The discovery process shares the already-placed Gateway's
+            // machine ([[RFC-0003:C-SERVE-TOPOLOGY]]).
+            let gateway_machine = allocations
+                .iter()
+                .find(|allocation| {
+                    matches!(allocation.wire(), ServeProcessAllocation::Frontend { .. })
+                })
+                .map(|allocation| allocation.machine().to_owned())
+                .ok_or_else(|| InferlabError::AdapterSemantics {
+                    message: "a discovery process requires a placed Gateway process".to_owned(),
+                })?;
+            vec![gateway_machine]
+        } else if let Some(fixed) = requirement.fixed_devices() {
             vec![fixed.machine().to_owned()]
         } else if let Some(role_machines) = placement
             .roles
@@ -467,6 +498,7 @@ pub(super) fn allocate_processes(
                         effective_parallelism: effective_parallelism.clone(),
                         links: links.clone(),
                         dependencies: requirement.launch_dependencies().to_vec(),
+                        discovery: discovery_process.clone(),
                         render_inputs: render_inputs.clone(),
                     },
                     Some(source),
@@ -501,6 +533,45 @@ pub(super) fn allocate_processes(
                         pd_router: pd_router.clone(),
                         links: links.clone(),
                         dependencies: requirement.launch_dependencies().to_vec(),
+                        discovery: discovery_process.clone(),
+                        render_inputs: render_inputs.clone(),
+                    },
+                    None,
+                    Vec::new(),
+                )
+            }
+            ProcessRequirementIdentity::Discovery {
+                requirement: discovery,
+                render_inputs,
+            } => {
+                if requirement.device_count() != 0 || !devices.is_empty() {
+                    return Err(InferlabError::InvalidConfig {
+                        message: "discovery process must not allocate model devices".to_owned(),
+                    });
+                }
+                // Emptied immediately before launch, so every server starts
+                // its discovery service from no prior registrations.
+                let data_directory = runtime_cache
+                    .path
+                    .join("state")
+                    .to_str()
+                    .ok_or_else(|| InferlabError::InvalidConfig {
+                        message: "discovery data directory is not valid UTF-8".to_owned(),
+                    })?
+                    .to_owned();
+                (
+                    ServeProcessAllocation::Discovery {
+                        process: requirement.id().to_owned(),
+                        process_role: DiscoveryProcessRole::Discovery,
+                        components: DiscoveryBinding::discovery(),
+                        machine: machine_id.clone(),
+                        devices,
+                        endpoint,
+                        ports: named_ports,
+                        cache,
+                        data_directory,
+                        launch,
+                        discovery: discovery.clone(),
                         render_inputs: render_inputs.clone(),
                     },
                     None,
@@ -616,7 +687,7 @@ fn runtime_cache_plan(
         hasher.update((value.len() as u64).to_le_bytes());
         hasher.update(value.as_bytes());
     }
-    let environment_key = format!("{:x}", hasher.finalize());
+    let environment_key = base16ct::lower::encode_string(&hasher.finalize());
     let path = storage_root
         .join("v1")
         .join(environment_key)
@@ -656,8 +727,12 @@ pub(super) fn pixi_command(environment: &str, process: Vec<String>) -> Vec<Strin
 pub(super) fn readiness_plan(
     probe: &ReadinessProbe,
     allocations: &[ResolvedProcessAllocation],
+    served_model: &str,
 ) -> Result<ReadinessPlan, InferlabError> {
     match probe {
+        ReadinessProbe::RegistryMembership(registry) => {
+            registry_membership_plan(registry, allocations, served_model)
+        }
         ReadinessProbe::Http { path } => Ok(ReadinessPlan::Http { path: path.clone() }),
         ReadinessProbe::HttpTargetRegistry(registry) => {
             let expected_targets = allocations
@@ -729,10 +804,76 @@ pub(super) fn readiness_plan(
     }
 }
 
+/// Derives every rank-zero model-serving process a registry must list, with
+/// its role value and the allocated `host:port` of the named port
+/// ([[RFC-0006:C-INTEGRATIONS]]).
+fn registry_membership_plan(
+    registry: &RegistryMembershipReadiness,
+    allocations: &[ResolvedProcessAllocation],
+    served_model: &str,
+) -> Result<ReadinessPlan, InferlabError> {
+    let mut expected_targets = Vec::new();
+    for allocation in allocations {
+        let ServeProcessAllocation::ModelRank {
+            role_kind, rank: 0, ..
+        } = allocation.wire()
+        else {
+            continue;
+        };
+        let role = match role_kind {
+            ServeRoleKind::Serve => registry.role_values.serve.as_deref(),
+            ServeRoleKind::Prefill => registry.role_values.prefill.as_deref(),
+            ServeRoleKind::Decode => registry.role_values.decode.as_deref(),
+        }
+        .ok_or_else(|| InferlabError::AdapterSemantics {
+            message: format!(
+                "registry-membership readiness declares no role value for {role_kind:?} process {:?}",
+                allocation.process()
+            ),
+        })?;
+        let port = allocation
+            .ports()
+            .get(&registry.target_port)
+            .ok_or_else(|| InferlabError::AdapterSemantics {
+                message: format!(
+                    "process {:?} has no registry target port {:?}",
+                    allocation.process(),
+                    registry.target_port
+                ),
+            })?;
+        expected_targets.push(RegistryMemberTarget {
+            process: allocation.process().to_owned(),
+            role: role.to_owned(),
+            address: format!("{}:{}", port.host, port.port),
+        });
+    }
+    Ok(ReadinessPlan::RegistryMembership {
+        registry_path: registry.registry_path.clone(),
+        entries_pointer: registry.entries_pointer.clone(),
+        entry_filter: registry
+            .entry_filter
+            .as_ref()
+            .map(|filter| JsonValueMatchPlan {
+                pointer: filter.pointer.clone(),
+                value: filter.value.clone(),
+            }),
+        role_pointer: registry.role_pointer.clone(),
+        address_pointer: registry.address_pointer.clone(),
+        model_list: registry.model_list.as_ref().map(|list| ModelListPlan {
+            path: list.path.clone(),
+            models_pointer: list.models_pointer.clone(),
+            name_pointer: list.name_pointer.clone(),
+            served_model: served_model.to_owned(),
+        }),
+        expected_targets,
+    })
+}
+
 fn target_endpoint_url(endpoint: &EndpointAssignment, scheme: TargetEndpointScheme) -> String {
     let scheme = match scheme {
         TargetEndpointScheme::Http => "http",
         TargetEndpointScheme::Grpc => "grpc",
+        TargetEndpointScheme::Tcp => "tcp",
     };
     format!("{scheme}://{}:{}", endpoint.host, endpoint.port)
 }
@@ -786,6 +927,7 @@ mod tests {
                         links: Vec::new(),
                         dependencies: Vec::new(),
                         render_inputs: Vec::new(),
+                        discovery: None,
                     },
                     RuntimeCachePlan {
                         storage_root: PathBuf::from("/cache"),
@@ -822,7 +964,7 @@ mod tests {
             prefill_bootstrap_port: "bootstrap".to_owned(),
         }));
 
-        let readiness = readiness_plan(&probe, &allocations)?;
+        let readiness = readiness_plan(&probe, &allocations, "served-model")?;
         assert!(matches!(
             &readiness,
             ReadinessPlan::HttpTargetRegistry { .. }

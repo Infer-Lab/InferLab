@@ -19,6 +19,7 @@ from inferlab_bench_runner.data_asset import prepare_agentic_data_asset
 from inferlab_bench_runner.execution import execute
 from inferlab_bench_runner.result_agentic import agentic_result_evidence
 from inferlab_measurement_sdk import (
+    PROTOCOL_VERSION,
     BenchAgenticAcquisitionOutcome,
     BenchAgenticSourceVerification,
     BenchClientRequest,
@@ -37,7 +38,7 @@ from .support import resolved_prompt_input
 def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchClientRequest:
     return BenchClientRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "endpoint": {
                 "protocol": "http",
                 "host": "127.0.0.1",
@@ -152,7 +153,7 @@ def test_agentic_source_preparation_closes_the_release_qualified_file(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "phase": {
                 "kind": "acquire",
                 "resolved_revision": source.catalog.revision,
@@ -186,7 +187,7 @@ def test_agentic_source_resolution_uses_the_release_revision_not_mutable_main(
     )
     request = MeasurementDataAssetPreparationRequest.model_validate(
         {
-            "protocol_version": "11",
+            "protocol_version": PROTOCOL_VERSION,
             "phase": {"kind": "resolve"},
             "source": {"kind": "agentic", "source": source.model_dump()},
             "artifact_dir": str(tmp_path / "assets"),

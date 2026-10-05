@@ -14,3 +14,137 @@ body { min-width: 320px; overflow-x: clip; }
 @media (min-width: 72rem) {
   :root { --sl-content-width: 58rem; }
 }
+
+/* Documentation presentation matching the product page. Every color reads a
+   Starlight theme token or the brand accent, so light and dark themes each
+   stay one coherent palette (RFC-0011:C-PUBLIC-SITE). */
+
+/* A thin brand signal above the header. */
+.page > .header::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, var(--sl-color-accent), color-mix(in srgb, #b7f36b 70%, var(--sl-color-accent)), transparent 70%);
+}
+.page > .header {
+  backdrop-filter: blur(12px) saturate(140%);
+  background-color: color-mix(in srgb, var(--sl-color-bg-nav) 88%, transparent);
+}
+
+/* Sidebar: quiet group labels, a clear current page. */
+.sidebar-content .top-level > li > details > summary .group-label .large {
+  color: var(--sl-color-gray-3);
+  font: 650 0.72rem/1.4 var(--sl-font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.sidebar-content a {
+  border-radius: 0.5rem;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-content a:hover {
+  background: color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
+}
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover {
+  color: var(--sl-color-text-accent);
+  background: color-mix(in srgb, var(--sl-color-accent) 14%, transparent);
+  box-shadow: inset 2px 0 var(--sl-color-accent);
+}
+
+/* Content: headings carry a brand tick; links underline on intent. */
+.sl-markdown-content h2 {
+  padding-top: 0.6rem;
+  letter-spacing: -0.02em;
+}
+.sl-markdown-content h2::before {
+  content: '';
+  display: block;
+  width: 2.2rem;
+  height: 3px;
+  margin-bottom: 0.9rem;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--sl-color-accent), transparent);
+}
+.sl-markdown-content a:not(.sl-anchor-link) {
+  text-decoration-color: color-mix(in srgb, var(--sl-color-accent) 45%, transparent);
+  text-decoration-thickness: 1px;
+  transition: text-decoration-color 0.15s;
+}
+.sl-markdown-content a:not(.sl-anchor-link):hover {
+  text-decoration-color: var(--sl-color-accent);
+}
+.sl-markdown-content :not(pre) > code {
+  padding: 0.12em 0.4em;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.35rem;
+  background: var(--sl-color-gray-6);
+}
+
+/* Tables: framed, scrollable, and wide matrices keep their first column. */
+.sl-markdown-content table {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.8rem;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.sl-markdown-content th {
+  background: var(--sl-color-gray-6);
+  font: 650 0.75rem/1.4 var(--sl-font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.sl-markdown-content th,
+.sl-markdown-content td {
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--sl-color-gray-5);
+  vertical-align: top;
+}
+.sl-markdown-content tr:last-child td {
+  border-bottom: 0;
+}
+.sl-markdown-content tbody tr:hover td {
+  background: color-mix(in srgb, var(--sl-color-accent) 5%, var(--sl-color-bg));
+}
+.sl-markdown-content table:has(th:nth-child(6)) td {
+  min-width: 13rem;
+}
+.sl-markdown-content table:has(th:nth-child(6)) :is(th, td):first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 10rem;
+  background: var(--sl-color-bg);
+  box-shadow: 1px 0 var(--sl-color-gray-5);
+}
+.sl-markdown-content table:has(th:nth-child(6)) th:first-child {
+  background: var(--sl-color-gray-6);
+}
+
+/* Asides and pagination as cards. */
+.starlight-aside {
+  border-radius: 0.8rem;
+}
+.pagination-links a {
+  border-radius: 0.9rem;
+  border-color: var(--sl-color-gray-5);
+  box-shadow: none;
+  transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+}
+.pagination-links a:hover {
+  border-color: var(--sl-color-accent);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px -18px var(--sl-color-accent);
+}
+.pagination-links .link-title {
+  color: var(--sl-color-white);
+  font-weight: 650;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pagination-links a,
+  .pagination-links a:hover {
+    transition: none;
+    transform: none;
+  }
+}

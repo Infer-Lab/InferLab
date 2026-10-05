@@ -1,0 +1,115 @@
+---
+// Starlight's header with the product page's primary navigation between
+// search and the theme controls. Search, social links, and the theme
+// selector stay Starlight's own components.
+import Search from '@astrojs/starlight/components/Search.astro';
+import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
+import ThemeSelect from '@astrojs/starlight/components/ThemeSelect.astro';
+import SiteTitle from '../StarlightSiteTitle.astro';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const path = Astro.url.pathname;
+const links = [
+  { label: 'Docs', href: `${base}/docs/`, match: (p: string) => p.startsWith(`${base}/docs/`) && !p.includes('/reference/') && !p.includes('/architecture/') },
+  { label: 'Backends', href: `${base}/docs/reference/backend-support/`, match: (p: string) => p.includes('/reference/') },
+  { label: 'Specification', href: `${base}/docs/architecture/`, match: (p: string) => p.includes('/architecture/') },
+];
+---
+
+<div class="header">
+  <div class="title-wrapper sl-flex">
+    <SiteTitle />
+  </div>
+  <div class="sl-flex print:hidden search-wrapper">
+    <Search />
+  </div>
+  <div class="sl-hidden md:sl-flex print:hidden right-group">
+    <nav class="docs-nav" aria-label="Primary navigation">
+      {links.map((link) => (
+        <a href={link.href} aria-current={link.match(path) ? 'page' : undefined}>{link.label}</a>
+      ))}
+    </nav>
+    <div class="sl-flex social-icons">
+      <SocialIcons />
+    </div>
+    <ThemeSelect />
+  </div>
+</div>
+
+<style>
+  .header {
+    display: flex;
+    gap: var(--sl-nav-gap);
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+  }
+  .title-wrapper {
+    overflow: clip;
+    padding: 0.25rem;
+    margin: -0.25rem;
+    min-width: 0;
+  }
+  .right-group,
+  .social-icons {
+    gap: 1rem;
+    align-items: center;
+  }
+  .social-icons::after {
+    content: '';
+    height: 1.6rem;
+    border-inline-end: 1px solid var(--sl-color-gray-5);
+  }
+  .docs-nav {
+    display: flex;
+    gap: 0.15rem;
+    padding: 0.2rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 999px;
+  }
+  .docs-nav a {
+    padding: 0.3rem 0.8rem;
+    border-radius: 999px;
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+    font-weight: 600;
+    text-decoration: none;
+    transition: color 0.2s, background 0.2s;
+  }
+  .docs-nav a:hover {
+    color: var(--sl-color-white);
+  }
+  .docs-nav a[aria-current='page'] {
+    color: var(--sl-color-black);
+    background: var(--sl-color-accent);
+  }
+  @media (min-width: 50rem) {
+    :global(:root[data-has-sidebar]) {
+      --__sidebar-pad: calc(2 * var(--sl-nav-pad-x));
+    }
+    :global(:root:not([data-has-toc])) {
+      --__toc-width: 0rem;
+    }
+    .header {
+      --__sidebar-width: max(0rem, var(--sl-content-inline-start, 0rem) - var(--sl-nav-pad-x));
+      --__main-column-fr: calc(
+        (
+            100% + var(--__sidebar-pad, 0rem) - var(--__toc-width, var(--sl-sidebar-width)) -
+              (2 * var(--__toc-width, var(--sl-nav-pad-x))) - var(--sl-content-inline-start, 0rem) -
+              var(--sl-content-width)
+          ) / 2
+      );
+      display: grid;
+      grid-template-columns:
+        minmax(calc(var(--__sidebar-width) + max(0rem, var(--__main-column-fr) - var(--sl-nav-gap))), auto)
+        1fr
+        auto;
+      align-content: center;
+    }
+  }
+  @media (max-width: 72rem) {
+    .docs-nav {
+      display: none;
+    }
+  }
+</style>

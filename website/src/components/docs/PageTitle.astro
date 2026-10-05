@@ -1,0 +1,50 @@
+---
+// The page's single level-one heading, preceded by the documentation area
+// it belongs to. The heading text and its id stay Starlight's.
+// Starlight's PAGE_TITLE_ID; its table of contents links the title by it.
+const PAGE_TITLE_ID = '_top';
+
+const id: string = Astro.locals.starlightRoute.entry.id;
+const segments = id.split('/');
+const areas: Record<string, string> = {
+  'getting-started': 'Getting started',
+  concepts: 'Concepts',
+  guides: 'Guides',
+  reference: 'Reference',
+  architecture: 'Architecture & specification',
+};
+let area = areas[segments[1] ?? ''] ?? 'Documentation';
+if (segments[2] === 'rfc' && segments[3]) area = 'Specification · RFC';
+if (segments[2] === 'adr' && segments[3]) area = 'Decision record · ADR';
+if (segments[2] === 'workspace-authoring') area = 'Guides · Workspace authoring';
+---
+
+<p class="page-area"><span aria-hidden="true"></span>{area}</p>
+<h1 id={PAGE_TITLE_ID}>{Astro.locals.starlightRoute.entry.data.title}</h1>
+
+<style>
+  .page-area {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin: 1rem 0 0;
+    color: var(--sl-color-accent);
+    font: 600 0.72rem/1.4 var(--sl-font-mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .page-area span {
+    width: 1.4rem;
+    height: 2px;
+    border-radius: 1px;
+    background: linear-gradient(90deg, var(--sl-color-accent), transparent);
+  }
+  h1 {
+    margin-top: 0.4rem;
+    font-size: var(--sl-text-h1);
+    line-height: 1.12;
+    font-weight: 750;
+    letter-spacing: -0.03em;
+    color: var(--sl-color-white);
+  }
+</style>

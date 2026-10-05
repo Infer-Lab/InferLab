@@ -1,0 +1,179 @@
+---
+const steps = [
+  {
+    id: 'declare',
+    title: 'Declare',
+    summary: 'Commit stacks, servers, cases, recipes, and measurement definitions.',
+    file: '.inferlab/workspace.d/demo.toml',
+    code: [
+      ['table', '[servers.demo]'],
+      ['pair', 'stack', '"vllm"'],
+      ['pair', 'model', '"example"'],
+      ['pair', 'topology', '"single"'],
+      ['blank'],
+      ['table', '[servers.demo.cases.tp2.parallelism.outer]'],
+      ['pair', 'tensor_parallel_size', '2'],
+      ['blank'],
+      ['table', '[recipes.qualify]'],
+      ['pair', 'server', '"demo"'],
+      ['pair', 'workload_suite', '"smoke-and-bench"'],
+    ],
+  },
+  {
+    id: 'bind',
+    title: 'Bind',
+    summary: 'Keep machines, devices, ports, and model locations in ignored local bindings.',
+    file: '.inferlab/local.toml',
+    code: [
+      ['table', '[model_weights.example]'],
+      ['pair', 'locator', '"/models/example"'],
+      ['blank'],
+      ['table', '[machines.local]'],
+      ['pair', 'host', '"127.0.0.1"'],
+      ['pair', 'devices', '[0, 1]'],
+      ['pair', 'ports', '[8000, 8001]'],
+    ],
+  },
+  {
+    id: 'resolve',
+    title: 'Resolve',
+    summary: 'Inspect the exact commands, topology, environment, and effective values before launch.',
+    file: 'inferlab recipe run qualify --case tp2 --dry-run',
+    code: [
+      ['out', '"server": {'],
+      ['out', '  "roles": [ { "kind": "serve", "replicas": [ … ] } ],'],
+      ['out', '  "command": { "argv": [ … ], "env": { … } },'],
+      ['out', '  "readiness": { "kind": "http", "path": "/v1/models" }'],
+      ['out', '},'],
+      ['out', '"measurements": { "evals": [ … ], "benches": [ … ] }'],
+    ],
+  },
+  {
+    id: 'run',
+    title: 'Run & inspect',
+    summary: 'Keep lifecycle, metrics, logs, artifacts, and cleanup outcomes in one record tree.',
+    file: 'inferlab recipe run qualify --case tp2',
+    code: [
+      ['out', 'resolve   effective commands frozen'],
+      ['out', 'launch    readiness verified'],
+      ['out', 'measure   eval smoke → bench'],
+      ['ok', 'record    .inferlab/records/<id>-recipe-qualify-tp2-…/'],
+      ['ok', 'cleanup   verified'],
+    ],
+  },
+];
+
+type Segment = { cls?: string; text: string };
+const rendered = steps.map((step) =>
+  step.code.map((line): Segment[] => {
+    switch (line[0]) {
+      case 'table':
+        return [{ cls: 'tok-table', text: line[1] }];
+      case 'pair':
+        return [{ cls: 'tok-key', text: line[1] }, { text: ' = ' }, { cls: 'tok-str', text: line[2] }];
+      case 'ok':
+        return [{ cls: 'tok-ok', text: line[1] }];
+      case 'out':
+        return [{ text: line[1] }];
+      default:
+        return [];
+    }
+  }),
+);
+---
+
+<div class="loop" data-loop>
+  <div class="loop-steps" role="tablist" aria-label="Operator loop" aria-orientation="vertical">
+    {steps.map((step, index) => (
+      <button
+        type="button"
+        role="tab"
+        id={`loop-tab-${step.id}`}
+        aria-controls={`loop-panel-${step.id}`}
+        aria-selected={index === 0 ? 'true' : 'false'}
+        tabindex={index === 0 ? 0 : -1}
+        class="loop-step"
+        data-loop-tab
+      >
+        <span class="loop-step__index">{String(index + 1).padStart(2, '0')}</span>
+        <span class="loop-step__body">
+          <span class="loop-step__title">{step.title}</span>
+          <span class="loop-step__summary">{step.summary}</span>
+        </span>
+        <span class="loop-step__progress" aria-hidden="true"></span>
+      </button>
+    ))}
+  </div>
+  <div class="loop-panels">
+    {steps.map((step, index) => (
+      <div
+        role="tabpanel"
+        id={`loop-panel-${step.id}`}
+        aria-labelledby={`loop-tab-${step.id}`}
+        class="loop-panel"
+        hidden={index !== 0}
+        tabindex="0"
+      >
+        <div class="loop-panel__file">{step.file}</div>
+        <pre><code>{rendered[index].map((segments) => (
+          <span class="loop-line">{segments.map((segment) => <span class={segment.cls}>{segment.text}</span>)}</span>
+        ))}</code></pre>
+      </div>
+    ))}
+  </div>
+</div>
+
+<script>
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  for (const root of document.querySelectorAll<HTMLElement>('[data-loop]')) {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[data-loop-tab]')];
+    let timer = 0;
+    let interacted = false;
+    const select = (tab: HTMLButtonElement) => {
+      for (const candidate of tabs) {
+        const selected = candidate === tab;
+        candidate.setAttribute('aria-selected', String(selected));
+        candidate.tabIndex = selected ? 0 : -1;
+        const panel = root.querySelector<HTMLElement>(`#${candidate.getAttribute('aria-controls')}`);
+        if (panel) panel.hidden = !selected;
+      }
+    };
+    const advance = () => {
+      if (interacted || reduceMotion.matches) return;
+      const current = tabs.findIndex((tab) => tab.getAttribute('aria-selected') === 'true');
+      select(tabs[(current + 1) % tabs.length]);
+      timer = window.setTimeout(advance, 4200);
+    };
+    const stop = () => {
+      interacted = true;
+      root.classList.add('is-manual');
+      clearTimeout(timer);
+    };
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => {
+        stop();
+        select(tab);
+      });
+      tab.addEventListener('keydown', (event) => {
+        const delta = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+        if (delta === undefined) return;
+        event.preventDefault();
+        stop();
+        const next = tabs[(tabs.indexOf(tab) + delta + tabs.length) % tabs.length];
+        next.focus();
+        select(next);
+      });
+    }
+    root.addEventListener('focusin', stop);
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting) && !interacted && !reduceMotion.matches) {
+        root.classList.add('is-playing');
+        clearTimeout(timer);
+        timer = window.setTimeout(advance, 4200);
+      } else {
+        clearTimeout(timer);
+      }
+    }, { threshold: 0.4 });
+    observer.observe(root);
+  }
+</script>

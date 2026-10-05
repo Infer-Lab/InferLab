@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-integration-sglang"
-version = "0.11.0"
+version = "0.11.1"
 description = "Inferlab adapter integration for SGLang"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -1,0 +1,119 @@
+---
+// An illustrative record tree: names follow the record layout operators find
+// under .inferlab/records/; the detail text summarizes, it does not define,
+// what each record holds (RFC-0005 owns record semantics).
+const items = [
+  {
+    id: 'recipe',
+    depth: 0,
+    name: '<id>-recipe-qualify-tp2/',
+    kind: 'workflow',
+    detail: 'The closed loop: the resolved recipe, workspace identity, and the outcome of every measurement it ran.',
+    fields: ['status', 'resolved', 'workspace', 'measurements'],
+  },
+  {
+    id: 'serve',
+    depth: 0,
+    name: '<id>-serve-demo-tp2/',
+    kind: 'server',
+    detail: 'The server record: effective commands and environment per process, readiness evidence, and verified cleanup.',
+    fields: ['resolved.server', 'process_evidence', 'cleanup', 'device_residuals'],
+  },
+  {
+    id: 'serve-log',
+    depth: 1,
+    name: 'server.stderr.log',
+    kind: 'log',
+    detail: 'Each process keeps its own stdout and stderr beside the record that launched it.',
+    fields: [],
+  },
+  {
+    id: 'eval',
+    depth: 0,
+    name: '<id>-…-eval-000-smoke/',
+    kind: 'eval',
+    detail: 'An Eval record: the request it sent, the response it judged, and the gate decision.',
+    fields: ['status', 'resolved', 'result'],
+  },
+  {
+    id: 'bench',
+    depth: 0,
+    name: '<id>-…-bench-000-throughput/',
+    kind: 'bench',
+    detail: 'A Bench record: the frozen request population, every case, and normalized metrics beside the raw runner output.',
+    fields: ['cases[].metrics', 'cases[].completed_requests', 'capture'],
+  },
+  {
+    id: 'bench-case',
+    depth: 1,
+    name: 'cases/concurrency-000/',
+    kind: 'artifacts',
+    detail: 'Per-case runner artifacts and logs, so a metric can be traced to the requests that produced it.',
+    fields: [],
+  },
+];
+---
+
+<div class="evidence" data-evidence>
+  <ul class="evidence-tree" role="listbox" aria-label="Record tree" aria-orientation="vertical">
+    {items.map((item, index) => (
+      <li
+        role="option"
+        id={`evidence-${item.id}`}
+        aria-selected={index === 0 ? 'true' : 'false'}
+        tabindex={index === 0 ? 0 : -1}
+        class="evidence-item"
+        style={`--depth: ${item.depth}`}
+        data-evidence-item={item.id}
+      >
+        <span class="evidence-item__kind">{item.kind}</span>
+        <span class="evidence-item__name">{item.name}</span>
+      </li>
+    ))}
+  </ul>
+  <div class="evidence-detail" aria-live="polite">
+    {items.map((item, index) => (
+      <article data-evidence-detail={item.id} hidden={index !== 0}>
+        <p class="evidence-detail__name">{item.name}</p>
+        <p>{item.detail}</p>
+        {item.fields.length > 0 && (
+          <ul class="evidence-detail__fields">
+            {item.fields.map((field) => <li><code>{field}</code></li>)}
+          </ul>
+        )}
+      </article>
+    ))}
+  </div>
+</div>
+
+<script>
+  for (const root of document.querySelectorAll<HTMLElement>('[data-evidence]')) {
+    const items = [...root.querySelectorAll<HTMLElement>('[data-evidence-item]')];
+    const select = (item: HTMLElement, focus = false) => {
+      for (const candidate of items) {
+        const selected = candidate === item;
+        candidate.setAttribute('aria-selected', String(selected));
+        candidate.tabIndex = selected ? 0 : -1;
+      }
+      for (const detail of root.querySelectorAll<HTMLElement>('[data-evidence-detail]')) {
+        detail.hidden = detail.dataset.evidenceDetail !== item.dataset.evidenceItem;
+      }
+      if (focus) item.focus();
+    };
+    for (const item of items) {
+      item.addEventListener('click', () => select(item));
+      item.addEventListener('keydown', (event) => {
+        const index = items.indexOf(item);
+        const next =
+          event.key === 'ArrowDown' ? items[Math.min(index + 1, items.length - 1)]
+          : event.key === 'ArrowUp' ? items[Math.max(index - 1, 0)]
+          : event.key === 'Home' ? items[0]
+          : event.key === 'End' ? items[items.length - 1]
+          : undefined;
+        if (!next) return;
+        event.preventDefault();
+        select(next, true);
+      });
+    }
+  }
+</script>

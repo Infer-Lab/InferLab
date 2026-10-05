@@ -1086,26 +1086,46 @@ def test_render_sglang_router_targets_every_replica_entrypoint() -> None:
     assert argv[argv.index("--worker-startup-timeout-secs") + 1] == "2147483647"
 
 
-def test_render_rejects_multi_node() -> None:
-    allocation_payload = _render_input().allocations[0].model_dump()
-    allocation_payload.update(
-        {
-            "process": "server-rank-000",
-            "rank_count": 2,
-            "machine": "node-a",
-            "devices": [0],
-        }
-    )
-    second_payload = {
-        **allocation_payload,
+def _multi_node_ranks() -> list[ServeProcessAllocation]:
+    """One TP2 replica placed as two single-device ranks on two machines."""
+    base = _render_input().allocations[0].model_dump()
+    rank_zero = {
+        **base,
+        "process": "server-rank-000",
+        "rank_count": 2,
+        "machine": "node-a",
+        "devices": [0],
+        "endpoint": {"host": "192.0.2.1", "port": 8000},
+        "ports": {"master": {"host": "192.0.2.1", "port": 29500}},
+    }
+    rank_one = {
+        **rank_zero,
         "process": "server-rank-001",
         "rank": 1,
         "machine": "node-b",
+        "endpoint": {"host": "192.0.2.2", "port": 8000},
+        "ports": {},
     }
-    allocation = ServeProcessAllocation.model_validate(allocation_payload)
-    second = ServeProcessAllocation.model_validate(second_payload)
-    with pytest.raises(AdapterOperationError):
-        render_serve(_render_input(allocations=[allocation, second]))
+    return [ServeProcessAllocation.model_validate(rank) for rank in (rank_zero, rank_one)]
+
+
+def test_render_spans_one_replica_across_machines() -> None:
+    result = render_serve(_render_input(allocations=_multi_node_ranks()))
+
+    for node_rank, process in enumerate(result.processes):
+        argv = process.root.command.argv
+        assert argv[argv.index("--nnodes") + 1] == "2"
+        assert argv[argv.index("--node-rank") + 1] == str(node_rank)
+        assert argv[argv.index("--dist-init-addr") + 1] == "192.0.2.1:29500"
+        # A nonzero rank binds its own health endpoint on its own machine.
+        assert argv[argv.index("--host") + 1] == f"192.0.2.{node_rank + 1}"
+
+
+def test_render_rejects_a_truncated_multi_node_rank_set() -> None:
+    _, rank_one = _multi_node_ranks()
+
+    with pytest.raises(AdapterOperationError, match="rank count"):
+        render_serve(_render_input(allocations=[rank_one]))
 
 
 _SPECULATIVE_EXTRA_ARGS = SettingValue.model_validate(

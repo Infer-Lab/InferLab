@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-10-05
+
+### Added
+
+- One SGLang model-serving replica can span machines through explicit rank
+  placement: every rank runs one SGLang node with its node count, node rank,
+  and the rank-zero distributed-init address, and an incomplete rank set fails
+  resolution. It ships in `inferlab-integration-sglang` `0.11.1`.
+- The website opens on an interactive control-plane simulator: choosing a
+  framework, serving topology, and frontend backend shows the process
+  topology, workspace declaration, and an illustrative lifecycle, offering
+  only what the backend support matrix reports with its status label. The
+  documentation pages share the new header, page titles, sidebar, tables, and
+  code presentation in both themes.
+
 ## [0.18.1] - 2026-10-05
 
 ### Fixed

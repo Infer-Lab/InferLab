@@ -61,6 +61,7 @@ def _verbatim_block_owns_prefill_cp(extra_args: list[str]) -> bool:
 def _render_process(
     input: RenderServeInput,
     allocation: ServeProcessAllocationModelRank,
+    replica_ranks: list[ServeProcessAllocationModelRank],
 ) -> RenderedServeProcess:
     settings = _settings(allocation.effective_settings)
     splice_draft_model(settings, allocation, input.auxiliary_models)
@@ -173,6 +174,7 @@ def _render_process(
                     f"prefill process {allocation.process!r} is missing its bootstrap port",
                 )
             inferlab_args.extend(["--disaggregation-bootstrap-port", str(bootstrap.port)])
+    inferlab_args.extend(_multi_node_args(allocation, replica_ranks))
     argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OWNED_OPTIONS))
     process_env = runtime_cache_env(allocation.cache, _RUNTIME_CACHE_EXTRA_SUBDIRS)
     process_env.update(settings.extra_env or {})
@@ -250,6 +252,38 @@ def _render_router(
     return rendered_frontend(allocation, ProcessSpec(argv=argv, env={}))
 
 
+def _multi_node_args(
+    allocation: ServeProcessAllocationModelRank,
+    replica_ranks: list[ServeProcessAllocationModelRank],
+) -> list[str]:
+    """A replica placed across machines runs one SGLang node per rank; every
+    node initializes torch.distributed at rank zero's `master` port."""
+    if len(replica_ranks) != allocation.rank_count:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"allocation {allocation.process!r} declares rank count "
+            f"{allocation.rank_count} but the render input carries "
+            f"{len(replica_ranks)} rank allocations for its replica",
+        )
+    if allocation.rank_count == 1:
+        return []
+    rank_zero = next((rank for rank in replica_ranks if rank.rank == 0), None)
+    master = None if rank_zero is None else rank_zero.ports.get("master")
+    if master is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"multi-node replica of {allocation.process!r} is missing its rank-zero master port",
+        )
+    return [
+        "--nnodes",
+        str(allocation.rank_count),
+        "--node-rank",
+        str(allocation.rank),
+        "--dist-init-addr",
+        f"{master.host}:{master.port}",
+    ]
+
+
 def render_serve(input: RenderServeInput) -> RenderServeResult:
     if not input.allocations:
         raise AdapterOperationError(
@@ -259,12 +293,12 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
     processes: list[RenderedServeProcess] = []
     for allocation in allocations:
         if isinstance(allocation, ServeProcessAllocationModelRank):
-            if allocation.rank_count > 1:
-                raise AdapterOperationError(
-                    AdapterErrorCode.invalid_request,
-                    "the SGLang integration does not support multi-node serving yet",
-                )
-            processes.append(_render_process(input, allocation))
+            replica_ranks = [
+                rank
+                for rank in model_allocations
+                if rank.role == allocation.role and rank.replica == allocation.replica
+            ]
+            processes.append(_render_process(input, allocation, replica_ranks))
         elif isinstance(allocation, ServeProcessAllocationFrontend):
             require_integration_fused_frontend(
                 allocation,

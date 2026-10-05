@@ -8,6 +8,8 @@ Product landing pages and category introductions are presentation-only summaries
 
 `scripts/sync-content.mjs` represents each source document's leading H1 as the Starlight page title, adds presentation frontmatter, and mechanically maps relative link destinations to website routes in generated, ignored files. It preserves the remaining authoritative prose, headings, code, tables, and link labels, while omitting the private RFC changelog tail from the public projection. The website consumes only the closed public content set the manifest declares.
 
+The product page's control-plane simulator offers only the framework, topology, and frontend-backend choices the backend support matrix reports, with the matrix's status label: `src/lib/backend-matrix.mjs` derives them from the matrix's "Serving And Control" table at build time and fails the build when a row it reads is missing or malformed. The simulator's topology, declaration, and lifecycle are illustrative presentation. Framework logos come from each project's repository; `src/assets/frameworks/SOURCES.md` records their provenance.
+
 Human-facing product text uses `InferLab`. Commands, package distribution names, local storage paths, and independently specified protocol or evidence literals retain their defined spelling. Repository and default project-site URLs use the repository's canonical `InferLab` spelling.
 
 ## Local workflow

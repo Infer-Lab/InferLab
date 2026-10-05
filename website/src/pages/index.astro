@@ -1,6 +1,13 @@
 ---
 import '../styles/product.css';
 import InferLabBrand from '../components/InferLabBrand.astro';
+import Simulator from '../components/product/Simulator.astro';
+import OperatorLoop from '../components/product/OperatorLoop.astro';
+import EvidenceExplorer from '../components/product/EvidenceExplorer.astro';
+import FrameworkMark from '../components/product/FrameworkMark.astro';
+import { frameworkLogos } from '../lib/framework-logos';
+import { readBackendMatrix } from '../lib/backend-matrix.mjs';
+import { availableTopologies } from '../lib/simulator.mjs';
 import {
   repositoryUrl,
   siteBaseWithSlash,
@@ -12,124 +19,226 @@ const docs = `${base}/docs/`;
 const install = `${base}/docs/getting-started/installation/`;
 const support = `${base}/docs/reference/backend-support/`;
 const specification = `${base}/docs/architecture/rfc/rfc-0001/`;
+
+const matrix = await readBackendMatrix();
+const frameworks = matrix.frameworks.map((framework) => {
+  const offered = availableTopologies(framework);
+  return {
+    label: framework.label,
+    logo: frameworkLogos[framework.id],
+    offered: offered.length,
+    qualified: offered.filter((topology) => framework.topologies[topology.id].status === 'Qualified').length,
+  };
+});
+
+const capabilities = [
+  {
+    tag: 'SERVE',
+    title: 'Managed lifecycles',
+    body: 'Launch direct, Gateway-backed, disaggregated, and multi-machine serving with layered readiness, logs, and verified cleanup.',
+    icon: 'M4 7h16M4 12h10M4 17h16',
+  },
+  {
+    tag: 'MEASURE',
+    title: 'Eval + bench',
+    body: 'Compose correctness and performance workloads while preserving normalized metrics beside raw runner artifacts.',
+    icon: 'M4 18l5-6 4 3 7-9',
+  },
+  {
+    tag: 'PROFILE',
+    title: 'Systems evidence',
+    body: 'Attach managed Nsight Systems or engine-native trace windows to selected workloads inside the same record.',
+    icon: 'M3 12h4l3-7 4 14 3-7h4',
+  },
+  {
+    tag: 'PACKAGE',
+    title: 'Runtime images',
+    body: 'Build and validate OCI image realizations from the same versioned workspace baseline.',
+    icon: 'M12 3l8 4v10l-8 4-8-4V7zM4 7l8 4 8-4M12 11v10',
+  },
+  {
+    tag: 'OBSERVE',
+    title: 'Terminal + web consoles',
+    body: 'Watch definitions, running work, records, logs, and metrics from a view-only TUI or a local browser console.',
+    icon: 'M4 5h16v11H4zM8 20h8M12 16v4',
+  },
+  {
+    tag: 'REPRODUCE',
+    title: 'Source identity',
+    body: 'Carry workspace revision and content identity alongside the effective execution evidence.',
+    icon: 'M12 3a9 9 0 1 0 9 9M12 7v5l3 3M17 3h4v4',
+  },
+];
 ---
 
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
       content="InferLab makes LLM inference experiments reproducible from declared workspace intent to durable file-first evidence."
     />
+    <meta name="theme-color" content="#04070c" />
     <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
     <link rel="canonical" href={`${siteOrigin}${siteBaseWithSlash}`} />
     <title>InferLab — Reproducible inference experiments</title>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
+    <div class="backdrop" aria-hidden="true">
+      <div class="backdrop__aurora"></div>
+      <div class="backdrop__grid"></div>
+    </div>
+
     <header class="site-header">
       <InferLabBrand href={`${base}/`} />
       <nav aria-label="Primary navigation">
         <a href={docs}>Docs</a>
         <a href={support}>Backends</a>
         <a href={specification}>Specification</a>
-        <a href={repositoryUrl}>GitHub</a>
+        <a class="nav-github" href={repositoryUrl}>GitHub <span aria-hidden="true">↗</span></a>
       </nav>
     </header>
 
     <main id="main">
       <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <div class="eyebrow"><span></span> Experiment control plane / file-first evidence</div>
-          <h1 id="hero-title">Make inference experiments <em>replayable.</em></h1>
+        <div class="hero-copy reveal">
+          <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Experiment control plane · file-first evidence</p>
+          <h1 id="hero-title">
+            Make inference<br />experiments <em>replayable.</em>
+          </h1>
           <p class="lede">
-            Declare the shared baseline once. Keep machine facts local. Run serving,
-            evaluation, benchmarks, images, and profiling through one evidence trail.
+            Declare the serving shape once. Keep machine facts local. InferLab resolves the
+            exact processes, launches them, measures, profiles, and keeps every fact in one
+            evidence trail.
           </p>
           <div class="actions">
             <a class="button primary" href={install}>Get started <span aria-hidden="true">→</span></a>
-            <a class="button secondary" href={docs}>Read the docs</a>
+            <a class="button ghost" href={docs}>Read the docs</a>
           </div>
-          <dl class="signal-row">
-            <div><dt>Authority</dt><dd>Versioned workspace</dd></div>
-            <div><dt>Execution</dt><dd>Resolved once</dd></div>
-            <div><dt>Evidence</dt><dd>Durable records</dd></div>
-          </dl>
+          <ul class="hero-points">
+            <li><b>Declared</b> workspace intent, versioned</li>
+            <li><b>Resolved</b> once, inspected before launch</li>
+            <li><b>Recorded</b> lifecycle, metrics, and cleanup</li>
+          </ul>
         </div>
-
-        <div class="console" aria-label="Example InferLab workflow">
-          <div class="console-bar">
-            <span class="status-dot"></span>
-            <span>workspace / experiment-042</span>
-            <span class="live">DECLARED</span>
-          </div>
-          <div class="topology" aria-hidden="true">
-            <div class="node source"><small>STACK</small><b>vllm</b></div>
-            <div class="trace"></div>
-            <div class="node"><small>SERVER</small><b>deepseek</b></div>
-            <div class="trace active"></div>
-            <div class="node output"><small>RECORD</small><b>2026-10-01T14-03-22.418Z-recipe-throughput-tp8-41827</b></div>
-          </div>
-          <pre><code><span class="prompt">$</span> inferlab recipe run throughput --case tp8
-<span class="muted">resolve</span>  workspace revision · source digest
-<span class="muted">launch </span>  8 ranks · readiness verified
-<span class="muted">measure</span>  eval → bench → profile
-<span class="success">complete</span> .inferlab/records/2026-10-01T14-03-22.418Z-recipe-throughput-tp8-41827/</code></pre>
-          <div class="telemetry" aria-hidden="true">
-            <span style="--h: 38%"></span><span style="--h: 62%"></span><span style="--h: 47%"></span>
-            <span style="--h: 83%"></span><span style="--h: 71%"></span><span style="--h: 92%"></span>
-            <span style="--h: 66%"></span><span style="--h: 78%"></span><span style="--h: 58%"></span>
-            <span style="--h: 86%"></span><span style="--h: 73%"></span><span style="--h: 95%"></span>
-          </div>
+        <div class="hero-sim reveal">
+          <Simulator supportHref={support} />
         </div>
       </section>
 
-      <section class="workflow" aria-labelledby="workflow-title">
-        <div class="section-heading">
-          <p>THE OPERATOR LOOP</p>
-          <h2 id="workflow-title">Intent in. Evidence out.</h2>
-        </div>
-        <ol>
-          <li><span>01</span><div><h3>Declare</h3><p>Commit stacks, servers, cases, recipes, and measurement definitions.</p></div></li>
-          <li><span>02</span><div><h3>Bind</h3><p>Supply machine-private placement, devices, ports, and model locations locally.</p></div></li>
-          <li><span>03</span><div><h3>Resolve</h3><p>Inspect the exact commands, topology, environment, and effective values before launch.</p></div></li>
-          <li><span>04</span><div><h3>Run & inspect</h3><p>Keep lifecycle, metrics, logs, artifacts, and cleanup outcomes in one record tree.</p></div></li>
-        </ol>
+      <section class="frameworks reveal" aria-labelledby="frameworks-title">
+        <h2 id="frameworks-title" class="frameworks__title">Serving frameworks</h2>
+        <ul>
+          {frameworks.map((framework) => (
+            <li>
+              <a href={support}>
+                <span class="frameworks__head">
+                  <FrameworkMark logo={framework.logo} label={framework.label} />
+                  <span class="frameworks__name" aria-hidden="true">{framework.label}</span>
+                </span>
+                <span class="frameworks__meter" aria-hidden="true">
+                  {Array.from({ length: 4 }, (_, index) => (
+                    <i class:list={[{ on: index < framework.offered, gold: index < framework.qualified }]}></i>
+                  ))}
+                </span>
+                <span class="frameworks__count">
+                  {framework.offered} {framework.offered === 1 ? 'topology' : 'topologies'} · {framework.qualified} qualified
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
       </section>
 
-      <section class="capabilities" aria-labelledby="capabilities-title">
-        <div class="section-heading">
-          <p>ONE EXPERIMENT SURFACE</p>
+      <section class="band" aria-labelledby="loop-title">
+        <div class="section-heading reveal">
+          <p class="kicker">The operator loop</p>
+          <h2 id="loop-title">Intent in. Evidence out.</h2>
+          <p>Four steps, one resolved execution object, no reconstructed configuration.</p>
+        </div>
+        <div class="reveal"><OperatorLoop /></div>
+      </section>
+
+      <section class="band" aria-labelledby="evidence-title">
+        <div class="section-heading reveal">
+          <p class="kicker">File-first evidence</p>
+          <h2 id="evidence-title">Every run explains itself.</h2>
+          <p>Records live in the workspace as plain files you can read, diff, and keep.</p>
+        </div>
+        <div class="reveal"><EvidenceExplorer /></div>
+      </section>
+
+      <section class="band" aria-labelledby="capabilities-title">
+        <div class="section-heading reveal">
+          <p class="kicker">One experiment surface</p>
           <h2 id="capabilities-title">From server process to comparable result.</h2>
         </div>
-        <div class="capability-grid">
-          <article><span>01 / SERVE</span><h3>Managed lifecycles</h3><p>Launch single-role or disaggregated serving topologies with readiness, logs, and verified cleanup.</p></article>
-          <article><span>02 / MEASURE</span><h3>Eval + bench</h3><p>Compose correctness and performance workloads while preserving normalized metrics and raw artifacts.</p></article>
-          <article><span>03 / PACKAGE</span><h3>Runtime images</h3><p>Build and validate OCI image realizations from the same versioned workspace baseline.</p></article>
-          <article><span>04 / PROFILE</span><h3>Systems evidence</h3><p>Attach managed Nsight Systems or engine-native trace windows to selected workloads without splitting the experiment record.</p></article>
-          <article><span>05 / OBSERVE</span><h3>View-only TUI</h3><p>Inspect declared definitions, current CLI work, records, logs, metrics, and journal context.</p></article>
-          <article><span>06 / REPRODUCE</span><h3>Source identity</h3><p>Carry workspace revision and content identity alongside the effective execution evidence.</p></article>
+        <div class="capability-grid" data-spotlight>
+          {capabilities.map((capability) => (
+            <article class="capability reveal">
+              <svg class="capability__icon" viewBox="0 0 24 24" aria-hidden="true"><path d={capability.icon} /></svg>
+              <span class="capability__tag">{capability.tag}</span>
+              <h3>{capability.title}</h3>
+              <p>{capability.body}</p>
+            </article>
+          ))}
         </div>
       </section>
 
-      <section class="cta" aria-labelledby="cta-title">
+      <section class="cta reveal" aria-labelledby="cta-title">
         <div>
-          <p>START WITH THE WORKSPACE</p>
+          <p class="kicker">Start with the workspace</p>
           <h2 id="cta-title">Your experiment should explain itself.</h2>
         </div>
         <div class="actions">
           <a class="button primary" href={install}>Install InferLab</a>
-          <a class="button secondary" href={`${repositoryUrl}/releases`}>Releases</a>
+          <a class="button ghost" href={`${repositoryUrl}/releases`}>Releases</a>
         </div>
       </section>
     </main>
 
-    <footer>
+    <footer class="site-footer">
       <InferLabBrand href={`${base}/`} compact />
-      <p>Reproducible LLM inference experiments.</p>
-      <div><a href={docs}>Documentation</a><a href={repositoryUrl}>Source</a><a href={`${repositoryUrl}/blob/main/LICENSE`}>MIT</a></div>
+      <p>
+        Reproducible LLM inference experiments.
+        <small>Framework names and logos are trademarks of their respective owners.</small>
+      </p>
+      <div>
+        <a href={docs}>Documentation</a>
+        <a href={support}>Backends</a>
+        <a href={repositoryUrl}>Source</a>
+        <a href={`${repositoryUrl}/blob/main/LICENSE`}>MIT</a>
+      </div>
     </footer>
+
+    <script>
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const revealed = document.querySelectorAll<HTMLElement>('.reveal');
+      if (reduceMotion || !('IntersectionObserver' in window)) {
+        revealed.forEach((element) => element.classList.add('is-visible'));
+      } else {
+        document.documentElement.classList.add('motion');
+        const observer = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            entry.target.classList.add('is-visible');
+            observer.unobserve(entry.target);
+          }
+        }, { rootMargin: '0px 0px -8% 0px' });
+        revealed.forEach((element) => observer.observe(element));
+      }
+      for (const grid of document.querySelectorAll<HTMLElement>('[data-spotlight]')) {
+        grid.addEventListener('pointermove', (event) => {
+          for (const card of grid.children as HTMLCollectionOf<HTMLElement>) {
+            const box = card.getBoundingClientRect();
+            card.style.setProperty('--spot-x', `${event.clientX - box.left}px`);
+            card.style.setProperty('--spot-y', `${event.clientY - box.top}px`);
+          }
+        });
+      }
+    </script>
   </body>
 </html>

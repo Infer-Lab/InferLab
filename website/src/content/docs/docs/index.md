@@ -1,6 +1,16 @@
 ---
 title: InferLab documentation
 description: Operator guidance, qualified backend support, and the current InferLab specification.
+hero:
+  tagline: Operator guidance, qualified backend support, and the current specification, each from the repository artifact that owns it.
+  actions:
+    - text: Install and start
+      link: ./getting-started/installation/
+      icon: right-arrow
+      variant: primary
+    - text: Backend support
+      link: ./reference/backend-support/
+      variant: minimal
 ---
 
 InferLab documentation is organized around the operator workflow and the repository artifacts that own each fact.

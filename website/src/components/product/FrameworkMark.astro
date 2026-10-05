@@ -1,0 +1,17 @@
+---
+interface Props {
+  logo?: string;
+  label: string;
+}
+
+const { logo, label } = Astro.props;
+---
+
+{logo ? (
+  <span class="mark mark--logo"><img src={logo} alt="" width="40" height="40" loading="lazy" decoding="async" /></span>
+) : (
+  <span class="mark mark--generic" aria-hidden="true">
+    <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" /></svg>
+  </span>
+)}
+<span class="visually-hidden">{label}</span>

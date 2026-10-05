@@ -1,0 +1,310 @@
+---
+import { readBackendMatrix } from '../../lib/backend-matrix.mjs';
+import { backendLogos } from '../../lib/framework-logos';
+import {
+  availableTopologies,
+  lifecycle,
+  renderDeclaration,
+  renderTopology,
+  resolveSelection,
+  topologies,
+} from '../../lib/simulator.mjs';
+
+interface Props {
+  supportHref: string;
+}
+
+const { supportHref } = Astro.props;
+const matrix = await readBackendMatrix();
+// Open on the richest shape the matrix offers: vLLM disaggregated behind
+// Dynamo when available, otherwise the first offered selection.
+const selection = resolveSelection(matrix, {
+  framework: 'vllm',
+  topology: 'prefill-decode',
+  backend: 'dynamo',
+});
+const framework = matrix.frameworks.find((candidate) => candidate.id === selection.framework)!;
+const offered = new Set(availableTopologies(framework).map((topology) => topology.id));
+const backends = selection.topology ? framework.topologies[selection.topology].backends : [];
+const steps = lifecycle(selection);
+---
+
+<section class="sim" aria-labelledby="sim-title" data-simulator data-support-href={supportHref}>
+  <script is:inline type="application/json" data-sim-matrix set:html={JSON.stringify(matrix)} />
+  <script is:inline type="application/json" data-sim-logos set:html={JSON.stringify(backendLogos)} />
+  <header class="sim-bar">
+    <span class="sim-bar__lights" aria-hidden="true"><i></i><i></i><i></i></span>
+    <h2 id="sim-title" class="sim-bar__title">control plane · simulator</h2>
+    <a class="sim-status" data-sim-status data-status={selection.status} href={supportHref}>
+      <span class="sim-status__dot" aria-hidden="true"></span>
+      <span data-sim-status-text>{selection.status}</span>
+      <span class="sim-status__hint">in the support matrix</span>
+    </a>
+  </header>
+
+  <div class="sim-controls">
+    <div class="sim-group" role="group" aria-label="Framework">
+      <span class="sim-group__label" aria-hidden="true">Framework</span>
+      <div class="sim-choices">
+        {matrix.frameworks.map((candidate) => (
+          <button
+            type="button"
+            class="sim-choice"
+            data-sim-framework={candidate.id}
+            aria-pressed={candidate.id === selection.framework ? 'true' : 'false'}
+          >
+            {candidate.label}
+          </button>
+        ))}
+      </div>
+    </div>
+    <div class="sim-group" role="group" aria-label="Topology">
+      <span class="sim-group__label" aria-hidden="true">Topology</span>
+      <div class="sim-choices">
+        {topologies.map((topology) => (
+          <button
+            type="button"
+            class="sim-choice sim-choice--topology"
+            data-sim-topology={topology.id}
+            aria-pressed={topology.id === selection.topology ? 'true' : 'false'}
+            aria-disabled={offered.has(topology.id) ? 'false' : 'true'}
+          >
+            <span>{topology.label}</span>
+            <small>{topology.detail}</small>
+          </button>
+        ))}
+      </div>
+    </div>
+    <div class="sim-group" role="group" aria-label="Frontend backend" data-sim-backends hidden={backends.length === 0}>
+      <span class="sim-group__label" aria-hidden="true">Frontend backend</span>
+      <div class="sim-choices" data-sim-backend-choices>
+        {backends.map((backend) => (
+          <button
+            type="button"
+            class="sim-choice sim-choice--backend"
+            data-sim-backend={backend}
+            aria-pressed={backend === selection.backend ? 'true' : 'false'}
+          >
+            {backendLogos[backend] && <img src={backendLogos[backend]} alt="" width="16" height="16" />}
+            {backend}
+          </button>
+        ))}
+      </div>
+    </div>
+    <p class="sim-unavailable" data-sim-unavailable aria-live="polite"></p>
+  </div>
+
+  <div class="sim-stage" data-sim-stage set:html={renderTopology(matrix, selection)} />
+
+  <div class="sim-panes">
+    <div class="sim-tabs" role="tablist" aria-label="Simulator output">
+      <button type="button" role="tab" id="sim-tab-declaration" aria-controls="sim-panel-declaration" aria-selected="true" data-sim-tab>
+        workspace.toml
+      </button>
+      <button type="button" role="tab" id="sim-tab-lifecycle" aria-controls="sim-panel-lifecycle" aria-selected="false" tabindex="-1" data-sim-tab>
+        recipe run
+      </button>
+    </div>
+    <div role="tabpanel" id="sim-panel-declaration" aria-labelledby="sim-tab-declaration" tabindex="0">
+      <pre class="sim-code"><code data-sim-declaration set:html={renderDeclaration(matrix, selection)} /></pre>
+    </div>
+    <div role="tabpanel" id="sim-panel-lifecycle" aria-labelledby="sim-tab-lifecycle" tabindex="0" hidden>
+      <ol class="sim-log" data-sim-log>
+        <li class="sim-log__command"><span class="sim-log__prompt">$</span> inferlab recipe run demo-qualify</li>
+        {steps.map((step) => (
+          <li data-phase={step.phase}><span class="sim-log__phase">{step.phase}</span>{step.text}</li>
+        ))}
+      </ol>
+    </div>
+  </div>
+  <p class="sim-note">
+    Every choice and status label comes from the{' '}
+    <a href={supportHref}>backend support matrix</a>; the topology and lifecycle are illustrative.
+  </p>
+</section>
+
+<script>
+  import {
+    availableTopologies,
+    describe,
+    lifecycle,
+    renderDeclaration,
+    renderTopology,
+    resolveSelection,
+    topologies,
+  } from '../../lib/simulator.mjs';
+
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-simulator]')) {
+    const matrix = JSON.parse(root.querySelector('[data-sim-matrix]')?.textContent ?? '{}');
+    const logos: Record<string, string> = JSON.parse(root.querySelector('[data-sim-logos]')?.textContent ?? '{}');
+    const stage = root.querySelector<HTMLElement>('[data-sim-stage]')!;
+    const declaration = root.querySelector<HTMLElement>('[data-sim-declaration]')!;
+    const log = root.querySelector<HTMLOListElement>('[data-sim-log]')!;
+    const status = root.querySelector<HTMLAnchorElement>('[data-sim-status]')!;
+    const statusText = root.querySelector<HTMLElement>('[data-sim-status-text]')!;
+    const backendGroup = root.querySelector<HTMLElement>('[data-sim-backends]')!;
+    const backendChoices = root.querySelector<HTMLElement>('[data-sim-backend-choices]')!;
+    const unavailable = root.querySelector<HTMLElement>('[data-sim-unavailable]')!;
+    let selection = resolveSelection(matrix, {
+      framework: root.querySelector<HTMLElement>('[data-sim-framework][aria-pressed="true"]')?.dataset.simFramework,
+      topology: root.querySelector<HTMLElement>('[data-sim-topology][aria-pressed="true"]')?.dataset.simTopology,
+      backend: root.querySelector<HTMLElement>('[data-sim-backend][aria-pressed="true"]')?.dataset.simBackend,
+    });
+    let animation = 0;
+    let logTimer = 0;
+
+    const frameworkOf = () => matrix.frameworks.find((candidate: { id: string }) => candidate.id === selection.framework);
+
+    function animate() {
+      cancelAnimationFrame(animation);
+      const svg = stage.querySelector('svg');
+      const layer = svg?.querySelector('.sim-particles');
+      if (!svg || !layer || reduceMotion.matches) return;
+      const paths = [...svg.querySelectorAll<SVGPathElement>('path[data-flow]')];
+      const particles = paths.flatMap((path, index) => {
+        const count = path.dataset.flow === 'request' ? 3 : 2;
+        const length = path.getTotalLength();
+        return Array.from({ length: count }, (_, k) => {
+          const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          dot.setAttribute('r', path.dataset.flow === 'request' ? '3' : '2.6');
+          dot.setAttribute('class', `sim-particle sim-particle--${path.dataset.flow}`);
+          layer.append(dot);
+          return { dot, path, length, offset: (k / count + index * 0.17) % 1 };
+        });
+      });
+      const started = performance.now();
+      const frame = (now: number) => {
+        const t = (now - started) / 2600;
+        for (const particle of particles) {
+          const progress = (t + particle.offset) % 1;
+          const point = particle.path.getPointAtLength(progress * particle.length);
+          particle.dot.setAttribute('cx', point.x.toFixed(1));
+          particle.dot.setAttribute('cy', point.y.toFixed(1));
+          particle.dot.setAttribute('opacity', Math.sin(progress * Math.PI).toFixed(2));
+        }
+        animation = requestAnimationFrame(frame);
+      };
+      animation = requestAnimationFrame(frame);
+    }
+
+    function playLog() {
+      clearTimeout(logTimer);
+      const steps = lifecycle(selection);
+      log.replaceChildren();
+      const command = document.createElement('li');
+      command.className = 'sim-log__command';
+      command.innerHTML = '<span class="sim-log__prompt">$</span> inferlab recipe run demo-qualify';
+      log.append(command);
+      const items = steps.map((step) => {
+        const item = document.createElement('li');
+        item.dataset.phase = step.phase;
+        const phase = document.createElement('span');
+        phase.className = 'sim-log__phase';
+        phase.textContent = step.phase;
+        item.append(phase, step.text);
+        log.append(item);
+        return item;
+      });
+      if (reduceMotion.matches) return;
+      items.forEach((item) => item.classList.add('is-pending'));
+      let index = 0;
+      const reveal = () => {
+        items[index]?.classList.remove('is-pending');
+        index += 1;
+        if (index < items.length) logTimer = window.setTimeout(reveal, 420);
+      };
+      logTimer = window.setTimeout(reveal, 260);
+    }
+
+    function render() {
+      const framework = frameworkOf();
+      const offered = new Set(availableTopologies(framework).map((topology: { id: string }) => topology.id));
+      for (const button of root.querySelectorAll<HTMLElement>('[data-sim-framework]')) {
+        button.setAttribute('aria-pressed', String(button.dataset.simFramework === selection.framework));
+      }
+      for (const button of root.querySelectorAll<HTMLElement>('[data-sim-topology]')) {
+        button.setAttribute('aria-pressed', String(button.dataset.simTopology === selection.topology));
+        button.setAttribute('aria-disabled', String(!offered.has(button.dataset.simTopology ?? '')));
+      }
+      const backends: string[] = selection.topology ? framework.topologies[selection.topology].backends : [];
+      backendGroup.hidden = backends.length === 0;
+      backendChoices.replaceChildren(
+        ...backends.map((backend) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'sim-choice sim-choice--backend';
+          button.dataset.simBackend = backend;
+          if (logos[backend]) {
+            const logo = document.createElement('img');
+            logo.src = logos[backend];
+            logo.alt = '';
+            logo.width = 16;
+            logo.height = 16;
+            button.append(logo);
+          }
+          button.append(backend);
+          button.setAttribute('aria-pressed', String(backend === selection.backend));
+          return button;
+        }),
+      );
+      status.dataset.status = selection.status ?? '';
+      statusText.textContent = selection.status ?? 'Not offered';
+      stage.classList.remove('is-entering');
+      stage.innerHTML = renderTopology(matrix, selection);
+      void stage.offsetWidth;
+      stage.classList.add('is-entering');
+      declaration.innerHTML = renderDeclaration(matrix, selection);
+      animate();
+      playLog();
+    }
+
+    root.addEventListener('click', (event) => {
+      const target = (event.target as HTMLElement).closest<HTMLElement>('button');
+      if (!target || !root.contains(target)) return;
+      if (target.dataset.simFramework) {
+        selection = resolveSelection(matrix, { ...selection, framework: target.dataset.simFramework });
+        unavailable.textContent = '';
+        render();
+      } else if (target.dataset.simTopology) {
+        if (target.getAttribute('aria-disabled') === 'true') {
+          const topology = topologies.find((candidate) => candidate.id === target.dataset.simTopology);
+          unavailable.textContent = `${topology?.label} serving is not offered for ${frameworkOf().label} in the support matrix.`;
+          return;
+        }
+        selection = resolveSelection(matrix, { ...selection, topology: target.dataset.simTopology });
+        unavailable.textContent = '';
+        render();
+      } else if (target.dataset.simBackend) {
+        selection = resolveSelection(matrix, { ...selection, backend: target.dataset.simBackend });
+        render();
+      }
+    });
+
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[data-sim-tab]')];
+    const selectTab = (tab: HTMLButtonElement) => {
+      for (const candidate of tabs) {
+        const selected = candidate === tab;
+        candidate.setAttribute('aria-selected', String(selected));
+        candidate.tabIndex = selected ? 0 : -1;
+        const panel = root.querySelector<HTMLElement>(`#${candidate.getAttribute('aria-controls')}`);
+        if (panel) panel.hidden = !selected;
+      }
+      if (tab.id === 'sim-tab-lifecycle') playLog();
+    };
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => selectTab(tab));
+      tab.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+        const next = tabs[(tabs.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+        next.focus();
+        selectTab(next);
+      });
+    }
+
+    stage.querySelector('svg')?.setAttribute('aria-label', describe(matrix, selection));
+    reduceMotion.addEventListener('change', animate);
+    animate();
+  }
+</script>

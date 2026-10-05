@@ -26,8 +26,6 @@ pub(super) struct RemoteCheckRequest<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum RemoteCheckError {
-    #[error("process {process:?} has no executable for remote environment checks")]
-    MissingExecutable { process: String },
     #[error("failed to run environment check {check:?} on machine {machine:?}: {source}")]
     Ssh {
         machine: String,

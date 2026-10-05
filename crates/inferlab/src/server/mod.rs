@@ -15,7 +15,7 @@ use inferlab_runtime::server::{
     ProcessObserver, ProcessSpec, ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind,
     ServerRuntime, SystemProcessRuntime,
 };
-use preflight::{PreflightObserver, RemoteCheckError, RemoteCheckRequest};
+use preflight::{PreflightObserver, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
 use residual::{
     RESIDUAL_SETTLE_INTERVAL, RESIDUAL_SETTLE_WINDOW, ResidualProbe, probe_device_residual,
@@ -388,6 +388,33 @@ fn fail_after_record_error<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     Ok(lifecycle_error(session, message))
 }
 
+/// Where and with what one remote machine's environment checks run.
+#[derive(Debug, PartialEq, Eq)]
+struct RemoteCheckTarget<'a> {
+    machine: &'a str,
+    target: &'a str,
+    root: &'a Path,
+    pixi: String,
+}
+
+/// One target per remote workspace the preflight verified, using the Pixi
+/// and checkout it observed there. The launch command is not consulted:
+/// wrappers such as NUMA pinning lead it.
+fn remote_check_targets(resolved: &ResolvedExecution) -> Vec<RemoteCheckTarget<'_>> {
+    resolved
+        .server
+        .placement
+        .remote_workspaces
+        .iter()
+        .map(|(machine, remote)| RemoteCheckTarget {
+            machine,
+            target: &remote.target,
+            root: &remote.path,
+            pixi: remote.pixi_executable.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
 /// Launch preflight against the local workspace realization
 /// ([[RFC-0002:C-ENVIRONMENT-CHECKS]],
 /// [[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]): declared checks run before
@@ -469,40 +496,22 @@ fn run_preflight_checks<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     // process launches ([[RFC-0002:C-ENVIRONMENT-CHECKS]]). The remote
     // preflight already proved revision equality, so the committed
     // scripts exist in the remote checkout.
-    let mut checked_machines = std::collections::BTreeSet::new();
-    for process in resolved.server.processes() {
-        let inferlab_runtime::plan::LaunchPlan::Ssh { target } = &process.launch else {
-            continue;
-        };
-        if !checked_machines.insert(process.machine.clone()) {
-            continue;
-        }
-        let mut remote_root = process.command.cwd.clone();
-        remote_root.pop();
-        let outcome = process
-            .command
-            .argv
-            .first()
-            .ok_or_else(|| RemoteCheckError::MissingExecutable {
-                process: process.id.clone(),
-            })
-            .and_then(|pixi| {
-                runtime.run_remote_checks(RemoteCheckRequest {
-                    target,
-                    root: &remote_root,
-                    pixi,
-                    pixi_environment: &stack.pixi_environment,
-                    checks: &stack.checks,
-                    machine: &process.machine,
-                    progress,
-                })
-            });
+    for remote in remote_check_targets(resolved) {
+        let outcome = runtime.run_remote_checks(RemoteCheckRequest {
+            target: remote.target,
+            root: remote.root,
+            pixi: &remote.pixi,
+            pixi_environment: &stack.pixi_environment,
+            checks: &stack.checks,
+            machine: remote.machine,
+            progress,
+        });
         let (evidence, failure) = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 let message = format!(
                     "environment check execution failed on machine {:?}: {error}",
-                    process.machine
+                    remote.machine
                 );
                 return Err(fail_with(
                     session,
@@ -521,13 +530,13 @@ fn run_preflight_checks<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             let repair = failure
                 .repair_hint
                 .as_ref()
-                .map(|hint| format!("; repair on {:?}: {hint}", process.machine))
+                .map(|hint| format!("; repair on {:?}: {hint}", remote.machine))
                 .unwrap_or_default();
             let message = format!(
                 "environment check {:?} failed on machine {:?} realization of Pixi \
                  environment {:?}: {}{repair}",
                 failure.id,
-                process.machine,
+                remote.machine,
                 stack.pixi_environment,
                 failure.output.trim(),
             );
@@ -1798,6 +1807,55 @@ mod tests {
         assert_eq!(*runtime.events.borrow(), ["spawn", "ready"]);
         assert_eq!(*runtime.terminated.borrow(), vec![70]);
         Ok(())
+    }
+
+    /// Remote environment checks run the Pixi the remote preflight observed
+    /// in the workspace it verified, not whatever leads the launch command:
+    /// NUMA pinning puts `numactl` there ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
+    #[test]
+    fn remote_checks_use_the_preflight_pixi_when_numa_pinning_wraps_the_command() {
+        let mut resolved = resolved();
+        let remote = &mut resolved.server.roles[0].replicas[0].ranks[0];
+        remote.launch = LaunchPlan::Ssh {
+            target: "node-0-ssh".to_owned(),
+        };
+        remote.command.argv = [
+            "numactl",
+            "--cpunodebind=0",
+            "--membind=0",
+            "--",
+            "/remote/bin/pixi",
+            "run",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        remote.command.cwd = PathBuf::from("/remote/workspace/.inferlab/state");
+        let machine = remote.machine.clone();
+        resolved.server.placement.remote_workspaces.insert(
+            machine.clone(),
+            crate::execution::RemoteWorkspacePlan {
+                target: "node-0-ssh".to_owned(),
+                path: PathBuf::from("/remote/workspace"),
+                revision: "revision".to_owned(),
+                dirty: false,
+                source_digest: "source".to_owned(),
+                pixi_manifest_sha256: "manifest".to_owned(),
+                pixi_lock_sha256: "lock".to_owned(),
+                pixi_environment: "env".to_owned(),
+                pixi_executable: PathBuf::from("/remote/bin/pixi"),
+                environment: BTreeMap::new(),
+            },
+        );
+
+        assert_eq!(
+            remote_check_targets(&resolved),
+            [RemoteCheckTarget {
+                machine: &machine,
+                target: "node-0-ssh",
+                root: Path::new("/remote/workspace"),
+                pixi: "/remote/bin/pixi".to_owned(),
+            }]
+        );
     }
 
     pub(super) fn process(index: usize) -> ProcessPlan {

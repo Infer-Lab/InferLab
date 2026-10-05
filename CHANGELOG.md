@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-05
+
+### Fixed
+
+- A server with a remote machine that declares `numa_nodes` starts again: the
+  remote environment checks ran `numactl` in place of Pixi, because they took
+  the executable from the NUMA-wrapped launch command. They now run the Pixi
+  and workspace checkout that the remote preflight verified on that machine.
+
 ## [0.18.0] - 2026-10-05
 
 ### Added

@@ -109,13 +109,17 @@ cache = { start = "cold" }   # warmup drains, then reset, then profiling
   remaining `timeout_seconds` bounds the whole fan-out, and when the caller
   gives up, the proxy cancels its in-flight target work.
 - A backend may decline a reset it cannot perform yet — for example while KV
-  blocks are still held for an unfinished transfer — by answering 2xx with a
-  body that fails the reset action's success predicate. InferLab records that
-  attempt and retries only the declined targets after a growing delay until
-  the reset succeeds, an attempt fails another way, or the case timeout runs
-  out; then the case fails. Every attempt is kept under
-  `cache_preparation.reset.attempts`, and a long run of declines between
-  cases points at engine state left over from the previous case.
+  blocks are still held for an unfinished transfer — by answering 2xx with the
+  opposite boolean of the reset action's boolean success predicate (vLLM
+  answers `success: false`). InferLab records that attempt and retries after a
+  growing delay until the reset succeeds, an attempt fails another way, or the
+  case timeout is spent; then the case fails. A per-target reset retries only
+  its declined targets; a public reset, including one fanned out by a built-in
+  prefill/decode proxy, retries the whole action. Any other answer that fails
+  the predicate — an empty or unparseable body, a missing value, a mismatched
+  string — fails the case at once. Every attempt is kept under
+  `cache_preparation.reset.attempts`, and a long run of declines between cases
+  points at engine state left over from the previous case.
 - Reset and conditioning occur after warmup, are excluded from profiling
   metrics, and do not consume population entries.
 - The one case timeout covers warmup, reset, conditioning, profiling, and

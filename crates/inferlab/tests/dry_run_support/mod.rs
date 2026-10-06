@@ -8,7 +8,6 @@ use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -152,7 +151,7 @@ impl TestWorkspace {
     }
 
     pub(crate) fn write_adapter(path: &Path) -> Result<(), Box<dyn Error>> {
-        fs::write(
+        crate::support::write_executable(
             path,
             r#"#!/usr/bin/env python3
 import hashlib
@@ -395,14 +394,11 @@ print(json.dumps({
 }))
 "#,
         )?;
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)?;
         Ok(())
     }
 
     pub(crate) fn write_pixi(path: &Path) -> Result<(), Box<dyn Error>> {
-        fs::write(
+        crate::support::write_executable(
             path,
             "#!/bin/sh\n\
              if [ \"$1\" = info ] && [ \"$2\" = --json ]; then\n\
@@ -441,9 +437,6 @@ print(json.dumps({
              fi\n\
              exec \"$@\"\n",
         )?;
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)?;
         Ok(())
     }
 
@@ -637,11 +630,7 @@ benches = [\"fixed-8k1k\", \"range-8k1k\"]
 ";
 
 pub(crate) fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
-    fs::write(path, content)?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
+    crate::support::write_executable(path, content)
 }
 
 pub(crate) const PD_ADAPTER: &str = r#"#!/usr/bin/env python3

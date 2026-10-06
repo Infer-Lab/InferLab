@@ -5,6 +5,12 @@ use std::thread;
 use std::time::Duration;
 use thiserror::Error;
 
+/// How long a process group has to exit after SIGTERM before SIGKILL, and
+/// after SIGKILL before termination is unverified: the one product-owned
+/// termination policy for processes InferLab starts ([[RFC-0009:C-CLEANUP-GRACE]]).
+pub const TERM_GRACE: Duration = Duration::from_secs(2);
+pub const KILL_GRACE: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Error)]
 pub enum ProcessGroupError {
     #[error("local process-group identity requires non-zero identifiers")]
@@ -270,6 +276,102 @@ impl LocalProcessGroup {
             .filter_map(|(pid, _, _)| pid.parse().ok())
             .collect())
     }
+}
+
+/// One live process of a process tree, identified by its pid and start time
+/// so a reused pid never stands in for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TreeProcess {
+    pub pid: u32,
+    pub process_group: u32,
+    pub start_time_ticks: u64,
+}
+
+impl TreeProcess {
+    /// Whether this exact process still runs: the pid exists with the same
+    /// start time and is not defunct.
+    pub fn is_alive(&self) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", self.pid)) else {
+            return false;
+        };
+        let Some(rest) = stat.rfind(')').map(|end| &stat[end + 1..]) else {
+            return false;
+        };
+        let mut fields = rest.split_whitespace();
+        let defunct = fields.next() == Some("Z");
+        let start = fields.nth(18).and_then(|value| value.parse::<u64>().ok());
+        !defunct && start == Some(self.start_time_ticks)
+    }
+
+    /// SIGKILL this exact process; one that already exited, or whose pid now
+    /// names another process, is left alone.
+    pub fn kill(&self) -> Result<(), std::io::Error> {
+        if !self.is_alive() {
+            return Ok(());
+        }
+        let pid = rustix::process::Pid::from_raw(self.pid as i32)
+            .ok_or_else(|| std::io::Error::other("process id is zero"))?;
+        match rustix::process::kill_process(pid, rustix::process::Signal::KILL) {
+            Ok(()) => Ok(()),
+            Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The executable this process runs, when readable.
+    pub fn executable(&self) -> Option<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/{}/exe", self.pid)).ok()
+    }
+}
+
+/// `root` and every live descendant, `root` first. A process whose parent
+/// has already exited is reparented away from the tree and is not found.
+pub fn process_tree(
+    root: u32,
+    bound: &OperationBound,
+) -> Result<Vec<TreeProcess>, ProcessGroupError> {
+    let output = cleanup_output(&["ps", "-eo", "pid=,ppid=,pgid=,stat="], bound)?;
+    if !output.status.success() {
+        return Err(ProcessGroupError::QueryExit {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    let processes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let pgid = fields.next()?.parse::<u32>().ok()?;
+            let state = fields.next()?;
+            (!state.starts_with('Z')).then_some((pid, ppid, pgid))
+        })
+        .collect::<Vec<_>>();
+    let mut pids = vec![root];
+    let mut tree = Vec::new();
+    let mut index = 0;
+    while let Some(&pid) = pids.get(index) {
+        index += 1;
+        if let Some(&(_, _, process_group)) =
+            processes.iter().find(|(candidate, _, _)| *candidate == pid)
+            && let Some(start_time_ticks) = process_start_time(pid)?
+        {
+            tree.push(TreeProcess {
+                pid,
+                process_group,
+                start_time_ticks,
+            });
+        }
+        pids.extend(
+            processes
+                .iter()
+                .filter(|(child, ppid, _)| *ppid == pid && !pids.contains(child))
+                .map(|(child, _, _)| *child)
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(tree)
 }
 
 pub fn process_start_time(pid: u32) -> Result<Option<u64>, ProcessGroupError> {

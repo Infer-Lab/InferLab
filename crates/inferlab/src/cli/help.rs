@@ -111,17 +111,21 @@ An omitted Bench kind resolves to serving, and an omitted synthetic prompt to fl
 
 pub(super) const BENCH_OVERRIDE: &str = "Override one typed field inside the selected Bench definition with a TOML value, for example concurrency=[1,8] or request_body.temperature=1.0. Later assignments win. The Bench identity and kind cannot be changed.";
 
-pub(super) const RUN: &str = "Execute one unrecorded diagnostic command with the same stack activation or container substitution used by InferLab launches.
+pub(super) const RUN: &str = "Execute one command with the same stack activation or container substitution used by InferLab launches; --record keeps a run record.
 
-Do not invoke .pixi/envs/<env>/bin tools directly: that bypasses manifest activation. Local execution exports the default placement's devices as CUDA_VISIBLE_DEVICES when every machine in it launches locally; an operator-set CUDA_VISIBLE_DEVICES wins. A container receives no host mount or device implicitly. An external image declaring entrypoint = \"image\" keeps its own entrypoint and receives the command as its arguments. Local --stack and the two container-image selectors are mutually exclusive; --mount and --devices require a container image.";
+Do not invoke .pixi/envs/<env>/bin tools directly: that bypasses manifest activation. Local execution exports the default placement's devices as CUDA_VISIBLE_DEVICES when every machine in it launches locally; an operator-set CUDA_VISIBLE_DEVICES wins. A container receives no host mount or device implicitly. An external image declaring entrypoint = \"image\" keeps its own entrypoint and receives the command as its arguments. Local --stack and the two container-image selectors are mutually exclusive; --mount and --devices require a container image.
+
+Local execution provides an InferLab context the command may read: INFERLAB_CONTEXT and INFERLAB_WORKSPACE_ROOT always; INFERLAB_RECORD_ID and INFERLAB_RECORD_ARTIFACTS with --record; INFERLAB_SERVE_RECORD, INFERLAB_SERVE_BASE_URL (scheme, host, and port, no path), and INFERLAB_SERVE_MODEL with --serve; INFERLAB_MODEL_ID and INFERLAB_MODEL_PATH with --model. --record, --serve, and --model reject a container image. A run nested inside another inferlab run replaces the inherited context and records the outer run as its parent; INFERLAB_ context variables set by hand fail the run. The command runs unchanged, so its own arguments stay the authority for where it writes outputs. A recorded run is non-interactive: the command writes to pipes copied to the terminal and the record's logs, a closed reader does not stop it, and an interrupt sends SIGTERM and then SIGKILL to the command's process tree.";
 
 pub(super) const RUN_EXAMPLES: &str = "EXAMPLES:
   inferlab run -- python -c 'import vllm; print(vllm.__version__)'
   inferlab run --stack vllm -- pytest tests/ -k smoke
   inferlab run --image <RECORD_ID> --devices 0 -- nvidia-smi -L
   inferlab run --external-image official --mount /data -- python3 /data/probe.py
+  inferlab run --stack modelopt --record --model qwen3-8b -- ./scripts/ptq.sh nvfp4
+  inferlab run --stack swe --record --serve <SERVER_RECORD_ID> -- ./scripts/swebench.sh
 
-This command writes no execution record; use a managed workflow for evidence.";
+Reference context variables from a script or sh -c, not directly on this command line: the operator's shell expands them before the context exists. A run record is evidence of what ran, not a qualification.";
 
 pub(super) const IMAGE_BUILD: &str = "Build one named runtime image as a recorded closed loop: resolve source and base-image identities, assemble every producible platform, inspect immutable image identity, optionally export unique OCI archives, and run eligible recipe validations.
 

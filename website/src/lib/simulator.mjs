@@ -10,7 +10,7 @@
  * @typedef {import('./backend-matrix.mjs').TopologyId} TopologyId
  * @typedef {import('./backend-matrix.mjs').Framework} Framework
  * @typedef {import('./backend-matrix.mjs').BackendMatrix} BackendMatrix
- * @typedef {{ framework: string, topology: TopologyId | undefined, backend: string | null, status: string | null }} Selection
+ * @typedef {{ framework: string, topology: TopologyId | undefined, backend: string | null, status: string | null, transport: string | null }} Selection
  */
 
 /** @type {{ id: TopologyId, label: string, detail: string }[]} */
@@ -44,11 +44,19 @@ export function resolveSelection(matrix, requested = {}) {
     offered.find((candidate) => candidate.id === requested.topology)?.id ?? offered[0]?.id;
   const backends = topology ? framework.topologies[topology].backends : [];
   const backend = backends.includes(requested.backend) ? requested.backend : backends[0] ?? null;
+  const entry = topology ? framework.topologies[topology] : undefined;
+  // A published pairing table is the authority for one backend's status and
+  // the transport that status was earned with.
+  const pairing = backend !== null ? entry?.pairings?.[backend] : undefined;
   return {
     framework: framework.id,
     topology,
     backend,
-    status: topology ? framework.topologies[topology].status : null,
+    status: pairing?.status ?? entry?.status ?? null,
+    transport:
+      topology === 'prefill-decode'
+        ? (pairing?.transport ?? framework.kvTransfer[0] ?? 'NIXL').toLowerCase()
+        : null,
   };
 }
 
@@ -190,7 +198,7 @@ export function renderDeclaration(matrix, selection) {
       lines.push(`${key('topology')} = ${str('single')}`, `${key('gateway_backend')} = ${str(selection.backend)}`);
       break;
     case 'prefill-decode': {
-      const transport = (framework.kvTransfer[0] ?? 'NIXL').toLowerCase();
+      const transport = selection.transport ?? (framework.kvTransfer[0] ?? 'NIXL').toLowerCase();
       lines.push(
         `${key('topology')} = ${str('prefill_decode')}`,
         `${key('gateway_backend')} = ${str(selection.backend)}`,

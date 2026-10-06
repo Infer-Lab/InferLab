@@ -29,7 +29,7 @@ fn workspace(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn wait_for(path: &Path) -> Result<serde_json::Value, Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::FIXTURE_HANG_GUARD;
     while Instant::now() < deadline {
         if let Ok(bytes) = fs::read(path) {
             return Ok(serde_json::from_slice(&bytes)?);

@@ -70,7 +70,7 @@ profiling until an in-container profiler contract exists.
 ## Ad-Hoc Probes
 
 `inferlab run` executes one command with the same activation used by product
-launches and writes no execution record:
+launches. Without `--record` it writes no execution record:
 
 ```sh
 inferlab run -- python -c "import vllm; print(vllm.__version__)"
@@ -87,8 +87,71 @@ indexes. Local probes execute with `CUDA_VISIBLE_DEVICES` set from the
 workspace's default placement when every machine it references launches
 locally — an explicit `CUDA_VISIBLE_DEVICES` in the environment wins, so
 ad-hoc GPU work lands on the workspace's own devices without extra flags.
-Use `run` for diagnostics, not evidence; qualification requires a
-managed recorded workflow.
+Use `run` for diagnostics and for workloads InferLab does not model; a run
+record says what ran, never a qualification, which requires a managed
+recorded workflow.
+
+## Recorded Runs And The InferLab Context
+
+For workloads InferLab does not model — agentic evaluation harnesses, model
+quantization, one-off conversions — local `run` is a thin wrapper: the command
+runs unchanged and InferLab offers it a context through environment variables
+the command may read or ignore.
+
+| Variable | Provided |
+| --- | --- |
+| `INFERLAB_CONTEXT` (context contract version) and `INFERLAB_WORKSPACE_ROOT` | always |
+| `INFERLAB_RECORD_ID`, `INFERLAB_RECORD_ARTIFACTS` (a record-owned directory the command may write) | with `--record` |
+| `INFERLAB_SERVE_RECORD`, `INFERLAB_SERVE_BASE_URL` (scheme, host, port; no path), `INFERLAB_SERVE_MODEL` (served model name) | with `--serve <SERVER_RECORD_ID>` of a running server |
+| `INFERLAB_MODEL_ID`, `INFERLAB_MODEL_PATH` (the `model_weights` locator for this machine) | with `--model <MODEL>` |
+
+`--record` writes a `run` record under `.inferlab/records/<UTC>-run-<stack>-<pid>/`:
+argv, stack and lock identity, workspace snapshot, the provided context and
+device projection, the linked server's state at start and exit, the parent
+record when nested, stdout and stderr logs, exit status, and timing. The
+record says what was provided, not what the command used, and claims no
+outputs: the command's own arguments stay the authority for where it wrote.
+These options apply to local stack execution only.
+
+Read the context from a script, not from the `inferlab run` command line —
+`"$INFERLAB_SERVE_BASE_URL"` written there expands in your shell before the
+context exists. A workspace-owned `scripts/swebench.sh`:
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+export OPENAI_BASE_URL="$INFERLAB_SERVE_BASE_URL/v1/"
+mini-extra swebench --model "hosted_vllm/$INFERLAB_SERVE_MODEL" \
+  --subset verified --slice 0:50 -o out/swebench
+cp out/swebench/preds.json "$INFERLAB_RECORD_ARTIFACTS/"
+```
+
+```sh
+inferlab serve start qwen3-8b-nvfp4
+inferlab run --stack swe --record --serve <SERVER_RECORD_ID> -- ./scripts/swebench.sh
+```
+
+A script may itself call `inferlab run --record` for each step; a nested run
+replaces the inherited context and records the outer run as its parent.
+Setting `INFERLAB_` context variables by hand fails the run.
+
+A recorded run behaves differently from an unrecorded one in three ways:
+
+- **Streams.** The command writes to pipes, not a terminal: its output is
+  copied to your terminal and the record logs, so progress bars, colors, and
+  Python's output buffering follow their non-terminal behavior. It does not
+  read the terminal; piped or redirected input still reaches it.
+- **Interrupts.** Ctrl-C reaches InferLab, not the command. InferLab sends
+  SIGTERM to every process group of the command's process tree, then SIGKILL
+  to the processes still alive after the shared grace, and finalizes the
+  record as `interrupted`. A harness that saves partial results on SIGINT
+  must also handle SIGTERM. A nested run is spared SIGKILL until it finalizes
+  its own record. Processes that left the tree and containers started
+  through a daemon, such as harness containers started through Docker, are
+  not cleaned up by InferLab.
+- **Closed readers.** Closing the reader of `inferlab run --record` (for
+  example piping into `head`) does not stop the command: the record keeps
+  its complete output.
 
 Never execute a binary directly through `.pixi/envs/<env>/bin/`; the
 [skill entry point](../SKILL.md) explains why `run` replaces it.

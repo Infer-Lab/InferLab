@@ -16,7 +16,8 @@ const matrixPath = path.resolve(
 
 /**
  * @typedef {'direct' | 'gateway' | 'multi-node' | 'prefill-decode'} TopologyId
- * @typedef {{ status: string | null, backends: string[] }} TopologyEntry
+ * @typedef {{ transport: string, status: string }} Pairing
+ * @typedef {{ status: string | null, backends: string[], pairings?: Record<string, Pairing> }} TopologyEntry
  * @typedef {{ id: string, label: string, topologies: Record<TopologyId, TopologyEntry>, kvTransfer: string[] }} Framework
  * @typedef {{ frameworks: Framework[] }} BackendMatrix
  */
@@ -53,6 +54,42 @@ function backticked(cell) {
 }
 
 /**
+ * The per-backend P/D pairing table a framework may publish ("### <label>
+ * P/D Pairings"): each backend's best-status transport.
+ * @param {string} markdown
+ * @param {string} label
+ * @param {string[]} backends
+ * @returns {Record<string, Pairing> | null}
+ */
+function pairingTable(markdown, label, backends) {
+  const section = markdown.split(`### ${label} P/D Pairings`)[1]?.split(/^#{2,3} /m)[0];
+  if (section === undefined) {
+    return null;
+  }
+  const lines = section.split('\n').filter((line) => line.startsWith('|'));
+  const transports = cells(lines[0] ?? '').slice(1);
+  /** @type {Record<string, Pairing>} */
+  const pairings = {};
+  for (const line of lines.slice(2)) {
+    const [pair, ...values] = cells(line);
+    const backend = pair.startsWith('Built-in')
+      ? 'builtin'
+      : pair.toLowerCase().replaceAll(' ', '-');
+    if (!backends.includes(backend)) {
+      throw new Error(`backend support matrix: ${label} pairing "${pair}" names no P/D backend`);
+    }
+    const best = transports
+      .map((transport, index) => ({ transport, status: status(values[index] ?? '') }))
+      .filter((candidate) => candidate.status !== null)
+      .sort((a, b) => statuses.indexOf(a.status) - statuses.indexOf(b.status))[0];
+    if (best !== undefined) {
+      pairings[backend] = /** @type {Pairing} */ (best);
+    }
+  }
+  return pairings;
+}
+
+/**
  * @param {string} markdown the backend support matrix
  * @returns {BackendMatrix}
  */
@@ -79,6 +116,7 @@ export function parseBackendMatrix(markdown) {
   };
 
   const packages = row('Integration package');
+  const publicComponentRow = row('`single` public component');
   const gatewayRow = row(topologyRows.gateway);
   const pdRouterRow = row('P/D Router backend');
   const kvRow = row('KV-transfer backend');
@@ -94,7 +132,12 @@ export function parseBackendMatrix(markdown) {
     const topologies = /** @type {Record<TopologyId, TopologyEntry>} */ ({});
     for (const topology of /** @type {TopologyId[]} */ (Object.keys(topologyRows))) {
       const cell = topologyValues[topology][index];
-      const entryStatus = status(cell);
+      // A direct topology exists only where the public component is the
+      // Engine itself; an Engine behind a required Gateway is not direct.
+      const entryStatus =
+        topology === 'direct' && !publicComponentRow[index].includes('direct-Engine')
+          ? null
+          : status(cell);
       let backends = [];
       if (entryStatus !== null && topology === 'gateway') {
         // The Gateway backend leads its cell; later names are distributions
@@ -104,6 +147,10 @@ export function parseBackendMatrix(markdown) {
         backends = backticked(pdRouterRow[index]);
       }
       topologies[topology] = { status: entryStatus, backends };
+      const pairings = topology === 'prefill-decode' ? pairingTable(markdown, label, backends) : null;
+      if (entryStatus !== null && pairings !== null) {
+        topologies[topology].pairings = pairings;
+      }
     }
     return {
       id,

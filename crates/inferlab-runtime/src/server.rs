@@ -580,6 +580,9 @@ pub struct SystemProcessRuntime;
 
 #[cfg(test)]
 mod tests {
+    /// A hang guard for awaited test events: a loaded host must never trip it.
+    const TEST_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     use super::*;
     use crate::plan::LaunchFilePlan;
     use std::cell::Cell;
@@ -1061,6 +1064,56 @@ mod tests {
     }
 
     #[test]
+    fn local_launch_refuses_a_data_directory_its_live_owner_still_uses() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache = root.path().join("cache");
+        let state = cache.join("state");
+        fs::create_dir_all(&state).map_err(|error| error.to_string())?;
+        fs::write(state.join("live-registration"), "another server\n")
+            .map_err(|error| error.to_string())?;
+        // This test process stands in for the other server's live etcd.
+        let owner = std::process::id();
+        let ticks = crate::process_group::process_start_time(owner)
+            .map_err(|error| error.to_string())?
+            .ok_or("own start time")?;
+        fs::write(cache.join("state.owner"), format!("{owner} {ticks}\n"))
+            .map_err(|error| error.to_string())?;
+        let command = CommandPlan {
+            argv: vec!["true".to_owned()],
+            env: BTreeMap::new(),
+            explicit_env: Vec::new(),
+            pass_env: Vec::new(),
+            cwd: root.path().to_path_buf(),
+        };
+
+        let result = spawn_local(ProcessSpec {
+            launch: &LaunchPlan::Local,
+            command: &command,
+            launch_files: &[],
+            cache_root: &cache,
+            stdout: &root.path().join("stdout.log"),
+            stderr: &root.path().join("stderr.log"),
+            remote_dir: &root.path().join("remote"),
+            container: None,
+            data_directory: Some(&state),
+        });
+
+        let failure = match result {
+            Err(failure) => failure,
+            Ok(handle) => {
+                let _ = terminate_local(&handle, CleanupTrigger::StartupRollback);
+                return Err("a live owner's data directory was emptied".to_owned());
+            }
+        };
+        assert!(
+            failure.message().contains("in use by live process"),
+            "{failure:?}"
+        );
+        assert!(state.join("live-registration").exists());
+        Ok(())
+    }
+
+    #[test]
     fn local_launch_empties_the_data_directory_before_the_process_starts() -> Result<(), String> {
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
         let cache = root.path().join("cache");
@@ -1099,10 +1152,8 @@ mod tests {
             data_directory: Some(&state),
         })
         .map_err(|failure| failure.message())?;
-        for _ in 0..200 {
-            if listing.exists() {
-                break;
-            }
+        let deadline = std::time::Instant::now() + TEST_HANG_GUARD;
+        while !listing.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let _ = terminate_local(&handle, CleanupTrigger::StartupRollback);
@@ -1733,7 +1784,7 @@ mod tests {
             .spawn()
             .map_err(|error| error.to_string())?;
         let handle = HostProcessHandle::new(child.id(), None)?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + TEST_HANG_GUARD;
         while !marker.exists() {
             if Instant::now() > deadline {
                 let _ = Command::new("kill")

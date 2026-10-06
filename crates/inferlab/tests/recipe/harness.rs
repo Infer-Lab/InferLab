@@ -4,11 +4,8 @@ use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::thread;
-use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 pub(crate) const WORKSPACE: &str = include_str!("../fixtures/deepseek-v4-flash-workspace.toml");
@@ -277,23 +274,10 @@ impl TestWorkspace {
 }
 
 pub(crate) fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
-    fs::write(path, content)?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
+    crate::support::write_executable(path, content)
 }
 
-pub(crate) fn wait_for_path(path: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    Err(format!("{} was not created within {timeout:?}", path.display()).into())
-}
+pub(crate) use crate::support::{wait_for_exit, wait_for_marker};
 
 fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
     let output = Command::new("git").current_dir(root).args(args).output()?;

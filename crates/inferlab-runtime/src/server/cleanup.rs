@@ -4,14 +4,14 @@ use super::{
     ProcessHandle, SshProcessHandle, SystemProcessRuntime,
 };
 use crate::operation_bound::{OperationBound, duration_millis};
-use crate::process_group::{LocalProcessGroup, SignalEvidence, TerminationSignal, VerifiedStatus};
+use crate::process_group::{
+    KILL_GRACE, LocalProcessGroup, SignalEvidence, TERM_GRACE, TerminationSignal, VerifiedStatus,
+};
 use crate::ssh::{SSH_ENV_REMOVE, ssh_argv};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const TERM_GRACE: Duration = Duration::from_secs(2);
-const KILL_GRACE: Duration = Duration::from_secs(10);
 const SERVER_CLEANUP_STATUS_DEADLINE: Duration = Duration::from_secs(2);
 pub(super) const REMOTE_SERVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(30);
 const LOCAL_LAUNCH_FAILURE_REAP_GRACE: Duration = Duration::from_secs(5);

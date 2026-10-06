@@ -192,16 +192,22 @@ impl ImageAdapterClient {
                 &device.to_string(),
             ));
         }
+        // Every image lowers through the workspace adapter packages, never
+        // packages baked into it: the image supplies the engine, and lowering
+        // follows this InferLab and the workspace pins
+        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+        for mount in adapter_environment_mounts(workspace_root, integration)? {
+            launcher.extend(inferlab_runtime::container::docker_bind_mount_readonly(
+                &mount.source.display().to_string(),
+                &format!("{ADAPTER_MOUNT_BASE}/{}", mount.target_name),
+            ));
+        }
+        launcher.extend([
+            "--env".to_owned(),
+            format!("PYTHONPATH={ADAPTER_MOUNT_BASE}"),
+        ]);
         if self.explicit_entrypoint {
-            for mount in adapter_environment_mounts(workspace_root, integration)? {
-                launcher.extend(inferlab_runtime::container::docker_bind_mount_readonly(
-                    &mount.source.display().to_string(),
-                    &format!("{ADAPTER_MOUNT_BASE}/{}", mount.target_name),
-                ));
-            }
             launcher.extend([
-                "--env".to_owned(),
-                format!("PYTHONPATH={ADAPTER_MOUNT_BASE}"),
                 "--entrypoint".to_owned(),
                 // python3, not python: Debian-family serving images ship no
                 // bare `python` alias, while every conda-family or python-base
@@ -735,28 +741,15 @@ fn adapter_environment_mounts(
 ) -> Result<Vec<AdapterMount>, InferlabError> {
     environment::ensure_usable(workspace_root, ADAPTER_ENVIRONMENT)?;
     let module = integration_module(integration)?;
-    let packages = [
-        (
-            "inferlab_adapter_sdk".to_owned(),
-            "inferlab-adapter-sdk".to_owned(),
-        ),
-        (module, format!("inferlab-integration-{integration}")),
-    ];
-    let import_names: Vec<String> = packages.iter().map(|(import, _)| import.clone()).collect();
+    let distribution = format!("inferlab-integration-{integration}");
     let python = environment::pixi_environment_prefix(workspace_root, ADAPTER_ENVIRONMENT)
         .join("bin/python");
-    // Two lines per package, in the requested order: its `__path__[0]`, then
-    // its `.dist-info` directory. `PathDistribution._path` is the only spelling
-    // of that directory importlib exposes; the adapter environment pins the
-    // interpreter, so the private attribute is stable here. A single failed
-    // import or metadata lookup aborts the whole script, so the interpreter's
-    // stderr names the offending package.
-    let script = format!(
-        "import importlib, importlib.metadata\n\
-         for import_name, dist_name in {packages:?}:\n    \
-         print(importlib.import_module(import_name).__path__[0])\n    \
-         print(importlib.metadata.distribution(dist_name)._path)\n"
-    );
+    // The integration and every InferLab distribution it requires,
+    // transitively, from package metadata: one `import<TAB>module
+    // directory<TAB>.dist-info directory` row each. `PathDistribution._path`
+    // is the only spelling of that directory importlib exposes; the adapter
+    // environment pins the interpreter, so the private attribute is stable.
+    let script = adapter_closure_script(&distribution);
     let launch_error = |source| InferlabError::LaunchAdapter {
         integration: integration.to_owned(),
         source,
@@ -776,40 +769,32 @@ fn adapter_environment_mounts(
             )),
         });
     }
+    let unexpected = |detail: String| InferlabError::LaunchAdapter {
+        integration: integration.to_owned(),
+        source: std::io::Error::other(format!(
+            "Pixi environment {ADAPTER_ENVIRONMENT:?} resolved the adapter packages \
+             unexpectedly: {detail}"
+        )),
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let directories: Vec<&str> = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    if directories.len() != 2 * import_names.len() {
-        return Err(InferlabError::LaunchAdapter {
-            integration: integration.to_owned(),
-            source: std::io::Error::other(format!(
-                "Pixi environment {ADAPTER_ENVIRONMENT:?} resolved an unexpected number of \
-                 directories for the adapter packages {import_names:?} (expected a module and \
-                 a metadata directory per package)"
-            )),
-        });
-    }
-    let mut mounts = Vec::with_capacity(directories.len());
-    for (index, (import_name, dist_name)) in packages.iter().enumerate() {
-        let module_dir = directories[2 * index];
-        let info_dir = std::path::PathBuf::from(directories[2 * index + 1]);
+    let mut mounts = Vec::new();
+    let mut resolved = Vec::new();
+    for row in stdout.lines().map(str::trim).filter(|row| !row.is_empty()) {
+        let [import_name, module_dir, info_dir] = row.split('\t').collect::<Vec<_>>()[..] else {
+            return Err(unexpected(format!(
+                "{row:?} is not an import, module, metadata row"
+            )));
+        };
+        let info_dir = std::path::PathBuf::from(info_dir);
         let info_name = info_dir
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| name.ends_with(".dist-info"))
-            .ok_or_else(|| InferlabError::LaunchAdapter {
-                integration: integration.to_owned(),
-                source: std::io::Error::other(format!(
-                    "Pixi environment {ADAPTER_ENVIRONMENT:?} resolved {dist_name:?} metadata \
-                     to {info_dir:?}, which is not a .dist-info directory"
-                )),
-            })?
+            .ok_or_else(|| unexpected(format!("{info_dir:?} is not a .dist-info directory")))?
             .to_owned();
+        resolved.push(import_name.to_owned());
         mounts.push(AdapterMount {
-            target_name: import_name.clone(),
+            target_name: import_name.to_owned(),
             source: std::path::PathBuf::from(module_dir),
         });
         mounts.push(AdapterMount {
@@ -817,7 +802,35 @@ fn adapter_environment_mounts(
             source: info_dir,
         });
     }
+    if !resolved.contains(&module) {
+        return Err(unexpected(format!(
+            "the integration module {module:?} is missing"
+        )));
+    }
     Ok(mounts)
+}
+
+/// The integration and every InferLab distribution it requires, transitively,
+/// from package metadata, as `import<TAB>module directory<TAB>.dist-info
+/// directory` rows.
+fn adapter_closure_script(distribution: &str) -> String {
+    format!(
+        "import importlib, importlib.metadata, re\n\
+         queue, seen = [{distribution:?}], []\n\
+         while queue:\n    \
+         name = queue.pop(0)\n    \
+         if name in seen:\n        continue\n    \
+         seen.append(name)\n    \
+         for requirement in importlib.metadata.distribution(name).requires or []:\n        \
+         if 'extra ==' in requirement:\n            continue\n        \
+         dependency = re.split(r'[\\s;<>=!~\\[(]', requirement, maxsplit=1)[0]\n        \
+         dependency = dependency.lower().replace('_', '-')\n        \
+         if dependency.startswith('inferlab-'):\n            queue.append(dependency)\n\
+         for name in seen:\n    \
+         module = name.replace('-', '_')\n    \
+         print(module, importlib.import_module(module).__path__[0], \
+         importlib.metadata.distribution(name)._path, sep='\\t')\n"
+    )
 }
 
 /// The traversal-safe charset an integration identifier (and the framework

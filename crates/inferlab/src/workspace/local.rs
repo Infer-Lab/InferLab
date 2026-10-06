@@ -279,6 +279,52 @@ pub(crate) enum LaunchBinding {
 }
 
 impl LocalBindings {
+    /// The locator of one `model_weights` binding for the locally launching
+    /// machine ([[RFC-0002:C-LOCAL-PLACEMENT]]): its machine locator when the
+    /// locally launching machines name one, otherwise the fallback locator.
+    /// Locally launching machines that name different locators are
+    /// ambiguous.
+    pub(crate) fn local_model_locator(&self, id: &str) -> Result<String, InferlabError> {
+        let binding = self
+            .model_weights
+            .get(id)
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "unknown model weight binding {id:?}; the local bindings declare {:?}",
+                    self.model_weights.keys().collect::<Vec<_>>()
+                ),
+            })?;
+        let mut local = binding
+            .machine_locators
+            .iter()
+            .filter(|(machine, _)| {
+                self.machines
+                    .get(*machine)
+                    .is_some_and(|machine| matches!(machine.launch, LaunchBinding::Local))
+            })
+            .map(|(_, locator)| locator.as_str())
+            .collect::<Vec<_>>();
+        local.sort_unstable();
+        local.dedup();
+        match local.as_slice() {
+            [locator] => Ok((*locator).to_owned()),
+            [] => binding
+                .locator
+                .clone()
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!(
+                        "model weight binding {id:?} declares no locator for the local machine"
+                    ),
+                }),
+            several => Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "model weight binding {id:?} names different locators {several:?} for the \
+                 locally launching machines"
+                ),
+            }),
+        }
+    }
+
     /// The device set the default placement assigns to local work, projected
     /// by ad-hoc local execution ([[RFC-0002:C-ADHOC-EXECUTION]]): rank-level
     /// devices plus the full inventories of machines referenced by the

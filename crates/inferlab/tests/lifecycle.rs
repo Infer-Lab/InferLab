@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -836,21 +835,13 @@ fn interruption_during_remote_preflight_reaps_the_ssh_process() -> Result<(), Bo
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let marker_deadline = Instant::now() + Duration::from_secs(5);
-    while !marker.is_file() {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            return Err(format!(
-                "serve start exited before remote preflight: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        if Instant::now() >= marker_deadline {
-            let _ = child.kill();
-            return Err("remote preflight did not reach the blocking SSH fixture".into());
-        }
-        thread::sleep(Duration::from_millis(25));
+    if let Err(error) = support::wait_for_marker(&mut child, &marker) {
+        let output = child.wait_with_output()?;
+        return Err(format!(
+            "remote preflight did not reach the blocking SSH fixture ({error}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
     }
     let ssh_pid = fs::read_to_string(&marker)?;
     let signal = Command::new("kill")
@@ -865,17 +856,7 @@ fn interruption_during_remote_preflight_reaps_the_ssh_process() -> Result<(), Bo
         .into());
     }
 
-    let exit_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if Instant::now() >= exit_deadline {
-            let _ = child.kill();
-            return Err("interrupted remote preflight did not finish within five seconds".into());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
+    support::wait_for_exit(&mut child, "the interrupted remote preflight")?;
     let output = child.wait_with_output()?;
     assert!(!output.status.success());
 
@@ -1325,6 +1306,98 @@ fn occupied_devices_on_every_machine_are_named_in_one_failure() -> Result<(), Bo
     Ok(())
 }
 
+/// `run --serve` injects the running server's public endpoint and served
+/// model, and records the server's lifecycle state at start and at command
+/// exit ([[RFC-0002:C-ADHOC-EXECUTION]], [[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn recorded_run_links_a_running_server_record() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let id = started["id"].as_str().ok_or("missing record id")?;
+    let endpoint = &started["resolved"]["server"]["endpoint"];
+    let base_url = format!(
+        "http://{}:{}",
+        endpoint["host"].as_str().ok_or("endpoint host")?,
+        endpoint["port"].as_u64().ok_or("endpoint port")?
+    );
+    let served = started["resolved"]["server"]["model"]["served_name"]
+        .as_str()
+        .ok_or("served model")?;
+
+    let output = workspace.run(&[
+        "run",
+        "--record",
+        "--serve",
+        id,
+        "--",
+        "sh",
+        "-c",
+        "echo \"$INFERLAB_SERVE_RECORD $INFERLAB_SERVE_BASE_URL $INFERLAB_SERVE_MODEL\"",
+    ])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("{id} {base_url} {served}\n")
+    );
+    let records = fs::read_dir(workspace.root.path().join(".inferlab/records"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let run_dir = records
+        .iter()
+        .find(|dir| dir.to_string_lossy().contains("-run-"))
+        .ok_or("run record")?;
+    let record: Value = serde_json::from_slice(&fs::read(run_dir.join("record.json"))?)?;
+    assert_eq!(record["serve"]["record_id"], id);
+    assert_eq!(record["serve"]["state_at_start"]["status"], "running");
+    assert_eq!(record["serve"]["state_at_exit"]["status"], "running");
+
+    workspace.run_json(&["serve", "stop", id])?;
+    let marker = workspace.root.path().join("executed");
+    let output = workspace.run(&[
+        "run",
+        "--serve",
+        id,
+        "--",
+        "touch",
+        marker.to_str().ok_or("marker path")?,
+    ])?;
+    assert!(!output.status.success());
+    assert!(
+        !marker.exists(),
+        "a stopped server must fail before execution"
+    );
+    Ok(())
+}
+
+/// A probe failure on one machine still names the occupied devices found on
+/// the others ([[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn a_probe_failure_still_names_occupied_devices_on_other_machines() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_ssh_pair()?;
+    let mut command = workspace.command(&["serve", "start", "deepseek-v4-flash-qualify"]);
+    command
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", OCCUPANT_ROW)
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE", "0")
+        .env("FIXTURE_NVIDIA_SMI_ERROR_ON", "node-b");
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("machine \"node-a\" has assigned devices other processes occupy"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("fixture probe failure on node-b"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 fn assert_datetime_record_id(id: &str, expected_stem: &str) -> Result<(), Box<dyn Error>> {
     let (timestamp, suffix) = id.split_once("Z-").ok_or("record id has no UTC prefix")?;
     assert_eq!(timestamp.len(), 23);
@@ -1418,7 +1491,7 @@ fn sigterm_during_readiness_rolls_back_the_recorded_process_group() -> Result<()
 }
 
 fn wait_for_process_handle(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + support::FIXTURE_HANG_GUARD;
     loop {
         let records = root.join(".inferlab/records");
         if let Ok(entries) = fs::read_dir(&records) {
@@ -1440,18 +1513,14 @@ fn wait_for_process_handle(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
             }
         }
         if Instant::now() >= deadline {
-            return Err("server process handle was not recorded within 5 seconds".into());
+            return Err("server process handle was not recorded within the hang guard".into());
         }
         thread::sleep(Duration::from_millis(25));
     }
 }
 
 fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
-    fs::write(path, content)?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
+    crate::support::write_executable(path, content)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
@@ -1472,6 +1541,8 @@ if [ "$1" = run ] && [ "$2" = --locked ] && [ "$3" = --no-install ] && [ "$4" = 
   shift 7
 elif [ "$1" = run ] && [ "$2" = --as-is ] && [ "$3" = --executable ] && [ "$4" = -e ] && [ "$5" = vllm ] && [ "$6" = -- ]; then
   shift 6
+elif [ "$1" = -q ] && [ "$2" = run ] && [ "$3" = --as-is ] && [ "$4" = --executable ] && [ "$5" = --manifest-path ] && [ "$7" = -e ] && [ "$8" = vllm ] && [ "$9" = -- ]; then
+  shift 9
 else
   printf 'unexpected pixi fixture arguments\n' >&2
   exit 2
@@ -1523,6 +1594,7 @@ if [ "$operation" = preflight ] && [ -n "${FAKE_SSH_HANG_PREFLIGHT:-}" ]; then
   sleep 3600
 fi
 printf 'fixture login banner\n'
+export FAKE_SSH_TARGET="$target"
 eval "exec bash -c $command"
 "#;
 
@@ -1546,6 +1618,10 @@ const OCCUPANT_ROW: &str = "4242, 2048, fixture-occupant";
 /// `FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES`, compute-apps queries past that
 /// count never return — a wedged driver.
 const NVIDIA_SMI: &str = r#"#!/bin/sh
+if [ -n "${FIXTURE_NVIDIA_SMI_ERROR_ON:-}" ] && [ "${FAKE_SSH_TARGET:-}" = "$FIXTURE_NVIDIA_SMI_ERROR_ON" ]; then
+  printf 'fixture probe failure on %s\n' "$FAKE_SSH_TARGET" >&2
+  exit 9
+fi
 if [ -n "${FIXTURE_NVIDIA_SMI_ERROR:-}" ]; then
   printf '%s\n' "$FIXTURE_NVIDIA_SMI_ERROR" >&2
   exit 9

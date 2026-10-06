@@ -571,9 +571,10 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
         entry.1.extend(process.allocation.devices.iter().copied());
     }
     let probe_total = probe_targets.len();
-    // Occupancy is a verdict about the devices, not a probe failure: every
-    // machine is still probed so one failure names all occupants.
-    let mut occupied = Vec::new();
+    // Every machine is probed so one failure names every finding: occupied
+    // devices are a verdict about the devices, a probe failure about the
+    // probe, and neither hides the other.
+    let mut findings = Vec::new();
     for (probe_index, (machine, (launch, devices))) in probe_targets.into_iter().enumerate() {
         progress.phase(Phase::named("local and remote preflight").item(
             &machine,
@@ -585,30 +586,20 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             Ok(evidence) => {
                 session.record_mut().hardware.insert(machine, evidence);
             }
-            Err(error @ HardwareProbeError::Occupied { .. }) => occupied.push(error.to_string()),
-            Err(error) => {
-                let message =
-                    format!("device hardware probe failed on machine {machine:?}: {error}");
-                return Err(fail_with(
-                    session,
-                    runtime,
-                    &[],
-                    FailurePhase::Preflight,
-                    None,
-                    message,
-                    true,
-                )?);
-            }
+            Err(error @ HardwareProbeError::Occupied { .. }) => findings.push(error.to_string()),
+            Err(error) => findings.push(format!(
+                "device hardware probe failed on machine {machine:?}: {error}"
+            )),
         }
     }
-    if !occupied.is_empty() {
+    if !findings.is_empty() {
         return Err(fail_with(
             session,
             runtime,
             &[],
             FailurePhase::Preflight,
             None,
-            occupied.join("; "),
+            findings.join("; "),
             true,
         )?);
     }

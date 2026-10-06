@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-06
+
+### Added
+
+- `inferlab run` provides an InferLab context the command may read:
+  `INFERLAB_CONTEXT` and `INFERLAB_WORKSPACE_ROOT` always, a running server's
+  base URL and served model with `--serve`, and a model binding's local
+  locator with `--model`. With `--record` it keeps a `run` record of argv,
+  stack and lock identity, workspace snapshot, the provided context, logs,
+  exit status, and timing, so workloads InferLab does not model — agentic
+  evaluation harnesses, model quantization — are recorded beside serving and
+  measurement. A nested run records its parent; an interrupt terminates the
+  command's process tree and finalizes the record as `interrupted`.
+
+### Changed
+
+- An InferLab-built image now lowers through the workspace adapter packages
+  mounted into it, as an external image already did, instead of the
+  integration packages baked into it: an image supplies the engine, so images
+  built for an earlier adapter protocol launch under a later InferLab without
+  a rebuild. The workspace `adapter` environment is now required for built
+  images too.
+
+### Fixed
+
+- An external image lowering vLLM, TokenSpeed, or Specialized Engine no longer
+  fails with a missing module: the adapter mount now carries every InferLab
+  package the integration requires, such as `inferlab-gateway-dynamo` or
+  `inferlab-gateway-smg`, not only the adapter SDK and the integration.
+- A prefix-cache reset is retried only when the backend reports the opposite
+  boolean of a boolean success predicate (vLLM's `success: false`); an empty
+  or unparseable body, a missing value, or Dynamo's `status: error` now fails
+  the case at once instead of retrying until the case timeout. Retries now
+  spend the whole case budget. Direct vLLM cold and primed starts need vLLM
+  0.26.0 or later, whose reset body reports the outcome.
+- SGLang rejects a prefill or decode replica spanning machines and a
+  multi-node replica with attention data parallelism before launch: neither
+  could be placed correctly. It ships in `inferlab-integration-sglang`
+  `0.12.1`.
+- A Dynamo server no longer empties the discovery data directory of another
+  live server on the same Gateway machine; launch refuses while the
+  directory's recorded owner runs.
+- A hardware probe failure on one machine no longer hides occupied devices
+  found on the others.
+- The console again shows the preparation attempt of dataset Bench records
+  written before the current workload record schema.
+- The backend support matrix lowers Dynamo cold and primed cache starts to
+  Limited with Dynamo prefix-cache reset, and the website simulator offers
+  only matrix-backed shapes: no direct topology for Specialized Engine, and
+  SGLang prefill/decode status and KV transfer taken from the pairing table.
+
 ## [0.19.0] - 2026-10-05
 
 ### Added
@@ -17,14 +68,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each application's device, process ID, process name, and memory.
 - A prefix-cache reset the backend declines — a 2xx answer whose body fails
   the reset action's success predicate, as vLLM answers while KV blocks are
-  still held — is retried on the declined targets only, after a growing delay,
-  until it succeeds, another failure occurs, or the case budget expires.
+  still held — is retried after a growing delay (only the declined targets of
+  a per-target reset; the whole action of a public reset) until it succeeds,
+  another failure occurs, or the case budget expires.
   Workload record schema 22 keeps every reset attempt.
 
 ### Changed
 
-- Adapter protocol 13: an HTTP action success predicate may expect a JSON
-  boolean, matched with its JSON type. It ships in `inferlab-adapter-sdk`
+- **Breaking:** the adapter protocol hard-cuts to version 13
+  ([[RFC-0006:C-INTEGRATIONS]]): an HTTP action success predicate may expect a
+  JSON boolean, matched with its JSON type, and version 12 payloads are
+  rejected. Workspaces bump their adapter pins and relock. InferLab-built
+  images run the integration packages baked into them, so images built before
+  0.19.0 must be rebuilt to launch with it. It ships in `inferlab-adapter-sdk`
   `0.13.0`; every framework integration moves to it: `inferlab-integration-vllm`,
   `inferlab-integration-sglang`, and `inferlab-integration-tensorrt-llm`
   `0.12.0`, `inferlab-integration-tokenspeed` and
@@ -39,8 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vLLM prefix-cache resets are judged by the response body: the direct vLLM
   reset and the built-in vLLM P/D Router counted HTTP 200 as success although
   vLLM answers `success: false` while KV blocks are still held. The P/D Router
-  now answers 200 with `success: false` when every engine declined and 206
-  for any other failure.
+  now answers 200 with `success: false` when every failed engine declined and
+  206 for any other failure.
 - vLLM Mooncake prefill/decode leaves the sender-worker count at vLLM's default
   unless `mooncake_num_workers` is set. The integration had replaced it with
   1, which serialized prefill-side KV transfers and stalled high-concurrency

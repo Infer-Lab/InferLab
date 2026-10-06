@@ -637,7 +637,9 @@ if os.environ.get("FIXTURE_BENCH_INTERRUPT_WAIT") == "1":
             "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
         ]
     )
-    Path(os.environ["FIXTURE_BENCH_MARKER"]).write_text(str(child.pid), encoding="utf-8")
+    marker = Path(os.environ["FIXTURE_BENCH_MARKER"])
+    marker.with_suffix(".tmp").write_text(str(child.pid), encoding="utf-8")
+    marker.with_suffix(".tmp").replace(marker)
     time.sleep(60)
 with open(os.environ["FIXTURE_BENCH_MARKER"], "w") as marker:
     marker.write("ran")

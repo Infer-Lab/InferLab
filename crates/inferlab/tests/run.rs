@@ -8,7 +8,6 @@ mod support;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -151,11 +150,7 @@ exit 2
 }
 
 fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
-    fs::write(path, content)?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
+    crate::support::write_executable(path, content)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
@@ -183,6 +178,10 @@ fn usage_rejects_invalid_realization_combinations() -> Result<(), Box<dyn Error>
         &["--image", "a", "--external-image", "b", "--", "true"][..],
         &["--mount", "/tmp", "--", "true"][..],
         &["--devices", "0", "--", "true"][..],
+        // The context options apply only to local stack execution.
+        &["--image", "img-1", "--record", "--", "true"][..],
+        &["--external-image", "base", "--serve", "s-1", "--", "true"][..],
+        &["--image", "img-1", "--model", "m", "--", "true"][..],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_inferlab"))
             .arg("run")
@@ -608,5 +607,313 @@ fn rank_shaped_default_placement_projects_rank_devices() -> Result<(), Box<dyn E
         stdout.contains("CVD=2,3"),
         "a rank-shaped placement projects its rank devices, not the machine inventory: {stdout}"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// InferLab context and recorded runs ([[RFC-0002:C-ADHOC-EXECUTION]],
+// [[RFC-0005:C-EVIDENCE]]).
+// ---------------------------------------------------------------------------
+
+fn run_records(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let records = root.join(".inferlab/records");
+    if !records.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = fs::read_dir(records)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    Ok(entries)
+}
+
+fn load_record(dir: &Path) -> Result<serde_json::Value, Box<dyn Error>> {
+    Ok(serde_json::from_slice(&fs::read(dir.join("record.json"))?)?)
+}
+
+#[test]
+fn local_run_injects_the_inferlab_context_without_a_record() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    let output = workspace.run(&[
+        "--",
+        "sh",
+        "-c",
+        "printf '%s|%s|%s\\n' \"$INFERLAB_CONTEXT\" \"$INFERLAB_WORKSPACE_ROOT\" \"${INFERLAB_RECORD_ID-unset}\"",
+    ])?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let root = fs::canonicalize(workspace.root.path())?;
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("1|{}|unset\n", root.display())
+    );
+    assert!(run_records(workspace.root.path())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn recorded_run_keeps_argv_context_logs_and_exit_status() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    let script = "echo out-line; echo err-line >&2; \
+                  echo kept > \"$INFERLAB_RECORD_ARTIFACTS/note.txt\"; exit 3";
+    let output = workspace.run(&["--record", "--", "sh", "-c", script])?;
+
+    // The command's status and streams still reach the operator.
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(stderr(&output).contains("err-line"));
+    assert!(String::from_utf8(output.stdout)?.contains("out-line"));
+
+    let records = run_records(workspace.root.path())?;
+    assert_eq!(records.len(), 1, "{records:?}");
+    let dir = &records[0];
+    let id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("record id")?
+        .to_owned();
+    assert!(id.contains("-run-vllm-"), "{id}");
+    let record = load_record(dir)?;
+    assert_eq!(record["kind"], "run");
+    assert_eq!(record["id"], id.as_str());
+    assert_eq!(record["status"], "failed");
+    assert_eq!(record["exit_status"]["code"], 3);
+    assert_eq!(record["stack"]["id"], "vllm");
+    assert_eq!(record["argv"], serde_json::json!(["sh", "-c", script]));
+    assert!(
+        record["workspace"]["revision"]
+            .as_str()
+            .is_some_and(|revision| !revision.is_empty())
+    );
+    let provided = &record["context"]["provided"];
+    assert_eq!(provided["INFERLAB_CONTEXT"], "1");
+    assert_eq!(provided["INFERLAB_RECORD_ID"], id.as_str());
+    assert!(record["finished_unix_ms"].as_u64().is_some());
+    let stdout_log = record["stdout"].as_str().ok_or("stdout log")?;
+    assert!(fs::read_to_string(workspace.root.path().join(stdout_log))?.contains("out-line"));
+    let stderr_log = record["stderr"].as_str().ok_or("stderr log")?;
+    assert!(fs::read_to_string(workspace.root.path().join(stderr_log))?.contains("err-line"));
+    assert_eq!(
+        fs::read_to_string(dir.join("artifacts/note.txt"))?,
+        "kept\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn recorded_run_resolves_and_records_the_selected_model_binding() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    write_local_bindings(
+        workspace.root.path(),
+        "[model_weights.fixture-model]\nlocator = \"/models/fixture-model\"\n",
+    )?;
+    let output = workspace.run(&[
+        "--record",
+        "--model",
+        "fixture-model",
+        "--",
+        "sh",
+        "-c",
+        "echo \"$INFERLAB_MODEL_ID=$INFERLAB_MODEL_PATH\"",
+    ])?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "fixture-model=/models/fixture-model\n"
+    );
+    let records = run_records(workspace.root.path())?;
+    let record = load_record(&records[0])?;
+    assert_eq!(
+        record["model"],
+        serde_json::json!({"id": "fixture-model", "locator": "/models/fixture-model"})
+    );
+
+    // An undeclared binding fails before the command executes.
+    let marker = workspace.root.path().join("executed");
+    let output = workspace.run(&[
+        "--model",
+        "undeclared",
+        "--",
+        "touch",
+        marker.to_str().ok_or("marker path")?,
+    ])?;
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        stderr(&output).contains("undeclared"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
+#[test]
+fn nested_run_replaces_the_inherited_context_and_records_its_parent() -> Result<(), Box<dyn Error>>
+{
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    let output = workspace.run_with_env(
+        &[("FIXTURE_INFERLAB_BIN", env!("CARGO_BIN_EXE_inferlab"))],
+        &[
+            "--record",
+            "--",
+            "sh",
+            "-c",
+            "\"$FIXTURE_INFERLAB_BIN\" run --record -- sh -c 'echo \"inner=$INFERLAB_RECORD_ID\"'",
+        ],
+    )?;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let records = run_records(workspace.root.path())?
+        .into_iter()
+        .map(|dir| load_record(&dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(records.len(), 2);
+    let (outer, inner): (Vec<_>, Vec<_>) = records
+        .iter()
+        .partition(|record| record["parent_record"].is_null());
+    let (outer, inner) = (outer[0], inner[0]);
+    assert_eq!(inner["parent_record"], outer["id"]);
+    // The inner command saw its own record, not the outer one.
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("inner={}\n", inner["id"].as_str().ok_or("inner id")?)
+    );
+    Ok(())
+}
+
+#[test]
+fn context_variables_set_without_the_marker_fail_before_execution() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    let marker = workspace.root.path().join("executed");
+    let output = workspace.run_with_env(
+        &[("INFERLAB_RECORD_ID", "operator-set")],
+        &["--", "touch", marker.to_str().ok_or("marker path")?],
+    )?;
+
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        stderr(&output).contains("INFERLAB_RECORD_ID"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
+#[test]
+fn interrupted_recorded_run_terminates_its_process_group() -> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    let pid_file = workspace.root.path().join("sleeper.pid");
+    let mut path = OsString::from(&workspace.bin);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let mut wrapper = Command::new(env!("CARGO_BIN_EXE_inferlab"))
+        .current_dir(workspace.root.path())
+        .env("PATH", path)
+        .env("FAKE_PIXI_LOG", &workspace.pixi_log)
+        .env_remove("CUDA_VISIBLE_DEVICES")
+        .args([
+            "run",
+            "--record",
+            "--",
+            "sh",
+            "-c",
+            &format!("sleep 300 & echo $! > {}; wait", pid_file.display()),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    support::wait_for_marker(&mut wrapper, &pid_file)?;
+    let sleeper: i32 = fs::read_to_string(&pid_file)?.trim().parse()?;
+
+    Command::new("kill")
+        .args(["-TERM", &wrapper.id().to_string()])
+        .status()?;
+    let status = wrapper.wait()?;
+
+    let sleeper_alive = Path::new(&format!("/proc/{sleeper}")).exists();
+    if sleeper_alive {
+        let _ = Command::new("kill")
+            .args(["-KILL", &sleeper.to_string()])
+            .status();
+    }
+    assert!(!status.success());
+    assert!(
+        !sleeper_alive,
+        "the command's process group must not survive"
+    );
+    let records = run_records(workspace.root.path())?;
+    let record = load_record(&records[0])?;
+    assert_eq!(record["status"], "interrupted");
+    assert!(
+        record["cleanup"]["verified"].as_bool().unwrap_or(false),
+        "{record}"
+    );
+    Ok(())
+}
+
+#[test]
+fn interrupting_a_nested_run_finalizes_every_record_and_its_stubborn_command()
+-> Result<(), Box<dyn Error>> {
+    let workspace = RunWorkspace::new(&["vllm"], false)?;
+    let pid_file = workspace.root.path().join("stubborn.pid");
+    let mut path = OsString::from(&workspace.bin);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    // The inner command ignores SIGTERM and runs in the inner run's own
+    // process group: the outer run's escalation must still reach it through
+    // the process tree.
+    let inner = format!(
+        "trap '' TERM; echo $$ > {}; while :; do sleep 1; done",
+        pid_file.display()
+    );
+    let mut wrapper = Command::new(env!("CARGO_BIN_EXE_inferlab"))
+        .current_dir(workspace.root.path())
+        .env("PATH", path)
+        .env("FAKE_PIXI_LOG", &workspace.pixi_log)
+        .env("FIXTURE_INFERLAB_BIN", env!("CARGO_BIN_EXE_inferlab"))
+        .env("FIXTURE_INNER", &inner)
+        .env_remove("CUDA_VISIBLE_DEVICES")
+        .args([
+            "run",
+            "--record",
+            "--",
+            "sh",
+            "-c",
+            "\"$FIXTURE_INFERLAB_BIN\" run --record -- sh -c \"$FIXTURE_INNER\"",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    support::wait_for_marker(&mut wrapper, &pid_file)?;
+    let stubborn: i32 = fs::read_to_string(&pid_file)?.trim().parse()?;
+
+    Command::new("kill")
+        .args(["-TERM", &wrapper.id().to_string()])
+        .status()?;
+    wrapper.wait()?;
+
+    let alive = Path::new(&format!("/proc/{stubborn}")).exists();
+    if alive {
+        let _ = Command::new("kill")
+            .args(["-KILL", &stubborn.to_string()])
+            .status();
+    }
+    assert!(
+        !alive,
+        "the outer run must terminate the nested command's process group"
+    );
+    let records = run_records(workspace.root.path())?
+        .into_iter()
+        .map(|dir| load_record(&dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(records.len(), 2);
+    // Both records are finalized, not just marked: the nested run is not
+    // killed before it records its own cleanup ([[RFC-0005:C-EVIDENCE]]).
+    for record in &records {
+        assert_eq!(record["status"], "interrupted", "{record}");
+        assert!(record["finished_unix_ms"].as_u64().is_some(), "{record}");
+        assert_eq!(record["cleanup"]["trigger"], "interrupt", "{record}");
+    }
     Ok(())
 }

@@ -284,6 +284,31 @@ def _multi_node_args(
     ]
 
 
+def _require_placeable_multi_node(allocation: ServeProcessAllocationModelRank) -> None:
+    """Only a serve-role replica without attention data parallelism spans
+    machines: a prefill node registers at rank zero's host on its own
+    bootstrap port, which only rank zero's machine serves, and DP attention
+    binds ports above the master port that InferLab never allocated
+    ([[RFC-0002:C-LOCAL-PLACEMENT]])."""
+    if allocation.rank_count == 1:
+        return
+    if allocation.role_kind != ServeRoleKind.serve:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"allocation {allocation.process!r} spans machines in a "
+            f"{allocation.role_kind.value} role; SGLang multi-node replicas are "
+            "not supported for prefill and decode roles",
+        )
+    attention = allocation.effective_parallelism.attention
+    if attention is not None and (attention.data_parallel_size or 1) != 1:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"allocation {allocation.process!r} spans machines with attention data "
+            "parallelism; SGLang multi-node replicas are not supported with "
+            "attention data parallelism",
+        )
+
+
 def render_serve(input: RenderServeInput) -> RenderServeResult:
     if not input.allocations:
         raise AdapterOperationError(
@@ -298,6 +323,7 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
                 for rank in model_allocations
                 if rank.role == allocation.role and rank.replica == allocation.replica
             ]
+            _require_placeable_multi_node(allocation)
             processes.append(_render_process(input, allocation, replica_ranks))
         elif isinstance(allocation, ServeProcessAllocationFrontend):
             require_integration_fused_frontend(

@@ -86,8 +86,10 @@ fn detailed_help_states_the_operator_boundaries_it_owns() -> Result<(), Box<dyn 
         (
             &["run"],
             &[
-                "writes no execution record",
+                "--record keeps a run record",
                 "no host mount or device implicitly",
+                "INFERLAB_CONTEXT",
+                "not a qualification",
             ],
         ),
         (

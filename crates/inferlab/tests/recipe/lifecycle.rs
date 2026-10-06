@@ -1,12 +1,11 @@
 use crate::harness::{
-    TestWorkspace, process_evidence, resolved_ranks, wait_for_path, write_executable,
+    TestWorkspace, process_evidence, resolved_ranks, wait_for_marker, write_executable,
 };
 use crate::support;
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
 use std::process::Stdio;
-use std::time::Duration;
 
 const ENVIRONMENT_CHECK: &str = include_str!("../fixtures/bin/recipe-environment-check.py");
 const PYTHON_SHIM: &str = include_str!("../fixtures/bin/recipe-python.sh");
@@ -359,14 +358,14 @@ fn manual_bench_attaches_to_an_explicit_running_server() -> Result<(), Box<dyn E
         2
     );
 
-    let bench = workspace
+    let mut bench = workspace
         .command()
         .env("FIXTURE_BENCH_WAIT", "1")
         .args(["bench", "c8k1k", "--serve", server_id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    wait_for_path(workspace.bench_marker(), Duration::from_secs(5))?;
+    wait_for_marker(&mut bench, workspace.bench_marker())?;
     let busy_stop = workspace
         .command()
         .args(["serve", "stop", server_id])

@@ -216,8 +216,10 @@ pub(super) fn probe_device_residual<R: ResidualProbe>(
 
 #[cfg(test)]
 mod tests {
+    /// A hang guard for awaited test events: a loaded host must never trip it.
+    const TEST_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     use super::{RESIDUAL_MARKER, ResidualProbeError, parse_residual_rows, residual_script};
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     #[test]
@@ -253,17 +255,28 @@ mod tests {
     ) -> Result<Result<u64, ResidualProbeError>, Box<dyn std::error::Error>> {
         let bin = tempfile::tempdir()?;
         let fake = bin.path().join("nvidia-smi");
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' {}\n",
-                rows.iter()
-                    .map(|row| format!("'{row}'"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' {}\n",
+            rows.iter()
+                .map(|row| format!("'{row}'"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        // Written by a child process: a writable descriptor held by this test
+        // process could leak into a concurrently forked child and make the
+        // fake fail to execute with ETXTBSY.
+        let mut writer = Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&fake)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        std::io::Write::write_all(
+            &mut writer.stdin.take().ok_or("writer stdin")?,
+            script.as_bytes(),
         )?;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))?;
+        if !writer.wait()?.success() {
+            return Err("failed to write the fake nvidia-smi".into());
+        }
         let path = format!("{}:{}", bin.path().display(), std::env::var("PATH")?);
         let output = Command::new("sh")
             .args([
@@ -286,7 +299,7 @@ mod tests {
         let mut zombie = Command::new("sh").args(["-c", "exit 0"]).spawn()?;
         let zombie_pid = zombie.id();
         let stat = format!("/proc/{zombie_pid}/stat");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + TEST_HANG_GUARD;
         while !std::fs::read_to_string(&stat)?.contains(") Z ") {
             if std::time::Instant::now() > deadline {
                 return Err("the child never became a zombie".into());

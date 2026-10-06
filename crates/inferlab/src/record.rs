@@ -50,6 +50,9 @@ pub(crate) enum RecordIdentity<'a> {
     Image {
         image: &'a str,
     },
+    Run {
+        stack: &'a str,
+    },
 }
 
 pub(crate) fn new_record_id(identity: RecordIdentity<'_>) -> Result<String, InferlabError> {
@@ -105,6 +108,7 @@ pub(crate) fn record_id(
         ),
         RecordIdentity::Bench { bench } => format!("{timestamp}-bench-{bench}-{pid}"),
         RecordIdentity::Image { image } => format!("{timestamp}-image-{image}-{pid}"),
+        RecordIdentity::Run { stack } => format!("{timestamp}-run-{stack}-{pid}"),
     })
 }
 

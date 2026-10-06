@@ -418,13 +418,7 @@ fn fixture_server_shim_registers_and_is_reaped() -> Result<(), Box<dyn Error>> {
     let mut stand_in = StandIn { child };
 
     let entry = registry.path().join(format!("{}.grp", stand_in.pid()));
-    for _ in 0..50 {
-        if entry.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(entry.exists(), "the shim registers its group at startup");
+    support::wait_until("the shim registering its group", || Ok(entry.exists()))?;
     assert!(support::group_alive(stand_in.pid()));
 
     drop(guard);

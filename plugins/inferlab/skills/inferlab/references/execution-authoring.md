@@ -155,10 +155,14 @@ integration = "vllm"
 ```
 
 The `integration` claim must equal the integration of every server stack the
-image is selected for. InferLab lowers an external image's commands with the
-workspace's own integration packages, so the workspace must commit and install
-a framework-free Pixi environment named `adapter` that contains
-`inferlab-adapter-sdk` and `inferlab-integration-<integration>`.
+image is selected for. An image supplies the engine; InferLab lowers its
+commands with the workspace's own integration packages, mounted read-only into
+the image — for external and built images alike, so an image keeps working
+when InferLab moves to a later adapter protocol. The workspace must commit and
+install a framework-free Pixi environment named `adapter` that contains
+`inferlab-integration-<integration>`; its InferLab dependencies, such as the
+adapter SDK and a shared Gateway package, are mounted with it. The image
+provides the Python interpreter and third-party packages such as Pydantic.
 
 By default InferLab replaces an external image's entrypoint with the rendered
 command, because an entrypoint may itself be a fixed serving command. When the

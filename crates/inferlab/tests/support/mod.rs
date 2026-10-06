@@ -793,3 +793,93 @@ pub(crate) fn reserve_local_ports_in(
     }
     Ok(ReservedLocalPorts { listeners, ports })
 }
+
+/// Write an executable fixture through a short-lived child process.
+///
+/// A file this test process held open for writing could be inherited, still
+/// writable, by a child another test thread is forking at that moment;
+/// executing the fixture would then fail with ETXTBSY ("Text file busy")
+/// until that child execs. Only the writer child ever holds a writable
+/// descriptor, and it has exited before this returns.
+pub(crate) fn write_executable(
+    path: impl AsRef<std::path::Path>,
+    content: impl AsRef<[u8]>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let path = path.as_ref();
+    let mut writer = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    writer
+        .stdin
+        .take()
+        .ok_or("executable writer has no stdin")?
+        .write_all(content.as_ref())?;
+    let status = writer.wait()?;
+    if !status.success() {
+        return Err(format!("failed to write executable {}: {status}", path.display()).into());
+    }
+    Ok(())
+}
+
+/// How long a test waits for a fixture event or exit before calling the
+/// product stuck. It guards against hangs only: a slow, loaded host must never
+/// trip it, so ordering comes from the awaited events themselves.
+pub(crate) const FIXTURE_HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// Poll `ready` until it holds, failing only at the hang guard.
+pub(crate) fn wait_until(
+    what: &str,
+    mut ready: impl FnMut() -> Result<bool, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + FIXTURE_HANG_GUARD;
+    while !ready()? {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("{what} did not happen within {FIXTURE_HANG_GUARD:?}").into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+/// Wait until the fixture has written `path`, failing at once when `child`
+/// exits first: a wrong flow fails fast and a slow host never does.
+pub(crate) fn wait_for_marker(
+    child: &mut std::process::Child,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut exited = None;
+    let waited = wait_until(&format!("writing {}", path.display()), || {
+        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+            return Ok(true);
+        }
+        exited = child.try_wait()?;
+        Ok(exited.is_some())
+    });
+    if let Err(error) = waited {
+        let _ = child.kill();
+        return Err(error);
+    }
+    match exited {
+        Some(status) => Err(format!(
+            "the command exited with {status} before {} was written",
+            path.display()
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
+/// Wait for `child` to exit, killing it at the hang guard.
+pub(crate) fn wait_for_exit(
+    child: &mut std::process::Child,
+    what: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let waited = wait_until(what, || Ok(child.try_wait()?.is_some()));
+    if waited.is_err() {
+        let _ = child.kill();
+    }
+    waited
+}

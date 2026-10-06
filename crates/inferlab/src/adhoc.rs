@@ -1,7 +1,11 @@
 //! Ad-hoc command execution inside a selected serving-environment
 //! realization ([[RFC-0002:C-ADHOC-EXECUTION]]): one operator command on
-//! the operator's streams, exiting with the command's status — no checks,
-//! no record, no allocation.
+//! the operator's streams, exiting with the command's status — no checks
+//! and no allocation. Local execution receives the InferLab context and,
+//! under `--record`, writes a run record.
+
+mod context;
+mod recorded;
 
 use crate::InferlabError;
 use crate::environment;
@@ -12,6 +16,9 @@ use std::process::Command;
 
 pub(crate) struct AdHocRequest<'a> {
     pub stack: Option<&'a str>,
+    pub record: bool,
+    pub serve: Option<&'a str>,
+    pub model: Option<&'a str>,
     pub image: Option<&'a str>,
     pub external_image: Option<&'a str>,
     pub mounts: &'a [String],
@@ -28,59 +35,144 @@ pub(crate) fn execute(
     // Mount requests parse before any selection I/O: a rejected request
     // should never cost a record read or a docker probe.
     let mounts = parse_mounts(request.mounts)?;
-    let (argv, project_devices) = if let Some(record_id) = request.image {
+    let argv = if let Some(record_id) = request.image {
         let image_id = crate::image::launch::select_for_adhoc(root, record_id)?;
-        (
-            container_argv(&image_id, &mounts, request.devices, request.command, false),
-            false,
-        )
+        container_argv(&image_id, &mounts, request.devices, request.command, false)
     } else if let Some(external_id) = request.external_image {
         let (reference, entrypoint) =
             crate::image::launch::select_external_for_adhoc(config, external_id)?;
-        (
-            container_argv(
-                &reference,
-                &mounts,
-                request.devices,
-                request.command,
-                entrypoint.overrides(),
-            ),
-            false,
+        container_argv(
+            &reference,
+            &mounts,
+            request.devices,
+            request.command,
+            entrypoint.overrides(),
         )
     } else {
-        (
-            local_argv(root, config, request.stack, request.command)?,
-            true,
-        )
+        return execute_local(root, config, request);
     };
     // Ctrl-C must reach the foreground command, not kill the wrapper: the
     // installed handler keeps this process alive to report the command's
     // real exit status.
     inferlab_runtime::interrupt::prepare()
         .map_err(|source| InferlabError::AdHocInterrupt { source })?;
-    let mut process = Command::new(&argv[0]);
-    process.args(&argv[1..]);
+    let status = Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .map_err(|source| InferlabError::AdHocRun {
+            message: format!("failed to launch {:?}: {source}", argv[0]),
+        })?;
+    Ok(exit_code(status))
+}
+
+/// Local stack execution with the injected InferLab context
+/// ([[RFC-0002:C-ADHOC-EXECUTION]]). Every selection — the inherited
+/// context, the linked server, the model binding, the stack — resolves
+/// before the command runs.
+fn execute_local(
+    root: &Path,
+    config: &WorkspaceConfig,
+    request: &AdHocRequest,
+) -> Result<i32, InferlabError> {
+    let inherited = context::inherited()?;
+    let (stack_id, definition) = select_stack(config, request.stack)?;
+    let argv = local_argv(root, definition, request.command)?;
+    let serve = request
+        .serve
+        .map(|id| context::serve(root, id))
+        .transpose()?;
+    let model = request
+        .model
+        .map(|id| context::model(root, id))
+        .transpose()?;
     // Project the workspace default placement's device set into local
     // execution ([[RFC-0002:C-ADHOC-EXECUTION]]); an operator-provided
     // CUDA_VISIBLE_DEVICES always wins.
-    if project_devices
-        && std::env::var_os("CUDA_VISIBLE_DEVICES").is_none()
-        && let Some(devices) = crate::workspace::soft_local_bindings(root)
+    let cuda_visible_devices = if std::env::var_os("CUDA_VISIBLE_DEVICES").is_none() {
+        crate::workspace::soft_local_bindings(root)
             .and_then(|local| local.default_local_devices())
-    {
-        process.env(
-            "CUDA_VISIBLE_DEVICES",
-            devices
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+            .map(|devices| {
+                devices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+    } else {
+        None
+    };
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::AdHocInterrupt { source })?;
+    if request.record {
+        return recorded::execute(recorded::RecordedRun {
+            root,
+            snapshot: crate::workspace::snapshot_workspace(root, config)?,
+            stack_id,
+            pixi_environment: &definition.pixi_environment,
+            argv: request.command,
+            executed_argv: &argv,
+            strip: &inherited.strip,
+            cuda_visible_devices,
+            serve,
+            model,
+            parent_record: inherited.parent_record,
+        });
     }
+    let mut process = Command::new(&argv[0]);
+    process.args(&argv[1..]);
+    for name in &inherited.strip {
+        process.env_remove(name);
+    }
+    process.envs(context::variables(
+        root,
+        None,
+        serve.as_ref(),
+        model.as_ref(),
+    ));
+    if let Some(devices) = cuda_visible_devices {
+        process.env("CUDA_VISIBLE_DEVICES", devices);
+    }
+    // Ctrl-C reaches the foreground command directly; the installed handler
+    // keeps this process alive to report the command's real exit status.
     let status = process.status().map_err(|source| InferlabError::AdHocRun {
         message: format!("failed to launch {:?}: {source}", argv[0]),
     })?;
     Ok(exit_code(status))
+}
+
+/// The selected stack, defaulting to the only declared one.
+fn select_stack<'a>(
+    config: &'a WorkspaceConfig,
+    stack: Option<&'a str>,
+) -> Result<(&'a str, &'a crate::workspace::StackDefinition), InferlabError> {
+    let stacks = &config.stacks;
+    match stack {
+        Some(id) => stacks
+            .get_key_value(id)
+            .map(|(id, definition)| (id.as_str(), definition))
+            .ok_or_else(|| InferlabError::AdHocRun {
+                message: format!(
+                    "unknown stack {id:?}; the workspace declares {:?}",
+                    stacks.keys().collect::<Vec<_>>()
+                ),
+            }),
+        None => {
+            let mut candidates = stacks.iter();
+            match (candidates.next(), candidates.next()) {
+                (Some((id, only)), None) => Ok((id.as_str(), only)),
+                (None, _) => Err(InferlabError::AdHocRun {
+                    message: "the workspace declares no stacks".to_owned(),
+                }),
+                (Some(_), Some(_)) => Err(InferlabError::AdHocRun {
+                    message: format!(
+                        "the workspace declares more than one stack {:?}; select one \
+                         with --stack",
+                        stacks.keys().collect::<Vec<_>>()
+                    ),
+                }),
+            }
+        }
+    }
 }
 
 /// The local-realization launcher ([[RFC-0002:C-ADHOC-EXECUTION]]): the
@@ -90,39 +182,9 @@ pub(crate) fn execute(
 /// operator's working directory.
 fn local_argv(
     root: &Path,
-    config: &WorkspaceConfig,
-    stack: Option<&str>,
+    definition: &crate::workspace::StackDefinition,
     command: &[String],
 ) -> Result<Vec<String>, InferlabError> {
-    let stacks = &config.stacks;
-    let definition = match stack {
-        Some(id) => stacks.get(id).ok_or_else(|| InferlabError::AdHocRun {
-            message: format!(
-                "unknown stack {id:?}; the workspace declares {:?}",
-                stacks.keys().collect::<Vec<_>>()
-            ),
-        })?,
-        None => {
-            let mut candidates = stacks.values();
-            match (candidates.next(), candidates.next()) {
-                (Some(only), None) => only,
-                (None, _) => {
-                    return Err(InferlabError::AdHocRun {
-                        message: "the workspace declares no stacks".to_owned(),
-                    });
-                }
-                (Some(_), Some(_)) => {
-                    return Err(InferlabError::AdHocRun {
-                        message: format!(
-                            "the workspace declares more than one stack {:?}; select one \
-                             with --stack",
-                            stacks.keys().collect::<Vec<_>>()
-                        ),
-                    });
-                }
-            }
-        }
-    };
     // The ad-hoc check (never the confirmation-marker-aware gate): running
     // this operation MUST NOT trust or produce qualification evidence a
     // real launch would rely on ([[RFC-0002:C-ADHOC-EXECUTION]]).

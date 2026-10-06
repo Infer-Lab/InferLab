@@ -496,16 +496,22 @@ fn source_preparation(
     preparation_attempt_id: Option<&str>,
     historical_acquisition: Option<&AcquisitionProjection>,
 ) -> String {
+    // Workload record schema 13 replaced inline acquisition with a reference
+    // to the measurement data-asset preparation attempt.
+    const PREPARATION_ATTEMPT_SCHEMA_VERSION: u32 = 13;
     match schema_version {
-        Some(crate::workload::EVIDENCE_WORKLOAD_SCHEMA_VERSION) => {
+        Some(version)
+            if (PREPARATION_ATTEMPT_SCHEMA_VERSION
+                ..=crate::workload::EVIDENCE_WORKLOAD_SCHEMA_VERSION)
+                .contains(&version) =>
+        {
             optional_text(preparation_attempt_id)
         }
-        Some(version) if version < crate::workload::EVIDENCE_WORKLOAD_SCHEMA_VERSION => {
-            historical_acquisition.map_or_else(
+        Some(version) if version < PREPARATION_ATTEMPT_SCHEMA_VERSION => historical_acquisition
+            .map_or_else(
                 || "unavailable for this record schema".to_owned(),
                 acquisition,
-            )
-        }
+            ),
         Some(_) => "unavailable for unsupported record schema".to_owned(),
         None => "unavailable for unknown record schema".to_owned(),
     }

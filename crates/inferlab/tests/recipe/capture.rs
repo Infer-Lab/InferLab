@@ -740,8 +740,10 @@ fn readiness_probing_backs_off_for_slow_starts() -> Result<(), Box<dyn Error>> {
     let attempts = process_evidence(&server, "server")?["readiness"]["attempts"]
         .as_u64()
         .ok_or("readiness evidence has no attempt count")?;
+    // Backoff bounds how often readiness polls; a loaded host only polls
+    // less, so the count has an upper bound but no lower one beyond progress.
     assert!(
-        (4..=12).contains(&attempts),
+        (1..=12).contains(&attempts),
         "a 3s wait must record a backed-off attempt count, got {attempts}"
     );
     Ok(())

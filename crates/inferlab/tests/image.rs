@@ -11,7 +11,6 @@ use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -156,7 +155,11 @@ impl TestWorkspace {
         // in the requested order ([[RFC-0006:C-INTEGRATIONS]]).
         let adapter_bin = root.path().join(".pixi/envs/adapter/bin");
         fs::create_dir_all(&adapter_bin)?;
-        for package in ["inferlab_adapter_sdk", "inferlab_integration_vllm"] {
+        for package in [
+            "inferlab_integration_vllm",
+            "inferlab_adapter_sdk",
+            "inferlab_gateway_dynamo",
+        ] {
             fs::create_dir_all(root.path().join(".pixi/envs/adapter/site").join(package))?;
             fs::create_dir_all(
                 root.path()
@@ -164,14 +167,18 @@ impl TestWorkspace {
                     .join(format!("{package}-0.1.0.dist-info")),
             )?;
         }
+        // The fixture answers with the vLLM integration's InferLab dependency
+        // closure, one `import<TAB>module<TAB>metadata` row per package, as
+        // the real closure script does.
         write_executable(
             &adapter_bin.join("python"),
             "#!/usr/bin/env python3\n\
              import os\n\
              root = os.getcwd()\n\
-             for name in ('inferlab_adapter_sdk', 'inferlab_integration_vllm'):\n\
-             \x20   print(f'{root}/.pixi/envs/adapter/site/{name}')\n\
-             \x20   print(f'{root}/.pixi/envs/adapter/site/{name}-0.1.0.dist-info')\n",
+             for name in ('inferlab_integration_vllm', 'inferlab_adapter_sdk', \
+             'inferlab_gateway_dynamo'):\n\
+             \x20   site = f'{root}/.pixi/envs/adapter/site'\n\
+             \x20   print(f'{name}\\t{site}/{name}\\t{site}/{name}-0.1.0.dist-info')\n",
         )?;
         fs::write(
             root.path().join(".gitignore"),
@@ -1322,6 +1329,8 @@ fn external_image_adapter_container_mounts_modules_with_their_metadata()
         "target=/inferlab-adapter/inferlab_adapter_sdk-0.1.0.dist-info,readonly",
         "target=/inferlab-adapter/inferlab_integration_vllm,readonly",
         "target=/inferlab-adapter/inferlab_integration_vllm-0.1.0.dist-info,readonly",
+        // An InferLab package the integration requires crosses too.
+        "target=/inferlab-adapter/inferlab_gateway_dynamo,readonly",
     ] {
         assert!(
             adapter_line.contains(target),
@@ -1828,6 +1837,61 @@ fn incompatible_image_selections_are_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn built_image_lowers_through_the_workspace_adapter_packages() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
+    assert!(
+        build.status.success(),
+        "bare image build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let record_id = stdout_json(&build)?["record_id"]
+        .as_str()
+        .ok_or("record id")?
+        .to_owned();
+    let docker_log = workspace.root.path().join("docker-log");
+    let dry = workspace
+        .command_with(&Scenario {
+            docker_log: Some(docker_log.clone()),
+            ..Scenario::default()
+        })
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--image",
+            &record_id,
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(
+        dry.status.success(),
+        "image-backed dry-run failed: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    // The image supplies the engine; the workspace adapter packages lower it,
+    // so a later InferLab protocol needs no rebuild
+    // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    let log = fs::read_to_string(&docker_log)?;
+    let adapter_line = log
+        .lines()
+        .find(|line| line.contains("-m inferlab_integration_vllm"))
+        .ok_or("adapter container invocation")?;
+    for target in [
+        "target=/inferlab-adapter/inferlab_integration_vllm,readonly",
+        "target=/inferlab-adapter/inferlab_adapter_sdk,readonly",
+        "target=/inferlab-adapter/inferlab_gateway_dynamo,readonly",
+    ] {
+        assert!(adapter_line.contains(target), "{target}: {adapter_line}");
+    }
+    assert!(
+        adapter_line.contains("PYTHONPATH=/inferlab-adapter"),
+        "{adapter_line}"
+    );
+    Ok(())
+}
+
+#[test]
 fn image_backed_launch_needs_no_local_environment() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let build = workspace.build(&["deepseek-v4-flash-runtime-bare"])?;
@@ -1856,9 +1920,12 @@ fn image_backed_launch_needs_no_local_environment() -> Result<(), Box<dyn Error>
 
     // From here on the locally installed serving environment is gone: any
     // Pixi invocation fails loudly.
+    // Only the adapter environment's usability probe may still run: the
+    // workspace adapter packages lower the image.
     write_executable(
         &workspace.bin.join("pixi"),
-        "#!/bin/sh\necho 'pixi must not run for an image-backed launch' >&2\nexit 97\n",
+        "#!/bin/sh\ncase \"$*\" in\n  *'-e adapter -- true') exit 0 ;;\nesac\n\
+         echo 'pixi must not run the serving environment for an image-backed launch' >&2\nexit 97\n",
     )?;
 
     let run = workspace
@@ -3333,11 +3400,7 @@ fn assert_datetime_record_id(id: &str, expected_stem: &str) -> Result<(), Box<dy
 }
 
 fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
-    fs::write(path, content)?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
+    crate::support::write_executable(path, content)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {

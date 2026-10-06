@@ -1,8 +1,9 @@
+mod support;
+
 use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -40,8 +41,7 @@ impl AgentHarness {
         if with_clis {
             for cli in ["claude", "codex"] {
                 let path = bin.join(cli);
-                fs::write(&path, NATIVE_CLI)?;
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+                support::write_executable(&path, NATIVE_CLI)?;
             }
         }
         Ok(Self {
@@ -146,7 +146,7 @@ fn install_with_no_from_checkout_uses_the_embedded_package_and_drives_both_clis(
     // inspects and replaces the registration instead of relying on a
     // permissive fake.
     let codex = harness.bin.join("codex");
-    fs::write(
+    support::write_executable(
         &codex,
         r#"#!/bin/sh
 printf 'codex %s\n' "$*" >> "$FAKE_AGENT_CLI_LOG"
@@ -178,7 +178,6 @@ esac
 exit 0
 "#,
     )?;
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755))?;
     // No `--from-checkout`: the binary-embedded default package must be
     // extracted and validated on its own, with no repository checkout in
     // reach ([[RFC-0008:C-AGENT-PLUGIN]]).
@@ -311,8 +310,7 @@ exit 0
 "#;
     for cli in ["claude", "codex"] {
         let path = harness.bin.join(cli);
-        fs::write(&path, source_aware_cli)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        support::write_executable(&path, source_aware_cli)?;
     }
 
     let output = harness.run(&["agent", "update", "--agent", "all"])?;
@@ -415,7 +413,7 @@ fn doctor_fails_when_the_registered_inferlab_marketplace_source_is_missing()
         ("claude", claude_marketplaces),
     ] {
         let path = harness.bin.join(cli);
-        fs::write(
+        support::write_executable(
             &path,
             format!(
                 "#!/bin/sh\n\
@@ -427,7 +425,6 @@ fn doctor_fails_when_the_registered_inferlab_marketplace_source_is_missing()
                 marketplaces
             ),
         )?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
     }
 
     let output = harness.run(&["agent", "doctor", "--agent", "all"])?;
@@ -502,7 +499,7 @@ fn native_failure_continues_other_runtimes_then_fails_loudly() -> Result<(), Box
     // plugin add: the report must keep the completed claude row and a codex
     // row carrying both the completed and the failed native commands.
     let codex = harness.bin.join("codex");
-    fs::write(
+    support::write_executable(
         &codex,
         "#!/bin/sh\n\
          printf 'codex %s\\n' \"$*\" >> \"$FAKE_AGENT_CLI_LOG\"\n\
@@ -511,7 +508,6 @@ fn native_failure_continues_other_runtimes_then_fails_loudly() -> Result<(), Box
          case \"$*\" in *\"plugin add\"*) echo 'codex exploded' >&2; exit 7 ;; esac\n\
          exit 0\n",
     )?;
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755))?;
     let root = repo_root();
     let output = harness.run(&[
         "agent",
@@ -793,7 +789,7 @@ fn a_spawn_failure_after_a_mutation_keeps_the_mutation_in_the_report() -> Result
     // chmods its absolute location — via /bin/chmod, because the bin-only
     // PATH below hides chmod itself.
     let codex = harness.bin.join("codex");
-    fs::write(
+    support::write_executable(
         &codex,
         format!(
             "#!/bin/sh\n\
@@ -805,7 +801,6 @@ fn a_spawn_failure_after_a_mutation_keeps_the_mutation_in_the_report() -> Result
             codex.display()
         ),
     )?;
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755))?;
     let root = repo_root();
     // A bin-only PATH: once the shim drops its own execute bit, the lookup
     // must not fall through to a real codex on the developer machine.

@@ -15,7 +15,7 @@ this map are not implicitly exposed by InferLab.
 | `serve start`, `status`, `logs`, `stop` | Own a long-running named server lifecycle | [Serving and recipes](serving-and-recipes.md) |
 | `recipe run` | Run serve, selected Eval/Bench suite, and cleanup as one closed loop | [Serving and recipes](serving-and-recipes.md) |
 | `bench` | Run one named Bench against an explicit managed server | [Measurements](measurements.md) |
-| `run` | Execute an unrecorded probe in a stack or image realization | [Images and ad-hoc execution](images-and-run.md) |
+| `run` | Execute a probe in a stack or image realization; with `--record`, keep a run record of a workload InferLab does not model | [Images and ad-hoc execution](images-and-run.md) |
 | `image build` | Assemble, inspect, optionally export, and validate a named runtime image | [Images and ad-hoc execution](images-and-run.md) |
 | `scratchpad note`, `scratchpad show` | Maintain the append-only operator narrative | [Evidence and diagnosis](evidence-and-diagnosis.md) |
 | `agent install`, `update`, `uninstall`, `doctor` | Manage the bundled agent plugin | [Agent plugin](agent-plugin.md) |

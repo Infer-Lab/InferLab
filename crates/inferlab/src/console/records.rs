@@ -65,6 +65,20 @@ struct RecordProjection {
     agentic_source: Option<serde_json::Value>,
     #[serde(default)]
     cases: Vec<CaseProjection>,
+    /// Run-record facts ([[RFC-0005:C-EVIDENCE]]), read only for the run
+    /// kind and kept untyped so no other record family can fail on them.
+    #[serde(default)]
+    stack: Option<serde_json::Value>,
+    #[serde(default)]
+    stdout: Option<serde_json::Value>,
+    #[serde(default)]
+    stderr: Option<serde_json::Value>,
+    #[serde(default)]
+    exit_status: Option<serde_json::Value>,
+    #[serde(default)]
+    serve: Option<serde_json::Value>,
+    #[serde(default)]
+    parent_record: Option<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -411,6 +425,15 @@ fn read_record(root: &Path, path: PathBuf, observed_unix_ms: u64) -> RecordView 
             );
         }
     }
+    if kind == "run"
+        && let Some(stack) = projection
+            .stack
+            .as_ref()
+            .and_then(|stack| stack.get("id"))
+            .and_then(serde_json::Value::as_str)
+    {
+        definition_ids.push(stack.to_owned());
+    }
     definition_ids.sort();
     definition_ids.dedup();
     let case = projection
@@ -627,11 +650,56 @@ fn read_record(root: &Path, path: PathBuf, observed_unix_ms: u64) -> RecordView 
             ));
         }
     }
+    if kind == "run" {
+        let exit = projection.exit_status.as_ref().and_then(|exit| {
+            exit.get("code")
+                .and_then(serde_json::Value::as_i64)
+                .map(|code| code.to_string())
+                .or_else(|| {
+                    exit.get("signal")
+                        .and_then(serde_json::Value::as_i64)
+                        .map(|signal| format!("signal {signal}"))
+                })
+        });
+        let linked = [
+            ("Exit status", exit),
+            (
+                "Server record",
+                projection
+                    .serve
+                    .as_ref()
+                    .and_then(|serve| serve.get("record_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            ),
+            (
+                "Parent record",
+                projection
+                    .parent_record
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            ),
+        ];
+        outcome_facts.extend(
+            linked
+                .into_iter()
+                .filter_map(|(label, value)| value.map(|value| (label.to_owned(), value))),
+        );
+    }
     let mut log_refs = projection
         .process_evidence
         .into_values()
         .flat_map(|process| process.stdout.into_iter().chain(process.stderr))
         .collect::<Vec<_>>();
+    if kind == "run" {
+        log_refs.extend(
+            [&projection.stdout, &projection.stderr]
+                .into_iter()
+                .filter_map(|log| log.as_ref().and_then(serde_json::Value::as_str))
+                .map(str::to_owned),
+        );
+    }
     log_refs.extend(
         cases
             .iter()
@@ -988,6 +1056,7 @@ mod tests {
         let current = root.path().join("current.json");
         let historical = root.path().join("historical.json");
         let future = root.path().join("future.json");
+        let earlier = root.path().join("earlier.json");
         let catalog = r#"{"dataset":"speed_bench","profile":"default","upstream_identity":"release","sha256":"abc"}"#;
         let current_version = crate::workload::EVIDENCE_WORKLOAD_SCHEMA_VERSION;
         let future_version = current_version + 1;
@@ -1010,6 +1079,21 @@ mod tests {
             ),
         )?;
 
+        // A record from an earlier schema that already carried preparation
+        // attempts keeps showing its attempt.
+        std::fs::write(
+            &earlier,
+            format!(
+                r#"{{"schema_version":21,"id":"earlier","kind":"bench","status":"succeeded","started_unix_ms":1,"request_source":{{"kind":"dataset","catalog":{catalog},"preparation_attempt_id":"data-asset-0"}},"cases":[]}}"#,
+            ),
+        )?;
+        let earlier = read_record(root.path(), earlier, 2);
+        assert!(
+            earlier.bench_details[0]
+                .rows
+                .iter()
+                .any(|(label, value)| { label == "Source preparation" && value == "data-asset-0" })
+        );
         let current = read_record(root.path(), current, 2);
         let historical = read_record(root.path(), historical, 2);
         let future = read_record(root.path(), future, 2);
@@ -1143,6 +1227,37 @@ mod tests {
                 .map(|record| record.id.as_deref())
                 .collect::<Vec<_>>(),
             [Some("serve-1"), Some("eval-1")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_record_shows_its_stack_logs_exit_and_links() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join(".inferlab/records/run-1");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("record.json"),
+            r#"{"schema_version":1,"kind":"run","id":"run-1","status":"failed","started_unix_ms":1,"finished_unix_ms":2,"stack":{"id":"vllm","pixi_environment":"vllm"},"stdout":".inferlab/records/run-1/stdout.log","stderr":".inferlab/records/run-1/stderr.log","exit_status":{"code":3},"serve":{"record_id":"serve-1"},"parent_record":"run-0"}"#,
+        )?;
+        let collection = read_records(root.path(), 10);
+        let record = &collection.records[0];
+        assert_eq!(record.kind, "run");
+        assert_eq!(record.definition_ids, ["vllm"]);
+        assert_eq!(
+            record.log_refs,
+            [
+                ".inferlab/records/run-1/stdout.log",
+                ".inferlab/records/run-1/stderr.log"
+            ]
+        );
+        assert_eq!(
+            record.outcome_facts,
+            [
+                ("Exit status".to_owned(), "3".to_owned()),
+                ("Server record".to_owned(), "serve-1".to_owned()),
+                ("Parent record".to_owned(), "run-0".to_owned()),
+            ]
         );
         Ok(())
     }

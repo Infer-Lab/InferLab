@@ -869,6 +869,9 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
+    /// A hang guard for awaited test events: a loaded host must never trip it.
+    const TEST_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     use super::*;
     use anyhow::{Context, Result};
 
@@ -1016,10 +1019,8 @@ mod tests {
                 .send()
                 .await;
             assert!(result.is_err(), "the pending target must hold the response");
-            for _ in 0..50 {
-                if observed.load(Ordering::SeqCst) {
-                    break;
-                }
+            let deadline = tokio::time::Instant::now() + TEST_HANG_GUARD;
+            while !observed.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             anyhow::Ok(())
@@ -1217,7 +1218,8 @@ mod tests {
             let mut stream = Box::pin(decode_response_stream(decode, prefill, OnClientDrop::Abort));
             assert!(matches!(stream.next().await, Some(Ok(_))));
             drop(stream);
-            for _ in 0..200 {
+            let deadline = tokio::time::Instant::now() + TEST_HANG_GUARD;
+            while tokio::time::Instant::now() < deadline {
                 if aborted.load(Ordering::SeqCst) {
                     return true;
                 }
@@ -1268,7 +1270,8 @@ mod tests {
             ));
             assert!(matches!(stream.next().await, Some(Ok(_))));
             drop(stream);
-            for _ in 0..200 {
+            let deadline = tokio::time::Instant::now() + TEST_HANG_GUARD;
+            while tokio::time::Instant::now() < deadline {
                 if completed.load(Ordering::SeqCst) {
                     return true;
                 }

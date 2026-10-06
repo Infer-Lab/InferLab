@@ -133,7 +133,8 @@ impl Console {
 
     /// A page once the workspace's first generation has been published.
     pub(crate) async fn settled(&self, path: &str, needle: &str) -> Result<String, Box<dyn Error>> {
-        for _ in 0..50 {
+        let deadline = std::time::Instant::now() + crate::support::FIXTURE_HANG_GUARD;
+        while std::time::Instant::now() < deadline {
             let page = self.page(path).await?;
             if page.contains(needle) {
                 return Ok(page);

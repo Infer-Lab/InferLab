@@ -1,8 +1,9 @@
+mod support;
+
 use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -188,7 +189,7 @@ fn real_pixi_clean_prefix_lock_and_locked_install() -> Result<(), Box<dyn Error>
 }
 
 fn write_fake_pixi(path: &Path) -> Result<(), Box<dyn Error>> {
-    fs::write(
+    support::write_executable(
         path,
         r#"#!/bin/sh
 set -eu
@@ -221,8 +222,5 @@ case "$1" in
 esac
 "#,
     )?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
     Ok(())
 }

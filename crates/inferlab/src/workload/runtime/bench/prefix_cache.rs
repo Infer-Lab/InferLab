@@ -109,10 +109,17 @@ fn reset_prefix_cache(
                     .as_ref()
                     .is_some_and(|value| success.value.matches(value));
                 if !evidence.succeeded {
-                    // A 2xx answer failing the predicate is the framework
-                    // declining the reset for now, e.g. while KV blocks are
-                    // still held ([[RFC-0004:C-BENCH-CACHE-STATE]]).
-                    evidence.declined = true;
+                    // Only the opposite boolean is the framework declining
+                    // for now, e.g. vLLM while KV blocks are still held; any
+                    // other mismatch is a failure
+                    // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+                    evidence.declined = matches!(
+                        (&success.value, &observed),
+                        (
+                            inferlab_protocol::JsonScalar::Boolean(expected),
+                            Some(serde_json::Value::Bool(reported)),
+                        ) if expected != reported
+                    );
                     evidence.error = Some(format!(
                         "prefix-cache reset reported {} at {:?}, expected {}",
                         observed
@@ -186,13 +193,16 @@ fn reset_outcome(
             failed.extend(declined);
             break;
         }
-        match bound.remaining() {
-            Remaining::Finite(remaining) if remaining > delay => std::thread::sleep(delay),
-            _ => {
-                failed.extend(declined);
-                exhausted = true;
-                break;
-            }
+        // Retry backoff never outlasts the case budget: the last wait ends
+        // with it, and a budget spent while waiting is the declined outcome
+        // ([[RFC-0009:C-TIME-CONTROL-OWNERSHIP]]).
+        if let Remaining::Finite(remaining) = bound.remaining() {
+            std::thread::sleep(delay.min(remaining));
+        }
+        if !matches!(bound.remaining(), Remaining::Finite(remaining) if !remaining.is_zero()) {
+            failed.extend(declined);
+            exhausted = true;
+            break;
         }
         pending = declined;
         delay = delay.saturating_mul(2).min(DECLINED_RESET_MAX_DELAY);
@@ -828,6 +838,30 @@ mod tests {
     }
 
     #[test]
+    fn only_the_opposite_boolean_is_a_decline() -> Result<(), Box<dyn std::error::Error>> {
+        // vLLM before it reported the outcome answered with an empty body;
+        // Dynamo answers status error when the reset raised. Neither is the
+        // framework declining, so neither may be retried.
+        const EMPTY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        for (response, action) in [
+            (EMPTY, vllm_reset()),
+            (ERROR_BODY, predicated("/engine/flush_cache")),
+        ] {
+            let (address, server) = serve_responses(vec![response])?;
+            let endpoint = endpoint_at(address);
+            let outcome = reset_outcome(
+                &cold(&endpoint, ResetCapability::Public(&action)),
+                &OperationBound::finite(Duration::from_secs(10)),
+            );
+            assert!(!outcome.succeeded, "{outcome:?}");
+            assert_eq!(outcome.attempts.len(), 1, "{outcome:?}");
+            assert!(!outcome.attempts[0].declined, "{outcome:?}");
+            server.join().map_err(|_| "fixture server panicked")??;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_reset_still_declined_when_the_case_budget_expires_fails()
     -> Result<(), Box<dyn std::error::Error>> {
         let (address, server) = serve_responses(vec![DECLINED_BODY; 2])?;
@@ -841,6 +875,8 @@ mod tests {
         assert!(!outcome.succeeded, "{outcome:?}");
         assert_eq!(outcome.attempts.len(), 2, "{outcome:?}");
         assert!(outcome.attempts.iter().all(|attempt| attempt.declined));
+        // The whole budget is spent before the reset is called declined.
+        assert!(outcome.elapsed_ms >= 1_150, "{outcome:?}");
         assert!(
             outcome
                 .error

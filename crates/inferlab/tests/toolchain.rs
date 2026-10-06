@@ -1,8 +1,9 @@
+mod support;
+
 use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -230,11 +231,7 @@ fn host_platform() -> &'static str {
 }
 
 fn write_executable(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
-    fs::write(path, contents)?;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
+    crate::support::write_executable(path, contents)
 }
 
 const PIXI: &str = r#"#!/bin/sh

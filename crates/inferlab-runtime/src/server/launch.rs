@@ -33,6 +33,13 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
         })
     })?;
     if let Some(state) = spec.data_directory {
+        if let Some(owner) = live_owner(&owner_marker(state)) {
+            return Err(fail(format!(
+                "process state directory {} is in use by live process {owner}; stop the server \
+                 that owns it before launching another one on this machine",
+                state.display()
+            )));
+        }
         match fs::remove_dir_all(state) {
             Ok(()) => {}
             Err(source) if source.kind() == io::ErrorKind::NotFound => {}
@@ -100,7 +107,16 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
             source,
         })
     })?;
-    HostProcessHandle::new(child.id(), spec.container.map(str::to_owned)).map_err(|error| {
+    let handle = HostProcessHandle::new(child.id(), spec.container.map(str::to_owned));
+    if let (Ok(handle), Some(state)) = (&handle, spec.data_directory) {
+        // The marker only protects a later launch, so failing to write it
+        // must not fail this one.
+        let _ = fs::write(
+            owner_marker(state),
+            format!("{} {}\n", handle.leader_pid, handle.leader_start_time_ticks),
+        );
+    }
+    handle.map_err(|error| {
         let mut cleanup = cleanup_failed_local_launch(&mut child);
         let error = ServerLaunchError::Preparation { message: error };
         // The client may already have asked the daemon to create the
@@ -135,6 +151,29 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
             },
         }
     })
+}
+
+/// The file recording which process owns a process state directory: its
+/// pid and start time, written beside the directory at launch.
+fn owner_marker(state: &Path) -> PathBuf {
+    let mut marker = state.as_os_str().to_owned();
+    marker.push(".owner");
+    PathBuf::from(marker)
+}
+
+/// The recorded owner's pid when that exact process still runs.
+fn live_owner(marker: &Path) -> Option<u32> {
+    let recorded = fs::read_to_string(marker).ok()?;
+    let mut fields = recorded.split_whitespace();
+    let pid = fields.next()?.parse::<u32>().ok()?;
+    let start_time_ticks = fields.next()?.parse::<u64>().ok()?;
+    crate::process_group::TreeProcess {
+        pid,
+        process_group: pid,
+        start_time_ticks,
+    }
+    .is_alive()
+    .then_some(pid)
 }
 
 pub(super) fn materialize_local_launch_files(
@@ -266,12 +305,29 @@ pub(super) fn spawn_ssh(
     let command = render_env_command(spec.command).map_err(LaunchFailure::before_launch)?;
     materialize_ssh_launch_files(target, spec.launch_files).map_err(LaunchFailure::from_error)?;
     let script = format!(
-        "set -eu; mkdir -p {dir} {cache}; {state}cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; printf '{marker}%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
+        "set -eu; mkdir -p {dir} {cache}; {state}cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; {owner_write}printf '{marker}%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
         dir = shell_quote_path(spec.remote_dir),
         cache = shell_quote_path(spec.cache_root),
         state = spec.data_directory.map_or_else(String::new, |state| {
+            let owner = shell_quote_path(&owner_marker(state));
             let state = shell_quote_path(state);
-            format!("rm -rf {state}; mkdir -p {state}; ")
+            // The same owner check as a local launch: a recorded owner that
+            // still runs with its recorded start time keeps its directory.
+            format!(
+                "if [ -f {owner} ]; then read owner_pid owner_ticks < {owner} || true; \
+                 if [ -n \"${{owner_pid:-}}\" ] && [ -r /proc/$owner_pid/stat ] \
+                 && [ \"$(awk '{{print $22}}' /proc/$owner_pid/stat)\" = \"${{owner_ticks:-}}\" ] \
+                 && [ \"$(awk '{{print $3}}' /proc/$owner_pid/stat)\" != Z ]; then \
+                 printf 'process state directory %s is in use by live process %s; stop the server \
+                 that owns it before launching another one on this machine\\n' {state} \"$owner_pid\" >&2; \
+                 exit 3; fi; fi; rm -rf {state}; mkdir -p {state}; "
+            )
+        }),
+        owner_write = spec.data_directory.map_or_else(String::new, |state| {
+            format!(
+                "printf '%s %s\\n' \"$pid\" \"$ticks\" > {} || true; ",
+                shell_quote_path(&owner_marker(state))
+            )
         }),
         cwd = shell_quote_path(&spec.command.cwd),
         stdout = shell_quote_path(&remote_stdout),

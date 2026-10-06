@@ -1,4 +1,4 @@
-use crate::harness::{TestWorkspace, wait_for_path};
+use crate::harness::{TestWorkspace, wait_for_exit, wait_for_marker};
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
@@ -20,7 +20,7 @@ fn interruption_records_remaining_measurements_and_cleans_up() -> Result<(), Box
         .stdout(stdout.reopen()?)
         .stderr(stderr.reopen()?)
         .spawn()?;
-    wait_for_path(workspace.eval_marker(), Duration::from_secs(5))?;
+    wait_for_marker(&mut child, workspace.eval_marker())?;
     let eval_child_pid = fs::read_to_string(workspace.eval_marker())?
         .trim()
         .parse::<u32>()?;
@@ -28,14 +28,7 @@ fn interruption_records_remaining_measurements_and_cleans_up() -> Result<(), Box
         .args(["-TERM", &child.id().to_string()])
         .status()?;
     assert!(signal.success());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait()?.is_none() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
-    }
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-        return Err("interrupted recipe did not finish cleanup within 10 seconds".into());
-    }
+    wait_for_exit(&mut child, "interrupted recipe did not finish cleanup")?;
     let output = read_spooled_output(child, &stdout, &stderr)?;
 
     assert!(!output.status.success());
@@ -112,19 +105,12 @@ fn interruption_during_builtin_smoke_preserves_the_interrupted_terminal_cause()
         .stdout(stdout.reopen()?)
         .stderr(stderr.reopen()?)
         .spawn()?;
-    wait_for_path(&marker, Duration::from_secs(5))?;
+    wait_for_marker(&mut child, &marker)?;
     let signal = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()?;
     assert!(signal.success());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait()?.is_none() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
-    }
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-        return Err("interrupted smoke recipe did not finish within 10 seconds".into());
-    }
+    wait_for_exit(&mut child, "interrupted smoke recipe did not finish")?;
     let output = read_spooled_output(child, &stdout, &stderr)?;
 
     assert!(!output.status.success());
@@ -158,7 +144,7 @@ fn interrupted_bench_preserves_native_evidence_and_cleans_its_group() -> Result<
         .stdout(stdout.reopen()?)
         .stderr(stderr.reopen()?)
         .spawn()?;
-    wait_for_path(workspace.bench_marker(), Duration::from_secs(5))?;
+    wait_for_marker(&mut child, workspace.bench_marker())?;
     let bench_child_pid = fs::read_to_string(workspace.bench_marker())?
         .trim()
         .parse::<u32>()?;
@@ -166,14 +152,10 @@ fn interrupted_bench_preserves_native_evidence_and_cleans_its_group() -> Result<
         .args(["-TERM", &child.id().to_string()])
         .status()?;
     assert!(signal.success());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait()?.is_none() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
-    }
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-        return Err("interrupted recipe did not finish Bench cleanup within 10 seconds".into());
-    }
+    wait_for_exit(
+        &mut child,
+        "interrupted recipe did not finish Bench cleanup",
+    )?;
     let output = read_spooled_output(child, &stdout, &stderr)?;
 
     assert!(!output.status.success());
@@ -184,7 +166,11 @@ fn interrupted_bench_preserves_native_evidence_and_cleans_its_group() -> Result<
             .ok_or("interrupted Bench has no record id")?,
     )?;
     assert_eq!(bench["status"], "failed");
-    assert_eq!(bench["cases"][0]["process"]["interrupted"], true);
+    assert_eq!(
+        bench["cases"][0]["process"]["interrupted"], true,
+        "{}",
+        bench["cases"][0]
+    );
     assert_eq!(
         bench["cases"][0]["process"]["termination"]["kill_sent"],
         true

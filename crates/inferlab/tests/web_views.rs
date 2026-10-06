@@ -2,6 +2,7 @@
 //! views over HTTP, record pages with metrics and paged logs, and live
 //! updates, exercised against the real binary.
 
+mod support;
 mod web_support;
 
 use std::error::Error;

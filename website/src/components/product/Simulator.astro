@@ -279,6 +279,10 @@ const steps = lifecycle(selection);
       } else if (target.dataset.simBackend) {
         selection = resolveSelection(matrix, { ...selection, backend: target.dataset.simBackend });
         render();
+        // The backend buttons are rebuilt; keep the keyboard on the choice.
+        backendChoices
+          .querySelector<HTMLElement>(`[data-sim-backend="${selection.backend}"]`)
+          ?.focus();
       }
     });
 

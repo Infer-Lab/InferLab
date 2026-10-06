@@ -477,6 +477,24 @@ struct RunArgs {
     #[arg(long, value_name = "INDEX[,INDEX...]", requires = "container-image")]
     devices: Option<String>,
 
+    /// Write a run record: argv, stack, workspace snapshot, the provided
+    /// InferLab context, logs, exit status, and timing.
+    #[arg(long, conflicts_with = "container-image")]
+    record: bool,
+
+    /// Link a running server record: inject its public endpoint and served
+    /// model name.
+    #[arg(
+        long,
+        value_name = "SERVER_RECORD_ID",
+        conflicts_with = "container-image"
+    )]
+    serve: Option<String>,
+
+    /// Inject the locator of this model weight binding for the local machine.
+    #[arg(long, value_name = "MODEL", conflicts_with = "container-image")]
+    model: Option<String>,
+
     /// Command to execute.
     #[arg(last = true, required = true, value_name = "CMD")]
     command: Vec<String>,
@@ -658,6 +676,9 @@ pub fn run(cli: Cli) -> Result<(), InferlabError> {
                     &config,
                     &crate::adhoc::AdHocRequest {
                         stack: args.stack.as_deref(),
+                        record: args.record,
+                        serve: args.serve.as_deref(),
+                        model: args.model.as_deref(),
                         image: args.image.as_deref(),
                         external_image: args.external_image.as_deref(),
                         mounts: &args.mounts,

@@ -1121,6 +1121,38 @@ def test_render_spans_one_replica_across_machines() -> None:
         assert argv[argv.index("--host") + 1] == f"192.0.2.{node_rank + 1}"
 
 
+@pytest.mark.parametrize(
+    ("change", "shape"),
+    [
+        # A prefill node registers at rank zero's host on its own bootstrap
+        # port, which only rank zero's machine serves.
+        ({"role_kind": "prefill"}, "prefill and decode"),
+        ({"role_kind": "decode"}, "prefill and decode"),
+        # DP attention binds ports above the master port InferLab never
+        # allocated.
+        (
+            {
+                "effective_parallelism": {
+                    "outer": {"tensor_parallel_size": 2},
+                    "attention": {"data_parallel_size": 2},
+                }
+            },
+            "attention data parallelism",
+        ),
+    ],
+)
+def test_render_rejects_multi_node_shapes_it_cannot_place(
+    change: dict[str, object], shape: str
+) -> None:
+    ranks = [
+        ServeProcessAllocation.model_validate({**rank.model_dump(), **change})
+        for rank in _multi_node_ranks()
+    ]
+
+    with pytest.raises(AdapterOperationError, match=shape):
+        render_serve(_render_input(allocations=ranks))
+
+
 def test_render_rejects_a_truncated_multi_node_rank_set() -> None:
     _, rank_one = _multi_node_ranks()
 

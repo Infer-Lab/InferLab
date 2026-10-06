@@ -23,7 +23,8 @@ pub const REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CONTAINER_ABSENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const COMMAND_REAP_GRACE: Duration = Duration::from_secs(5);
-const COMMAND_IO_DRAIN_GRACE: Duration = Duration::from_secs(5);
+/// How long a command's output may stay open after the command exits.
+pub const COMMAND_IO_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 /// The `--gpus` argv pair for a device spec (a single index or a
 /// comma-joined list). The literal quotes are part of the value: docker's

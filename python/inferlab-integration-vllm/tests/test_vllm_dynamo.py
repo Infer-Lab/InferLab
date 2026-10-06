@@ -89,7 +89,7 @@ def test_dynamo_routed_single_plans_discovery_registry_readiness_and_per_target_
     assert gateway.endpoint.prefix_cache_reset is None
     reset = result.roles[0].replica_prefix_cache_reset
     assert reset is not None and reset.path == "/engine/flush_cache"
-    assert reset.success is not None and reset.success.value == "ok"
+    assert reset.success is not None and reset.success.value.root == "ok"
     for replica in result.replicas:
         assert replica.ports == ["request"]
         assert isinstance(replica.primary_readiness.root, ReadinessProbeHttp)

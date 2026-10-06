@@ -57,7 +57,7 @@ pub(crate) struct WorkloadHttpAction {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct WorkloadSuccessMatch {
     pub pointer: String,
-    pub value: String,
+    pub value: inferlab_protocol::JsonScalar,
 }
 
 /// One model-serving replica's per-target prefix-cache reset, already

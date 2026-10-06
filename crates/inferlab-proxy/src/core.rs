@@ -316,15 +316,31 @@ pub(crate) fn build_pooled_client() -> reqwest::Result<reqwest::Client> {
 pub struct FanoutFailure {
     pub url: String,
     pub error: String,
+    /// The target answered 2xx but declined the reset for now
+    /// ([[RFC-0003:C-GATEWAY-PD-ROUTER]]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declined: bool,
 }
 
 /// Aggregated response of the cache reset/flush fan-out endpoints. SGLang's
 /// `flush_cache` and the vLLM proxies' `reset_prefix_cache` share this wire
-/// contract.
+/// contract; `success` is true exactly when every target succeeded.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ResetPrefixCacheResponse {
+    pub success: bool,
     pub successful: Vec<String>,
     pub failed: Vec<FanoutFailure>,
+}
+
+/// How a reset/flush target's answer is judged.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SweepSuccess {
+    /// Any 2xx other than 206 succeeds.
+    Status,
+    /// A 2xx other than 206 succeeds only when its JSON body reports
+    /// `success` `true`; any other 2xx body is the engine declining for now.
+    /// vLLM answers `/reset_prefix_cache` this way.
+    BodySuccessFlag,
 }
 
 /// Aggregated response of the prefix-cache conditioning fan-out endpoint.
@@ -442,9 +458,11 @@ pub(crate) fn ranked_prime_targets<R: PrimeReplica + Clone>(
 }
 
 /// Run the reset/flush fan-out skeleton: the engine module enumerates the
-/// target base URLs and names its endpoint (`path`) and operation; target
-/// execution and the response aggregation (200 when every target succeeded,
-/// 206 on partial failure) live here. The caller's measurement-case request
+/// target base URLs, names its endpoint (`path`) and operation, and says how
+/// a target's answer is judged; target execution and the response
+/// aggregation live here. The answer is 200 when every target succeeded or
+/// every failed target only declined — `success` then tells them apart — and
+/// 206 when any target failed otherwise ([[RFC-0003:C-GATEWAY-PD-ROUTER]]). The caller's measurement-case request
 /// deadline bounds the whole fan-out; the proxy adds no shorter cap
 /// ([[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]]). An empty target set is a 502 —
 /// "no targets" must not be conflated with success.
@@ -454,13 +472,21 @@ pub(crate) async fn run_sweep_fanout(
     path: &'static str,
     targets: Vec<String>,
     authorization: Option<String>,
+    judge: SweepSuccess,
 ) -> Response<Body> {
     if targets.is_empty() {
         return empty_fanout_failure(operation);
     }
-    let attempts = targets
-        .into_iter()
-        .map(|url| sweep_target(client.clone(), operation, path, url, authorization.clone()));
+    let attempts = targets.into_iter().map(|url| {
+        sweep_target(
+            client.clone(),
+            operation,
+            path,
+            url,
+            authorization.clone(),
+            judge,
+        )
+    });
     let mut successful = Vec::new();
     let mut failed = Vec::new();
     for result in futures_util::future::join_all(attempts).await {
@@ -469,14 +495,18 @@ pub(crate) async fn run_sweep_fanout(
             Err(failure) => failed.push(failure),
         }
     }
-    let status = if failed.is_empty() {
+    let status = if failed.iter().all(|failure| failure.declined) {
         StatusCode::OK
     } else {
         StatusCode::PARTIAL_CONTENT
     };
     (
         status,
-        Json(ResetPrefixCacheResponse { successful, failed }),
+        Json(ResetPrefixCacheResponse {
+            success: failed.is_empty(),
+            successful,
+            failed,
+        }),
     )
         .into_response()
 }
@@ -487,6 +517,7 @@ async fn sweep_target(
     path: &'static str,
     url: String,
     authorization: Option<String>,
+    judge: SweepSuccess,
 ) -> Result<String, FanoutFailure> {
     let endpoint = join_path(&url, path);
     let mut request = client.post(endpoint);
@@ -496,11 +527,42 @@ async fn sweep_target(
     let response = request.send().await.map_err(|error| FanoutFailure {
         url: url.clone(),
         error: format!("{operation} request failed: {error}"),
+        declined: false,
     })?;
     // A 206 from an upstream that is itself an aggregating frontend reports
     // partial failure, not success.
     if response.status().is_success() && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        Ok(url)
+        match judge {
+            SweepSuccess::Status => Ok(url),
+            SweepSuccess::BodySuccessFlag => {
+                let body = response.bytes().await.map_err(|error| FanoutFailure {
+                    url: url.clone(),
+                    error: format!("{operation} response read failed: {error}"),
+                    declined: false,
+                })?;
+                let reported = serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .and_then(|document| document.get("success").cloned());
+                // Only an explicit `success: false` is the engine declining;
+                // a body that reports nothing usable is a failure.
+                match reported {
+                    Some(Value::Bool(true)) => Ok(url),
+                    Some(Value::Bool(false)) => Err(FanoutFailure {
+                        url,
+                        error: format!("{operation} declined: the engine reported success false"),
+                        declined: true,
+                    }),
+                    _ => Err(FanoutFailure {
+                        url,
+                        error: format!(
+                            "{operation} response did not report success: {}",
+                            String::from_utf8_lossy(&body)
+                        ),
+                        declined: false,
+                    }),
+                }
+            }
+        }
     } else {
         let status = response.status();
         let detail = response
@@ -510,6 +572,7 @@ async fn sweep_target(
         Err(FanoutFailure {
             url,
             error: format!("HTTP {status}: {detail}"),
+            declined: false,
         })
     }
 }
@@ -896,6 +959,7 @@ mod tests {
             "/reset_prefix_cache",
             Vec::new(),
             None,
+            SweepSuccess::Status,
         ));
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let body = runtime.block_on(axum::body::to_bytes(response.into_body(), usize::MAX))?;

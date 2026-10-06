@@ -31,6 +31,7 @@ from inferlab_adapter_sdk import (
     GatewayTargetEngine,
     HttpActionSpec,
     HttpMethod,
+    JsonScalar,
     JsonValueMatch,
     ModelListRequirement,
     PdRouterPlan,
@@ -48,6 +49,7 @@ from inferlab_adapter_sdk import (
     ServeProcessAllocationFrontend,
     ServeProcessAllocationModelRank,
     SettingValue,
+    SuccessMatch,
     TargetEndpointScheme,
     fused_pd_frontend_plans,
     rendered_discovery,
@@ -148,7 +150,7 @@ rename or add listeners to a Dynamo process."""
 
 # Dynamo's server-control routes answer HTTP 200 even when the engine reports
 # a failure; only the body status distinguishes success.
-_ACTION_SUCCESS = JsonValueMatch(pointer="/status", value="ok")
+_ACTION_SUCCESS = SuccessMatch(pointer="/status", value=JsonScalar("ok"))
 
 
 def require_backend(selected: str | None, *, component: str) -> None:

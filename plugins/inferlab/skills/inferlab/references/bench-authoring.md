@@ -108,6 +108,14 @@ cache = { start = "cold" }   # warmup drains, then reset, then profiling
   prefill/decode proxy has no fixed per-target cap of its own: the case's
   remaining `timeout_seconds` bounds the whole fan-out, and when the caller
   gives up, the proxy cancels its in-flight target work.
+- A backend may decline a reset it cannot perform yet — for example while KV
+  blocks are still held for an unfinished transfer — by answering 2xx with a
+  body that fails the reset action's success predicate. InferLab records that
+  attempt and retries only the declined targets after a growing delay until
+  the reset succeeds, an attempt fails another way, or the case timeout runs
+  out; then the case fails. Every attempt is kept under
+  `cache_preparation.reset.attempts`, and a long run of declines between
+  cases points at engine state left over from the previous case.
 - Reset and conditioning occur after warmup, are excluded from profiling
   metrics, and do not consume population entries.
 - The one case timeout covers warmup, reset, conditioning, profiling, and

@@ -403,7 +403,9 @@ fn send_control_request(
             .and_then(|document| document.pointer(&success.pointer).cloned())
     });
     let predicate_holds = action.success.as_ref().is_none_or(|success| {
-        observed.as_ref().and_then(serde_json::Value::as_str) == Some(success.value.as_str())
+        observed
+            .as_ref()
+            .is_some_and(|value| success.value.matches(value))
     });
     Ok(ControlResponse {
         status,
@@ -1013,9 +1015,9 @@ mod tests {
         });
         let mut action =
             engine_trace_stop(format!("http://{address}/engine/control/start_profile"));
-        action.success = Some(inferlab_protocol::JsonValueMatch {
+        action.success = Some(inferlab_protocol::SuccessMatch {
             pointer: "/status".to_owned(),
-            value: "ok".to_owned(),
+            value: inferlab_protocol::JsonScalar::String("ok".to_owned()),
         });
 
         let record = http_action("serve", "start-range", &action, 1);

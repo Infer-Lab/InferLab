@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v12",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v13",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -376,7 +376,7 @@
           "description": "When present, a 2xx response succeeds only if its JSON body holds the\nexpected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).",
           "anyOf": [
             {
-              "$ref": "#/$defs/JsonValueMatch"
+              "$ref": "#/$defs/SuccessMatch"
             },
             {
               "type": "null"
@@ -726,7 +726,7 @@
           "description": "When present, a 2xx response succeeds only if its JSON body holds the\nexpected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).",
           "anyOf": [
             {
-              "$ref": "#/$defs/JsonValueMatch"
+              "$ref": "#/$defs/SuccessMatch"
             },
             {
               "type": "null"
@@ -773,6 +773,17 @@
         "adapter_version",
         "framework",
         "framework_version"
+      ]
+    },
+    "JsonScalar": {
+      "description": "The JSON scalar an HTTP action success predicate expects: a string, or\nfrom protocol version 13 a boolean ([[RFC-0006:C-INTEGRATIONS]]).",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "JsonValueMatch": {
@@ -1253,12 +1264,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `12` (serialized as the\nstring `\"12\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `13` (serialized as the\nstring `\"13\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 12.",
+          "description": "Protocol version 13.",
           "type": "string",
-          "const": "12"
+          "const": "13"
         }
       ]
     },
@@ -2386,6 +2397,23 @@
             "$ref": "#/$defs/SettingValue"
           }
         }
+      ]
+    },
+    "SuccessMatch": {
+      "description": "A JSON Pointer and the scalar an HTTP action success predicate expects at\nit.",
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/JsonScalar"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "value"
       ]
     },
     "SuppliedRenderInput": {

@@ -331,9 +331,12 @@ def _kv_transfer_args(
             "prefill_decode render is missing its KV-transfer mechanism",
         )
     if transport == KvTransferMechanism.mooncake:
-        extra: dict[str, JsonValue] = {
-            "num_workers": settings.mooncake_num_workers or 1,
-        }
+        # vLLM owns the sender-worker default: each of its twice-`num_workers`
+        # sender tasks is held until its request finishes prefill, so a lower
+        # value serializes prefill-side transfers.
+        extra: dict[str, JsonValue] = {}
+        if settings.mooncake_num_workers is not None:
+            extra["num_workers"] = settings.mooncake_num_workers
         if settings.kv_transfer_protocol is not None:
             extra["mooncake_protocol"] = settings.kv_transfer_protocol
         config: dict[str, JsonValue] = {

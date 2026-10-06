@@ -5,8 +5,8 @@ use crate::workload::domain::BenchPopulation;
 use crate::workload::domain::{WorkloadEndpoint, WorkloadHttpAction, WorkloadReplicaReset};
 use crate::workload::record::{
     BenchCachePreparationEvidence, BenchCachePreparationPhase, BenchCachePreparationTransition,
-    PerTargetPrefixCacheResetEvidence, PrefixCacheConditioningEvidence,
-    PrefixCacheConditioningRankEvidence, PrefixCacheResetEvidence, PrefixCacheResetOutcome,
+    PrefixCacheConditioningEvidence, PrefixCacheConditioningRankEvidence, PrefixCacheResetEvidence,
+    PrefixCacheResetOutcome,
 };
 use crate::workspace::BenchCacheStart;
 use inferlab_protocol::PromptCacheReadZeroRepresentation;
@@ -14,6 +14,13 @@ use inferlab_proxy::core::PrimePrefixCacheResponse;
 use inferlab_runtime::operation_bound::{OperationBound, Remaining};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// Delay before the first retry of a declined reset; it doubles per round up
+/// to the cap, so a reset that frees within seconds retries promptly and one
+/// that waits minutes for a transfer timeout keeps its evidence short.
+const DECLINED_RESET_FIRST_DELAY: Duration = Duration::from_millis(500);
+const DECLINED_RESET_MAX_DELAY: Duration = Duration::from_secs(15);
 
 struct ConditioningResponse {
     status: u16,
@@ -86,6 +93,7 @@ fn reset_prefix_cache(
         process: process.map(str::to_owned),
         success: action.success.clone(),
         observed_value: None,
+        declined: false,
     };
     match result {
         Ok((status, body)) => {
@@ -97,11 +105,16 @@ fn reset_prefix_cache(
                     .as_deref()
                     .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
                     .and_then(|document| document.pointer(&success.pointer).cloned());
-                evidence.succeeded = observed.as_ref().and_then(serde_json::Value::as_str)
-                    == Some(success.value.as_str());
+                evidence.succeeded = observed
+                    .as_ref()
+                    .is_some_and(|value| success.value.matches(value));
                 if !evidence.succeeded {
+                    // A 2xx answer failing the predicate is the framework
+                    // declining the reset for now, e.g. while KV blocks are
+                    // still held ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+                    evidence.declined = true;
                     evidence.error = Some(format!(
-                        "prefix-cache reset reported {} at {:?}, expected {:?}",
+                        "prefix-cache reset reported {} at {:?}, expected {}",
                         observed
                             .as_ref()
                             .map_or_else(|| "no value".to_owned(), ToString::to_string),
@@ -121,46 +134,96 @@ fn reset_prefix_cache(
 }
 
 /// The public reset action, or the per-target reset attempted on every
-/// model-serving replica even after an earlier attempt fails
-/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+/// model-serving replica even after an earlier target fails. A declined
+/// attempt is retried — on its own target only — after a growing delay until
+/// it succeeds, fails otherwise, or the case budget cannot hold another
+/// delay ([[RFC-0004:C-BENCH-CACHE-STATE]]).
 fn reset_outcome(
     input: &CachePreparationInput<'_>,
     bound: &OperationBound,
 ) -> PrefixCacheResetOutcome {
     let targets = match input.reset {
-        ResetCapability::Public(action) => {
-            let url = format!(
+        ResetCapability::Public(action) => vec![(
+            format!(
                 "http://{}:{}{}",
                 input.endpoint.host, input.endpoint.port, action.path
-            );
-            return PrefixCacheResetOutcome::Public(reset_prefix_cache(url, action, None, bound));
-        }
-        ResetCapability::PerTarget(targets) => targets,
+            ),
+            action,
+            None,
+        )],
+        ResetCapability::PerTarget(targets) => targets
+            .iter()
+            .map(|target| {
+                (
+                    target.url.clone(),
+                    &target.action,
+                    Some(target.process.as_str()),
+                )
+            })
+            .collect(),
     };
     let started_ms = bound.elapsed_ms();
-    let attempts = targets
-        .iter()
-        .map(|target| {
-            reset_prefix_cache(
-                target.url.clone(),
-                &target.action,
-                Some(&target.process),
-                bound,
-            )
-        })
-        .collect::<Vec<_>>();
-    let failed = attempts
-        .iter()
-        .filter(|attempt| !attempt.succeeded)
-        .filter_map(|attempt| attempt.process.as_deref())
-        .collect::<Vec<_>>();
-    PrefixCacheResetOutcome::PerTarget(PerTargetPrefixCacheResetEvidence {
+    let mut attempts = Vec::new();
+    let mut failed = Vec::new();
+    let mut pending = (0..targets.len()).collect::<Vec<_>>();
+    let mut delay = DECLINED_RESET_FIRST_DELAY;
+    let mut exhausted = false;
+    while !pending.is_empty() {
+        let mut declined = Vec::new();
+        for index in pending {
+            let (url, action, process) = &targets[index];
+            let attempt = reset_prefix_cache(url.clone(), action, *process, bound);
+            if attempt.declined {
+                declined.push(index);
+            } else if !attempt.succeeded {
+                failed.push(index);
+            }
+            attempts.push(attempt);
+        }
+        // Any failure other than a decline settles the reset as failed, so
+        // the declined targets are not retried either.
+        if declined.is_empty() || !failed.is_empty() {
+            failed.extend(declined);
+            break;
+        }
+        match bound.remaining() {
+            Remaining::Finite(remaining) if remaining > delay => std::thread::sleep(delay),
+            _ => {
+                failed.extend(declined);
+                exhausted = true;
+                break;
+            }
+        }
+        pending = declined;
+        delay = delay.saturating_mul(2).min(DECLINED_RESET_MAX_DELAY);
+    }
+    failed.sort_unstable();
+    let error = (!failed.is_empty()).then(|| {
+        let mut message = match input.reset {
+            ResetCapability::Public(_) => attempts
+                .last()
+                .and_then(|attempt| attempt.error.clone())
+                .unwrap_or_else(|| "prefix-cache reset failed".to_owned()),
+            ResetCapability::PerTarget(_) => format!(
+                "prefix-cache reset failed on {}",
+                failed
+                    .iter()
+                    .map(|index| targets[*index].2.unwrap_or(targets[*index].0.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        if exhausted {
+            message.push_str("; still declined when the case budget expired");
+        }
+        message
+    });
+    PrefixCacheResetOutcome {
         succeeded: failed.is_empty(),
-        error: (!failed.is_empty())
-            .then(|| format!("prefix-cache reset failed on {}", failed.join(", "))),
+        error,
         elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
         attempts,
-    })
+    }
 }
 
 /// The server's prefix-cache reset capability: its public action or the
@@ -210,7 +273,7 @@ pub(super) fn prepare_prefix_cache(
         phase: BenchCachePreparationPhase::CacheReset,
         elapsed_ms: bound.elapsed_ms(),
     });
-    let conditioning = if reset.succeeded() && input.start == BenchCacheStart::Primed {
+    let conditioning = if reset.succeeded && input.start == BenchCacheStart::Primed {
         input
             .conditioning
             .zip(input.population)
@@ -641,13 +704,161 @@ mod tests {
     const SERVER_ERROR: &str =
         "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+    const DECLINED_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"success\":false}";
+    const ACCEPTED_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"success\":true}";
+
+    /// vLLM's reset action: a 200 whose body reports `success` `true`.
+    fn vllm_reset() -> WorkloadHttpAction {
+        WorkloadHttpAction {
+            method: WorkloadHttpMethod::Post,
+            path: "/reset_prefix_cache".to_owned(),
+            success: Some(crate::workload::domain::WorkloadSuccessMatch {
+                pointer: "/success".to_owned(),
+                value: inferlab_protocol::JsonScalar::Boolean(true),
+            }),
+        }
+    }
+
+    fn cold<'a>(
+        endpoint: &'a WorkloadEndpoint,
+        reset: ResetCapability<'a>,
+    ) -> CachePreparationInput<'a> {
+        CachePreparationInput {
+            endpoint,
+            reset,
+            start: BenchCacheStart::Cold,
+            conditioning: None,
+            population: None,
+            warmup_drained: false,
+        }
+    }
+
+    #[test]
+    fn a_declined_reset_is_retried_only_on_the_declined_target_until_it_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (declining, declining_server) = serve_responses(vec![DECLINED_BODY, ACCEPTED_BODY])?;
+        let (accepting, accepting_server) = serve_responses(vec![ACCEPTED_BODY])?;
+        let targets = [
+            WorkloadReplicaReset {
+                process: "prefill-0-rank-0".to_owned(),
+                url: format!("http://{declining}/reset_prefix_cache"),
+                action: vllm_reset(),
+            },
+            WorkloadReplicaReset {
+                process: "decode-0-rank-0".to_owned(),
+                url: format!("http://{accepting}/reset_prefix_cache"),
+                action: vllm_reset(),
+            },
+        ];
+        let endpoint = endpoint_at(declining);
+        let outcome = reset_outcome(
+            &cold(&endpoint, ResetCapability::PerTarget(&targets)),
+            &OperationBound::finite(Duration::from_secs(10)),
+        );
+
+        assert!(outcome.succeeded, "{outcome:?}");
+        let attempts = outcome
+            .attempts
+            .iter()
+            .map(|attempt| {
+                (
+                    attempt.process.as_deref(),
+                    attempt.succeeded,
+                    attempt.declined,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts,
+            [
+                (Some("prefill-0-rank-0"), false, true),
+                (Some("decode-0-rank-0"), true, false),
+                (Some("prefill-0-rank-0"), true, false),
+            ]
+        );
+        assert_eq!(
+            outcome.attempts[0].observed_value,
+            Some(serde_json::Value::Bool(false))
+        );
+        declining_server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+        accepting_server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_other_than_a_decline_stops_retrying_every_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (failing, failing_server) = serve_responses(vec![SERVER_ERROR])?;
+        let (declining, declining_server) = serve_responses(vec![DECLINED_BODY])?;
+        let targets = [
+            WorkloadReplicaReset {
+                process: "prefill-0-rank-0".to_owned(),
+                url: format!("http://{failing}/reset_prefix_cache"),
+                action: vllm_reset(),
+            },
+            WorkloadReplicaReset {
+                process: "decode-0-rank-0".to_owned(),
+                url: format!("http://{declining}/reset_prefix_cache"),
+                action: vllm_reset(),
+            },
+        ];
+        let endpoint = endpoint_at(failing);
+        let outcome = reset_outcome(
+            &cold(&endpoint, ResetCapability::PerTarget(&targets)),
+            &OperationBound::finite(Duration::from_secs(10)),
+        );
+
+        assert!(!outcome.succeeded, "{outcome:?}");
+        assert_eq!(outcome.attempts.len(), 2, "{outcome:?}");
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("prefix-cache reset failed on prefill-0-rank-0, decode-0-rank-0")
+        );
+        failing_server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+        declining_server
+            .join()
+            .map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_reset_still_declined_when_the_case_budget_expires_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (address, server) = serve_responses(vec![DECLINED_BODY; 2])?;
+        let action = vllm_reset();
+        let endpoint = endpoint_at(address);
+        let outcome = reset_outcome(
+            &cold(&endpoint, ResetCapability::Public(&action)),
+            &OperationBound::finite(Duration::from_millis(1_200)),
+        );
+
+        assert!(!outcome.succeeded, "{outcome:?}");
+        assert_eq!(outcome.attempts.len(), 2, "{outcome:?}");
+        assert!(outcome.attempts.iter().all(|attempt| attempt.declined));
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("still declined when the case budget expired")),
+            "{outcome:?}"
+        );
+        server.join().map_err(|_| "fixture server panicked")??;
+        Ok(())
+    }
+
     fn predicated(path: &str) -> WorkloadHttpAction {
         WorkloadHttpAction {
             method: WorkloadHttpMethod::Post,
             path: path.to_owned(),
             success: Some(crate::workload::domain::WorkloadSuccessMatch {
                 pointer: "/status".to_owned(),
-                value: "ok".to_owned(),
+                value: inferlab_protocol::JsonScalar::String("ok".to_owned()),
             }),
         }
     }
@@ -706,9 +917,7 @@ mod tests {
             &OperationBound::finite(Duration::from_secs(5)),
         );
 
-        let PrefixCacheResetOutcome::PerTarget(evidence) = outcome else {
-            return Err("a per-target capability must record per-target evidence".into());
-        };
+        let evidence = outcome;
         assert!(!evidence.succeeded);
         assert_eq!(evidence.attempts.len(), 2);
         assert!(!evidence.attempts[0].succeeded);

@@ -90,6 +90,14 @@ inferlab serve logs <SERVER_RECORD_ID>
 inferlab serve stop <SERVER_RECORD_ID>
 ```
 
+Before any serving process starts, the launch hardware probe asks every
+assigned device for its compute applications. Any reported application —
+another session, a process InferLab did not start, or memory a dead process
+still holds — fails the launch in `preflight`, and the error and record
+failure name the machine and each application's device, PID, process name,
+and memory. Stop the occupant or assign other devices in local bindings;
+InferLab does not queue for or share an occupied device.
+
 `stop` is idempotent. Distinguish business-result failure, profiling/control
 failure, process cleanup failure, and incomplete evidence instead of reducing
 all of them to a nonzero shell status.

@@ -1,5 +1,5 @@
 {
-  "protocol_version": "12",
+  "protocol_version": "13",
   "model": {
     "locator": "/models/qwen3-vl",
     "served_name": "qwen3-vl"

@@ -12,6 +12,7 @@ from inferlab_adapter_sdk import (
     AdapterRequestPlanServe,
     AdapterRequestRenderServe,
     AdapterResponse,
+    HttpActionSpec,
     PlanServeResult,
     PromptCacheReadZeroRepresentation,
     RenderedServeProcessFrontend,
@@ -127,6 +128,37 @@ def test_single_topology_rejects_a_routed_backend() -> None:
     assert response.root.error.code == "invalid_settings"
 
 
+def test_single_plan_matches_the_shared_single_fixture() -> None:
+    payload = load_plan_payload()
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload["topology"] = "single"
+    input_payload["gateway_backend"] = None
+    input_payload["pd_router_backend"] = None
+    input_payload["kv_transfer"] = None
+    input_payload["roles"] = [
+        {
+            "id": "serve",
+            "kind": "serve",
+            "replica_count": 1,
+            "parallelism": {"outer": {"tensor_parallel_size": 2}},
+            "settings": {},
+        }
+    ]
+    request = AdapterRequest.model_validate(payload)
+    expected = AdapterResponse.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-response-single.json")
+    )
+
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+    assert expected.root.status == "ok"
+    assert isinstance(expected.root.result.root, AdapterResultPlanServe)
+    expected_output = expected.root.result.root.output
+    assert result.model_copy(update={"integration": expected_output.integration}) == (
+        expected_output
+    )
+
+
 def test_single_topology_declares_its_server_metrics_capability() -> None:
     payload = load_plan_payload()
     input_payload = cast(dict[str, object], payload["input"])
@@ -152,6 +184,15 @@ def test_single_topology_declares_its_server_metrics_capability() -> None:
     assert endpoint.server_metrics is not None
     assert endpoint.server_metrics.path == "/metrics"
     assert endpoint.server_metrics.port is None
+    assert endpoint.prefix_cache_reset is not None
+    assert_success_is_true(endpoint.prefix_cache_reset)
+
+
+def assert_success_is_true(reset: HttpActionSpec) -> None:
+    # vLLM declines a reset with HTTP 200 and `success: false`, so only the
+    # body says whether it happened ([[RFC-0003:C-GATEWAY-PD-ROUTER]]).
+    assert reset.success is not None
+    assert (reset.success.pointer, reset.success.value.root) == ("/success", True)
 
 
 def test_single_topology_declares_explicit_zero_cache_usage_when_enabled() -> None:
@@ -455,6 +496,28 @@ def test_plan_static_npmd_keeps_replicas_distinct_from_ranks() -> None:
     assert all(replica.capture_target is not None for replica in result.replicas)
 
 
+def test_render_mooncake_leaves_sender_workers_at_the_framework_default() -> None:
+    # vLLM runs twice `num_workers` Mooncake sender tasks, each held until its
+    # request finishes prefill; overriding the framework default serialized
+    # prefill-side transfers, so only an operator-set value is rendered.
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    assert input_payload["kv_transfer"] == "mooncake"
+    allocations = cast(list[dict[str, object]], input_payload["allocations"])
+    cast(dict[str, object], allocations[1]["effective_settings"])["mooncake_num_workers"] = 4
+
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+    result = render_serve(request.root.input)
+
+    configs = [
+        json.loads(argv[argv.index("--kv-transfer-config") + 1])
+        for argv in (wrapped.root.command.argv for wrapped in result.processes[:2])
+    ]
+    assert "num_workers" not in configs[0]["kv_connector_extra_config"]
+    assert configs[1]["kv_connector_extra_config"]["num_workers"] == 4
+
+
 def test_render_nixl_uses_role_side_channels_and_connector() -> None:
     payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
     input_payload = cast(dict[str, object], payload["input"])
@@ -504,6 +567,7 @@ def test_builtin_pd_frontends_declare_prefix_cache_reset() -> None:
     assert result.gateway is not None
     assert result.gateway.endpoint.prefix_cache_reset is not None
     assert result.gateway.endpoint.prefix_cache_reset.path == "/reset_prefix_cache"
+    assert_success_is_true(result.gateway.endpoint.prefix_cache_reset)
     assert result.gateway.endpoint.prefix_cache_conditioning is not None
     assert result.gateway.endpoint.prefix_cache_conditioning.path == "/prime_prefix_cache"
 

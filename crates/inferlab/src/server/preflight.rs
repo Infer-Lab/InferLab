@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 
 const PREFLIGHT_MARKER: &str = "INFERLAB_PREFLIGHT\t";
 const HARDWARE_MARKER: &str = "INFERLAB_HARDWARE\t";
+const OCCUPANT_MARKER: &str = "INFERLAB_OCCUPANT\t";
 
 pub(super) struct RemoteCheckRequest<'a> {
     pub target: &'a str,
@@ -176,6 +177,37 @@ pub(super) enum HardwareProbeError {
         probed: Vec<u32>,
         assigned: Vec<u32>,
     },
+    #[error(
+        "machine {machine:?} has assigned devices other processes occupy: {}; stop them or assign other devices",
+        describe_occupants(.occupants)
+    )]
+    Occupied {
+        machine: String,
+        occupants: Vec<DeviceOccupant>,
+    },
+}
+
+/// One compute application an assigned device reported at launch, in
+/// nvidia-smi's own `pid, used_memory, process_name` spelling.
+#[derive(Debug)]
+pub(super) struct DeviceOccupant {
+    device: u32,
+    pid: String,
+    used_memory_mib: String,
+    process_name: String,
+}
+
+fn describe_occupants(occupants: &[DeviceOccupant]) -> String {
+    occupants
+        .iter()
+        .map(|occupant| {
+            format!(
+                "device {}: pid {} ({}) holds {} MiB",
+                occupant.device, occupant.pid, occupant.process_name, occupant.used_memory_mib
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl PreflightObserver for inferlab_runtime::server::SystemProcessRuntime {
@@ -226,7 +258,10 @@ impl PreflightObserver for inferlab_runtime::server::SystemProcessRuntime {
 
 /// One probe script for both launch paths: the command substitution keeps
 /// nvidia-smi's exit status authoritative (a pipe would mask it), and the
-/// marker prefix keeps SSH login banners out of the parsed rows.
+/// marker prefix keeps SSH login banners out of the parsed rows. Each
+/// assigned device is then asked for its compute applications with `-i`, so
+/// every occupant row names its device; any occupant refuses the launch
+/// ([[RFC-0005:C-EVIDENCE]]).
 fn nvidia_smi_script(devices: &[u32]) -> String {
     let select = if devices.is_empty() {
         String::new()
@@ -240,12 +275,28 @@ fn nvidia_smi_script(devices: &[u32]) -> String {
                 .join(",")
         )
     };
+    let occupants = if devices.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; for device in {}; do apps=$(nvidia-smi -i \"$device\" \
+             --query-compute-apps=pid,used_memory,process_name \
+             --format=csv,noheader,nounits); \
+             if [ -n \"$apps\" ]; then printf '%s\\n' \"$apps\" | while IFS= read -r line; \
+             do printf '{OCCUPANT_MARKER}%s\\t%s\\n' \"$device\" \"$line\"; done; fi; done",
+            devices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
     format!(
         "set -eu; out=$(nvidia-smi{select} \
          --query-gpu=index,name,memory.total,uuid,driver_version \
          --format=csv,noheader,nounits); \
          printf '%s\\n' \"$out\" | while IFS= read -r line; \
-         do printf '{HARDWARE_MARKER}%s\\n' \"$line\"; done"
+         do printf '{HARDWARE_MARKER}%s\\n' \"$line\"; done{occupants}"
     )
 }
 
@@ -255,8 +306,13 @@ fn parse_hardware_output(
     stdout: &str,
 ) -> Result<MachineHardwareEvidence, HardwareProbeError> {
     let mut observed_devices = Vec::new();
+    let mut occupants = Vec::new();
     let mut driver_version: Option<String> = None;
     for line in stdout.lines() {
+        if let Some(row) = line.strip_prefix(OCCUPANT_MARKER) {
+            occupants.push(parse_occupant(machine, row)?);
+            continue;
+        }
         let Some(row) = line.strip_prefix(HARDWARE_MARKER) else {
             continue;
         };
@@ -322,9 +378,42 @@ fn parse_hardware_output(
             });
         }
     }
+    if !occupants.is_empty() {
+        return Err(HardwareProbeError::Occupied {
+            machine: machine.to_owned(),
+            occupants,
+        });
+    }
     Ok(MachineHardwareEvidence {
         driver_version,
         devices: observed_devices,
+    })
+}
+
+fn parse_occupant(machine: &str, row: &str) -> Result<DeviceOccupant, HardwareProbeError> {
+    let unexpected = || HardwareProbeError::UnexpectedRow {
+        machine: machine.to_owned(),
+        row: row.to_owned(),
+    };
+    let (device, application) = row.split_once('\t').ok_or_else(unexpected)?;
+    // The process name is the last field, so a name containing the separator
+    // stays whole.
+    let fields = application.splitn(3, ", ").collect::<Vec<_>>();
+    let [pid, used_memory, process_name] = fields.as_slice() else {
+        return Err(unexpected());
+    };
+    let device = device
+        .parse::<u32>()
+        .map_err(|source| HardwareProbeError::InvalidIndex {
+            machine: machine.to_owned(),
+            value: device.to_owned(),
+            source,
+        })?;
+    Ok(DeviceOccupant {
+        device,
+        pid: pid.trim().to_owned(),
+        used_memory_mib: used_memory.trim().to_owned(),
+        process_name: process_name.trim().to_owned(),
     })
 }
 
@@ -700,7 +789,7 @@ fn parse_preflight_output(output: &str) -> Option<PreflightOutput> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HARDWARE_MARKER, parse_hardware_output};
+    use super::{HARDWARE_MARKER, OCCUPANT_MARKER, nvidia_smi_script, parse_hardware_output};
 
     #[test]
     fn hardware_rows_parse_through_banner_noise_in_index_order() -> Result<(), String> {
@@ -752,5 +841,31 @@ mod tests {
         assert_eq!(evidence.driver_version, "580.65.06");
         assert!(evidence.devices.is_empty(), "{evidence:?}");
         Ok(())
+    }
+
+    #[test]
+    fn occupied_assigned_devices_fail_naming_each_application() {
+        let stdout = format!(
+            "{HARDWARE_MARKER}0, Fixture GPU, 97871, GPU-aaa, 580.65.06\n\
+             {HARDWARE_MARKER}1, Fixture GPU, 97871, GPU-bbb, 580.65.06\n\
+             {OCCUPANT_MARKER}1\t4242, 2048, fixture-occupant\n"
+        );
+        let occupied = parse_hardware_output("node-a", &[0, 1], &stdout);
+        assert!(
+            occupied.as_ref().is_err_and(|error| {
+                let message = error.to_string();
+                message.contains("\"node-a\"")
+                    && message.contains("device 1: pid 4242 (fixture-occupant) holds 2048 MiB")
+                    && !message.contains("device 0")
+            }),
+            "{occupied:?}"
+        );
+    }
+
+    #[test]
+    fn only_assigned_devices_are_checked_for_occupants() {
+        // A proxy-only host assigns no device, so nothing there may block launch.
+        assert!(!nvidia_smi_script(&[]).contains("--query-compute-apps"));
+        assert!(nvidia_smi_script(&[0, 1]).contains("--query-compute-apps"));
     }
 }

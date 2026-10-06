@@ -649,6 +649,7 @@ async fn flush_cache(State(state): State<ProxyState>, headers: HeaderMap) -> Res
         "/flush_cache",
         targets,
         authorization,
+        core::SweepSuccess::Status,
     )
     .await
 }

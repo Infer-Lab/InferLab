@@ -4,9 +4,9 @@ use crate::workspace::{PlacementBinding, PlacementRoleBinding, ServerDefinition}
 use inferlab_profiler::plan::{CaptureWindowControlEndpointPlan, CaptureWindowHttpMethodPlan};
 use inferlab_protocol::{
     CaptureMechanism, CaptureWindowControlEndpoint, EndpointAssignment, EndpointDeclaration,
-    EndpointRequirement, FrontendComponents, FrontendProcessRole, GatewayTarget, JsonValueMatch,
+    EndpointRequirement, FrontendComponents, FrontendProcessRole, GatewayTarget,
     KvTransferMechanism, PlanServeResult, ReadinessProbe, RenderSource, ServeReplicaRequirement,
-    ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeTopology, SuppliedRenderInput,
+    ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeTopology, SuccessMatch, SuppliedRenderInput,
     SyntheticAcceptanceInput, SyntheticAcceptanceOutcome,
 };
 use inferlab_serve_domain::{
@@ -66,7 +66,7 @@ fn is_json_pointer(pointer: &str) -> bool {
 fn validate_action_success(
     integration: &str,
     label: &str,
-    success: Option<&JsonValueMatch>,
+    success: Option<&SuccessMatch>,
 ) -> Result<(), InferlabError> {
     match success {
         Some(success) if !is_json_pointer(&success.pointer) => {
@@ -1693,9 +1693,9 @@ mod tests {
         let reset = inferlab_protocol::HttpActionSpec {
             method: inferlab_protocol::HttpMethod::Post,
             path: "/engine/flush_cache".to_owned(),
-            success: Some(JsonValueMatch {
+            success: Some(SuccessMatch {
                 pointer: "/status".to_owned(),
-                value: "ok".to_owned(),
+                value: inferlab_protocol::JsonScalar::String("ok".to_owned()),
             }),
         };
         let validate = |plan: &PlanServeResult, roles: &[ServeRoleInput]| {

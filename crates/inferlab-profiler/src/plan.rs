@@ -106,7 +106,7 @@ pub struct CaptureWindowActionPlan {
     /// A 2xx response succeeds only if its JSON body holds the expected
     /// value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub success: Option<inferlab_protocol::JsonValueMatch>,
+    pub success: Option<inferlab_protocol::SuccessMatch>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

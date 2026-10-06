@@ -410,6 +410,7 @@ async fn reset_prefix_cache(State(state): State<ProxyState>, headers: HeaderMap)
         "/reset_prefix_cache",
         targets,
         authorization,
+        core::SweepSuccess::BodySuccessFlag,
     )
     .await
 }
@@ -878,7 +879,8 @@ mod tests {
         state.requests.fetch_add(1, Ordering::SeqCst);
         let status = StatusCode::from_u16(state.status.load(Ordering::SeqCst))
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, "reset").into_response()
+        // vLLM's reset answer shape.
+        (status, Json(json!({"success": true}))).into_response()
     }
 
     async fn spawn_reset_backend(state: ResetBackend) -> Result<(String, JoinHandle<()>)> {

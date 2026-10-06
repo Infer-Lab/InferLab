@@ -233,6 +233,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 primed_ranks.clear()
             if os.environ.get("FIXTURE_RECORD_CACHE_PREPARATION") == "1":
                 record_capture_event("cache_reset")
+            # vLLM's answer shape: the body, not the status, says whether
+            # the reset happened.
+            body = json.dumps({"success": 200 <= status < 300}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(status)
         self.end_headers()
 

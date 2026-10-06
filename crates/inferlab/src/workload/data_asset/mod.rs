@@ -16,4 +16,7 @@ pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 /// request-source evidence and the effective vision-mode selection on the
 /// built-in OpenAI smoke definition
 /// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]], [[RFC-0004:C-MEASUREMENTS]]).
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 21;
+/// Version 22 records every attempt of a public prefix-cache reset, including
+/// declined attempts retried within the case budget, and admits a boolean
+/// success-predicate value ([[RFC-0005:C-EVIDENCE]]).
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 22;

@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `12` (serialized as the
-/// string `"12"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `13` (serialized as the
+/// string `"13"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 12.
-    #[serde(rename = "12")]
-    V12,
+    /// Protocol version 13.
+    #[serde(rename = "13")]
+    V13,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V12;
+    pub const CURRENT: Self = Self::V13;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V12 => "12",
+            Self::V13 => "13",
         }
     }
 }
@@ -852,6 +852,47 @@ pub struct JsonValueMatch {
     pub value: String,
 }
 
+/// The JSON scalar an HTTP action success predicate expects: a string, or
+/// from protocol version 13 a boolean ([[RFC-0006:C-INTEGRATIONS]]).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum JsonScalar {
+    Boolean(bool),
+    String(String),
+}
+
+impl JsonScalar {
+    /// Whether an observed JSON value equals this scalar with the same JSON
+    /// type: the string `"true"` never matches the boolean `true`.
+    #[must_use]
+    pub fn matches(&self, observed: &serde_json::Value) -> bool {
+        match (self, observed) {
+            (Self::Boolean(expected), serde_json::Value::Bool(value)) => expected == value,
+            (Self::String(expected), serde_json::Value::String(value)) => expected == value,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for JsonScalar {
+    /// The scalar in its JSON spelling.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Boolean(value) => write!(formatter, "{value}"),
+            Self::String(value) => write!(formatter, "{}", serde_json::Value::from(value.as_str())),
+        }
+    }
+}
+
+/// A JSON Pointer and the scalar an HTTP action success predicate expects at
+/// it.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessMatch {
+    pub pointer: String,
+    pub value: JsonScalar,
+}
+
 /// The integration-owned HTTP registry contract for target-aware readiness.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -878,7 +919,7 @@ pub struct HttpActionSpec {
     /// When present, a 2xx response succeeds only if its JSON body holds the
     /// expected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub success: Option<JsonValueMatch>,
+    pub success: Option<SuccessMatch>,
 }
 
 // Capture window control ([[RFC-0004:C-WORKLOAD-PROFILING]]).
@@ -928,7 +969,7 @@ pub struct CaptureWindowHttpActionSpec {
     /// When present, a 2xx response succeeds only if its JSON body holds the
     /// expected value at the pointer ([[RFC-0006:C-INTEGRATIONS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub success: Option<JsonValueMatch>,
+    pub success: Option<SuccessMatch>,
 }
 
 /// One concrete process allocation supplied to `RenderServe`. Model-rank and

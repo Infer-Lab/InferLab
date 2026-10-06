@@ -68,7 +68,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v12.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v13.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -188,6 +188,22 @@ def test_generated_models_accept_shared_valid_fixtures() -> None:
     assert isinstance(frontend, ServeProcessAllocationFrontend)
     assert frontend.components.model_dump() == ("gateway", "pd_router")
     assert not hasattr(frontend, "model_locator")
+
+
+def test_protocol_13_carries_a_boolean_success_predicate() -> None:
+    # [[RFC-0006:C-INTEGRATIONS]]: vLLM's direct reset succeeds only when the
+    # body reports `success` `true`.
+    response = AdapterResponse.model_validate(
+        load_json(FIXTURES / "valid" / "plan-serve-response-single.json")
+    )
+    assert isinstance(response.root, AdapterResponseOk)
+    result = response.root.result.root
+    assert isinstance(result, AdapterResultPlanServe)
+    endpoint = result.output.roles[0].public_endpoint
+    assert endpoint is not None and endpoint.prefix_cache_reset is not None
+    success = endpoint.prefix_cache_reset.success
+    assert success is not None
+    assert (success.pointer, success.value.root) == ("/success", True)
 
 
 def test_auxiliary_model_fixtures_carry_identities_and_resolved_locators() -> None:
@@ -371,7 +387,7 @@ def test_generated_models_preserve_discovery_registry_and_per_target_reset() -> 
     for role in output.output.roles:
         reset = role.replica_prefix_cache_reset
         assert reset is not None and reset.success is not None
-        assert (reset.success.pointer, reset.success.value) == ("/status", "ok")
+        assert (reset.success.pointer, reset.success.value.root) == ("/status", "ok")
 
     render = AdapterRequest.model_validate(
         load_json(FIXTURES / "valid" / "render-serve-request-discovery.json")

@@ -137,7 +137,7 @@ pub enum CaptureActionRecord {
         /// The declared success predicate and the value observed at its
         /// pointer ([[RFC-0005:C-EVIDENCE]]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        success: Option<inferlab_protocol::JsonValueMatch>,
+        success: Option<inferlab_protocol::SuccessMatch>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         observed_value: Option<serde_json::Value>,
     },

@@ -324,7 +324,7 @@ pub struct PendingCaptureWindowActionPlan {
     method: CaptureWindowHttpMethodPlan,
     path: String,
     body: Option<BTreeMap<String, SettingValue>>,
-    success: Option<inferlab_protocol::JsonValueMatch>,
+    success: Option<inferlab_protocol::SuccessMatch>,
 }
 
 #[derive(Clone)]
@@ -452,7 +452,7 @@ impl PendingCaptureWindowActionPlan {
         method: CaptureWindowHttpMethodPlan,
         path: String,
         body: Option<BTreeMap<String, SettingValue>>,
-        success: Option<inferlab_protocol::JsonValueMatch>,
+        success: Option<inferlab_protocol::SuccessMatch>,
     ) -> Self {
         Self {
             method,
@@ -461,7 +461,7 @@ impl PendingCaptureWindowActionPlan {
             success,
         }
     }
-    pub fn success(&self) -> Option<&inferlab_protocol::JsonValueMatch> {
+    pub fn success(&self) -> Option<&inferlab_protocol::SuccessMatch> {
         self.success.as_ref()
     }
     pub const fn method(&self) -> CaptureWindowHttpMethodPlan {

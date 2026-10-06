@@ -465,7 +465,7 @@ fn finish_after_barrier_failure(
 }
 
 fn cache_preparation_error(preparation: &BenchCachePreparationEvidence) -> Option<&'static str> {
-    if !preparation.reset.succeeded() {
+    if !preparation.reset.succeeded {
         Some("prefix-cache reset failed")
     } else if preparation.start == crate::workspace::BenchCacheStart::Primed
         && preparation

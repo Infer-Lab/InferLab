@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-05
+
+### Added
+
+- A server launch refuses assigned devices that other processes occupy: the
+  launch hardware probe reads each assigned device's compute applications and
+  fails before any serving process spawns, naming every occupied machine and
+  each application's device, process ID, process name, and memory.
+- A prefix-cache reset the backend declines — a 2xx answer whose body fails
+  the reset action's success predicate, as vLLM answers while KV blocks are
+  still held — is retried on the declined targets only, after a growing delay,
+  until it succeeds, another failure occurs, or the case budget expires.
+  Workload record schema 22 keeps every reset attempt.
+
+### Changed
+
+- Adapter protocol 13: an HTTP action success predicate may expect a JSON
+  boolean, matched with its JSON type. It ships in `inferlab-adapter-sdk`
+  `0.13.0`; every framework integration moves to it: `inferlab-integration-vllm`,
+  `inferlab-integration-sglang`, and `inferlab-integration-tensorrt-llm`
+  `0.12.0`, `inferlab-integration-tokenspeed` and
+  `inferlab-integration-specialized-engine` `0.13.0`, `inferlab-gateway-smg`
+  `0.3.0`, and `inferlab-gateway-dynamo` `0.2.0`.
+- The backend support matrix lowers Dynamo prefix-cache reset to Limited:
+  `ai-dynamo` 1.5.0 reports success even when vLLM declined the reset
+  (reported upstream as ai-dynamo/dynamo#15688).
+
+### Fixed
+
+- vLLM prefix-cache resets are judged by the response body: the direct vLLM
+  reset and the built-in vLLM P/D Router counted HTTP 200 as success although
+  vLLM answers `success: false` while KV blocks are still held. The P/D Router
+  now answers 200 with `success: false` when every engine declined and 206
+  for any other failure.
+- vLLM Mooncake prefill/decode leaves the sender-worker count at vLLM's default
+  unless `mooncake_num_workers` is set. The integration had replaced it with
+  1, which serialized prefill-side KV transfers and stalled high-concurrency
+  cases until transfers timed out.
+
 ## [0.18.2] - 2026-10-05
 
 ### Added

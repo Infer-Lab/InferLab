@@ -11,6 +11,7 @@ from inferlab_adapter_sdk import (
     HttpActionSpec,
     HttpMethod,
     IntegrationIdentity,
+    JsonScalar,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -35,6 +36,7 @@ from inferlab_adapter_sdk import (
     ServeRoleLinkSideChannel,
     ServeRoleResult,
     ServeTopology,
+    SuccessMatch,
     SyntheticAcceptanceOutcome,
     TargetEndpointScheme,
     consistent_acceptance_outcome,
@@ -48,6 +50,17 @@ from inferlab_adapter_sdk import (
 from .auxiliary import validate_auxiliary_models
 from .settings import VllmServeSettings, _settings
 from .synthetic import apply_synthetic_acceptance
+
+
+# vLLM answers a reset it cannot perform yet — KV blocks still held — with
+# HTTP 200 and `success: false`; the built-in P/D Router reports the same
+# member for its fan-out ([[RFC-0003:C-GATEWAY-PD-ROUTER]]).
+def _reset_prefix_cache() -> HttpActionSpec:
+    return HttpActionSpec(
+        method=HttpMethod(),
+        path="/reset_prefix_cache",
+        success=SuccessMatch(pointer="/success", value=JsonScalar(True)),
+    )
 
 
 def _identity() -> IntegrationIdentity:
@@ -303,10 +316,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     role_result.public_endpoint = EndpointDeclaration(
         protocol=EndpointProtocol(),
         server_metrics=ServerMetricsEndpointRequirement(path="/metrics"),
-        prefix_cache_reset=HttpActionSpec(
-            method=HttpMethod(),
-            path="/reset_prefix_cache",
-        ),
+        prefix_cache_reset=_reset_prefix_cache(),
         prompt_cache_read_zero_representation=(
             PromptCacheReadZeroRepresentation.explicit
             if settings.enable_prompt_tokens_details
@@ -451,10 +461,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         )
         frontend_endpoint = EndpointDeclaration(
             protocol=EndpointProtocol(),
-            prefix_cache_reset=HttpActionSpec(
-                method=HttpMethod(),
-                path="/reset_prefix_cache",
-            ),
+            prefix_cache_reset=_reset_prefix_cache(),
             prefix_cache_conditioning=HttpActionSpec(
                 method=HttpMethod(),
                 path="/prime_prefix_cache",

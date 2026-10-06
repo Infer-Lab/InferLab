@@ -15,7 +15,7 @@ use inferlab_runtime::server::{
     ProcessObserver, ProcessSpec, ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind,
     ServerRuntime, SystemProcessRuntime,
 };
-use preflight::{PreflightObserver, RemoteCheckRequest};
+use preflight::{HardwareProbeError, PreflightObserver, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
 use residual::{
     RESIDUAL_SETTLE_INTERVAL, RESIDUAL_SETTLE_WINDOW, ResidualProbe, probe_device_residual,
@@ -571,6 +571,9 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
         entry.1.extend(process.allocation.devices.iter().copied());
     }
     let probe_total = probe_targets.len();
+    // Occupancy is a verdict about the devices, not a probe failure: every
+    // machine is still probed so one failure names all occupants.
+    let mut occupied = Vec::new();
     for (probe_index, (machine, (launch, devices))) in probe_targets.into_iter().enumerate() {
         progress.phase(Phase::named("local and remote preflight").item(
             &machine,
@@ -582,6 +585,7 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             Ok(evidence) => {
                 session.record_mut().hardware.insert(machine, evidence);
             }
+            Err(error @ HardwareProbeError::Occupied { .. }) => occupied.push(error.to_string()),
             Err(error) => {
                 let message =
                     format!("device hardware probe failed on machine {machine:?}: {error}");
@@ -596,6 +600,17 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
                 )?);
             }
         }
+    }
+    if !occupied.is_empty() {
+        return Err(fail_with(
+            session,
+            runtime,
+            &[],
+            FailurePhase::Preflight,
+            None,
+            occupied.join("; "),
+            true,
+        )?);
     }
     session.rewrite()?;
     Ok(())

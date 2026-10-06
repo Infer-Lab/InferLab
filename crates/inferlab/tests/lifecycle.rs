@@ -1266,6 +1266,65 @@ fn hardware_probe_failure_fails_the_launch_before_any_process() -> Result<(), Bo
     Ok(())
 }
 
+/// Another process holding memory on an assigned device refuses the launch
+/// before any serving process spawns ([[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn occupied_assigned_device_fails_the_launch_before_any_process() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let mut command = workspace.command(&["serve", "start", "deepseek-v4-flash-qualify"]);
+    command
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", OCCUPANT_ROW)
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE", "1");
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    let occupant = "device 1: pid 4242 (fixture-occupant) holds 2048 MiB";
+    assert!(stderr.contains(occupant), "{stderr}");
+    assert!(
+        !stderr.contains("device 0"),
+        "only the occupied device is named: {stderr}"
+    );
+
+    let records = workspace.root.path().join(".inferlab/records");
+    let entries = fs::read_dir(records)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(entries.len(), 1);
+    let record: Value = serde_json::from_slice(&fs::read(entries[0].path().join("record.json"))?)?;
+    assert_eq!(record["status"], "failed");
+    assert_eq!(record["failure"]["phase"], "preflight");
+    assert!(
+        record["failure"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("\"local\"") && message.contains(occupant)),
+        "{record}"
+    );
+    assert_eq!(
+        process_evidence(&record, "server")?["handle"],
+        Value::Null,
+        "no serving process may start on an occupied device"
+    );
+    Ok(())
+}
+
+/// One launch failure names the occupants of every machine, so a multi-node
+/// operator clears them all before retrying ([[RFC-0005:C-EVIDENCE]]).
+#[test]
+fn occupied_devices_on_every_machine_are_named_in_one_failure() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_ssh_pair()?;
+    let mut command = workspace.command(&["serve", "start", "deepseek-v4-flash-qualify"]);
+    command.env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", OCCUPANT_ROW);
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    for occupied in [
+        "machine \"node-a\" has assigned devices other processes occupy: device 0:",
+        "machine \"node-b\" has assigned devices other processes occupy: device 1:",
+    ] {
+        assert!(stderr.contains(occupied), "{stderr}");
+    }
+    Ok(())
+}
+
 fn assert_datetime_record_id(id: &str, expected_stem: &str) -> Result<(), Box<dyn Error>> {
     let (timestamp, suffix) = id.split_once("Z-").ok_or("record id has no UTC prefix")?;
     assert_eq!(timestamp.len(), 23);
@@ -1472,10 +1531,15 @@ eval "exec bash -c $command"
 /// server's residual ([[RFC-0005:C-EVIDENCE]]).
 const GONE_PROCESS_ROW: &str = "4194304, 1024";
 
+/// A launch-time compute-apps row (`pid, used_memory, process_name`) of a
+/// process occupying an assigned device.
+const OCCUPANT_ROW: &str = "4242, 2048, fixture-occupant";
+
 /// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape;
 /// `FIXTURE_NVIDIA_SMI_ERROR` forces a loud probe failure, and a
 /// compute-apps query answers with the `FIXTURE_NVIDIA_SMI_COMPUTE_APPS`
-/// rows (empty — no surviving compute applications — when unset). With
+/// rows (empty — no surviving compute applications — when unset), only for
+/// the `-i` device `FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE` names when set. With
 /// `FIXTURE_NVIDIA_SMI_HELD_PROBES`, each compute-apps query appends a line
 /// to `FIXTURE_NVIDIA_SMI_PROBE_LOG` and the rows stop after that many
 /// queries — memory the driver releases while the probe waits. With
@@ -1496,6 +1560,15 @@ case " $* " in
       sleep 3600
     fi
     if [ -n "${FIXTURE_NVIDIA_SMI_HELD_PROBES:-}" ] && [ "$probes" -gt "$FIXTURE_NVIDIA_SMI_HELD_PROBES" ]; then
+      exit 0
+    fi
+    device=""
+    previous=""
+    for argument in "$@"; do
+      if [ "$previous" = "-i" ]; then device="$argument"; fi
+      previous="$argument"
+    done
+    if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE:-}" ] && [ "$device" != "$FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE" ]; then
       exit 0
     fi
     if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS:-}" ]; then

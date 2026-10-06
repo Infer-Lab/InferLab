@@ -1616,7 +1616,7 @@ fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(),
         false
     );
     assert_eq!(
-        bench["cases"][0]["cache_preparation"]["reset"]["http_status"],
+        bench["cases"][0]["cache_preparation"]["reset"]["attempts"][0]["http_status"],
         206
     );
     assert_eq!(bench["cases"][0]["error"], "prefix-cache reset failed");
@@ -1668,7 +1668,10 @@ fn adaptive_bench_resets_the_prefix_cache_before_every_probe() -> Result<(), Box
         assert_eq!(case["status"], "succeeded");
         assert_eq!(case["cache_preparation"]["start"], "cold");
         assert_eq!(case["cache_preparation"]["reset"]["succeeded"], true);
-        assert_eq!(case["cache_preparation"]["reset"]["http_status"], 200);
+        assert_eq!(
+            case["cache_preparation"]["reset"]["attempts"][0]["http_status"],
+            200
+        );
         assert_eq!(
             case["cache_preparation"]["transitions"][0]["phase"],
             "cache_reset"

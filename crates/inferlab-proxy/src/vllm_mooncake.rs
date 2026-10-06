@@ -576,6 +576,7 @@ async fn reset_prefix_cache(State(state): State<ProxyState>, headers: HeaderMap)
         "/reset_prefix_cache",
         targets,
         authorization,
+        core::SweepSuccess::BodySuccessFlag,
     )
     .await
 }
@@ -908,6 +909,31 @@ mod tests {
 
         let all_succeeded = reset_prefix_cache(State(state.clone()), HeaderMap::new()).await;
         assert_eq!(all_succeeded.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(all_succeeded.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["success"], true);
+
+        // vLLM declines with HTTP 200 and `success: false` while KV blocks
+        // are still held ([[RFC-0003:C-GATEWAY-PD-ROUTER]]).
+        decode_backend.declines.store(true, Ordering::SeqCst);
+        let declined = reset_prefix_cache(State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(declined.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(declined.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["failed"][0]["url"], decode_backend.url());
+        assert_eq!(body["failed"][0]["declined"], true);
+        decode_backend.declines.store(false, Ordering::SeqCst);
+
+        // A 200 that does not report `success` at all is a failure, not a
+        // decline: only an explicit `success: false` may be retried.
+        decode_backend.empty_body.store(true, Ordering::SeqCst);
+        let malformed = reset_prefix_cache(State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(malformed.status(), StatusCode::PARTIAL_CONTENT);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(malformed.into_body(), usize::MAX).await?)?;
+        assert!(body["failed"][0].get("declined").is_none(), "{body}");
+        decode_backend.empty_body.store(false, Ordering::SeqCst);
 
         decode_backend
             .status
@@ -918,25 +944,38 @@ mod tests {
             serde_json::from_slice(&to_bytes(partial.into_body(), usize::MAX).await?)?;
         assert_eq!(body["successful"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["failed"].as_array().map(Vec::len), Some(1));
-        assert_eq!(prefill_backend.requests.load(Ordering::SeqCst), 2);
-        assert_eq!(decode_backend.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(body["success"], false);
+        assert_eq!(prefill_backend.requests.load(Ordering::SeqCst), 4);
+        assert_eq!(decode_backend.requests.load(Ordering::SeqCst), 4);
         prefill_server.abort();
         decode_server.abort();
         Ok(())
     }
 
+    /// A vLLM engine's reset endpoint: `{"success": true}`, or `false`
+    /// while it declines.
     #[derive(Clone)]
     struct ResetBackend {
         status: Arc<AtomicU16>,
+        declines: Arc<AtomicBool>,
+        empty_body: Arc<AtomicBool>,
         requests: Arc<AtomicUsize>,
+        url: Arc<std::sync::OnceLock<String>>,
     }
 
     impl ResetBackend {
         fn new() -> Self {
             Self {
                 status: Arc::new(AtomicU16::new(StatusCode::OK.as_u16())),
+                declines: Arc::new(AtomicBool::new(false)),
+                empty_body: Arc::new(AtomicBool::new(false)),
                 requests: Arc::new(AtomicUsize::new(0)),
+                url: Arc::new(std::sync::OnceLock::new()),
             }
+        }
+
+        fn url(&self) -> &str {
+            self.url.get().map_or("", String::as_str)
         }
     }
 
@@ -944,15 +983,21 @@ mod tests {
         state.requests.fetch_add(1, Ordering::SeqCst);
         let status = StatusCode::from_u16(state.status.load(Ordering::SeqCst))
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, "reset").into_response()
+        if state.empty_body.load(Ordering::SeqCst) {
+            return status.into_response();
+        }
+        let success = !state.declines.load(Ordering::SeqCst);
+        (status, Json(json!({"success": success}))).into_response()
     }
 
     async fn spawn_reset_backend(state: ResetBackend) -> Result<(String, JoinHandle<()>)> {
+        let url = state.url.clone();
         let app = Router::new()
             .route("/reset_prefix_cache", post(mock_reset))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
+        let _ = url.set(format!("http://{address}"));
         let server = tokio::spawn(async move {
             let _result = serve(listener, app).await;
         });

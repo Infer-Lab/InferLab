@@ -3,7 +3,7 @@ use inferlab_protocol::{
     BenchClientResult, BenchPopulationPreparationRequest, BenchPrefixSharingInput,
     BenchRequestSourceInput, BenchTokenSelectorInput, EvalClientRequest, EvalClientResult,
     EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion,
-    EvalTaskSourceInput, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
+    EvalTaskSourceInput, JsonScalar, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
     MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
     Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, ProtocolVersion,
     ReadinessProbe, RenderInputDeclaration, ServeProcessAllocation, SettingValue,
@@ -55,6 +55,10 @@ const VALID_RENDER_REQUEST_AUXILIARY: &str = include_str!(concat!(
 const VALID_PLAN_RESPONSE_NIXL_SIDE_CHANNEL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/plan-serve-response-nixl-side-channel.json"
+));
+const VALID_PLAN_RESPONSE_SINGLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/plan-serve-response-single.json"
 ));
 const VALID_PLAN_RESPONSE_ROUTED_SINGLE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -151,7 +155,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v12.schema.json"
+    "/../../protocol/schema/adapter-protocol-v13.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -629,6 +633,38 @@ fn frontend_component_schema_uses_stable_binding_names() -> Result<(), Box<dyn E
     assert!(definitions.contains_key("GatewayPdRouterFrontendBinding"));
     assert!(!definitions.contains_key("FrontendComponents1"));
     assert!(!definitions.contains_key("FrontendComponents2"));
+    Ok(())
+}
+
+/// Protocol 13 carries a boolean success-predicate value: vLLM's direct
+/// reset succeeds only when the body reports `success` `true`
+/// ([[RFC-0006:C-INTEGRATIONS]], [[RFC-0003:C-GATEWAY-PD-ROUTER]]).
+#[test]
+fn a_boolean_success_predicate_round_trips() -> Result<(), Box<dyn Error>> {
+    let response: AdapterResponse = serde_json::from_str(VALID_PLAN_RESPONSE_SINGLE)?;
+    let AdapterResponse::Ok { result, .. } = &response else {
+        return Err("single fixture did not contain a successful response".into());
+    };
+    let AdapterResult::PlanServe { output } = result.as_ref() else {
+        return Err("single fixture did not contain plan output".into());
+    };
+    let reset = output.roles[0]
+        .public_endpoint
+        .as_ref()
+        .and_then(|endpoint| endpoint.prefix_cache_reset.as_ref())
+        .ok_or("public reset")?;
+    assert_eq!(
+        reset
+            .success
+            .as_ref()
+            .map(|success| (success.pointer.as_str(), &success.value)),
+        Some(("/success", &JsonScalar::Boolean(true)))
+    );
+    let value = serde_json::to_value(&response)?;
+    assert_eq!(
+        value.pointer("/result/output/roles/0/public_endpoint/prefix_cache_reset/success/value"),
+        Some(&serde_json::Value::Bool(true))
+    );
     Ok(())
 }
 
@@ -1203,8 +1239,8 @@ fn discovery_registry_membership_and_per_target_reset_fixtures_round_trip()
             reset
                 .success
                 .as_ref()
-                .map(|m| (m.pointer.as_str(), m.value.as_str())),
-            Some(("/status", "ok"))
+                .map(|m| (m.pointer.as_str(), &m.value)),
+            Some(("/status", &JsonScalar::String("ok".to_owned())))
         );
     }
     assert_eq!(

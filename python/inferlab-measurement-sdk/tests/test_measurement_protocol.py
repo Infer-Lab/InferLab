@@ -235,7 +235,7 @@ def test_agentic_bench_fixtures_round_trip() -> None:
         load_json(FIXTURES / "valid" / "bench-client-request-agentic.json")
     )
     assert request.definition.agentic_source is not None
-    assert request.definition.agentic_source.catalog.scenario == "inferencex-agentx-mvp"
+    assert request.definition.agentic_source.catalog.scenario == "agentx"
     assert request.definition.artifact_level is BenchArtifactLevelInput.diagnostic
 
     result = inferlab_measurement_sdk.BenchClientResult.model_validate(

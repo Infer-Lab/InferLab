@@ -18,7 +18,7 @@ pydantic = "==2.13.4"
 c-compiler = "1.*"
 
 [feature.bench.pypi-dependencies]
-aiperf = { git = "https://github.com/lucifer1004/aiperf.git", rev = "8f3ac49a51ff6b07b22cd5afcfd0495902106572" }
+aiperf = { git = "https://github.com/lucifer1004/aiperf.git", rev = "c0a951f3282335a32573ebc9c949d5b5c23e0dec" }
 
 # Image-packaging tools ([[RFC-0007:C-IMAGE-BUILD]]): search-path rewriting,
 # device-code extraction for verification, and wheel repacking.

@@ -514,7 +514,7 @@ fn agentic_bench_fixtures_round_trip() -> Result<(), Box<dyn Error>> {
         .agentic_source
         .as_ref()
         .ok_or("AgentX fixture omitted its agentic source")?;
-    assert_eq!(source.catalog.scenario, "inferencex-agentx-mvp");
+    assert_eq!(source.catalog.scenario, "agentx");
     assert_eq!(request.case.duration_seconds, Some(900));
     assert_eq!(
         request.definition.artifact_level,

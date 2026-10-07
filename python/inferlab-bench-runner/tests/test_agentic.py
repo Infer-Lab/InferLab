@@ -17,7 +17,7 @@ from inferlab_bench_runner.aiperf import (
 )
 from inferlab_bench_runner.data_asset import prepare_agentic_data_asset
 from inferlab_bench_runner.execution import execute
-from inferlab_bench_runner.result_agentic import agentic_result_evidence
+from inferlab_bench_runner.result_agentic import agentic_result_evidence, warmup_abort_detail
 from inferlab_measurement_sdk import (
     PROTOCOL_VERSION,
     BenchAgenticAcquisitionOutcome,
@@ -78,7 +78,7 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
                             "aiperf.dataset.loader.semianalysis_cc_traces_weka:"
                             "SemiAnalysisCCTracesWekaLoader"
                         ),
-                        "scenario": "inferencex-agentx-mvp",
+                        "scenario": "agentx",
                         "concurrency_semantics": "root_session_tree_lanes",
                         "replay_semantics": "source_response_inclusive",
                         "cache_bust": "first_turn_prefix",
@@ -90,7 +90,8 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
                         "warmup_grace_seconds": 1800,
                         "dataset_configuration_timeout_seconds": 1800,
                         "service_profile_configuration_timeout_seconds": 1800,
-                        "default_duration_seconds": 1800,
+                        "default_duration_seconds": 3600,
+                        "default_seed": 42,
                         "minimum_duration_seconds": 900,
                         "failure_threshold": 0.10,
                         "dataset_entries": 393,
@@ -98,14 +99,17 @@ def agentic_request(tmp_path: Path, *, server_metrics: bool = False) -> BenchCli
                         "ignore_eos": True,
                         "use_server_token_count": True,
                         "gpu_telemetry": False,
-                        "server_metric_slice_seconds": 1,
+                        "metric_slice_seconds": 1,
+                        "stats_interval_seconds": 30,
+                        "http_tcp_user_timeout_ms": 900000,
+                        "realtime_metrics": True,
                         "required_artifacts": ["aggregate", "records", "raw_records"],
                         "unavailable_dimensions": ["exported_per_lane_time_origin"],
                         "inferencex_repository": "SemiAnalysisAI/InferenceX",
-                        "inferencex_revision": "45aa3a24be4d97aad878076391ebd38690cce1cb",
-                        "inferencex_reference": "benchmarks/benchmark_lib.sh",
-                        "aiperf_revision": "754356e9a39acc6cc6afb242d123bb57c3fb6f75",
-                        "aiperf_version": "0.13.0+inferlab.1",
+                        "inferencex_revision": "8ba71d026e866e7792074a3fd3f896fe6d1ad099",
+                        "inferencex_reference": "inferencex-e2e/benchmarks/benchmark_lib.sh",
+                        "aiperf_revision": "89b21867872a5bbc4b0676bf5005c404da5e9f94",
+                        "aiperf_version": "0.13.0+inferlab.3",
                     },
                 },
                 "prompt": resolved_prompt_input({"kind": "server_chat"}),
@@ -240,14 +244,18 @@ def test_verified_agentic_cache_hit_uses_local_only_acquisition(
 def test_agentic_config_lowers_the_release_profile_without_an_inferlab_dag(
     tmp_path: Path,
 ) -> None:
-    request_value = agentic_request(tmp_path, server_metrics=True)
+    # Every agentx preset value is declared, because the preset's
+    # command-line defaults never reach the configuration-file path.
+    request_value = agentic_request(tmp_path, server_metrics=False)
     config = aiperf_config(request_value)
     benchmark = cast(dict[str, object], config["benchmark"])
     dataset = cast(dict[str, object], benchmark["dataset"])
     profiling = cast(dict[str, object], benchmark["profiling"])
     artifacts = cast(dict[str, object], benchmark["artifacts"])
+    runtime = cast(dict[str, object], benchmark["runtime"])
 
-    assert benchmark["scenario"] == "inferencex-agentx-mvp"
+    assert benchmark["scenario"] == "agentx"
+    assert config["randomSeed"] == 42
     assert dataset == {
         "type": "public",
         "dataset": "semianalysis_cc_traces_weka_062126_256k",
@@ -267,10 +275,13 @@ def test_agentic_config_lowers_the_release_profile_without_an_inferlab_dag(
         "agenticWarmupGracePeriod": 1800,
     }
     assert artifacts["sliceDuration"] == 1
+    assert runtime == {"ui": "none", "statsInterval": 30}
     prepared = prepare_aiperf_execution(request_value, CaseDeadline(3600))
     assert prepared.environment == {
         "AIPERF_DATASET_CONFIGURATION_TIMEOUT": "1800",
         "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT": "1800",
+        "AIPERF_HTTP_TCP_USER_TIMEOUT": "900000",
+        "AIPERF_UI_REALTIME_METRICS_ENABLED": "true",
     }
 
 
@@ -383,7 +394,7 @@ def test_agentic_result_preserves_public_scenario_coordinates_and_branch_stats(
     summary: dict[str, object] = {
         "benchmark_id": "agentx-run-1",
         "metadata": {
-            "scenario": "inferencex-agentx-mvp",
+            "scenario": "agentx",
             "submission_valid": True,
             "dataset": {
                 "loader": "semianalysis_cc_traces_weka_062126_256k",
@@ -480,7 +491,7 @@ def test_agentic_result_records_warmup_failures_as_evidence_not_handoff_state(
     summary: dict[str, object] = {
         "benchmark_id": "agentx-run-1",
         "metadata": {
-            "scenario": "inferencex-agentx-mvp",
+            "scenario": "agentx",
             "submission_valid": True,
             "dataset": {
                 "loader": "semianalysis_cc_traces_weka_062126_256k",
@@ -553,7 +564,7 @@ def test_performance_agentic_result_degrades_raw_derived_dimensions(
     summary: dict[str, object] = {
         "benchmark_id": "agentx-run-1",
         "metadata": {
-            "scenario": "inferencex-agentx-mvp",
+            "scenario": "agentx",
             "submission_valid": True,
             "dataset": {
                 "loader": "semianalysis_cc_traces_weka_062126_256k",
@@ -600,3 +611,38 @@ def test_performance_agentic_result_degrades_raw_derived_dimensions(
         "cache_bust_observations",
         "warmup_source_coordinate_records",
     ]
+
+
+def test_warmup_abort_detail_names_the_failed_root_stream_request(tmp_path: Path) -> None:
+    # Field shape of AIPerf's per-request records export as observed when a
+    # cache-pressure warmup request was reset; trace ids are fake.
+    def record(trace: str, turn: int, depth: int, error: object = None) -> str:
+        metadata = {
+            "benchmark_phase": "warmup",
+            "conversation_id": trace,
+            "turn_index": turn,
+            "agent_depth": depth,
+            "was_cancelled": False,
+        }
+        return json.dumps({"metadata": metadata, "metrics": {}, "error": error})
+
+    reset = {"type": "ClientOSError", "message": "ClientOSError(104, 'Connection reset by peer')"}
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        "\n".join(
+            [
+                record("fake-root-trace", 1, 0),
+                record("fake-child-trace", 0, 1, reset),
+                record("fake-root-trace", 2, 0, reset),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert warmup_abort_detail(records) == (
+        "AIPerf aborted AgentX warmup before profiling after 1 failed root-stream "
+        "warmup request(s); first: trace fake-root-trace turn 2: "
+        "ClientOSError(104, 'Connection reset by peer')"
+    )
+
+    records.write_text(record("fake-child-trace", 0, 1, reset), encoding="utf-8")
+    assert warmup_abort_detail(records) is None

@@ -49,7 +49,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing-inspection-0.4.2-pyhcf101f3_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.15.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
-      - pypi: git+https://github.com/lucifer1004/aiperf.git?rev=8f3ac49a51ff6b07b22cd5afcfd0495902106572#8f3ac49a51ff6b07b22cd5afcfd0495902106572
+      - pypi: git+https://github.com/lucifer1004/aiperf.git?rev=c0a951f3282335a32573ebc9c949d5b5c23e0dec#c0a951f3282335a32573ebc9c949d5b5c23e0dec
       - pypi: https://files.pythonhosted.org/packages/00/2f/f7c8a533bee50fbf5bb37ffc1621e7b2cdd8c9a6301fc51faa35fa50b09d/textual-5.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/00/b7/e3bf5133d697a08128598c8d0abc5e16377b51465a33756de24fa7dee953/aiosqlite-0.22.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/03/a7/03aa61fbc3c5cbf99b44d158665f9b0dd3d8059be16c460208d9e385c837/brotli-1.2.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -228,7 +228,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing-inspection-0.4.2-pyhcf101f3_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.15.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
-      - pypi: git+https://github.com/lucifer1004/aiperf.git?rev=8f3ac49a51ff6b07b22cd5afcfd0495902106572#8f3ac49a51ff6b07b22cd5afcfd0495902106572
+      - pypi: git+https://github.com/lucifer1004/aiperf.git?rev=c0a951f3282335a32573ebc9c949d5b5c23e0dec#c0a951f3282335a32573ebc9c949d5b5c23e0dec
       - pypi: https://files.pythonhosted.org/packages/00/2f/f7c8a533bee50fbf5bb37ffc1621e7b2cdd8c9a6301fc51faa35fa50b09d/textual-5.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/00/b7/e3bf5133d697a08128598c8d0abc5e16377b51465a33756de24fa7dee953/aiosqlite-0.22.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl
@@ -2254,9 +2254,9 @@ packages:
   run_exports: {}
   size: 34528
   timestamp: 1786613220176
-- pypi: git+https://github.com/lucifer1004/aiperf.git?rev=8f3ac49a51ff6b07b22cd5afcfd0495902106572#8f3ac49a51ff6b07b22cd5afcfd0495902106572
+- pypi: git+https://github.com/lucifer1004/aiperf.git?rev=c0a951f3282335a32573ebc9c949d5b5c23e0dec#c0a951f3282335a32573ebc9c949d5b5c23e0dec
   name: aiperf
-  version: 0.13.0+inferlab.1
+  version: 0.13.0+inferlab.3
   requires_dist:
   - aiofiles~=24.1.0
   - aiohttp>=3.14.3,<4
@@ -2311,6 +2311,8 @@ packages:
   - wandb>=0.19.0,<1.0.0 ; extra == 'wandb'
   - opentelemetry-exporter-otlp-proto-http>=1.24.0,<2.0.0 ; extra == 'otel'
   - opentelemetry-sdk>=1.24.0,<2.0.0 ; extra == 'otel'
+  - botocore>=1.34.0 ; extra == 'aws'
+  - aiperf[aws] ; extra == 'test'
   - httpx>=0.27.0 ; extra == 'test'
   - hypothesis>=6.0.0 ; (platform_machine != 'ARM64' and extra == 'test') or (sys_platform != 'win32' and extra == 'test')
   - hypothesis>=6.0.0,<6.156 ; platform_machine == 'ARM64' and sys_platform == 'win32' and extra == 'test'
@@ -2323,7 +2325,7 @@ packages:
   - pytest-timeout>=2.0.0 ; extra == 'test'
   - pytest-xdist>=3.8.0 ; extra == 'test'
   - trustme>=1.0.0 ; (platform_machine != 'ARM64' and extra == 'test') or (sys_platform != 'win32' and extra == 'test')
-  - aiperf[mlflow,otel,test,wandb] ; extra == 'dev'
+  - aiperf[aws,mlflow,otel,test,wandb] ; extra == 'dev'
   - black>=25.1.0 ; extra == 'dev'
   - pre-commit>=4.2.0 ; extra == 'dev'
   - ruff>=0.14.0,<0.15.0 ; extra == 'dev'

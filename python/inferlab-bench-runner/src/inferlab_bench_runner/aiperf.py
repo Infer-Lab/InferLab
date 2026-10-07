@@ -404,19 +404,26 @@ def aiperf_config(
     }
     if not definition.server_metrics:
         artifacts["prefix"] = ARTIFACT_PREFIX
+    # Worker and record-processor counts stay AIPerf's to choose, as in
+    # InferenceX runs; each request's worker_id in the retained per-request
+    # records shows the effective fan-out.
+    runtime: JsonObject = {"ui": "none"}
     benchmark: JsonObject = {
         "model": request.model.served_name,
         "endpoint": endpoint_config,
         "dataset": population.dataset,
         "profiling": profiling_config(request),
         "tokenizer": {"name": request.model.locator},
-        "runtime": {"ui": "none", "workers": 1, "recordProcessors": 1},
+        "runtime": runtime,
         "gpuTelemetry": {"enabled": False},
         "serverMetrics": {"enabled": False},
         "artifacts": artifacts,
     }
     if definition.agentic_source is not None:
-        benchmark["scenario"] = definition.agentic_source.catalog.scenario
+        catalog = definition.agentic_source.catalog
+        benchmark["scenario"] = catalog.scenario
+        runtime["statsInterval"] = catalog.stats_interval_seconds
+        artifacts["sliceDuration"] = catalog.metric_slice_seconds
     if definition.server_metrics:
         server_metrics = endpoint.server_metrics
         if server_metrics is None:
@@ -427,10 +434,6 @@ def aiperf_config(
             "formats": ["json"],
             "discovery": {"mode": "disabled"},
         }
-        if definition.agentic_source is not None:
-            artifacts["sliceDuration"] = (
-                definition.agentic_source.catalog.server_metric_slice_seconds
-            )
     if definition.request_slo is not None:
         benchmark["slos"] = aiperf_slos(definition.request_slo)
     warmup_sessions = request.case.warmup_session_count
@@ -716,6 +719,8 @@ def prepare_aiperf_execution(
             "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT": str(
                 catalog.service_profile_configuration_timeout_seconds
             ),
+            "AIPERF_HTTP_TCP_USER_TIMEOUT": str(catalog.http_tcp_user_timeout_ms),
+            "AIPERF_UI_REALTIME_METRICS_ENABLED": "true" if catalog.realtime_metrics else "false",
         }
     decoration = image_decoration(request)
     if decoration is not None and request.population is not None:

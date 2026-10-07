@@ -106,7 +106,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         Some(64)
     );
     assert_eq!(first["bench"]["platform"], host_platform());
-    assert_eq!(first["bench"]["aiperf_version"], "0.13.0+inferlab.1");
+    assert_eq!(first["bench"]["aiperf_version"], "0.13.0+inferlab.3");
     assert_eq!(first["bench"]["transformers_version"], "5.12.1");
     assert_eq!(first["image"]["platform"], host_platform());
     assert_eq!(first["image"]["patchelf_version"], "0.19.2");
@@ -271,7 +271,7 @@ PYTHON
 cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"aiperf_version":"0.13.0+inferlab.1","transformers_version":"5.12.1"}\n'
+  printf '{"aiperf_version":"0.13.0+inferlab.3","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 printf 'unexpected python fixture arguments: %s\n' "$*" >&2

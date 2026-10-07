@@ -65,7 +65,7 @@ pub(crate) fn definition(definition: &BenchDefinition) -> DefinitionDetail {
                     load.push(fact("Burstiness", value.to_string()));
                 }
                 load.extend([
-                    fact("Seed", seed.to_string()),
+                    fact("Seed", seed.unwrap_or(0).to_string()),
                     fact(
                         "Cache start",
                         cache_start(cache.as_ref().map(|cache| cache.start)),
@@ -93,7 +93,7 @@ pub(crate) fn definition(definition: &BenchDefinition) -> DefinitionDetail {
                     title: "LOAD",
                     rows: vec![
                         fact("Concurrency", number_list(concurrency)),
-                        fact("Seed", seed.to_string()),
+                        fact("Seed", seed.unwrap_or(0).to_string()),
                         fact(
                             "Cache start",
                             cache_start(cache.as_ref().map(|cache| cache.start)),
@@ -102,11 +102,15 @@ pub(crate) fn definition(definition: &BenchDefinition) -> DefinitionDetail {
                     ],
                 });
             } else if agentic_source.is_some() {
+                // Omitted duration and seed resolve to the profile defaults,
+                // which the declared definition does not carry.
                 let mut load = vec![
                     fact("Root-tree concurrency", number_list(concurrency)),
-                    fact("Seed", seed.to_string()),
                     fact("Timeout", format!("{timeout_seconds}s")),
                 ];
+                if let Some(value) = seed {
+                    load.insert(1, fact("Seed", value.to_string()));
+                }
                 if let Some(value) = duration_seconds {
                     load.insert(1, fact("Profiling duration", format!("{value}s")));
                 }

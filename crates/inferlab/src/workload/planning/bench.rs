@@ -531,12 +531,19 @@ fn resolve_bench_definition(
                     });
                 }
             };
+            let seed = match (&source, seed) {
+                (_, Some(seed)) => *seed,
+                (ResolvedBenchSource::Agentic { agentic_source }, None) => {
+                    agentic_source.catalog.default_seed
+                }
+                (_, None) => 0,
+            };
             Ok(ResolvedBenchDefinition {
                 source,
                 prompt,
                 server_metrics: *server_metrics,
                 artifact_level: *artifact_level,
-                seed: *seed,
+                seed,
                 request_body: request_body.clone(),
                 request_slo: request_slo.clone(),
                 timeout_seconds: *timeout_seconds,
@@ -609,6 +616,7 @@ fn resolve_bench_agentic_source(
                 .policy
                 .service_profile_configuration_timeout_seconds,
             default_duration_seconds: resolved.policy.default_duration_seconds,
+            default_seed: resolved.policy.default_seed,
             minimum_duration_seconds: resolved.policy.minimum_duration_seconds,
             failure_threshold: resolved.policy.failure_threshold,
             dataset_entries: resolved.policy.dataset_entries,
@@ -616,7 +624,10 @@ fn resolve_bench_agentic_source(
             ignore_eos: resolved.policy.ignore_eos,
             use_server_token_count: resolved.policy.use_server_token_count,
             gpu_telemetry: resolved.policy.gpu_telemetry,
-            server_metric_slice_seconds: resolved.policy.server_metric_slice_seconds,
+            metric_slice_seconds: resolved.policy.metric_slice_seconds,
+            stats_interval_seconds: resolved.policy.stats_interval_seconds,
+            http_tcp_user_timeout_ms: resolved.policy.http_tcp_user_timeout_ms,
+            realtime_metrics: resolved.policy.realtime_metrics,
             required_artifacts: resolved.policy.required_artifacts,
             unavailable_dimensions: resolved.policy.unavailable_dimensions,
             inferencex_repository: resolved.qualification.inferencex_repository,
@@ -1132,7 +1143,7 @@ timeout_seconds = 60
     }
 
     #[test]
-    fn agentic_definition_resolves_profile_default_duration_and_catalog_policy()
+    fn agentic_definition_resolves_profile_defaults_and_catalog_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let definition = toml::from_str::<BenchDefinition>(
             r#"
@@ -1153,13 +1164,14 @@ timeout_seconds = 3600
             resolved["agentic_source"]["catalog"]["revision"],
             "8fecd2fc56694469f758f0afbbb6335ad3043740"
         );
+        assert_eq!(resolved["agentic_source"]["catalog"]["scenario"], "agentx");
         assert_eq!(
-            resolved["agentic_source"]["catalog"]["scenario"],
-            "inferencex-agentx-mvp"
+            resolved["seed"], resolved["agentic_source"]["catalog"]["default_seed"],
+            "an omitted agentic seed resolves to the profile default"
         );
 
         let execution = serde_json::to_value(resolve_bench_execution("agentx", &definition)?)?;
-        assert_eq!(execution["cases"][0]["duration_seconds"], 1800);
+        assert_eq!(execution["cases"][0]["duration_seconds"], 3600);
         assert_eq!(execution["cases"][0]["load_shape"]["concurrency"], 2);
         assert_eq!(
             required_population_count("agentx", &resolve_bench_execution("agentx", &definition)?)?,

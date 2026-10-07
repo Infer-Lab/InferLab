@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-06
+
+### Changed
+
+- **Breaking:** an AgentX Bench that omits `duration_seconds` now profiles for
+  3600 seconds, the InferenceX submission default, instead of 1800 seconds;
+  the 900-second minimum is unchanged. Raise `timeout_seconds` for such
+  Benches to fit the longer window.
+- AgentX replay runs AIPerf's `agentx` scenario, the preset current InferenceX
+  submissions use, with every preset value declared by the release profile: an
+  AgentX Bench that omits `seed` now uses seed 42, metric time slices apply to
+  every case, and the replay uses the preset's TCP user timeout, stats
+  interval, and realtime metrics. The catalog names the InferenceX revision
+  that runs the preset.
+- The measurement toolchain moves to an AIPerf `0.13.0+inferlab.3`
+  integration build ([[ADR-0061]]): upstream AIPerf main, which carries the
+  reviewed AgentX port including a fix for a subagent join that held its
+  parent's lane at phase handoff, plus the export teardown fix upstream has not
+  merged (ai-dynamo/aiperf#1468) and the SemiAnalysis `agentx` scenario preset.
+  Reinstall the toolchain after upgrading InferLab.
+- Benches no longer pin AIPerf to one worker process and one record
+  processor: AIPerf chooses both, as in InferenceX runs (for example eight
+  workers at concurrency 8), and each request's `worker_id` in the per-request
+  records shows the effective fan-out.
+
+### Fixed
+
+- An AgentX case that AIPerf aborts during warmup now says so in its error and
+  names the failed root-stream warmup request's trace, turn, and cause. Any
+  failed root-stream warmup request, including a single cache-pressure
+  request, aborts the case, as it does in InferenceX runs.
+
 ## [0.20.0] - 2026-10-06
 
 ### Added

@@ -25,7 +25,7 @@
     },
     "run": {
       "native_run_id": "agentx-run-1",
-      "scenario": "inferencex-agentx-mvp",
+      "scenario": "agentx",
       "submission_valid": true,
       "submission_invalid_reasons": [],
       "warmup_records": 1,
@@ -57,7 +57,7 @@
     }
   },
   "prompt_token_reconciliation": [],
-  "native_command": ["aiperf", "profile", "--scenario", "inferencex-agentx-mvp"],
+  "native_command": ["aiperf", "profile", "--scenario", "agentx"],
   "native_exit_code": 0,
   "report_invocations": [],
   "raw_artifacts": [

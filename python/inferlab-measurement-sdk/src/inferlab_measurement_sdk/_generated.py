@@ -823,26 +823,30 @@ class BenchAgenticCatalogInput(BaseModel):
     dataset_configuration_timeout_seconds: Annotated[int, Field(ge=0)]
     dataset_entries: Annotated[int, Field(ge=0)]
     default_duration_seconds: Annotated[int, Field(ge=0)]
+    default_seed: Annotated[int, Field(ge=0)]
     failure_threshold: float
     filename: str
     global_idle_gap_cap_seconds: float
     gpu_telemetry: bool
+    http_tcp_user_timeout_ms: Annotated[int, Field(ge=0)]
     ignore_eos: bool
     inferencex_reference: str
     inferencex_repository: str
     inferencex_revision: str
     license: str
     materialization_identity: str
+    metric_slice_seconds: Annotated[int, Field(ge=0)]
     minimum_duration_seconds: Annotated[int, Field(ge=0)]
+    realtime_metrics: bool
     replay_semantics: str
     repository: str
     required_artifacts: list[str]
     revision: str
     scenario: str
-    server_metric_slice_seconds: Annotated[int, Field(ge=0)]
     service_profile_configuration_timeout_seconds: Annotated[int, Field(ge=0)]
     sha256: str
     source_format: str
+    stats_interval_seconds: Annotated[int, Field(ge=0)]
     streaming: bool
     trace_count: Annotated[int, Field(ge=0)]
     trace_idle_gap_cap_seconds: float

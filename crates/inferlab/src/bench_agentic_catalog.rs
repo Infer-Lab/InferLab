@@ -55,6 +55,7 @@ pub(crate) struct ProfileEntry {
     pub dataset_configuration_timeout_seconds: u64,
     pub service_profile_configuration_timeout_seconds: u64,
     pub default_duration_seconds: u64,
+    pub default_seed: u64,
     pub minimum_duration_seconds: u64,
     pub failure_threshold: f64,
     pub dataset_entries: u32,
@@ -62,7 +63,10 @@ pub(crate) struct ProfileEntry {
     pub ignore_eos: bool,
     pub use_server_token_count: bool,
     pub gpu_telemetry: bool,
-    pub server_metric_slice_seconds: u64,
+    pub metric_slice_seconds: u64,
+    pub stats_interval_seconds: u64,
+    pub http_tcp_user_timeout_ms: u64,
+    pub realtime_metrics: bool,
     pub required_artifacts: Vec<String>,
     pub unavailable_dimensions: Vec<String>,
 }
@@ -139,7 +143,7 @@ mod tests {
         assert_eq!(full.source.trace_count, 393);
         assert_eq!(limited.source.revision.len(), 40);
         assert_eq!(limited.policy.minimum_duration_seconds, 900);
-        assert_eq!(limited.policy.default_duration_seconds, 1800);
+        assert_eq!(limited.policy.default_duration_seconds, 3600);
         assert_eq!(limited.policy.trajectory_start_min, 0.25);
         assert_eq!(limited.policy.trajectory_start_max, 0.75);
         assert_eq!(limited.policy.dataset_configuration_timeout_seconds, 1800);
@@ -147,7 +151,7 @@ mod tests {
             limited.policy.service_profile_configuration_timeout_seconds,
             1800
         );
-        assert_eq!(limited.qualification.aiperf_version, "0.13.0+inferlab.1");
+        assert_eq!(limited.qualification.aiperf_version, "0.13.0+inferlab.3");
         assert_eq!(
             limited.qualification.inferencex_repository,
             "SemiAnalysisAI/InferenceX"

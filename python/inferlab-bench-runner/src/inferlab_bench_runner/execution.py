@@ -31,7 +31,7 @@ from .aiperf import (
     speed_bench_category,
 )
 from .population import load_chat_tokenizer
-from .result_agentic import agentic_result_evidence
+from .result_agentic import agentic_result_evidence, warmup_abort_detail
 from .result_metrics import NORMALIZATION_SCHEMA, normalize_summary, prompt_cache_evidence
 from .result_policy import request_slo_evidence, warmup_counts, warmup_error
 from .result_population import population_identity_error, prompt_token_reconciliation
@@ -211,6 +211,10 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             reason = "AIPerf reached the measurement-case deadline"
         elif native_exit_code != 0 and not complete_all_inference_error:
             reason = f"AIPerf exited with {native_exit_code}"
+            if agentic_source is not None:
+                abort_detail = warmup_abort_detail(records_path)
+                if abort_detail is not None:
+                    reason = f"{reason}; {abort_detail}"
         elif summary_error is not None:
             reason = f"AIPerf summary is invalid: {summary_error}"
         elif count_error is not None:

@@ -22,7 +22,7 @@
     "run": null
   },
   "prompt_token_reconciliation": [],
-  "native_command": ["aiperf", "profile", "--scenario", "inferencex-agentx-mvp"],
+  "native_command": ["aiperf", "profile", "--scenario", "agentx"],
   "native_exit_code": null,
   "report_invocations": [],
   "raw_artifacts": [

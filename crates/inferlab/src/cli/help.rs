@@ -105,7 +105,7 @@ WORKSPACE TOML — SEMIANALYSIS AGENTX TRACE REPLAY:
   concurrency = [1]
   timeout_seconds = 7200
 
-AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, a 300-second per-trace idle-gap cap, a cache-pressure warmup of 10 requests per lane, a 900-second minimum and 1800-second default profiling duration, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context corpus is about 1.85 GB. Choose the corpus the served context length can hold: requests beyond it are recorded as context overflows at runtime, not rejected while planning. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
+AgentX concurrency counts root session-tree lanes, not simultaneous HTTP requests. The release profile owns source-response replay, first-turn-prefix cache busting, a 300-second per-trace idle-gap cap, a cache-pressure warmup of 10 requests per lane, a 900-second minimum and 3600-second default profiling duration, a default seed of 42, and AIPerf scenario validity. Live server responses are measured but do not feed later source turns. The 256k corpus download is about 569 MB; the full-context corpus is about 1.85 GB. Choose the corpus the served context length can hold: requests beyond it are recorded as context overflows at runtime, not rejected while planning. Transport metrics and native branch counters do not claim agent-task quality. Inspect the resolved source revision, replay policy, native aggregate, raw records, branch_stats, and unavailable scheduler dimensions in dry-run and the Bench record.
 
 An omitted Bench kind resolves to serving, and an omitted synthetic prompt to flat, or to server_chat when a random source declares images. Use `inferlab workspace show --json` to inspect their canonical explicit values.";
 
@@ -184,6 +184,7 @@ mod tests {
             ),
             format!("{}-second minimum", policy.minimum_duration_seconds),
             format!("{}-second default", policy.default_duration_seconds),
+            format!("default seed of {}", policy.default_seed),
             format!("about {} MB", limited.source.approximate_bytes / 1_000_000),
             format!("about {} GB", full.source.approximate_bytes as f64 / 1e9),
         ];

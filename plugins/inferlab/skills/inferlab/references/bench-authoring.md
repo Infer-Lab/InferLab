@@ -560,10 +560,11 @@ cache busting, trajectory sampling, a per-trace and a global cap on recorded
 idle gaps, a per-lane cache-pressure warmup, streaming chat requests, native
 failure thresholds, and minimum and default profiling durations. Recorded idle
 periods longer than the caps are shortened, so replay timing differs from the
-raw trace. Omitting `duration_seconds` selects the profile's default duration.
-Live server responses are measured but do not become the context for later
-source turns, so this workflow measures replay transport behavior rather than
-agent task quality.
+raw trace. Omitting `duration_seconds` selects the profile's default duration,
+and omitting `seed` selects the profile's default seed rather than the ordinary
+Bench default of 0. Live server responses are measured but do not become the
+context for later source turns, so this workflow measures replay transport
+behavior rather than agent task quality.
 
 Choose the corpus the served context length can hold. Use
 `semianalysis_agentx_062126_256k` for a server whose context limit is at least
@@ -574,9 +575,11 @@ requests that exceed it as context overflows, excludes them from the latency
 distributions, and judges the overflow rate against its native scenario
 threshold, and an invalid native submission fails the case.
 
-A snapshot-warmup failure aborts the case before profiling. A cache-pressure
-warmup request failure is preserved as warmup evidence and does not by itself
-fail the case.
+AIPerf decides whether a warmup failure aborts the case, as InferenceX runs
+do: any failed root-stream warmup request, including a single cache-pressure
+request, aborts the case before profiling, while a failed subagent warmup
+request does not by itself. Warmup failures are recorded as warmup evidence
+either way.
 
 Both corpora are sizable downloads. Source preparation, which runs before a
 recipe launches its server or before a manual Bench's first request, verifies

@@ -219,6 +219,11 @@
           "format": "uint64",
           "minimum": 0
         },
+        "default_seed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "failure_threshold": {
           "type": "number",
           "format": "double"
@@ -232,6 +237,11 @@
         },
         "gpu_telemetry": {
           "type": "boolean"
+        },
+        "http_tcp_user_timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "ignore_eos": {
           "type": "boolean"
@@ -251,10 +261,18 @@
         "materialization_identity": {
           "type": "string"
         },
+        "metric_slice_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "minimum_duration_seconds": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "realtime_metrics": {
+          "type": "boolean"
         },
         "replay_semantics": {
           "type": "string"
@@ -274,11 +292,6 @@
         "scenario": {
           "type": "string"
         },
-        "server_metric_slice_seconds": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
         "service_profile_configuration_timeout_seconds": {
           "type": "integer",
           "format": "uint64",
@@ -289,6 +302,11 @@
         },
         "source_format": {
           "type": "string"
+        },
+        "stats_interval_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "streaming": {
           "type": "boolean"
@@ -350,6 +368,7 @@
         "dataset_configuration_timeout_seconds",
         "service_profile_configuration_timeout_seconds",
         "default_duration_seconds",
+        "default_seed",
         "minimum_duration_seconds",
         "failure_threshold",
         "dataset_entries",
@@ -357,7 +376,10 @@
         "ignore_eos",
         "use_server_token_count",
         "gpu_telemetry",
-        "server_metric_slice_seconds",
+        "metric_slice_seconds",
+        "stats_interval_seconds",
+        "http_tcp_user_timeout_ms",
+        "realtime_metrics",
         "required_artifacts",
         "unavailable_dimensions",
         "inferencex_repository",

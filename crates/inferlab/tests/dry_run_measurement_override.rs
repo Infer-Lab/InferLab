@@ -43,7 +43,7 @@ fn agentic_source_dry_run_preserves_declared_boundary_and_effective_profile()
 
     let plan = workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
     let bench = &plan["measurements"]["benches"][0];
-    assert_eq!(bench["execution"]["cases"][0]["duration_seconds"], 1800);
+    assert_eq!(bench["execution"]["cases"][0]["duration_seconds"], 3600);
     assert_eq!(
         bench["client"]["effective_definition"]["agentic_source"]["catalog"]["revision"],
         "8fecd2fc56694469f758f0afbbb6335ad3043740"

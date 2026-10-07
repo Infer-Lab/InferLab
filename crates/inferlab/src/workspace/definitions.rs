@@ -625,8 +625,10 @@ pub(crate) enum BenchDefinition {
         session_source: Option<BenchSessionSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agentic_source: Option<BenchAgenticSource>,
-        #[serde(default)]
-        seed: u64,
+        /// Omitted resolves to the agentic profile's default seed, or 0 for
+        /// other sources (RFC-0004:C-BENCH-AGENTIC-TRACE-REPLAY).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
         #[serde(default)]
         server_metrics: bool,
         #[serde(default)]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from inferlab_measurement_sdk import (
     BenchAgenticBranchStats,
@@ -130,6 +131,41 @@ def _record_failed(record: JsonObject) -> bool:
     metadata = record.get("metadata")
     return record.get("error") is not None or (
         isinstance(metadata, dict) and metadata.get("was_cancelled") is True
+    )
+
+
+def warmup_abort_detail(records_path: Path) -> str | None:
+    """Name the root-stream warmup failure that aborted an AgentX run natively.
+
+    The release-pinned AIPerf aborts before profiling when a root-stream warmup
+    request fails or is cancelled, while descendant failures do not abort by
+    themselves (RFC-0004:C-BENCH-AGENTIC-TRACE-REPLAY). Its exit status alone
+    does not say so; the per-request records export does.
+    """
+    warmup, parse_error = phase_records(records_path, "warmup")
+    if parse_error is not None:
+        return None
+    failed = [
+        record
+        for record in warmup
+        if _record_failed(record)
+        and isinstance(metadata := record.get("metadata"), dict)
+        and metadata.get("agent_depth") == 0
+    ]
+    if not failed:
+        return None
+    first = failed[0]
+    metadata = cast(JsonObject, first["metadata"])
+    error = first.get("error")
+    cause = (
+        str(error.get("message"))
+        if isinstance(error, dict) and error.get("message") is not None
+        else "cancelled"
+    )
+    return (
+        f"AIPerf aborted AgentX warmup before profiling after {len(failed)} failed "
+        f"root-stream warmup request(s); first: trace {metadata.get('conversation_id')} "
+        f"turn {metadata.get('turn_index')}: {cause}"
     )
 
 

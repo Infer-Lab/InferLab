@@ -710,6 +710,7 @@ fn resolve_bench_session_source(
         profile: source.profile.clone(),
         max_input_tokens: source.max_input_tokens,
         output_tokens: source.output_tokens,
+        output_stop: source.output_stop,
         inter_turn_delay_scale: source.inter_turn_delay_scale,
         max_inter_turn_delay_seconds: source.max_inter_turn_delay_seconds,
         catalog: Box::new(BenchSessionDatasetCatalog {
@@ -744,6 +745,7 @@ fn resolve_bench_request_source(
             prompt: _,
             input_tokens,
             output_tokens,
+            output_stop,
             prefix_sharing,
             shared_system_content,
             corpus,
@@ -751,6 +753,7 @@ fn resolve_bench_request_source(
         } => Ok(ResolvedBenchRequestSource::Random {
             input_tokens: input_tokens.clone(),
             output_tokens: output_tokens.clone(),
+            output_stop: *output_stop,
             prefix_sharing: prefix_sharing.clone(),
             shared_system_content: shared_system_content.clone(),
             corpus: corpus.as_ref().map(|corpus| {
@@ -795,6 +798,7 @@ fn resolve_bench_request_source(
         BenchRequestSource::RandomMixture {
             prompt: _,
             shapes,
+            output_stop,
             prefix_sharing,
             images: _,
         } => {
@@ -817,6 +821,7 @@ fn resolve_bench_request_source(
                     })
                     .collect(),
                 total_weight,
+                output_stop: *output_stop,
                 prefix_sharing: prefix_sharing.clone(),
             })
         }
@@ -825,6 +830,7 @@ fn resolve_bench_request_source(
             profile,
             max_input_tokens,
             output_tokens,
+            output_stop,
             images: _,
         } => {
             let resolved = bench_dataset_catalog::resolve(dataset, profile.as_deref())?;
@@ -841,12 +847,14 @@ fn resolve_bench_request_source(
                 profile: profile.clone(),
                 max_input_tokens: *max_input_tokens,
                 output_tokens: *output_tokens,
+                output_stop: *output_stop,
                 catalog: Box::new(BenchDatasetCatalog {
                     dataset: resolved.dataset,
                     profile: resolved.profile,
                     source: resolved.source,
                     upstream_identity: resolved.upstream_identity,
                     url: resolved.url,
+                    aiperf_dataset: resolved.aiperf_dataset,
                     sha256: resolved.sha256,
                     source_format: resolved.source_format,
                     aiperf_format: resolved.aiperf_format,
@@ -1031,8 +1039,9 @@ mod tests {
         ResolvedBenchImageSource, ResolvedBenchImages, ResolvedBenchSource,
     };
     use crate::workspace::{
-        BenchDefinition, BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRandomShape,
-        BenchRequestSource, BenchTokenSelector, BenchTpotApplicability, validate_bench,
+        BenchDefinition, BenchOutputStop, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
+        BenchRandomShape, BenchRequestSource, BenchTokenSelector, BenchTpotApplicability,
+        validate_bench,
     };
     use sha2::Digest;
     use std::path::Path;
@@ -1045,6 +1054,7 @@ mod tests {
                 prompt: BenchPromptSelection::explicit(BenchPrompt::Flat),
                 input_tokens: BenchTokenSelector::Fixed(8000),
                 output_tokens: BenchTokenSelector::Fixed(1000),
+                output_stop: BenchOutputStop::Length,
                 prefix_sharing: Some(BenchPrefixSharing::Ratio {
                     shared_prefix_ratio: 0.75,
                 }),
@@ -1057,6 +1067,7 @@ mod tests {
         let mixture = resolve_bench_request_source(
             &BenchRequestSource::RandomMixture {
                 prompt: BenchPromptSelection::explicit(BenchPrompt::ServerChat),
+                output_stop: BenchOutputStop::Length,
                 shapes: vec![
                     BenchRandomShape {
                         input_tokens: 1024,
@@ -1779,6 +1790,40 @@ timeout_seconds = 3600
                 Path::new("/workspace")
             )?)?["artifact_level"],
             "performance"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn output_stop_defaults_to_length_and_is_rejected_on_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parse = |source: &str| {
+            toml::from_str::<BenchDefinition>(&format!(
+                "kind = \"serving\"\nrequest_source = {source}\nconcurrency = [1]\nprompts_per_concurrency = 1\ntimeout_seconds = 60\n"
+            ))
+        };
+        let omitted = parse(r#"{ kind = "random", input_tokens = 8, output_tokens = 4 }"#)?;
+        let canonical = serde_json::to_value(&omitted)?;
+        assert_eq!(canonical["request_source"]["output_stop"], "length");
+
+        let eos = parse(
+            r#"{ kind = "random", input_tokens = 8, output_tokens = 4, output_stop = "eos" }"#,
+        )?;
+        let resolved = resolve_bench_definition(&eos, &eos, Path::new("/workspace"))?;
+        let ResolvedBenchSource::Requests { request_source } = &resolved.source else {
+            return Err("random source did not resolve to requests".into());
+        };
+        let wire = serde_json::to_value(super::super::super::wire::bench_request_source_input(
+            request_source,
+        )?)?;
+        assert_eq!(wire["output_stop"], "eos");
+
+        let replay = parse(
+            r#"{ kind = "replay", path = "p.jsonl", prompt = { kind = "flat" }, output_stop = "eos" }"#,
+        );
+        assert!(
+            replay.is_err_and(|error| error.to_string().contains("output_stop")),
+            "a replay source carries its stop controls in the replayed entries"
         );
         Ok(())
     }

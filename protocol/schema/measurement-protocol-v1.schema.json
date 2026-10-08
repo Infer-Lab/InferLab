@@ -89,6 +89,15 @@
   "$comment": "Generated from crates/inferlab-protocol/src/wire.rs and measurement_data_asset.rs; do not edit.",
   "additionalProperties": false,
   "$defs": {
+    "BenchAcceptanceSource": {
+      "description": "Where AIPerf's SPEED-Bench computation found an acceptance value: the first\nof per-request records, the run summary, and the scraped server metrics\nthat yields one.",
+      "type": "string",
+      "enum": [
+        "records",
+        "summary",
+        "server_metrics"
+      ]
+    },
     "BenchAgenticAcquisitionOutcome": {
       "type": "string",
       "enum": [
@@ -759,6 +768,14 @@
       "description": "The result a Bench client writes for the measurement runtime to consume.",
       "type": "object",
       "properties": {
+        "acceptance_sources": {
+          "description": "The release-pinned AIPerf source each SPEED-Bench acceptance value was\ntaken from ([[RFC-0004:C-MEASUREMENTS]]).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BenchAcceptanceSource"
+          },
+          "default": {}
+        },
         "agentic_evidence": {
           "anyOf": [
             {
@@ -913,6 +930,14 @@
       "description": "Immutable release-catalog facts resolved by the Rust control plane.",
       "type": "object",
       "properties": {
+        "aiperf_dataset": {
+          "description": "The release-pinned AIPerf public dataset that materializes the rows;\nabsent for a byte snapshot.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "aiperf_format": {
           "type": "string"
         },
@@ -979,7 +1004,12 @@
           "type": "string"
         },
         "url": {
-          "type": "string"
+          "description": "The byte-snapshot location; absent for an AIPerf-backed source.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -987,7 +1017,6 @@
         "dataset",
         "source",
         "upstream_identity",
-        "url",
         "sha256",
         "source_format",
         "aiperf_format",
@@ -1319,6 +1348,14 @@
         "command",
         "interrupted",
         "timed_out"
+      ]
+    },
+    "BenchOutputStopInput": {
+      "description": "Whether a request's output-token limit is an exact length or a cap that\nlets the model stop at end of sequence\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).",
+      "type": "string",
+      "enum": [
+        "length",
+        "eos"
       ]
     },
     "BenchPopulationInput": {
@@ -2104,6 +2141,10 @@
               "type": "string",
               "const": "random"
             },
+            "output_stop": {
+              "$ref": "#/$defs/BenchOutputStopInput",
+              "default": "length"
+            },
             "output_tokens": {
               "$ref": "#/$defs/BenchTokenSelectorInput"
             },
@@ -2144,6 +2185,10 @@
             "kind": {
               "type": "string",
               "const": "random_mixture"
+            },
+            "output_stop": {
+              "$ref": "#/$defs/BenchOutputStopInput",
+              "default": "length"
             },
             "prefix_sharing": {
               "anyOf": [
@@ -2193,6 +2238,10 @@
               "type": "integer",
               "format": "uint32",
               "minimum": 0
+            },
+            "output_stop": {
+              "$ref": "#/$defs/BenchOutputStopInput",
+              "default": "length"
             },
             "output_tokens": {
               "type": [
@@ -2561,6 +2610,10 @@
             "null"
           ],
           "format": "double"
+        },
+        "output_stop": {
+          "$ref": "#/$defs/BenchOutputStopInput",
+          "default": "length"
         },
         "output_tokens": {
           "type": [
@@ -3746,6 +3799,20 @@
             "resolved_revision",
             "cache_state_before"
           ]
+        },
+        {
+          "description": "Materialize a release-pinned AIPerf public dataset into rows the\ncontrol plane verifies against the catalog digest.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "materialize"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
         }
       ]
     },
@@ -3925,12 +3992,13 @@
       ]
     },
     "MeasurementDataAssetSourceBytesOutcome": {
-      "description": "Whether immutable source bytes were reused or downloaded.",
+      "description": "Whether immutable source bytes were reused, downloaded, or materialized by\na release-pinned AIPerf public dataset.",
       "type": "string",
       "enum": [
         "not_accessed",
         "reused",
         "downloaded",
+        "materialized",
         "unavailable"
       ]
     },
@@ -3980,6 +4048,33 @@
           "required": [
             "kind",
             "source"
+          ]
+        },
+        {
+          "description": "A release-catalog source whose rows only the release-pinned AIPerf's\npublic-dataset materialization can produce\n([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).",
+          "type": "object",
+          "properties": {
+            "cache_root": {
+              "description": "Machine-local directory AIPerf's working-directory-relative\ndataset cache resolves under.",
+              "type": "string"
+            },
+            "dataset": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "aiperf_public_dataset"
+            },
+            "output_path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "dataset",
+            "output_path",
+            "cache_root"
           ]
         }
       ]

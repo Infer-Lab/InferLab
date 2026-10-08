@@ -195,6 +195,8 @@ pub(crate) struct AdaptiveBenchSummary {
 pub(crate) enum DatasetAcquisitionOutcome {
     Reused,
     Downloaded,
+    /// Produced by a release-pinned AIPerf public-dataset materialization.
+    Materialized,
     Failed,
 }
 
@@ -516,6 +518,8 @@ pub(crate) struct BenchCaseEvidence {
     pub prompt_cache_observations: Vec<inferlab_protocol::BenchPromptCacheObservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_invocations: Vec<BenchNativeInvocation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acceptance_sources: BTreeMap<String, inferlab_protocol::BenchAcceptanceSource>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

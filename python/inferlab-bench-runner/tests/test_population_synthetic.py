@@ -959,3 +959,31 @@ def test_local_prompt_targets_reconcile_with_backend_prompt_tokens(tmp_path: Pat
     evidence, error = prompt_token_reconciliation(bench_request, profiling_path)
     assert error == "profiling population entry 2 planned 8 prompt tokens, backend reported 9"
     assert evidence[2].reconciled is False
+
+
+def test_output_stop_changes_only_the_stop_controls_of_frozen_entries(tmp_path: Path) -> None:
+    source: dict[str, object] = {
+        "kind": "random",
+        "input_tokens": {"kind": "inclusive_uniform", "min": 7, "max": 11},
+        "output_tokens": {"kind": "inclusive_uniform", "min": 3, "max": 5},
+        "prefix_sharing": None,
+    }
+    rows = {}
+    for stop in ("length", "eos"):
+        result = prepare_population(
+            random_preparation_request(
+                tmp_path, 4, request_source={**source, "output_stop": stop}, artifact_name=stop
+            ),
+            FakeTokenizer(),
+        )
+        assert result.status == ClientStatus.succeeded
+        assert result.population is not None
+        rows[stop] = [
+            json.loads(line) for line in Path(result.population.path).read_text().splitlines()
+        ]
+
+    assert [row["extra"] for row in rows["length"]] == [
+        {"ignore_eos": True, "min_tokens": row["output_length"]} for row in rows["length"]
+    ]
+    assert all(row["extra"] == {} for row in rows["eos"])
+    assert [{**row, "extra": {}} for row in rows["length"]] == rows["eos"]

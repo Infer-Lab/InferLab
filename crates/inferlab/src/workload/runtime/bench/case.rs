@@ -21,6 +21,7 @@ use inferlab_protocol::BenchClientResult;
 use inferlab_runtime::operation_bound::{
     OperationBound, OperationTerminalCause, OperationTimingEvidence,
 };
+use std::collections::BTreeMap;
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Duration;
 
@@ -234,6 +235,9 @@ pub(super) fn run_bench_case(
             report_invocations: result
                 .as_ref()
                 .map_or_else(Vec::new, |result| result.report_invocations.clone()),
+            acceptance_sources: result
+                .as_ref()
+                .map_or_else(BTreeMap::new, |result| result.acceptance_sources.clone()),
         },
         native_command: result.as_ref().map(|result| result.native_command.clone()),
         native_exit_code: result.as_ref().and_then(|result| result.native_exit_code),
@@ -538,6 +542,7 @@ fn failed_case_record(
             prompt_token_reconciliation: Vec::new(),
             prompt_cache_observations: Vec::new(),
             report_invocations: Vec::new(),
+            acceptance_sources: BTreeMap::new(),
         },
         native_command: None,
         native_exit_code: None,

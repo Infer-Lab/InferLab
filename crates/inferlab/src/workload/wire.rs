@@ -9,21 +9,21 @@ use crate::InferlabError;
 use crate::adapter::project_setting_values;
 use crate::toolchain::BundledEvalTask;
 use crate::workspace::{
-    BenchArtifactLevel, BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchSharedSystemContent,
-    BenchTokenSelector, EvalDefinition, EvalPrompt, EvalTaskSource, RequestSlo,
-    effective_lm_eval_base_seed,
+    BenchArtifactLevel, BenchCacheStart, BenchOutputStop, BenchPrefixSharing, BenchPrompt,
+    BenchSharedSystemContent, BenchTokenSelector, EvalDefinition, EvalPrompt, EvalTaskSource,
+    RequestSlo, effective_lm_eval_base_seed,
 };
 use inferlab_protocol::{
     BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchArtifactLevelInput,
     BenchCacheStartInput, BenchCorpusInput, BenchDatasetCacheState, BenchDatasetCatalogInput,
     BenchDatasetFilterInput, BenchDefinitionInput, BenchInclusiveUniformInput,
-    BenchPopulationInput, BenchPrefixSharingInput, BenchPromptInput, BenchPromptRouteInput,
-    BenchRandomShapeInput, BenchRenderingAuthorityInput, BenchRequestRepresentationInput,
-    BenchRequestSloInput, BenchRequestSourceInput, BenchSessionDatasetCatalogInput,
-    BenchSessionSourceInput, BenchSessionTemplateInput, BenchSharedSystemContentInput,
-    BenchTokenDistributionKindInput, BenchTokenSelectorInput, ClientEndpointInput,
-    EndpointProtocol, EvalDefinitionInput, EvalPromptInput, EvalTaskSourceInput,
-    MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
+    BenchOutputStopInput, BenchPopulationInput, BenchPrefixSharingInput, BenchPromptInput,
+    BenchPromptRouteInput, BenchRandomShapeInput, BenchRenderingAuthorityInput,
+    BenchRequestRepresentationInput, BenchRequestSloInput, BenchRequestSourceInput,
+    BenchSessionDatasetCatalogInput, BenchSessionSourceInput, BenchSessionTemplateInput,
+    BenchSharedSystemContentInput, BenchTokenDistributionKindInput, BenchTokenSelectorInput,
+    ClientEndpointInput, EndpointProtocol, EvalDefinitionInput, EvalPromptInput,
+    EvalTaskSourceInput, MeasurementModelInput, ServerMetricsEndpointInput, SettingValue,
 };
 use std::collections::BTreeMap;
 
@@ -204,6 +204,7 @@ pub(super) fn bench_session_source_input(
         profile: source.profile.clone(),
         max_input_tokens: source.max_input_tokens,
         output_tokens: source.output_tokens,
+        output_stop: output_stop_input(source.output_stop),
         inter_turn_delay_scale: source.inter_turn_delay_scale,
         max_inter_turn_delay_seconds: source.max_inter_turn_delay_seconds,
         catalog: Box::new(BenchSessionDatasetCatalogInput {
@@ -236,6 +237,13 @@ pub(super) fn bench_session_source_input(
     }
 }
 
+const fn output_stop_input(output_stop: BenchOutputStop) -> BenchOutputStopInput {
+    match output_stop {
+        BenchOutputStop::Length => BenchOutputStopInput::Length,
+        BenchOutputStop::Eos => BenchOutputStopInput::Eos,
+    }
+}
+
 pub(super) fn bench_request_source_input(
     source: &ResolvedBenchRequestSource,
 ) -> Result<BenchRequestSourceInput, InferlabError> {
@@ -243,6 +251,7 @@ pub(super) fn bench_request_source_input(
         ResolvedBenchRequestSource::Random {
             input_tokens,
             output_tokens,
+            output_stop,
             prefix_sharing,
             shared_system_content,
             corpus,
@@ -250,6 +259,7 @@ pub(super) fn bench_request_source_input(
         } => BenchRequestSourceInput::Random {
             input_tokens: token_selector_input(input_tokens),
             output_tokens: token_selector_input(output_tokens),
+            output_stop: output_stop_input(*output_stop),
             prefix_sharing: prefix_sharing.as_ref().map(prefix_sharing_input),
             shared_system_content: shared_system_content
                 .as_ref()
@@ -263,6 +273,7 @@ pub(super) fn bench_request_source_input(
         ResolvedBenchRequestSource::RandomMixture {
             shapes,
             total_weight,
+            output_stop,
             prefix_sharing,
         } => BenchRequestSourceInput::RandomMixture {
             shapes: shapes
@@ -274,6 +285,7 @@ pub(super) fn bench_request_source_input(
                 })
                 .collect(),
             total_weight: *total_weight,
+            output_stop: output_stop_input(*output_stop),
             prefix_sharing: prefix_sharing.as_ref().map(prefix_sharing_input),
         },
         ResolvedBenchRequestSource::Dataset {
@@ -281,12 +293,14 @@ pub(super) fn bench_request_source_input(
             profile,
             max_input_tokens,
             output_tokens,
+            output_stop,
             catalog,
         } => BenchRequestSourceInput::Dataset {
             dataset: dataset.clone(),
             profile: profile.clone(),
             max_input_tokens: *max_input_tokens,
             output_tokens: *output_tokens,
+            output_stop: output_stop_input(*output_stop),
             catalog: Box::new(catalog_input(catalog)),
         },
         ResolvedBenchRequestSource::Replay {
@@ -422,6 +436,7 @@ pub(super) fn catalog_input(catalog: &BenchDatasetCatalog) -> BenchDatasetCatalo
         source: catalog.source.clone(),
         upstream_identity: catalog.upstream_identity.clone(),
         url: catalog.url.clone(),
+        aiperf_dataset: catalog.aiperf_dataset.clone(),
         sha256: catalog.sha256.clone(),
         source_format: catalog.source_format.clone(),
         aiperf_format: catalog.aiperf_format.clone(),

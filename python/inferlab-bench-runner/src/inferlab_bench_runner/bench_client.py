@@ -18,11 +18,13 @@ from inferlab_measurement_sdk import (
     ClientStatus,
     MeasurementDataAssetPreparationRequest,
     MeasurementDataAssetPreparationResult,
+    MeasurementDataAssetSourceInputAiperfPublicDataset,
     failed_data_asset_preparation_result,
     parse_args,
     write_result,
 )
 
+from inferlab_bench_runner.aiperf_public_dataset import materialize_aiperf_public_dataset
 from inferlab_bench_runner.data_asset import prepare_agentic_data_asset
 from inferlab_bench_runner.execution import execute
 from inferlab_bench_runner.population import prepare_population
@@ -50,6 +52,8 @@ def handle_bench_execution(input_text: str) -> BenchClientResult:
 
 def handle_data_asset_preparation(input_text: str) -> MeasurementDataAssetPreparationResult:
     request = MeasurementDataAssetPreparationRequest.model_validate_json(input_text)
+    if isinstance(request.source.root, MeasurementDataAssetSourceInputAiperfPublicDataset):
+        return materialize_aiperf_public_dataset(request)
     return prepare_agentic_data_asset(request)
 
 

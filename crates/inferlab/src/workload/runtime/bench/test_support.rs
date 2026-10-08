@@ -30,6 +30,7 @@ pub(super) fn prefill_bench_result() -> BenchClientResult {
         native_command: vec!["fixture-bench".to_owned()],
         native_exit_code: Some(0),
         report_invocations: Vec::new(),
+        acceptance_sources: std::collections::BTreeMap::new(),
         raw_artifacts: Vec::new(),
         error: None,
     }

@@ -20,6 +20,7 @@ from inferlab_bench_runner.population_types import (
     MaterializedEntry,
     count_summary,
     json_line,
+    stop_controls,
 )
 
 
@@ -50,7 +51,18 @@ def prepare_speed_bench_population(
         else:
             question_id = raw.get("question_id")
             category = raw.get("category")
-            turns = raw.get("turns")
+            # The AIPerf-materialized row carries the user turns as structured
+            # messages; placeholders are already resolved upstream.
+            messages_value = raw.get("messages")
+            turns = (
+                [
+                    message.get("content")
+                    for message in messages_value
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ]
+                if isinstance(messages_value, list)
+                else None
+            )
             first_turn = (
                 next(
                     (
@@ -129,9 +141,10 @@ def prepare_speed_bench_population(
         for population_index, entry in enumerate(ordered):
             population_line = json_line(
                 {
-                    "question_id": entry.source_sample_id,
-                    "category": entry.category,
+                    "session_id": f"inferlab-{population_index:08}",
                     "messages": entry.messages,
+                    "output_length": entry.output_tokens,
+                    "extra": stop_controls(source.output_stop, entry.output_tokens),
                 }
             )
             population_file.write(population_line)

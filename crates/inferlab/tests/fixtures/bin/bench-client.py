@@ -40,6 +40,38 @@ if args.prepare_source:
         with open(args.output, "w") as handle:
             json.dump(result, handle)
         raise SystemExit(1)
+    if request["source"]["kind"] == "aiperf_public_dataset":
+        # A stand-in for AIPerf's public-dataset materialization: one fixture
+        # row, which cannot match the release catalog's pinned digest.
+        target = request["source"]["output_path"]
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w") as rows:
+            rows.write(
+                json.dumps(
+                    {
+                        "question_id": "f" * 32,
+                        "category": "coding",
+                        "messages": [{"role": "user", "content": "fixture"}],
+                    }
+                )
+                + "\n"
+            )
+        record_capture_event(
+            f"materialize {request['source']['dataset']} {request['source']['cache_root']}"
+        )
+        result = {
+            "schema_version": 1,
+            "status": "succeeded",
+            "effective_selection": None,
+            "readiness": None,
+            "cache_stores": [],
+            "remote_metadata": "unavailable",
+            "source_bytes": "materialized",
+            "error": None,
+        }
+        with open(args.output, "w") as handle:
+            json.dump(result, handle)
+        raise SystemExit(0)
     source = request["source"]["source"]
     catalog = source["catalog"]
     phase = request["phase"]

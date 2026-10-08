@@ -26,6 +26,7 @@ from inferlab_bench_runner.population_types import (
     MaterializedEntry,
     count_summary,
     json_line,
+    stop_controls,
 )
 
 
@@ -325,7 +326,7 @@ def prepare_sharegpt_population(
                 "session_id": f"inferlab-{index:08}",
                 "messages": entry.messages,
                 "output_length": entry.output_tokens,
-                "extra": {"ignore_eos": True, "min_tokens": entry.output_tokens},
+                "extra": stop_controls(source.output_stop, entry.output_tokens),
             }
             population_line = json_line(request_value)
             population_file.write(population_line)
@@ -460,10 +461,7 @@ def prepare_sharegpt_session_population(
                             "role": "user",
                             "delay": turn.effective_inter_turn_delay_seconds * 1000.0,
                             "output_length": turn.output_tokens,
-                            "extra": {
-                                "ignore_eos": True,
-                                "min_tokens": turn.output_tokens,
-                            },
+                            "extra": stop_controls(source.output_stop, turn.output_tokens),
                         }
                         for turn in session.turns
                     ],

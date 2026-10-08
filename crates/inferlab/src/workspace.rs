@@ -33,7 +33,7 @@ pub(crate) use definitions::{
     effective_lm_eval_base_seed,
 };
 pub(crate) use definitions::{
-    BenchImageSampling, BenchImagesDeclaration, BenchPrefixSharing, BenchPrompt,
+    BenchImageSampling, BenchImagesDeclaration, BenchOutputStop, BenchPrefixSharing, BenchPrompt,
     BenchPromptSelection, BenchSharedSystemContent,
 };
 pub(crate) use definitions::{

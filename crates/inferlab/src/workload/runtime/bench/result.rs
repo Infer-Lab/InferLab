@@ -136,39 +136,26 @@ pub(super) fn bench_result_error(
         return Some("Bench client returned agentic evidence for a non-agentic case".to_owned());
     }
     if speed_bench_server_metrics {
-        let expected = [
-            ("acceptance_length", "accept_length"),
-            ("acceptance_rate", "accept_rate"),
-        ];
-        if result.report_invocations.len() != expected.len() {
-            return Some(format!(
-                "Bench client returned {} SPEED-Bench report invocations, expected {}",
-                result.report_invocations.len(),
-                expected.len()
-            ));
+        if !result.report_invocations.is_empty() {
+            return Some(
+                "Bench client returned SPEED-Bench report invocations instead of acceptance sources"
+                    .to_owned(),
+            );
         }
-        for (invocation, (purpose, native_metric)) in result.report_invocations.iter().zip(expected)
-        {
-            let has_metric = invocation
-                .command
-                .windows(2)
-                .any(|pair| pair == ["--metric", native_metric]);
-            if invocation.purpose != purpose
-                || invocation.exit_code != Some(0)
-                || invocation.interrupted
-                || invocation.timed_out
-                || !invocation
-                    .command
-                    .iter()
-                    .any(|arg| arg == "speed-bench-report")
-                || !has_metric
+        for metric in ["acceptance_length", "acceptance_rate"] {
+            if !result.metrics.contains_key(metric)
+                || !result.acceptance_sources.contains_key(metric)
             {
                 return Some(format!(
-                    "Bench client returned invalid {purpose} report process evidence"
+                    "Bench client omitted SPEED-Bench {metric} or the source it came from"
                 ));
             }
         }
+        if result.acceptance_sources.len() != 2 {
+            return Some("Bench client returned acceptance sources for unknown metrics".to_owned());
+        }
     } else if !result.report_invocations.is_empty()
+        || !result.acceptance_sources.is_empty()
         || result.metrics.contains_key("acceptance_length")
         || result.metrics.contains_key("acceptance_rate")
     {

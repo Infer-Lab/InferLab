@@ -127,13 +127,9 @@ fn prepare_one(
         DataAssetSource::Eval { source } => {
             prepare_eval(root, owner_record_id, source, attempt, persist)
         }
-        DataAssetSource::ReleaseCatalog { source } => release_catalog::prepare(
-            &source.cache_path,
-            &source.url,
-            &source.expected_sha256,
-            attempt,
-            persist,
-        ),
+        DataAssetSource::ReleaseCatalog { source } => {
+            release_catalog::prepare(root, owner_record_id, source, attempt, persist)
+        }
         DataAssetSource::Agentic { source } => prepare_agentic(
             root,
             owner_record_id,

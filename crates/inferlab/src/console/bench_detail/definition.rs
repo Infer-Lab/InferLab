@@ -1,6 +1,6 @@
 use super::super::FactSection;
 use crate::workspace::{
-    BenchCacheStart, BenchDefinition, BenchImageSampling, BenchImagesDeclaration,
+    BenchCacheStart, BenchDefinition, BenchImageSampling, BenchImagesDeclaration, BenchOutputStop,
     BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
     BenchSharedSystemContent, BenchTokenSelector, RequestRate,
 };
@@ -235,12 +235,20 @@ fn source_section(
     )
 }
 
+fn output_stop_summary(output_stop: BenchOutputStop) -> &'static str {
+    match output_stop {
+        BenchOutputStop::Length => "exact length",
+        BenchOutputStop::Eos => "end of sequence (limit is a cap)",
+    }
+}
+
 fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) {
     match source {
         BenchRequestSource::Random {
             prompt,
             input_tokens,
             output_tokens,
+            output_stop,
             prefix_sharing,
             shared_system_content,
             corpus,
@@ -254,6 +262,7 @@ fn request_source_section(source: &BenchRequestSource) -> (String, FactSection) 
                     fact("Prompt", prompt_summary(prompt)),
                     fact("Input tokens", token_selector(input_tokens)),
                     fact("Output tokens", token_selector(output_tokens)),
+                    fact("Output stop", output_stop_summary(*output_stop)),
                     fact("Prefix sharing", prefix_summary(prefix_sharing.as_ref())),
                     fact(
                         "Shared system content",

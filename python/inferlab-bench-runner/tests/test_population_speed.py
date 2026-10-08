@@ -23,19 +23,25 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source_path = tmp_path / "qualitative.parquet"
-    source_path.write_bytes(b"parquet fixture boundary")
-    rows = [
-        {
-            "question_id": f"{index:032x}",
-            "category": category,
-            "turns": ["", f"first turn {index}", f"later turn {index}"],
-        }
-        for index, category in enumerate(["coding", "coding", "math", "coding"])
-    ]
-    monkeypatch.setattr(
-        "inferlab_bench_runner.population._iter_parquet_rows",
-        lambda _path: iter(rows),
+    # Rows in the shape the AIPerf SPEED-Bench materialization writes.
+    source_path = tmp_path / "speed_bench_qualitative.jsonl"
+    source_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "question_id": f"{index:032x}",
+                    "category": category,
+                    "messages": [
+                        {"role": "user", "content": ""},
+                        {"role": "user", "content": f"first turn {index}"},
+                        {"role": "user", "content": f"later turn {index}"},
+                    ],
+                }
+            )
+            + "\n"
+            for index, category in enumerate(["coding", "coding", "math", "coding"])
+        ),
+        encoding="utf-8",
     )
     request_value = BenchPopulationPreparationRequest.model_validate(
         {
@@ -53,11 +59,11 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
                     "dataset": "speed_bench",
                     "profile": "qualitative_coding",
                     "source": "qualitative",
-                    "upstream_identity": "fixture@1:qualitative.parquet",
-                    "url": "https://example.invalid/qualitative.parquet",
+                    "upstream_identity": "aiperf-public-dataset:speed_bench_qualitative",
+                    "aiperf_dataset": "speed_bench_qualitative",
                     "sha256": "0" * 64,
-                    "source_format": "huggingface-parquet-v1",
-                    "aiperf_format": "speed_bench_coding",
+                    "source_format": "aiperf-public-dataset-jsonl-v1",
+                    "aiperf_format": "mooncake_trace",
                     "configuration": "qualitative",
                     "split": "test",
                     "filter": {"field": "category", "value": "coding"},
@@ -87,8 +93,9 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
         json.loads(line) for line in Path(result.population.path).read_text().splitlines()
     ]
     evidence = [json.loads(line) for line in Path(result.evidence_path).read_text().splitlines()]
-    assert len({row["question_id"] for row in population}) == 2
-    assert all(row["category"] == "coding" for row in population)
+    assert len({row["question_id"] for row in evidence}) == 2
+    assert all(row["category"] == "coding" for row in evidence)
+    assert all(row["extra"] == {"ignore_eos": True, "min_tokens": 16} for row in population)
     assert all(len(row["messages"]) == 1 for row in population)
     assert all("first turn" in row["messages"][0]["content"] for row in population)
     assert all(row["first_user_turn_index"] == 1 for row in evidence)
@@ -100,12 +107,12 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
     assert all("rendered_prompt" not in row for row in evidence)
 
 
-def test_speed_population_reconciles_upstream_question_identities(tmp_path: Path) -> None:
+def test_speed_population_reconciles_frozen_session_identities(tmp_path: Path) -> None:
     bench_request = speed_bench_request(tmp_path)
     assert bench_request.population is not None
-    question_ids = [f"{index:032x}" for index in range(4)]
+    question_ids = [f"inferlab-{index:08}" for index in range(4)]
     Path(bench_request.population.path).write_text(
-        "".join(json.dumps({"question_id": value}) + "\n" for value in question_ids),
+        "".join(json.dumps({"session_id": value}) + "\n" for value in question_ids),
         encoding="utf-8",
     )
     profiling_path = tmp_path / "profiling.jsonl"

@@ -7,7 +7,6 @@ from inferlab_measurement_sdk import (
     BenchClientRequest,
     BenchPromptTokenReconciliation,
     BenchRenderingAuthorityInput,
-    BenchRequestSourceInputDataset,
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
 )
@@ -102,12 +101,7 @@ def population_identity_error(
 ) -> str | None:
     if request.population is None or request.definition.request_source is None:
         return None
-    source = request.definition.request_source.root
-    identity_field = (
-        "question_id"
-        if isinstance(source, BenchRequestSourceInputDataset) and source.dataset == "speed_bench"
-        else "session_id"
-    )
+    identity_field = "session_id"
     required_identities = request.case.warmup_request_count + request.case.request_count
     population_ids: list[str] = []
     try:

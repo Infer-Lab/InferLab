@@ -764,6 +764,17 @@ pub(crate) struct BenchAgenticSource {
     pub profile: String,
 }
 
+/// Whether a request's resolved output-token limit is an exact length or a
+/// cap that lets the model stop at end of sequence
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BenchOutputStop {
+    #[default]
+    Length,
+    Eos,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchSessionSource {
@@ -773,6 +784,8 @@ pub(crate) struct BenchSessionSource {
     pub max_input_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u32>,
+    #[serde(default)]
+    pub output_stop: BenchOutputStop,
     #[serde(default = "default_inter_turn_delay_scale")]
     pub inter_turn_delay_scale: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,6 +804,8 @@ pub(crate) enum BenchRequestSource {
         prompt: BenchPromptSelection,
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
+        #[serde(default)]
+        output_stop: BenchOutputStop,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_sharing: Option<BenchPrefixSharing>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -804,6 +819,8 @@ pub(crate) enum BenchRequestSource {
         #[serde(default)]
         prompt: BenchPromptSelection,
         shapes: Vec<BenchRandomShape>,
+        #[serde(default)]
+        output_stop: BenchOutputStop,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_sharing: Option<BenchPrefixSharing>,
         // Tolerated at parse so validation can name the offending source kind
@@ -818,6 +835,8 @@ pub(crate) enum BenchRequestSource {
         max_input_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u32>,
+        #[serde(default)]
+        output_stop: BenchOutputStop,
         // Tolerated at parse so validation can name the offending source kind.
         #[serde(default, skip_serializing)]
         images: Option<serde::de::IgnoredAny>,

@@ -1,7 +1,8 @@
 use crate::bench_metric::BenchMetric;
 use crate::workspace::{
-    BenchArtifactLevel, BenchCacheStart, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
-    BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability, JsonValue, RequestSlo,
+    BenchArtifactLevel, BenchCacheStart, BenchOutputStop, BenchPrefixSharing, BenchPrompt,
+    BenchPromptSelection, BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability,
+    JsonValue, RequestSlo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -107,7 +108,10 @@ pub(crate) struct BenchDatasetCatalog {
     pub profile: Option<String>,
     pub source: String,
     pub upstream_identity: String,
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub aiperf_dataset: Option<String>,
     pub sha256: String,
     pub source_format: String,
     pub aiperf_format: String,
@@ -283,6 +287,8 @@ pub(crate) enum ResolvedBenchRequestSource {
         input_tokens: BenchTokenSelector,
         output_tokens: BenchTokenSelector,
         #[serde(default)]
+        output_stop: BenchOutputStop,
+        #[serde(default)]
         prefix_sharing: Option<BenchPrefixSharing>,
         #[serde(default)]
         shared_system_content: Option<BenchSharedSystemContent>,
@@ -297,6 +303,8 @@ pub(crate) enum ResolvedBenchRequestSource {
         shapes: Vec<ResolvedBenchRandomShape>,
         total_weight: u64,
         #[serde(default)]
+        output_stop: BenchOutputStop,
+        #[serde(default)]
         prefix_sharing: Option<BenchPrefixSharing>,
     },
     Dataset {
@@ -304,6 +312,8 @@ pub(crate) enum ResolvedBenchRequestSource {
         profile: Option<String>,
         max_input_tokens: u32,
         output_tokens: Option<u32>,
+        #[serde(default)]
+        output_stop: BenchOutputStop,
         catalog: Box<BenchDatasetCatalog>,
     },
     Replay {
@@ -374,6 +384,8 @@ pub(crate) struct ResolvedBenchSessionSource {
     pub profile: Option<String>,
     pub max_input_tokens: u32,
     pub output_tokens: Option<u32>,
+    #[serde(default)]
+    pub output_stop: BenchOutputStop,
     pub inter_turn_delay_scale: f64,
     pub max_inter_turn_delay_seconds: Option<f64>,
     pub catalog: Box<BenchSessionDatasetCatalog>,

@@ -35,6 +35,24 @@ request members listed
 fragment additionally may not declare `min_tokens`, `min_new_tokens`, or
 `ignore_eos`, because the runtime owns output-length enforcement.
 
+`output_stop` chooses that enforcement on a `random`, `random_mixture`,
+`dataset`, or `session_source` table. The default, `"length"`, treats each
+request's output-token limit as an exact length: the request sets a matching
+minimum and ignores end of sequence, so every response runs to the full limit.
+`"eos"` treats the limit as a cap: the model stops at its natural end of
+sequence or at the limit, whichever comes first.
+
+```toml
+request_source = { kind = "dataset", dataset = "speed_bench", profile = "qualitative_qa", max_input_tokens = 8192, output_tokens = 1024, output_stop = "eos" }
+```
+
+Choose `"eos"` when the measurement depends on natural response length, such
+as speculative-decoding acceptance; SPEED-Bench's own methodology does not
+suppress end of sequence. Under `"eos"` a response can end after one token, so
+per-token timing covers fewer tokens, and results are not comparable with
+`"length"` runs. A `replay` source has no `output_stop`: each replayed entry
+already carries its stop controls.
+
 ## Static and adaptive serving load
 
 A static `serving` Bench uses either independent requests or dependent
@@ -166,10 +184,11 @@ the measurement client. InferLab preserves framework routes such as `/metrics`
 or `/v1/metrics` rather than substituting a framework-neutral default; the
 [backend support matrix](backend-support.md) lists which endpoints declare a
 metrics export and the setting or port each needs. A successful
-`speed_bench` case additionally runs AIPerf's pinned SPEED report twice and
-publishes the CSV cells as `acceptance_length` and `acceptance_rate`; other
-request sources retain the raw server metrics but do not publish those two
-SPEED-specific scalars.
+`speed_bench` case additionally publishes `acceptance_length` and
+`acceptance_rate` from AIPerf's SPEED-Bench computation, taking each from the
+first of AIPerf's per-request records, run summary, and scraped server metrics
+that yields one and recording which; other request sources retain the raw
+server metrics but do not publish those two SPEED-specific scalars.
 
 Set `artifact_level = "performance"` to skip AIPerf's full raw
 request/response export while keeping the normalized per-request records and
@@ -339,7 +358,8 @@ may change fields within the selected source, but cannot change
 
 The same release catalog exposes NVIDIA SPEED-Bench profiles. Profile names
 are catalog data rather than Rust or Python enum variants; the catalog maps
-each identifier to its immutable snapshot, category filter, and AIPerf format.
+each identifier to an AIPerf SPEED-Bench dataset, its pinned content digest,
+and a category filter.
 Qualitative profiles use names such as `qualitative_coding`; throughput
 profiles combine an input bucket and entropy tier, such as
 `throughput_8k_mixed`:
@@ -355,10 +375,16 @@ warmup_prompts_per_concurrency = 0
 timeout_seconds = 900
 ```
 
-InferLab verifies the selected parquet snapshot, filters and samples without
-replacement, and freezes only each row's first user turn as an independent
-request. Later turns are recorded as omitted rather than silently becoming
-sessions.
+SPEED-Bench publishes placeholders for prompts whose source datasets do not
+permit redistribution. Before the first case, AIPerf resolves the selected
+SPEED-Bench configuration from those sources and InferLab holds the resolved
+rows to the release catalog's pinned digest, failing preparation if they
+differ. Resolution downloads the source datasets once into the Hugging Face
+cache and needs an account that has accepted the terms of the gated
+`cais/hle` dataset; without it, preparation fails with AIPerf's message.
+InferLab then filters and samples without replacement and freezes only each
+row's first user turn as an independent request. Later turns are recorded as
+omitted rather than silently becoming sessions.
 
 ## Replaying a recorded population
 

@@ -43,6 +43,7 @@ from inferlab_bench_runner.population_types import (
     count_summary,
     decode_exact,
     json_line,
+    stop_controls,
     token_stream_digest,
     unbiased_index,
 )
@@ -1067,7 +1068,7 @@ def write_synthetic_population(
             population_value: JsonObject = {
                 "session_id": f"inferlab-{index:08}",
                 "output_length": output_tokens,
-                "extra": {"ignore_eos": True, "min_tokens": output_tokens},
+                "extra": stop_controls(source.output_stop, output_tokens),
             }
             if targeting.transport_prompt is None:
                 population_value["messages"] = targeting.messages

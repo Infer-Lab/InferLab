@@ -1,6 +1,5 @@
 """Own the pinned AIPerf CLI, configuration, artifact, and report boundary."""
 
-import csv
 import json
 import math
 import os
@@ -10,16 +9,18 @@ import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import cast
 
 from inferlab_measurement_sdk import (
+    BenchAcceptanceSource,
     BenchArtifactLevelInput,
     BenchClientRequest,
     BenchLoadInputConcurrencyLimited,
     BenchLoadInputRequestRateLimited,
     BenchLoadInputUnboundedRequestRate,
-    BenchNativeInvocation,
+    BenchOutputStopInput,
     BenchPromptRouteInput,
     BenchRequestSloInput,
     BenchRequestSourceInputDataset,
@@ -43,9 +44,9 @@ from .aiperf_images import (
 ARTIFACT_PREFIX = "inferlab-bench"
 PROFILE_EXPORT_NAME = "profile_export_aiperf.json"
 SERVER_METRICS_EXPORT_NAME = "server_metrics_export.json"
-SPEED_REPORT_PATHS = {
-    "acceptance_length": ("accept_length", "speed-bench-acceptance-length.csv"),
-    "acceptance_rate": ("accept_rate", "speed-bench-acceptance-rate.csv"),
+SPEED_ACCEPTANCE_METRICS = {
+    "acceptance_length": "accept_length",
+    "acceptance_rate": "accept_rate",
 }
 
 
@@ -129,6 +130,21 @@ def aiperf_client_defaults(request: BenchClientRequest) -> JsonObject:
     if source_input is None:
         return defaults
     source = source_input.root
+    if (
+        isinstance(
+            source,
+            BenchRequestSourceInputRandom
+            | BenchRequestSourceInputRandomMixture
+            | BenchRequestSourceInputDataset,
+        )
+        and source.output_stop is BenchOutputStopInput.eos
+    ):
+        # The output-token limit is a cap: no minimum and no suppressed end of
+        # sequence (RFC-0004:C-BENCH-REQUEST-SOURCES).
+        del defaults["ignore_eos"]
+        if isinstance(source, BenchRequestSourceInputDataset) and source.output_tokens is not None:
+            defaults["max_tokens"] = source.output_tokens
+        return defaults
     if isinstance(source, BenchRequestSourceInputRandom):
         output_tokens = fixed_tokens(source.output_tokens)
         if output_tokens is not None:
@@ -487,16 +503,6 @@ def raw_artifacts(
             "aiperf-server-metrics-export",
             artifact_dir / SERVER_METRICS_EXPORT_NAME,
         ),
-        (
-            "speed_bench_acceptance_length",
-            "speed-bench-report-csv",
-            artifact_dir / SPEED_REPORT_PATHS["acceptance_length"][1],
-        ),
-        (
-            "speed_bench_acceptance_rate",
-            "speed-bench-report-csv",
-            artifact_dir / SPEED_REPORT_PATHS["acceptance_rate"][1],
-        ),
     ]
     return [
         RawArtifact(name=name, kind=kind, path=str(path))
@@ -548,131 +554,79 @@ def run_aiperf(
 
 
 def speed_bench_category(request: BenchClientRequest) -> str | None:
+    """The resolved SPEED-Bench category that labels the case's acceptance."""
     source_input = request.definition.request_source
     if source_input is None:
         return None
     source = source_input.root
     if not isinstance(source, BenchRequestSourceInputDataset) or source.dataset != "speed_bench":
         return None
-    prefix = "speed_bench_"
-    if not source.catalog.aiperf_format.startswith(prefix):
-        raise ValueError("resolved SPEED-Bench profile has an invalid AIPerf dataset format")
-    return source.catalog.aiperf_format.removeprefix(prefix)
+    if source.catalog.filter is None:
+        raise ValueError("resolved SPEED-Bench profile has no category filter")
+    return source.catalog.filter.value
 
 
-def parse_speed_bench_report(
-    path: Path,
-    served_model: str,
-    category: str,
-    normalized_name: str,
-) -> float:
-    try:
-        with path.open(encoding="utf-8", newline="") as report_file:
-            reader = csv.DictReader(report_file)
-            rows = list(reader)
-            fieldnames = reader.fieldnames or []
-    except (OSError, csv.Error) as error:
-        raise ValueError(f"{normalized_name} report {path} is unreadable: {error}") from error
-    if fieldnames.count("Model") != 1:
-        raise ValueError(f"{normalized_name} report {path} has no unique Model column")
-    if fieldnames.count(category) != 1:
-        raise ValueError(
-            f"{normalized_name} report {path} has no unique category column {category!r}"
-        )
-    model_rows = [row for row in rows if row.get("Model") == served_model]
-    if len(model_rows) != 1 or len(rows) != 1:
-        raise ValueError(
-            f"{normalized_name} report {path} requires exactly one row for model "
-            f"{served_model!r}; matching={len(model_rows)}, total={len(rows)}"
-        )
-    raw_value = model_rows[0].get(category)
-    if raw_value is None or not raw_value.strip():
-        raise ValueError(
-            f"{normalized_name} report {path} cell for {served_model!r}/{category!r} is empty"
-        )
-    try:
-        value = float(raw_value)
-    except ValueError:
-        raise ValueError(
-            f"{normalized_name} report {path} cell for {served_model!r}/{category!r} "
-            f"is not numeric: {raw_value!r}"
-        ) from None
-    if not math.isfinite(value):
-        raise ValueError(
-            f"{normalized_name} report {path} cell for {served_model!r}/{category!r} is not finite"
-        )
-    if normalized_name == "acceptance_length" and value < 1.0:
-        raise ValueError(f"acceptance_length report cell is below one: {value}")
-    if normalized_name == "acceptance_rate" and not 0.0 <= value <= 1.0:
-        raise ValueError(f"acceptance_rate report cell is outside [0, 1]: {value}")
-    return value
-
-
-def run_speed_bench_reports(
+def compute_speed_bench_acceptance(
     request: BenchClientRequest,
-    command_prefix: list[str],
     artifact_dir: Path,
-    deadline: CaseDeadline,
-) -> tuple[dict[str, float], list[BenchNativeInvocation], str | None]:
+) -> tuple[dict[str, float], dict[str, BenchAcceptanceSource], str | None]:
+    """Take SPEED-Bench acceptance from the release-pinned AIPerf computation.
+
+    Each value comes from the first of AIPerf's per-request records, run
+    summary, and scraped server metrics that yields one, labeled with the
+    case's resolved category (RFC-0004:C-MEASUREMENTS).
+    """
     category = speed_bench_category(request)
     if category is None:
-        return {}, [], None
+        return {}, {}, None
+    report = import_module("aiperf.analysis.speed_bench_report")
+    profile = report.load_profile(artifact_dir)
+    server_metrics = report.load_server_metrics(artifact_dir)
     metrics: dict[str, float] = {}
-    invocations: list[BenchNativeInvocation] = []
+    sources: dict[str, BenchAcceptanceSource] = {}
     errors: list[str] = []
-    for normalized_name, (report_metric, filename) in SPEED_REPORT_PATHS.items():
-        output_path = artifact_dir / filename
-        command = [
-            *command_prefix,
-            "speed-bench-report",
-            str(artifact_dir),
-            "--output",
-            str(output_path),
-            "--format",
-            "csv",
-            "--metric",
-            report_metric,
-        ]
-        try:
-            exit_code, interrupted, timed_out = run_aiperf(command, deadline)
-        except OSError as error:
-            invocations.append(
-                BenchNativeInvocation(
-                    purpose=normalized_name,
-                    command=command,
-                    exit_code=None,
-                    interrupted=False,
-                    timed_out=False,
+    for normalized_name, metric in SPEED_ACCEPTANCE_METRICS.items():
+        value: object = None
+        source: BenchAcceptanceSource | None = None
+        records = dict(report.acceptance_from_records(artifact_dir, metric, category))
+        if records:
+            if set(records) != {category}:
+                errors.append(
+                    f"{normalized_name} records carry categories {sorted(records)}, "
+                    f"not only {category!r}"
                 )
+                continue
+            value, source = records[category], BenchAcceptanceSource.records
+        elif (
+            profile is not None
+            and (summarized := report.extract_summary_acceptance(profile, metric)) is not None
+        ):
+            value, source = summarized, BenchAcceptanceSource.summary
+        elif server_metrics is not None:
+            scraped = (
+                report.extract_accept_length(server_metrics)
+                if metric == "accept_length"
+                else report.extract_accept_rate(server_metrics)
             )
-            errors.append(f"failed to launch {normalized_name} report: {error}")
+            if scraped is not None:
+                value, source = scraped, BenchAcceptanceSource.server_metrics
+        if source is None:
+            errors.append(f"AIPerf yielded no {normalized_name} for category {category!r}")
             continue
-        invocations.append(
-            BenchNativeInvocation(
-                purpose=normalized_name,
-                command=command,
-                exit_code=exit_code,
-                interrupted=interrupted,
-                timed_out=timed_out,
-            )
-        )
-        if interrupted:
-            return metrics, invocations, f"{normalized_name} report was interrupted"
-        if timed_out:
-            return metrics, invocations, f"{normalized_name} report reached the case deadline"
-        if exit_code != 0:
-            errors.append(f"{normalized_name} report exited with {exit_code}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            errors.append(f"{normalized_name} is not numeric: {value!r}")
             continue
-        try:
-            metrics[normalized_name] = parse_speed_bench_report(
-                output_path,
-                request.model.served_name,
-                category,
-                normalized_name,
-            )
-        except ValueError as error:
-            errors.append(str(error))
-    return metrics, invocations, "; ".join(errors) or None
+        number = float(value)
+        if not math.isfinite(number):
+            errors.append(f"{normalized_name} is not finite")
+        elif normalized_name == "acceptance_length" and number < 1.0:
+            errors.append(f"acceptance_length is below one: {number}")
+        elif normalized_name == "acceptance_rate" and not 0.0 <= number <= 1.0:
+            errors.append(f"acceptance_rate is outside [0, 1]: {number}")
+        else:
+            metrics[normalized_name] = number
+            sources[normalized_name] = source
+    return metrics, sources, "; ".join(errors) or None
 
 
 def prepare_aiperf_execution(

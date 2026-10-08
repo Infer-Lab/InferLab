@@ -29,6 +29,9 @@ pub enum MeasurementDataAssetPreparationPhase {
         resolved_revision: String,
         cache_state_before: MeasurementDataAssetCacheOutcome,
     },
+    /// Materialize a release-pinned AIPerf public dataset into rows the
+    /// control plane verifies against the catalog digest.
+    Materialize,
 }
 
 /// The next separately durable preparation phase selected by the owning
@@ -51,6 +54,16 @@ pub enum MeasurementDataAssetSourceInput {
     },
     Agentic {
         source: Box<BenchAgenticSourceInput>,
+    },
+    /// A release-catalog source whose rows only the release-pinned AIPerf's
+    /// public-dataset materialization can produce
+    /// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+    AiperfPublicDataset {
+        dataset: String,
+        output_path: PathBuf,
+        /// Machine-local directory AIPerf's working-directory-relative
+        /// dataset cache resolves under.
+        cache_root: PathBuf,
     },
 }
 
@@ -176,13 +189,15 @@ pub enum MeasurementDataAssetRemoteMetadataOutcome {
     Unavailable,
 }
 
-/// Whether immutable source bytes were reused or downloaded.
+/// Whether immutable source bytes were reused, downloaded, or materialized by
+/// a release-pinned AIPerf public dataset.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeasurementDataAssetSourceBytesOutcome {
     NotAccessed,
     Reused,
     Downloaded,
+    Materialized,
     Unavailable,
 }
 

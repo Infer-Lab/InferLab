@@ -501,6 +501,7 @@ fn validate_bench_common(
                 prompt,
                 input_tokens,
                 output_tokens,
+                output_stop: _,
                 prefix_sharing,
                 shared_system_content,
                 corpus,
@@ -550,6 +551,7 @@ fn validate_bench_common(
             BenchRequestSource::RandomMixture {
                 prompt,
                 shapes,
+                output_stop: _,
                 prefix_sharing,
                 images,
             } => {
@@ -619,6 +621,7 @@ fn validate_bench_common(
                 profile,
                 max_input_tokens,
                 output_tokens,
+                output_stop: _,
                 images,
             } => {
                 reject_images_declaration(id, "dataset", images)?;
@@ -915,7 +918,7 @@ fn validate_bench_token_selector(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::definitions::BenchRandomShape;
+    use crate::workspace::definitions::{BenchOutputStop, BenchRandomShape};
 
     #[test]
     fn dataset_request_source_is_one_valid_serving_bench_shape()
@@ -941,6 +944,7 @@ timeout_seconds = 60
                 profile: None,
                 max_input_tokens: 8192,
                 output_tokens: None,
+                output_stop: BenchOutputStop::Length,
                 images: None,
             }) if dataset == "sharegpt"
         ));
@@ -957,6 +961,7 @@ timeout_seconds = 60
                 profile: None,
                 max_input_tokens: 8192,
                 output_tokens: Some(1),
+                output_stop: BenchOutputStop::Length,
                 images: None,
             }
             .tpot_applicability(),
@@ -1217,6 +1222,7 @@ timeout_seconds = 60
                 prompt,
                 input_tokens: BenchTokenSelector::Fixed(8000),
                 output_tokens: BenchTokenSelector::Fixed(1000),
+                output_stop: BenchOutputStop::Length,
                 prefix_sharing: Some(BenchPrefixSharing::Ratio {
                     shared_prefix_ratio: 0.75,
                 }),

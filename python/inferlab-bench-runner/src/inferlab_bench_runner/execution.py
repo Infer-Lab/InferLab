@@ -4,13 +4,13 @@ import json
 
 from inferlab_measurement_sdk import (
     SCHEMA_VERSION,
+    BenchAcceptanceSource,
     BenchAgenticResultEvidence,
     BenchAgenticSourceVerification,
     BenchArtifactLevelInput,
     BenchCacheStartInput,
     BenchClientRequest,
     BenchClientResult,
-    BenchNativeInvocation,
     BenchRequestSloResult,
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
@@ -24,10 +24,10 @@ from .agentic_source import acquire_and_verify_agentic_source
 from .aiperf import (
     PROFILE_EXPORT_NAME,
     SERVER_METRICS_EXPORT_NAME,
+    compute_speed_bench_acceptance,
     prepare_aiperf_execution,
     raw_artifacts,
     run_aiperf,
-    run_speed_bench_reports,
     speed_bench_category,
 )
 from .population import load_chat_tokenizer
@@ -281,7 +281,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
             errors.append("AIPerf completed no requests")
         elif request_slo is None and agentic_source is None and failed_requests != 0:
             errors.append(f"AIPerf reported {failed_requests} failed requests")
-    report_invocations: list[BenchNativeInvocation] = []
+    acceptance_sources: dict[str, BenchAcceptanceSource] = {}
     if not errors and request.definition.server_metrics:
         profile_export = artifact_dir / PROFILE_EXPORT_NAME
         server_metrics_export = artifact_dir / SERVER_METRICS_EXPORT_NAME
@@ -290,15 +290,12 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         if not server_metrics_export.is_file():
             errors.append(f"AIPerf server metrics omitted {SERVER_METRICS_EXPORT_NAME}")
         if not errors and speed_bench_category(request) is not None:
-            report_metrics, report_invocations, report_error = run_speed_bench_reports(
-                request,
-                prepared.command_prefix,
-                artifact_dir,
-                deadline,
+            acceptance, acceptance_sources, acceptance_error = compute_speed_bench_acceptance(
+                request, artifact_dir
             )
-            metrics.update(report_metrics)
-            if report_error is not None:
-                errors.append(report_error)
+            metrics.update(acceptance)
+            if acceptance_error is not None:
+                errors.append(acceptance_error)
     artifacts = raw_artifacts(
         artifact_dir, config_path, request_config_path, prepared.profile_artifacts
     )
@@ -317,7 +314,7 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         prompt_cache_observations=prompt_cache_observations,
         native_command=command,
         native_exit_code=native_exit_code,
-        report_invocations=report_invocations,
+        acceptance_sources=acceptance_sources,
         raw_artifacts=artifacts,
         error=result_error,
     )

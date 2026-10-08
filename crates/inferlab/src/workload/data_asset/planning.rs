@@ -126,13 +126,24 @@ fn bench_asset(plan: &BenchPlan) -> Option<DataAssetSource> {
                 dataset: catalog.dataset.clone(),
                 profile: catalog.profile.clone(),
                 url: catalog.url.clone(),
+                aiperf_dataset: catalog.aiperf_dataset.clone(),
+                // An AIPerf-backed source is materialized by the measurement
+                // runner, so its selection depends on that runtime too.
+                command: catalog
+                    .aiperf_dataset
+                    .as_ref()
+                    .map(|_| plan.client.command.clone()),
                 upstream_identity: catalog.upstream_identity.clone(),
                 expected_sha256: catalog.sha256.clone(),
                 configuration: catalog.configuration.clone(),
                 split: catalog.split.clone(),
                 filter: catalog.filter.clone(),
                 cache_path: catalog.cache_path.clone(),
-                acquisition_runtime_identity: format!("inferlab-{}", env!("CARGO_PKG_VERSION")),
+                acquisition_runtime_identity: if catalog.aiperf_dataset.is_some() {
+                    runtime_identity
+                } else {
+                    format!("inferlab-{}", env!("CARGO_PKG_VERSION"))
+                },
             }),
         }),
         ResolvedBenchSource::Sessions { session_source } => {
@@ -141,7 +152,9 @@ fn bench_asset(plan: &BenchPlan) -> Option<DataAssetSource> {
                 source: Box::new(ReleaseCatalogDataAssetSource {
                     dataset: catalog.dataset.clone(),
                     profile: catalog.profile.clone(),
-                    url: catalog.url.clone(),
+                    url: Some(catalog.url.clone()),
+                    aiperf_dataset: None,
+                    command: None,
                     upstream_identity: catalog.upstream_identity.clone(),
                     expected_sha256: catalog.sha256.clone(),
                     configuration: catalog.configuration.clone(),
@@ -290,7 +303,9 @@ mod tests {
             source: Box::new(ReleaseCatalogDataAssetSource {
                 dataset: "fixture".to_owned(),
                 profile: Some("default".to_owned()),
-                url: "https://example.invalid/data.json".to_owned(),
+                url: Some("https://example.invalid/data.json".to_owned()),
+                aiperf_dataset: None,
+                command: None,
                 upstream_identity: "revision".to_owned(),
                 expected_sha256: "digest".to_owned(),
                 configuration: Some("default".to_owned()),

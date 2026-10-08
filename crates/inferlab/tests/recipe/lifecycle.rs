@@ -553,6 +553,84 @@ timeout_seconds = 60
     Ok(())
 }
 
+#[test]
+fn speed_bench_rows_from_aiperf_are_held_to_the_catalog_pin() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let mut config = fs::read_to_string(&manifest)?;
+    config.push_str(
+        r#"
+
+[benches.speed]
+request_source = { kind = "dataset", dataset = "speed_bench", profile = "qualitative_coding", max_input_tokens = 8192, output_tokens = 16 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 60
+"#,
+    );
+    fs::write(manifest, config)?;
+    let cache_home = workspace.root().join("fixture-cache");
+    let events = workspace.root().join("capture-events.log");
+    let start = workspace
+        .command()
+        .args(["serve", "start", "deepseek-v4-flash-qualify"])
+        .output()?;
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let server: Value = serde_json::from_slice(&start.stdout)?;
+    let server_id = server["id"].as_str().ok_or("server record has no id")?;
+
+    let failed = workspace
+        .command()
+        .env("XDG_CACHE_HOME", &cache_home)
+        .env("FIXTURE_CAPTURE_EVENTS", &events)
+        .args(["bench", "speed", "--serve", server_id])
+        .output()?;
+    assert!(!failed.status.success());
+    let bench: Value = serde_json::from_slice(&failed.stdout)?;
+    assert_eq!(bench["status"], "failed");
+    let attempt = &bench["data_assets"]["attempts"][0];
+    assert_eq!(attempt["state"], "failed");
+    let pinned = attempt["source"]["expected_sha256"]
+        .as_str()
+        .ok_or("attempt names no pinned digest")?;
+    assert!(
+        attempt["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(&format!("expected {pinned}"))),
+        "AIPerf rows that differ from the pin fail preparation: {attempt}"
+    );
+    let materialized = fs::read_to_string(&events)?;
+    assert!(
+        materialized.contains(&format!(
+            "materialize speed_bench_qualitative {}",
+            cache_home.join("inferlab/aiperf").display()
+        )),
+        "the runner materializes the AIPerf dataset under the cache home: {materialized}"
+    );
+    assert!(
+        !cache_home.join("inferlab/datasets/sha256").exists()
+            || fs::read_dir(cache_home.join("inferlab/datasets/sha256"))?
+                .next()
+                .is_none(),
+        "rows that fail the pin never reach the source cache"
+    );
+
+    let stop = workspace
+        .command()
+        .args(["serve", "stop", server_id])
+        .output()?;
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    Ok(())
+}
+
 fn assert_datetime_record_id(id: &str, expected_suffix: &str) -> Result<(), Box<dyn Error>> {
     let (timestamp, suffix) = id.split_once("Z-").ok_or("record id has no UTC prefix")?;
     assert_eq!(timestamp.len(), 23);

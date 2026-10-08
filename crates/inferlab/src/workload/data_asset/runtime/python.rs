@@ -312,6 +312,33 @@ pub(super) fn commit_agentic_resolve(
     })
 }
 
+/// Commit an AIPerf materialization phase; the control plane, not the
+/// runner, then verifies and publishes the rows.
+pub(super) fn commit_materialize(
+    attempt: &mut DataAssetPreparationAttempt,
+    mut result: PythonPhaseResult,
+    cache_root: &Path,
+    persist: &mut impl FnMut(&[DataAssetPreparationAttempt]) -> Result<(), InferlabError>,
+) -> Result<(), InferlabError> {
+    if let Some(value) = result.result.as_mut() {
+        value
+            .cache_stores
+            .push(inferlab_protocol::MeasurementDataAssetCacheStore {
+                authority: "aiperf_dataset_cache".to_owned(),
+                purpose: "aiperf_public_dataset".to_owned(),
+                path: Some(cache_root.to_path_buf()),
+                outcome: inferlab_protocol::MeasurementDataAssetCacheOutcome::Unavailable,
+            });
+    }
+    commit_result(
+        attempt,
+        DataAssetPreparationPhase::Materialize,
+        result,
+        persist,
+    )
+    .map(|_| ())
+}
+
 pub(super) fn commit_terminal(
     attempt: &mut DataAssetPreparationAttempt,
     phase: DataAssetPreparationPhase,
@@ -429,6 +456,9 @@ fn source_bytes(
         }
         inferlab_protocol::MeasurementDataAssetSourceBytesOutcome::Downloaded => {
             DataAssetSourceBytesOutcome::Downloaded
+        }
+        inferlab_protocol::MeasurementDataAssetSourceBytesOutcome::Materialized => {
+            DataAssetSourceBytesOutcome::Materialized
         }
         inferlab_protocol::MeasurementDataAssetSourceBytesOutcome::Unavailable => {
             DataAssetSourceBytesOutcome::Unavailable

@@ -102,4 +102,6 @@ pub(crate) use bench::run_bench;
 pub(crate) use bench::skip;
 pub(crate) use client::{ClientProcessPaths, run_unbounded_client};
 pub(crate) use eval::run_eval;
-pub(crate) use preparation::acquire_dataset_snapshot;
+pub(crate) use preparation::{
+    acquire_dataset_snapshot, publish_materialized_snapshot, reuse_cached_snapshot,
+};

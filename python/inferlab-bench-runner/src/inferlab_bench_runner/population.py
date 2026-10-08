@@ -2,6 +2,7 @@
 
 import importlib
 import importlib.metadata
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -32,6 +33,14 @@ def _iter_parquet_rows(path: Path) -> Iterator[object]:
         yield from cast(list[object], batch.to_pylist())
 
 
+def _iter_jsonl_rows(path: Path) -> Iterator[object]:
+    """Rows of a materialized AIPerf public dataset, one JSON object per line."""
+    with path.open(encoding="utf-8") as rows:
+        for line in rows:
+            if line.strip():
+                yield json.loads(line)
+
+
 def prepare_population(
     request: BenchPopulationPreparationRequest,
     tokenizer: ChatTokenizer | None = None,
@@ -59,7 +68,7 @@ def prepare_population(
         if source.dataset == "sharegpt":
             return prepare_sharegpt_population(request, tokenizer)
         if source.dataset == "speed_bench":
-            return prepare_speed_bench_population(request, tokenizer, source, _iter_parquet_rows)
+            return prepare_speed_bench_population(request, tokenizer, source, _iter_jsonl_rows)
         raise ValueError(f"unsupported catalog dataset {source.dataset!r}")
     if isinstance(source, BenchRequestSourceInputReplay):
         return prepare_replay_population(request, tokenizer, source)

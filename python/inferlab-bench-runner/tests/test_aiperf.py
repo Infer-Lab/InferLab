@@ -1,18 +1,19 @@
 import json
+import sys
+import types
 from pathlib import Path
 from typing import cast
 
 import pytest
 from inferlab_bench_runner.aiperf import (
     aiperf_config,
+    compute_speed_bench_acceptance,
     inference_request_config,
-    parse_speed_bench_report,
-    run_speed_bench_reports,
     speed_bench_category,
 )
 from inferlab_measurement_sdk import (
+    BenchAcceptanceSource,
     BenchClientRequest,
-    CaseDeadline,
 )
 
 from .support import (
@@ -254,7 +255,7 @@ def test_speed_bench_uses_the_catalog_dataset_format_and_fixed_output_limit(
     assert benchmark["dataset"] == {
         "type": "file",
         "path": str(tmp_path / "population.jsonl"),
-        "format": "speed_bench_coding",
+        "format": "mooncake_trace",
         "entries": 4,
         "sampling": "sequential",
     }
@@ -266,44 +267,70 @@ def test_speed_bench_uses_the_catalog_dataset_format_and_fixed_output_limit(
     assert "max_completion_tokens" not in extra
 
 
-def test_speed_reports_use_pinned_aiperf_cli_and_exact_csv_cells(tmp_path: Path) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text(
-        """#!/bin/sh
-metric=''
-output=''
-while [ \"$#\" -gt 0 ]; do
-  case \"$1\" in
-    --metric) metric=$2; shift 2 ;;
-    --output) output=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-if [ \"$metric\" = accept_length ]; then value=2.34; else value=0.67; fi
-printf 'Model,coding,Overall\\ndeepseek-v4-flash,%s,%s\\n' \"$value\" \"$value\" > \"$output\"
-""",
-        encoding="utf-8",
+def _fake_speed_report(
+    monkeypatch: pytest.MonkeyPatch,
+    records: dict[str, dict[str, float]],
+    summary: dict[str, float | None],
+    server: dict[str, float | None],
+) -> None:
+    """Stand in for AIPerf's SPEED-Bench report module, keyed by metric."""
+    module = types.ModuleType("aiperf.analysis.speed_bench_report")
+    module.load_profile = lambda run_dir: {"profile": True}  # type: ignore[attr-defined]
+    module.load_server_metrics = lambda run_dir: {"server": True}  # type: ignore[attr-defined]
+    module.acceptance_from_records = (  # type: ignore[attr-defined]
+        lambda run_dir, metric, category: records.get(metric, {})
     )
-    aiperf.chmod(0o755)
+    module.extract_summary_acceptance = (  # type: ignore[attr-defined]
+        lambda profile, metric: summary.get(metric)
+    )
+    module.extract_accept_length = lambda metrics: server.get("accept_length")  # type: ignore[attr-defined]
+    module.extract_accept_rate = lambda metrics: server.get("accept_rate")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "aiperf.analysis.speed_bench_report", module)
 
-    metrics, invocations, error = run_speed_bench_reports(
-        speed_bench_request(tmp_path),
-        [str(aiperf)],
-        tmp_path,
-        CaseDeadline(5.0),
+
+def test_speed_acceptance_takes_the_first_aiperf_source_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_speed_report(
+        monkeypatch,
+        records={"accept_length": {"coding": 2.34}},
+        summary={"accept_length": 9.0, "accept_rate": None},
+        server={"accept_length": 9.0, "accept_rate": 0.67},
+    )
+
+    metrics, sources, error = compute_speed_bench_acceptance(
+        speed_bench_request(tmp_path), tmp_path
     )
 
     assert error is None
     assert metrics == {"acceptance_length": 2.34, "acceptance_rate": 0.67}
-    assert [item.purpose for item in invocations] == [
-        "acceptance_length",
-        "acceptance_rate",
-    ]
-    assert all(item.exit_code == 0 for item in invocations)
-    assert all("speed-bench-report" in item.command for item in invocations)
+    assert sources == {
+        "acceptance_length": BenchAcceptanceSource.records,
+        "acceptance_rate": BenchAcceptanceSource.server_metrics,
+    }
 
 
-def test_speed_report_category_follows_the_catalog_aiperf_format(tmp_path: Path) -> None:
+def test_speed_acceptance_rejects_records_for_another_category(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_speed_report(
+        monkeypatch,
+        records={"accept_length": {"weka_main": 2.0}, "accept_rate": {"coding": 1.5}},
+        summary={},
+        server={},
+    )
+
+    metrics, sources, error = compute_speed_bench_acceptance(
+        speed_bench_request(tmp_path), tmp_path
+    )
+
+    assert metrics == {} and sources == {}
+    assert error is not None
+    assert "not only 'coding'" in error
+    assert "acceptance_rate is outside [0, 1]" in error
+
+
+def test_speed_acceptance_category_follows_the_profile_filter(tmp_path: Path) -> None:
     raw = speed_bench_request(tmp_path).model_dump(mode="json")
     definition = cast(dict[str, object], raw["definition"])
     source = cast(dict[str, object], definition["request_source"])
@@ -311,59 +338,10 @@ def test_speed_report_category_follows_the_catalog_aiperf_format(tmp_path: Path)
     source["profile"] = "throughput_8k_mixed"
     catalog["profile"] = "throughput_8k_mixed"
     catalog["source"] = "throughput_8k"
-    catalog["aiperf_format"] = "speed_bench_throughput_8k_mixed"
     catalog["configuration"] = "throughput_8k"
     catalog["filter"] = {"field": "category", "value": "mixed"}
 
-    assert speed_bench_category(BenchClientRequest.model_validate(raw)) == "throughput_8k_mixed"
-
-
-def test_speed_reports_attempt_both_native_metrics_after_one_report_fails(
-    tmp_path: Path,
-) -> None:
-    aiperf = tmp_path / "aiperf"
-    aiperf.write_text(
-        """#!/bin/sh
-metric=''
-output=''
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --metric) metric=$2; shift 2 ;;
-    --output) output=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-if [ "$metric" = accept_length ]; then exit 3; fi
-printf 'Model,coding,Overall\\ndeepseek-v4-flash,0.67,0.67\\n' > "$output"
-""",
-        encoding="utf-8",
-    )
-    aiperf.chmod(0o755)
-
-    metrics, invocations, error = run_speed_bench_reports(
-        speed_bench_request(tmp_path),
-        [str(aiperf)],
-        tmp_path,
-        CaseDeadline(5.0),
-    )
-
-    assert metrics == {"acceptance_rate": 0.67}
-    assert [item.exit_code for item in invocations] == [3, 0]
-    assert error == "acceptance_length report exited with 3"
-
-
-def test_speed_report_rejects_duplicate_model_rows_and_invalid_ranges(tmp_path: Path) -> None:
-    report = tmp_path / "report.csv"
-    report.write_text(
-        "Model,coding,Overall\ndeepseek-v4-flash,2.0,2.0\ndeepseek-v4-flash,3.0,3.0\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="exactly one row"):
-        parse_speed_bench_report(report, "deepseek-v4-flash", "coding", "acceptance_length")
-
-    report.write_text("Model,coding,Overall\ndeepseek-v4-flash,1.01,1.01\n", encoding="utf-8")
-    with pytest.raises(ValueError, match=r"outside \[0, 1\]"):
-        parse_speed_bench_report(report, "deepseek-v4-flash", "coding", "acceptance_rate")
+    assert speed_bench_category(BenchClientRequest.model_validate(raw)) == "mixed"
 
 
 def test_config_lowers_explicit_request_slo_to_aiperf_metric_tags(tmp_path: Path) -> None:
@@ -540,4 +518,22 @@ def test_config_lowers_weighted_exact_shapes_to_aiperf_sequence_distribution(
     endpoint = cast(dict[str, object], benchmark["endpoint"])
     extra = cast(dict[str, object], endpoint["extra"])
     assert extra["ignore_eos"] is True
+    assert "min_tokens" not in extra
+
+
+def test_eos_output_stop_sends_the_limit_as_a_cap(tmp_path: Path) -> None:
+    source: dict[str, object] = {
+        "kind": "random",
+        "input_tokens": 8000,
+        "output_tokens": 1000,
+        "output_stop": "eos",
+        "prefix_sharing": None,
+    }
+    config = aiperf_config(
+        request(tmp_path, {"kind": "concurrency_limited", "concurrency": 1}, request_source=source)
+    )
+    endpoint = cast(dict[str, object], cast(dict[str, object], config["benchmark"])["endpoint"])
+    extra = cast(dict[str, object], endpoint["extra"])
+
+    assert "ignore_eos" not in extra
     assert "min_tokens" not in extra

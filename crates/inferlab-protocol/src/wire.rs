@@ -1707,6 +1707,17 @@ pub enum BenchRenderingAuthorityInput {
     Server,
 }
 
+/// Whether a request's output-token limit is an exact length or a cap that
+/// lets the model stop at end of sequence
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchOutputStopInput {
+    #[default]
+    Length,
+    Eos,
+}
+
 /// One closed request origin lowered by Inferlab for the Bench runtime.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1716,6 +1727,8 @@ pub enum BenchRequestSourceInput {
     Random {
         input_tokens: BenchTokenSelectorInput,
         output_tokens: BenchTokenSelectorInput,
+        #[serde(default)]
+        output_stop: BenchOutputStopInput,
         #[serde(default)]
         prefix_sharing: Option<BenchPrefixSharingInput>,
         #[serde(default)]
@@ -1734,6 +1747,8 @@ pub enum BenchRequestSourceInput {
         shapes: Vec<BenchRandomShapeInput>,
         total_weight: u64,
         #[serde(default)]
+        output_stop: BenchOutputStopInput,
+        #[serde(default)]
         prefix_sharing: Option<BenchPrefixSharingInput>,
     },
     /// Inferlab materializes a release-catalog conversation snapshot before
@@ -1744,6 +1759,8 @@ pub enum BenchRequestSourceInput {
         profile: Option<String>,
         max_input_tokens: u32,
         output_tokens: Option<u32>,
+        #[serde(default)]
+        output_stop: BenchOutputStopInput,
         catalog: Box<BenchDatasetCatalogInput>,
     },
     /// Inferlab replays one workspace-local frozen population file unchanged;
@@ -1881,7 +1898,13 @@ pub struct BenchDatasetCatalogInput {
     pub profile: Option<String>,
     pub source: String,
     pub upstream_identity: String,
-    pub url: String,
+    /// The byte-snapshot location; absent for an AIPerf-backed source.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The release-pinned AIPerf public dataset that materializes the rows;
+    /// absent for a byte snapshot.
+    #[serde(default)]
+    pub aiperf_dataset: Option<String>,
     pub sha256: String,
     pub source_format: String,
     pub aiperf_format: String,
@@ -1922,6 +1945,8 @@ pub struct BenchSessionSourceInput {
     pub profile: Option<String>,
     pub max_input_tokens: u32,
     pub output_tokens: Option<u32>,
+    #[serde(default)]
+    pub output_stop: BenchOutputStopInput,
     pub inter_turn_delay_scale: f64,
     pub max_inter_turn_delay_seconds: Option<f64>,
     pub catalog: Box<BenchSessionDatasetCatalogInput>,
@@ -2230,8 +2255,23 @@ pub struct BenchClientResult {
     pub native_exit_code: Option<i32>,
     #[serde(default)]
     pub report_invocations: Vec<BenchNativeInvocation>,
+    /// The release-pinned AIPerf source each SPEED-Bench acceptance value was
+    /// taken from ([[RFC-0004:C-MEASUREMENTS]]).
+    #[serde(default)]
+    pub acceptance_sources: BTreeMap<String, BenchAcceptanceSource>,
     pub raw_artifacts: Vec<RawArtifact>,
     pub error: Option<String>,
+}
+
+/// Where AIPerf's SPEED-Bench computation found an acceptance value: the first
+/// of per-request records, the run summary, and the scraped server metrics
+/// that yields one.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchAcceptanceSource {
+    Records,
+    Summary,
+    ServerMetrics,
 }
 
 /// Backend-reported prompt/cache token accounting for one completed profiling request.

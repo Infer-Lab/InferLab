@@ -38,6 +38,7 @@ pub(super) fn prepare_bench_request_source(
             ResolvedBenchRequestSource::Random {
                 input_tokens,
                 output_tokens,
+                output_stop: _,
                 prefix_sharing,
                 shared_system_content,
                 corpus,
@@ -127,6 +128,7 @@ pub(super) fn prepare_bench_request_source(
             ResolvedBenchRequestSource::RandomMixture {
                 shapes,
                 total_weight,
+                output_stop: _,
                 prefix_sharing,
             } => {
                 let preparation = run_population_preparation(plan, session, progress, None)?;
@@ -497,36 +499,120 @@ fn sum_session_turns(
     })
 }
 
+type AcquisitionFailure = Box<(DatasetAcquisitionEvidence, InferlabError)>;
+
+/// Verify a cached source snapshot against its pinned digest.
+pub(crate) fn reuse_cached_snapshot(
+    cache_path: &Path,
+    expected_sha256: &str,
+) -> Result<DatasetAcquisitionEvidence, AcquisitionFailure> {
+    let (observed_bytes, observed_sha256) = match hash_dataset_file(cache_path) {
+        Ok(observed) => observed,
+        Err(error) => {
+            let evidence = failed_acquisition(None, None, &error);
+            return Err(Box::new((evidence, error)));
+        }
+    };
+    if observed_sha256 != expected_sha256 {
+        let error = InferlabError::DatasetDigest {
+            path: cache_path.to_path_buf(),
+            expected: expected_sha256.to_owned(),
+            observed: observed_sha256.clone(),
+        };
+        return Err(Box::new((
+            failed_acquisition(Some(observed_bytes), Some(observed_sha256), &error),
+            error,
+        )));
+    }
+    Ok(DatasetAcquisitionEvidence {
+        outcome: DatasetAcquisitionOutcome::Reused,
+        observed_bytes: Some(observed_bytes),
+        observed_sha256: Some(observed_sha256),
+        error: None,
+    })
+}
+
+/// Publish rows an AIPerf public-dataset materialization produced once they
+/// match the catalog's pinned digest, exactly as a downloaded snapshot is.
+pub(crate) fn publish_materialized_snapshot(
+    materialized: &Path,
+    cache_path: &Path,
+    expected_sha256: &str,
+) -> Result<DatasetAcquisitionEvidence, AcquisitionFailure> {
+    let (observed_bytes, observed_sha256) = match hash_dataset_file(materialized) {
+        Ok(observed) => observed,
+        Err(error) => return Err(Box::new((failed_acquisition(None, None, &error), error))),
+    };
+    let failure = |error: InferlabError| -> AcquisitionFailure {
+        Box::new((
+            failed_acquisition(Some(observed_bytes), Some(observed_sha256.clone()), &error),
+            error,
+        ))
+    };
+    if observed_sha256 != expected_sha256 {
+        return Err(failure(InferlabError::DatasetDigest {
+            path: materialized.to_path_buf(),
+            expected: expected_sha256.to_owned(),
+            observed: observed_sha256.clone(),
+        }));
+    }
+    let parent = cache_path.parent().ok_or_else(|| {
+        failure(InferlabError::DatasetPreparation {
+            message: format!("dataset cache path {} has no parent", cache_path.display()),
+        })
+    })?;
+    fs::create_dir_all(parent).map_err(|source| {
+        failure(InferlabError::DatasetIo {
+            operation: "create",
+            path: parent.to_path_buf(),
+            source,
+        })
+    })?;
+    let mut temporary = NamedTempFile::new_in(parent).map_err(|source| {
+        failure(InferlabError::DatasetIo {
+            operation: "create temporary dataset snapshot in",
+            path: parent.to_path_buf(),
+            source,
+        })
+    })?;
+    let mut source = File::open(materialized).map_err(|source| {
+        failure(InferlabError::DatasetIo {
+            operation: "open",
+            path: materialized.to_path_buf(),
+            source,
+        })
+    })?;
+    std::io::copy(&mut source, temporary.as_file_mut())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|source| {
+            failure(InferlabError::DatasetIo {
+                operation: "write",
+                path: temporary.path().to_path_buf(),
+                source,
+            })
+        })?;
+    temporary.persist(cache_path).map_err(|error| {
+        failure(InferlabError::DatasetIo {
+            operation: "publish",
+            path: cache_path.to_path_buf(),
+            source: error.error,
+        })
+    })?;
+    Ok(DatasetAcquisitionEvidence {
+        outcome: DatasetAcquisitionOutcome::Materialized,
+        observed_bytes: Some(observed_bytes),
+        observed_sha256: Some(observed_sha256),
+        error: None,
+    })
+}
+
 pub(crate) fn acquire_dataset_snapshot(
     cache_path: &Path,
     url: &str,
     expected_sha256: &str,
-) -> Result<DatasetAcquisitionEvidence, Box<(DatasetAcquisitionEvidence, InferlabError)>> {
+) -> Result<DatasetAcquisitionEvidence, AcquisitionFailure> {
     if cache_path.is_file() {
-        let (observed_bytes, observed_sha256) = match hash_dataset_file(cache_path) {
-            Ok(observed) => observed,
-            Err(error) => {
-                let evidence = failed_acquisition(None, None, &error);
-                return Err(Box::new((evidence, error)));
-            }
-        };
-        if observed_sha256 != expected_sha256 {
-            let error = InferlabError::DatasetDigest {
-                path: cache_path.to_path_buf(),
-                expected: expected_sha256.to_owned(),
-                observed: observed_sha256.clone(),
-            };
-            return Err(Box::new((
-                failed_acquisition(Some(observed_bytes), Some(observed_sha256), &error),
-                error,
-            )));
-        }
-        return Ok(DatasetAcquisitionEvidence {
-            outcome: DatasetAcquisitionOutcome::Reused,
-            observed_bytes: Some(observed_bytes),
-            observed_sha256: Some(observed_sha256),
-            error: None,
-        });
+        return reuse_cached_snapshot(cache_path, expected_sha256);
     }
     let parent = cache_path
         .parent()

@@ -8,6 +8,12 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
+class BenchAcceptanceSource(StrEnum):
+    records = 'records'
+    summary = 'summary'
+    server_metrics = 'server_metrics'
+
+
 class BenchAgenticAcquisitionOutcome(StrEnum):
     reused = 'reused'
     downloaded = 'downloaded'
@@ -224,6 +230,11 @@ class BenchNativeInvocation(BaseModel):
     timed_out: bool
 
 
+class BenchOutputStopInput(StrEnum):
+    length = 'length'
+    eos = 'eos'
+
+
 class BenchPrefixConditioningInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -338,6 +349,7 @@ class BenchRequestSourceInputRandomMixture(BaseModel):
         extra='forbid',
     )
     kind: Literal['random_mixture'] = 'random_mixture'
+    output_stop: BenchOutputStopInput = 'length'
     prefix_sharing: BenchPrefixSharingInput | None = None
     shapes: list[BenchRandomShapeInput]
     total_weight: Annotated[int, Field(ge=0)]
@@ -403,6 +415,7 @@ class BenchSessionSourceInput(BaseModel):
     inter_turn_delay_scale: float
     max_input_tokens: Annotated[int, Field(ge=0)]
     max_inter_turn_delay_seconds: float | None = None
+    output_stop: BenchOutputStopInput = 'length'
     output_tokens: Annotated[int | None, Field(ge=0)] = None
     profile: str | None = None
 
@@ -700,17 +713,26 @@ class MeasurementDataAssetPreparationPhaseAcquire(BaseModel):
     resolved_revision: str
 
 
+class MeasurementDataAssetPreparationPhaseMaterialize(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    kind: Literal['materialize'] = 'materialize'
+
+
 class MeasurementDataAssetPreparationPhase(
     RootModel[
         MeasurementDataAssetPreparationPhaseResolve
         | MeasurementDataAssetPreparationPhaseSnapshotLocal
         | MeasurementDataAssetPreparationPhaseAcquire
+        | MeasurementDataAssetPreparationPhaseMaterialize
     ]
 ):
     root: Annotated[
         MeasurementDataAssetPreparationPhaseResolve
         | MeasurementDataAssetPreparationPhaseSnapshotLocal
-        | MeasurementDataAssetPreparationPhaseAcquire,
+        | MeasurementDataAssetPreparationPhaseAcquire
+        | MeasurementDataAssetPreparationPhaseMaterialize,
         Field(
             description='One externally observable source-preparation phase. Separating resolution\nfrom acquisition lets the control plane durably commit each result.'
         ),
@@ -737,7 +759,23 @@ class MeasurementDataAssetSourceBytesOutcome(StrEnum):
     not_accessed = 'not_accessed'
     reused = 'reused'
     downloaded = 'downloaded'
+    materialized = 'materialized'
     unavailable = 'unavailable'
+
+
+class MeasurementDataAssetSourceInputAiperfPublicDataset(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    cache_root: Annotated[
+        str,
+        Field(
+            description="Machine-local directory AIPerf's working-directory-relative\ndataset cache resolves under."
+        ),
+    ]
+    dataset: str
+    kind: Literal['aiperf_public_dataset'] = 'aiperf_public_dataset'
+    output_path: str
 
 
 class MeasurementDataAssetVerification(BaseModel):
@@ -897,6 +935,12 @@ class BenchDatasetCatalogInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    aiperf_dataset: Annotated[
+        str | None,
+        Field(
+            description='The release-pinned AIPerf public dataset that materializes the rows;\nabsent for a byte snapshot.'
+        ),
+    ] = None
     aiperf_format: str
     cache_path: str
     cache_state: BenchDatasetCacheState
@@ -912,7 +956,12 @@ class BenchDatasetCatalogInput(BaseModel):
     source_format: str
     split: str | None = None
     upstream_identity: str
-    url: str
+    url: Annotated[
+        str | None,
+        Field(
+            description='The byte-snapshot location; absent for an AIPerf-backed source.'
+        ),
+    ] = None
 
 
 class BenchInclusiveUniformInput(BaseModel):
@@ -1027,6 +1076,7 @@ class BenchRequestSourceInputDataset(BaseModel):
     dataset: str
     kind: Literal['dataset'] = 'dataset'
     max_input_tokens: Annotated[int, Field(ge=0)]
+    output_stop: BenchOutputStopInput = 'length'
     output_tokens: Annotated[int | None, Field(ge=0)] = None
     profile: str | None = None
 
@@ -1284,11 +1334,15 @@ class MeasurementDataAssetSourceInputAgentic(BaseModel):
 
 class MeasurementDataAssetSourceInput(
     RootModel[
-        MeasurementDataAssetSourceInputEval | MeasurementDataAssetSourceInputAgentic
+        MeasurementDataAssetSourceInputEval
+        | MeasurementDataAssetSourceInputAgentic
+        | MeasurementDataAssetSourceInputAiperfPublicDataset
     ]
 ):
     root: Annotated[
-        MeasurementDataAssetSourceInputEval | MeasurementDataAssetSourceInputAgentic,
+        MeasurementDataAssetSourceInputEval
+        | MeasurementDataAssetSourceInputAgentic
+        | MeasurementDataAssetSourceInputAiperfPublicDataset,
         Field(
             description='The measurement-owned source whose bytes or task selection are prepared.'
         ),
@@ -1307,6 +1361,12 @@ class BenchClientResult(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    acceptance_sources: Annotated[
+        dict[str, BenchAcceptanceSource],
+        Field(
+            description='The release-pinned AIPerf source each SPEED-Bench acceptance value was\ntaken from ([[RFC-0004:C-MEASUREMENTS]]).'
+        ),
+    ] = {}
     agentic_evidence: BenchAgenticResultEvidence | None = None
     completed_requests: Annotated[int, Field(ge=0)]
     error: str | None = None
@@ -1373,6 +1433,7 @@ class BenchRequestSourceInputRandom(BaseModel):
     ] = None
     input_tokens: BenchTokenSelectorInput
     kind: Literal['random'] = 'random'
+    output_stop: BenchOutputStopInput = 'length'
     output_tokens: BenchTokenSelectorInput
     prefix_sharing: BenchPrefixSharingInput | None = None
     shared_system_content: BenchSharedSystemContentInput | None = None

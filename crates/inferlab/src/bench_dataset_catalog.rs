@@ -31,13 +31,17 @@ struct DatasetEntry {
 #[serde(deny_unknown_fields)]
 struct SourceEntry {
     upstream_identity: String,
-    url: String,
+    /// A byte snapshot is downloaded from `url`; an AIPerf-backed source is
+    /// materialized by the release-pinned AIPerf public dataset it names.
+    /// Exactly one is declared, and either way `sha256` pins the bytes.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    aiperf_dataset: Option<String>,
     sha256: String,
     source_format: String,
     #[serde(default)]
     aiperf_format: Option<String>,
-    #[serde(default)]
-    aiperf_format_prefix: Option<String>,
     #[serde(default)]
     configuration: Option<String>,
     #[serde(default)]
@@ -65,7 +69,8 @@ pub(crate) struct ResolvedDatasetCatalogEntry {
     pub profile: Option<String>,
     pub source: String,
     pub upstream_identity: String,
-    pub url: String,
+    pub url: Option<String>,
+    pub aiperf_dataset: Option<String>,
     pub sha256: String,
     pub source_format: String,
     pub aiperf_format: String,
@@ -114,17 +119,11 @@ pub(crate) fn resolve(
             ),
         }
     })?;
-    let aiperf_format = match (&source.aiperf_format, &source.aiperf_format_prefix, &filter) {
-        (Some(format), None, _) => format.clone(),
-        (None, Some(prefix), Some(filter)) => format!("{prefix}{}", filter.value),
-        _ => {
-            return Err(InferlabError::InvalidConfig {
-                message: format!(
-                    "release dataset catalog source {dataset:?}.{source_name:?} has no unambiguous AIPerf format"
-                ),
-            });
-        }
-    };
+    let aiperf_format = source.aiperf_format.clone().ok_or_else(|| InferlabError::InvalidConfig {
+        message: format!(
+            "release dataset catalog source {dataset:?}.{source_name:?} declares no AIPerf format"
+        ),
+    })?;
 
     Ok(ResolvedDatasetCatalogEntry {
         dataset: dataset.to_owned(),
@@ -132,6 +131,7 @@ pub(crate) fn resolve(
         source: source_name.to_owned(),
         upstream_identity: source.upstream_identity.clone(),
         url: source.url.clone(),
+        aiperf_dataset: source.aiperf_dataset.clone(),
         sha256: source.sha256.clone(),
         source_format: source.source_format.clone(),
         aiperf_format,
@@ -171,12 +171,17 @@ pub(crate) fn resolve_session(
             ),
         }
     })?;
+    let url = source.url.clone().ok_or_else(|| InferlabError::InvalidConfig {
+        message: format!(
+            "dataset {dataset:?} source {source_name:?} is not a byte snapshot and cannot back linear sessions"
+        ),
+    })?;
     Ok(ResolvedSessionDatasetCatalogEntry {
         dataset: dataset.to_owned(),
         profile: profile.map(str::to_owned),
         source: source_name.to_owned(),
         upstream_identity: source.upstream_identity.clone(),
-        url: source.url.clone(),
+        url,
         sha256: source.sha256.clone(),
         source_format: source.source_format.clone(),
         configuration: source.configuration.clone(),
@@ -231,6 +236,17 @@ fn parse_catalog() -> Result<ReleaseCatalog, InferlabError> {
                 catalog.schema_version
             ),
         });
+    }
+    for (dataset, entry) in &catalog.datasets {
+        for (source_name, source) in &entry.sources {
+            if source.url.is_some() == source.aiperf_dataset.is_some() {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "release dataset catalog source {dataset:?}.{source_name:?} must declare exactly one of url and aiperf_dataset"
+                    ),
+                });
+            }
+        }
     }
     Ok(catalog)
 }

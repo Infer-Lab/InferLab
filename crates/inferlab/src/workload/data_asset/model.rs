@@ -97,7 +97,14 @@ pub(super) struct ReleaseCatalogDataAssetSource {
     pub dataset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    pub url: String,
+    /// A byte snapshot downloads from `url`; an AIPerf-backed source runs the
+    /// measurement runner to materialize `aiperf_dataset` with `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aiperf_dataset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<ClientCommandPlan>,
     pub upstream_identity: String,
     pub expected_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,7 +138,11 @@ enum DataAssetKeyInput<'a> {
     ReleaseCatalog {
         dataset: &'a str,
         profile: &'a Option<String>,
-        url: &'a str,
+        // Serialized unchanged for byte snapshots so their existing keys hold.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aiperf_dataset: &'a Option<String>,
         upstream_identity: &'a str,
         expected_sha256: &'a str,
         configuration: &'a Option<String>,
@@ -163,6 +174,7 @@ impl DataAssetSource {
                 dataset: &source.dataset,
                 profile: &source.profile,
                 url: &source.url,
+                aiperf_dataset: &source.aiperf_dataset,
                 upstream_identity: &source.upstream_identity,
                 expected_sha256: &source.expected_sha256,
                 configuration: &source.configuration,
@@ -242,6 +254,7 @@ pub(super) enum DataAssetSourceBytesOutcome {
     NotAccessed,
     Reused,
     Downloaded,
+    Materialized,
     Unavailable,
 }
 
@@ -380,6 +393,7 @@ pub(super) enum DataAssetPreparationPhase {
     Acquire,
     CacheObservation,
     AcquireAndVerify,
+    Materialize,
 }
 
 impl DataAssetPreparationPhase {
@@ -390,6 +404,7 @@ impl DataAssetPreparationPhase {
             Self::Acquire => "acquire",
             Self::CacheObservation => "cache_observation",
             Self::AcquireAndVerify => "acquire_and_verify",
+            Self::Materialize => "materialize",
         }
     }
 }
@@ -586,7 +601,9 @@ mod tests {
                 source: Box::new(ReleaseCatalogDataAssetSource {
                     dataset: "fixture".to_owned(),
                     profile: None,
-                    url: "https://example.invalid/data.json".to_owned(),
+                    url: Some("https://example.invalid/data.json".to_owned()),
+                    aiperf_dataset: None,
+                    command: None,
                     upstream_identity: "revision".to_owned(),
                     expected_sha256: "digest".to_owned(),
                     configuration: None,

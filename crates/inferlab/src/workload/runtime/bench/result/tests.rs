@@ -5,7 +5,7 @@ use crate::workspace::RequestSlo;
 use inferlab_protocol::{
     BenchAgenticAcquisitionOutcome, BenchAgenticBranchStats, BenchAgenticResultEvidence,
     BenchAgenticRunEvidence, BenchAgenticSourceVerification, BenchDatasetCacheState,
-    BenchNativeInvocation, BenchPromptCacheObservation, RawArtifact,
+    BenchPromptCacheObservation, RawArtifact,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -414,24 +414,16 @@ fn speed_bench_server_metrics_require_both_acceptance_scalars() {
     let mut result = prefill_bench_result();
     result.metrics.insert("acceptance_length".to_owned(), 2.5);
     result.metrics.insert("acceptance_rate".to_owned(), 0.75);
-    result.report_invocations = [
-        ("acceptance_length", "accept_length"),
-        ("acceptance_rate", "accept_rate"),
-    ]
-    .into_iter()
-    .map(|(purpose, metric)| BenchNativeInvocation {
-        purpose: purpose.to_owned(),
-        command: vec![
-            "aiperf".to_owned(),
-            "speed-bench-report".to_owned(),
-            "--metric".to_owned(),
-            metric.to_owned(),
-        ],
-        exit_code: Some(0),
-        interrupted: false,
-        timed_out: false,
-    })
-    .collect();
+    result.acceptance_sources = BTreeMap::from([
+        (
+            "acceptance_length".to_owned(),
+            inferlab_protocol::BenchAcceptanceSource::Records,
+        ),
+        (
+            "acceptance_rate".to_owned(),
+            inferlab_protocol::BenchAcceptanceSource::ServerMetrics,
+        ),
+    ]);
 
     assert_eq!(
         bench_result_error(

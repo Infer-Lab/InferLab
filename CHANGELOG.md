@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-10-07
+
+### Added
+
+- Request and session sources accept `output_stop`. The default, `"length"`,
+  keeps today's behavior: every response runs to its exact output-token limit
+  with end of sequence ignored. `"eos"` makes the limit a cap so the model
+  stops at its natural end of sequence, as SPEED-Bench's methodology expects.
+  Existing definitions produce the same requests and populations as before.
+
+### Changed
+
+- SPEED-Bench acceptance comes from AIPerf's per-request records, run summary,
+  or server metrics, in that order, and the record names the source of each
+  value; the per-case SPEED-Bench report CSV artifacts are gone.
+
+### Fixed
+
+- SPEED-Bench runs again: InferLab 0.21.0's AIPerf build rejected the dataset
+  format InferLab handed it, so every SPEED-Bench case failed at startup.
+- SPEED-Bench Benches measure real prompts in every category. InferLab used to
+  freeze the published rows unchanged, and many are redistribution
+  placeholders: 9 of the 11 qualitative categories measured acceptance partly
+  or entirely on placeholder text, so earlier SPEED-Bench results in those
+  categories are not valid. AIPerf now resolves the rows from their source
+  datasets and InferLab holds them to a pinned digest. Resolution needs a
+  Hugging Face account that has accepted the terms of the gated `cais/hle`
+  dataset.
+
 ## [0.21.0] - 2026-10-06
 
 ### Changed

@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Protocol
 
-from inferlab_measurement_sdk import BenchTokenCountSummary
+from inferlab_measurement_sdk import BenchOutputStopInput, BenchTokenCountSummary, JsonObject
 
 
 class ChatTokenizer(Protocol):
@@ -79,3 +79,15 @@ def unbiased_index(seed: int, population_index: int, label: str, size: int) -> i
         if candidate < limit:
             return candidate % size
         counter += 1
+
+
+def stop_controls(output_stop: BenchOutputStopInput, output_tokens: int) -> JsonObject:
+    """The stop members a request carries for its output-token limit.
+
+    Under ``length`` the limit is exact: the request sets a matching minimum
+    and suppresses end of sequence. Under ``eos`` the limit is a cap and the
+    request carries no stop members (RFC-0004:C-BENCH-REQUEST-SOURCES).
+    """
+    if output_stop is BenchOutputStopInput.eos:
+        return {}
+    return {"ignore_eos": True, "min_tokens": output_tokens}

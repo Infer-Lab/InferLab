@@ -530,6 +530,7 @@ fn classify_eligibility<C: AdapterClient>(
             captures: &[],
             image: None,
             external: None,
+            wait_for_devices: false,
         },
         adapter,
     ) {

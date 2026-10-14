@@ -212,16 +212,21 @@ impl TestWorkspace {
             ),
         )?;
         ports.release();
-        write_executable(&bin.join("pixi"), PIXI)?;
-        write_executable(&bin.join("docker"), DOCKER)?;
-        write_executable(&bin.join("ssh"), SSH)?;
+        use crate::support::FakeTool;
+        crate::support::install_fake_tools(
+            &bin,
+            &[
+                FakeTool::Pixi,
+                FakeTool::Docker,
+                FakeTool::Ssh,
+                FakeTool::Ss,
+                FakeTool::NvidiaSmi,
+                FakeTool::Python,
+            ],
+        )?;
         write_executable(&bin.join("inferlab-adapter-vllm"), ADAPTER)?;
         write_executable(&bin.join("fixture-server"), FIXTURE_SERVER)?;
         write_executable(&bin.join("fixture-bench-client"), BENCH_CLIENT)?;
-        write_executable(&bin.join("nvidia-smi"), NVIDIA_SMI)?;
-        // Environment checks run as `python <script>` through the fixture
-        // pixi; the test host may only provide `python3`.
-        write_executable(&bin.join("python"), "#!/bin/sh\nexec python3 \"$@\"\n")?;
         git(root.path(), &["init", "-q"])?;
         git(root.path(), &["config", "user.email", "test@example.com"])?;
         git(root.path(), &["config", "user.name", "Inferlab Test"])?;
@@ -1203,13 +1208,11 @@ fn native_only_image_succeeds() -> Result<(), Box<dyn Error>> {
 #[test]
 fn mutating_then_failing_package_build_still_reports_the_mutation() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    write_executable(&workspace.bin.join("pixi"), MUTATING_FAILING_PIXI)?;
-    git(workspace.root.path(), &["add", "."])?;
-    git(
-        workspace.root.path(),
-        &["commit", "-qm", "mutating failing fixture"],
-    )?;
-    let output = workspace.build(&["deepseek-v4-flash-runtime-native"])?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_PIXI_BUILD", "fail")
+        .args(["image", "build", "deepseek-v4-flash-runtime-native"])
+        .output()?;
     assert!(!output.status.success());
     let report = stdout_json(&output)?;
     let record_id = report["record_id"].as_str().ok_or("record id")?;
@@ -1469,13 +1472,11 @@ fn invalid_container_hardware_declarations_are_rejected_at_load() -> Result<(), 
 #[test]
 fn mutating_package_build_fails_the_assembly() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    write_executable(&workspace.bin.join("pixi"), MUTATING_PIXI)?;
-    git(workspace.root.path(), &["add", "."])?;
-    git(
-        workspace.root.path(),
-        &["commit", "-qm", "mutating fixture"],
-    )?;
-    let output = workspace.build(&["deepseek-v4-flash-runtime-native"])?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_PIXI_BUILD", "mutate")
+        .args(["image", "build", "deepseek-v4-flash-runtime-native"])
+        .output()?;
     assert!(
         !output.status.success(),
         "a workspace-mutating build must fail the invocation"
@@ -2961,7 +2962,7 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
             ssh_swallow_handle: true,
             ..Scenario::default()
         })
-        .env("FIXTURE_SSH_ENV_LOG", &env_log)
+        .env("FAKE_SSH_ENV_LOG", &env_log)
         .env("LD_LIBRARY_PATH", "/fixture/pixi/envs/vllm/lib")
         .env("LD_PRELOAD", "/fixture/pixi/envs/vllm/lib/libfixture.so")
         .args([
@@ -3415,46 +3416,8 @@ fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
     .into())
 }
 
-const PIXI: &str = include_str!("fixtures/bin/pixi.sh");
-
-/// A `pixi` whose wheel build writes into the workspace source tree, the way
-/// an unruly external build backend would.
-const MUTATING_PIXI: &str = include_str!("fixtures/bin/mutating-pixi.sh");
-
-/// A `pixi` whose wheel build writes into the workspace source tree and then
-/// exits non-zero — the failure must not let it escape the mutation audit.
-const MUTATING_FAILING_PIXI: &str = include_str!("fixtures/bin/mutating-failing-pixi.sh");
-
-// A fake ssh that executes the remote script locally: options and the
-// target are stripped, the command words are joined exactly as sshd hands
-// them to the remote shell, and FIXTURE_SSH_TARGET lets other shims tell
-// which "machine" invoked them. The login-shell flag is dropped because a
-// profile would re-derive PATH and evict the fixture shims.
-const SSH: &str = include_str!("fixtures/bin/ssh.py");
-
-const DOCKER: &str = include_str!("fixtures/bin/docker.py");
-
 const ADAPTER: &str = include_str!("fixtures/bin/adapter.py");
 
 const BENCH_CLIENT: &str = include_str!("fixtures/bin/bench-client.py");
 
 const FIXTURE_SERVER: &str = include_str!("fixtures/bin/fixture-server.py");
-
-/// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape; a
-/// compute-apps query answers empty — no surviving compute applications.
-const NVIDIA_SMI: &str = r#"#!/bin/sh
-case " $* " in
-  *" --query-compute-apps="*) exit 0 ;;
-esac
-ids="0,1,2,3,4,5,6,7"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -i) ids="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-IFS=,
-for id in $ids; do
-  printf '%s, Fixture GPU, 97871, GPU-fixture-000%s, 580.65.06\n' "$id" "$id"
-done
-"#;

@@ -270,12 +270,15 @@ pub enum InferlabError {
     AdapterProtocolVersion { message: String },
 
     #[error(
-        "machine binding {machine:?} provides {available} devices but the server requires {required}"
+        "machine binding {machine:?} provides {available} devices but the server requires {required}{held}"
     )]
     InsufficientDevices {
         machine: String,
         required: u32,
         available: usize,
+        /// The pool devices resolution skipped as held, with their holders,
+        /// or empty ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+        held: String,
     },
 
     #[error("closed-loop recipe failed; record {record_id}")]
@@ -354,11 +357,17 @@ pub enum InferlabError {
     #[error("server lifecycle failed: {message}")]
     ServerLifecycle { message: String },
 
+    #[error("interrupted while waiting for {waiting_for}, held by {holder}")]
+    LockWaitInterrupted { waiting_for: String, holder: String },
+
     #[error("server lifecycle failed: {source}")]
     ServerInterrupt {
         #[source]
         source: inferlab_runtime::interrupt::InterruptInstallError,
     },
+
+    #[error("port observation on machine {machine:?} failed: {message}")]
+    PortObservation { machine: String, message: String },
 
     #[error("NUMA pinning failed: {source}")]
     NumaPinning {
@@ -437,6 +446,9 @@ pub enum InferlabError {
 
     #[error("web console job {}: {message}", path.display())]
     WebJob { path: PathBuf, message: String },
+
+    #[error("detached job {job_id}: {message}")]
+    DetachedJob { job_id: String, message: String },
 
     #[error("ad-hoc execution failed: {source}")]
     AdHocInterrupt {
@@ -589,9 +601,11 @@ impl InferlabError {
             | Self::ImageSelection { .. }
             | Self::ImagePreflight { .. } => "E4003",
             Self::ServerLifecycle { .. }
+            | Self::LockWaitInterrupted { .. }
             | Self::ServerInterrupt { .. }
             | Self::ServerPreflight { .. }
             | Self::NumaPinning { .. }
+            | Self::PortObservation { .. }
             | Self::ServerBusy { .. }
             | Self::Proxy { .. }
             | Self::Profiling { .. }
@@ -619,7 +633,8 @@ impl InferlabError {
             | Self::WebServe { .. }
             | Self::WebInterrupt { .. }
             | Self::WebStart { .. }
-            | Self::WebJob { .. } => "E9002",
+            | Self::WebJob { .. }
+            | Self::DetachedJob { .. } => "E9002",
         }
     }
 }

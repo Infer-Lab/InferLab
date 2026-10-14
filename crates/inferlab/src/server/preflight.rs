@@ -197,6 +197,20 @@ pub(super) struct DeviceOccupant {
     process_name: String,
 }
 
+impl DeviceOccupant {
+    pub(super) const fn device(&self) -> u32 {
+        self.device
+    }
+
+    /// The occupant in the launch failure's own words, without its device.
+    pub(super) fn description(&self) -> String {
+        format!(
+            "pid {} ({}) holds {} MiB",
+            self.pid, self.process_name, self.used_memory_mib
+        )
+    }
+}
+
 fn describe_occupants(occupants: &[DeviceOccupant]) -> String {
     occupants
         .iter()

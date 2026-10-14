@@ -8,7 +8,6 @@ use std::fs;
 use std::process::Stdio;
 
 const ENVIRONMENT_CHECK: &str = include_str!("../fixtures/bin/recipe-environment-check.py");
-const PYTHON_SHIM: &str = include_str!("../fixtures/bin/recipe-python.sh");
 
 impl TestWorkspace {
     /// Declare one realization check on the serving stack whose script
@@ -25,7 +24,6 @@ impl TestWorkspace {
         )?;
         // Checks run as `python <script>`; the test host may only provide
         // `python3`.
-        write_executable(&self.bin().join("python"), PYTHON_SHIM)?;
         let manifest = self.root().join(".inferlab/workspace.toml");
         let mut text = fs::read_to_string(&manifest)?;
         text.push_str(

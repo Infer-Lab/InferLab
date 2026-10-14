@@ -1,4 +1,20 @@
 #!/bin/sh
+# Fake `pixi` for every test harness, answering the invocations InferLab
+# issues as pixi 0.81 does: `info --json`, the toolchain `install`,
+# `list --json`, and the `run` forms that activate a named environment.
+# Switches (all optional):
+#   FAKE_PIXI_LOG             append every argument vector
+#   FAKE_PIXI_INSTALL_LOG     append each toolchain install's arguments
+#   PIXI_FIXTURE_PLATFORM, PIXI_FIXTURE_GLIBC   shape `info --json`
+#   PIXI_FIXTURE_LIST         a file answering `list --json`
+#   FAKE_PIXI_PROBE_EXIT      exit status of the `--locked --no-install` usability probe
+#   FAKE_PIXI_UNAVAILABLE=1   the probe reports a missing environment prefix
+#   FIXTURE_PIXI_BUILD=mutate|fail   a wheel build leaves a stray file in the
+#                             source tree, and with fail also crashes
+#   FIXTURE_PATH_MAPS, FIXTURE_WHEEL_EXTRA      observe and shape wheel builds
+if [ -n "${FAKE_PIXI_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_PIXI_LOG"
+fi
 if [ "$1" = info ] && [ "$2" = --json ]; then
   case "$(uname -m)" in
     x86_64) detected_platform=linux-64 ;;
@@ -15,6 +31,9 @@ if [ "$1" = info ] && [ "$2" = --json ]; then
   exit 0
 fi
 if [ "$1" = install ] && [ "$2" = --manifest-path ] && [ "$4" = --all ] && [ "$5" = --locked ]; then
+  if [ -n "${FAKE_PIXI_INSTALL_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$FAKE_PIXI_INSTALL_LOG"
+  fi
   prefix="$(dirname "$3")"
   mkdir -p "$prefix/.pixi/envs/eval/bin" "$prefix/.pixi/envs/bench/bin"
   cat > "$prefix/.pixi/envs/eval/bin/python" <<'PYTHON'
@@ -84,14 +103,23 @@ if [ "$1" = list ] && [ "$2" = --json ]; then
 JSON
   exit 0
 fi
-if [ "$1" = run ] && [ "$2" = --locked ] && [ "$3" = --no-install ] && [ "$4" = --executable ] && [ "$5" = -e ] && { [ "$6" = vllm ] || [ "$6" = adapter ]; } && [ "$7" = -- ]; then
+if [ "$1" = run ] && [ "$2" = --locked ] && [ "$3" = --no-install ] && [ "$4" = --executable ] && [ "$5" = -e ] && [ "$7" = -- ]; then
   shift 7
-elif [ "$1" = run ] && [ "$2" = --clean-env ] && [ "$3" = --as-is ] && [ "$4" = --executable ] && [ "$5" = -e ] && [ "$6" = vllm ] && [ "$7" = -- ]; then
+  if [ -n "${FAKE_PIXI_PROBE_EXIT:-}" ]; then
+    exit "$FAKE_PIXI_PROBE_EXIT"
+  fi
+  if [ "${FAKE_PIXI_UNAVAILABLE:-0}" = 1 ] && [ "$1" = true ]; then
+    printf 'environment prefix is missing\n' >&2
+    exit 3
+  fi
+elif [ "$1" = run ] && [ "$2" = --clean-env ] && [ "$3" = --as-is ] && [ "$4" = --executable ] && [ "$5" = -e ] && [ "$7" = -- ]; then
   shift 7
-elif [ "$1" = run ] && [ "$2" = --as-is ] && [ "$3" = --executable ] && [ "$4" = -e ] && [ "$5" = vllm ] && [ "$6" = -- ]; then
+elif [ "$1" = run ] && [ "$2" = --as-is ] && [ "$3" = --executable ] && [ "$4" = -e ] && [ "$6" = -- ]; then
   shift 6
+elif [ "$1" = -q ] && [ "$2" = run ] && [ "$3" = --as-is ] && [ "$4" = --executable ] && [ "$5" = --manifest-path ] && [ "$7" = -e ] && [ "$9" = -- ]; then
+  shift 9
 else
-  printf 'unexpected pixi fixture arguments\n' >&2
+  printf 'unexpected pixi fixture arguments: %s\n' "$*" >&2
   exit 2
 fi
 if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
@@ -105,6 +133,13 @@ if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   shift 8
 fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
+  case "${FIXTURE_PIXI_BUILD:-}" in
+    mutate|fail) printf 'stray\n' > vendor/vllm/stray-build-artifact.txt ;;
+  esac
+  if [ "${FIXTURE_PIXI_BUILD:-}" = fail ]; then
+    printf 'simulated backend crash\n' >&2
+    exit 1
+  fi
   # Like pip, name the wheel after the project metadata when the build
   # directory declares it; bare fixture trees fall back to the directory name.
   name="$(sed -n 's/^name = "\(.*\)"$/\1/p' "$9/pyproject.toml" 2>/dev/null | head -n 1)"

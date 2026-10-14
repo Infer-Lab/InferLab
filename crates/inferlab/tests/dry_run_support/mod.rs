@@ -83,7 +83,6 @@ impl TestWorkspace {
             .to_string();
         Self::write_local_bindings(&inferlab_dir.join("local.toml"), &private_weight)?;
         Self::write_adapter(&adapter_bin.join("inferlab-adapter-vllm"))?;
-        Self::write_pixi(&adapter_bin.join("pixi"))?;
         write_executable(
             &adapter_bin.join("fixture-eval-client"),
             include_str!("../fixtures/bin/recipe-eval-client.py"),
@@ -92,9 +91,18 @@ impl TestWorkspace {
             &adapter_bin.join("fixture-bench-client"),
             include_str!("../fixtures/bin/bench-client.py"),
         )?;
-        write_executable(&adapter_bin.join("ip"), NETWORK_IP)?;
-        write_executable(&adapter_bin.join("ibdev2netdev"), IBDEV2NETDEV)?;
-        write_executable(&adapter_bin.join("ssh"), SSH)?;
+        use crate::support::FakeTool;
+        crate::support::install_fake_tools(
+            &adapter_bin,
+            &[
+                FakeTool::Pixi,
+                FakeTool::Ip,
+                FakeTool::Ibdev2netdev,
+                FakeTool::Ssh,
+                FakeTool::Ss,
+                FakeTool::NvidiaSmi,
+            ],
+        )?;
         let data_home = root.path().join("data");
         let mut path = OsString::from(&adapter_bin);
         path.push(":");
@@ -393,49 +401,6 @@ print(json.dumps({
     },
 }))
 "#,
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn write_pixi(path: &Path) -> Result<(), Box<dyn Error>> {
-        crate::support::write_executable(
-            path,
-            "#!/bin/sh\n\
-             if [ \"$1\" = info ] && [ \"$2\" = --json ]; then\n\
-               case \"$(uname -m)\" in\n\
-                 x86_64) platform=linux-64 ;;\n\
-                 aarch64) platform=linux-aarch64 ;;\n\
-                 *) platform=unsupported ;;\n\
-               esac\n\
-               printf '{\"platform\":\"%s\",\"virtual_packages\":[\"__glibc=2.35=0\"]}\\n' \"$platform\"\n\
-               exit 0\n\
-             fi\n\
-             if [ \"$1\" = install ] && [ \"$2\" = --manifest-path ] && [ \"$4\" = --all ] && [ \"$5\" = --locked ]; then\n\
-               prefix=\"$(dirname \"$3\")\"\n\
-               mkdir -p \"$prefix/.pixi/envs/eval/bin\" \"$prefix/.pixi/envs/bench/bin\"\n\
-               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"lm_eval_version\":\"0.4.13\"}\\n'\"'\"'; exit 0; fi' 'shift' 'exec fixture-eval-client \"$@\"' > \"$prefix/.pixi/envs/eval/bin/python\"\n\
-               printf '%s\\n' '#!/bin/sh' 'if [ \"$2\" = --handshake ]; then printf '\"'\"'{\"aiperf_version\":\"0.13.0+inferlab.3\",\"transformers_version\":\"5.12.1\"}\\n'\"'\"'; exit 0; fi' 'if [ \"$1\" = -m ] && [ \"$2\" = inferlab_bench_runner.bench_client ]; then shift 2; else shift; fi' 'exec fixture-bench-client \"$@\"' > \"$prefix/.pixi/envs/bench/bin/python\"\n\
-               chmod +x \"$prefix/.pixi/envs/eval/bin/python\" \"$prefix/.pixi/envs/bench/bin/python\"\n\
-               mkdir -p \"$prefix/.pixi/envs/image/bin\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf \"wheel 0.48.0\\n\"' > \"$prefix/.pixi/envs/image/bin/python\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf \"patchelf 0.19.2\\n\"' > \"$prefix/.pixi/envs/image/bin/patchelf\"\n\
-               printf '%s\\n' '#!/bin/sh' 'printf \"Cuda compilation tools, release 13.4, V13.4.92\\n\"' > \"$prefix/.pixi/envs/image/bin/cuobjdump\"\n\
-               chmod +x \"$prefix/.pixi/envs/image/bin/python\" \"$prefix/.pixi/envs/image/bin/patchelf\" \"$prefix/.pixi/envs/image/bin/cuobjdump\"\n\
-               exit 0\n\
-             fi\n\
-             if [ \"$1\" = run ] && [ \"$2\" = --locked ] && [ \"$3\" = --no-install ] && [ \"$4\" = --executable ] && [ \"$5\" = -e ] && [ \"$6\" = vllm ] && [ \"$7\" = -- ]; then\n\
-               shift 7\n\
-             elif [ \"$1\" = run ] && [ \"$2\" = --as-is ] && [ \"$3\" = --executable ] && [ \"$4\" = -e ] && [ \"$5\" = vllm ] && [ \"$6\" = -- ]; then\n\
-               shift 6\n\
-             else\n\
-               printf 'unexpected pixi fixture arguments\\n' >&2\n\
-               exit 2\n\
-             fi\n\
-             if [ \"${FAKE_PIXI_UNAVAILABLE:-0}\" = 1 ] && [ \"$1\" = true ]; then\n\
-               printf 'environment prefix is missing\\n' >&2\n\
-               exit 3\n\
-             fi\n\
-             exec \"$@\"\n",
         )?;
         Ok(())
     }
@@ -802,33 +767,3 @@ pub(crate) fn prefill_decode_workspace(integration: &str, transport: &str) -> St
             "cache = { start = \"uncontrolled\" }",
         )
 }
-
-const NETWORK_IP: &str = r#"#!/bin/sh
-if [ "$1" = route ] && [ "$2" = get ]; then
-  printf '8.8.8.8 dev enx-link-local src 169.254.3.1\n'
-  exit 0
-fi
-if [ "$1" = -o ] && [ "$2" = -4 ] && [ "$3" = addr ]; then
-  printf '1: enx-link-local inet 169.254.3.1/24\n'
-  if [ "${FAKE_NETWORK_MODE:-default}" != link-local-only ]; then
-    printf '2: ens-rdma inet 192.0.2.10/24\n'
-  fi
-  exit 0
-fi
-printf 'unexpected ip fixture arguments: %s\n' "$*" >&2
-exit 2
-"#;
-
-const SSH: &str = r#"#!/bin/sh
-while [ "$1" != -- ]; do shift; done
-shift
-shift
-command="$3"
-eval "exec bash -c $command"
-"#;
-
-const IBDEV2NETDEV: &str = r#"#!/bin/sh
-if [ "${FAKE_NETWORK_MODE:-default}" != link-local-only ]; then
-  printf 'mlx5_0 port 1 ==> ens-rdma (Up)\n'
-fi
-"#;

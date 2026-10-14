@@ -13,11 +13,11 @@ default:
 
 # Build the whole workspace
 build:
-    cargo build --workspace
+    cargo build --workspace --release
 
 # Run the full Rust test suite
 test:
-    cargo test --workspace --all-targets
+    cargo test --workspace --all-targets --release
 
 # ---------------------------------------------------------------------------- #
 #                                    CHECKS                                    #
@@ -33,11 +33,11 @@ fmt-check:
 
 [group("checks")]
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --release -- -D warnings
 
 [group("checks")]
 doc:
-    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --release
 
 # The full Rust gate, exactly what CI's rust job runs
 [group("checks")]
@@ -46,9 +46,9 @@ verify-rust: fmt-check build test clippy doc verify-fake-engine-smg
 # The smg-transport feature-variant gate for the fake engine
 [group("checks")]
 verify-fake-engine-smg:
-    cargo test -p inferlab-fake-engine --all-targets --features smg-transport
-    cargo clippy -p inferlab-fake-engine --all-targets --features smg-transport -- -D warnings
-    RUSTDOCFLAGS='-D warnings' cargo doc -p inferlab-fake-engine --features smg-transport --no-deps
+    cargo test -p inferlab-fake-engine --all-targets --features smg-transport --release
+    cargo clippy -p inferlab-fake-engine --all-targets --features smg-transport --release -- -D warnings
+    RUSTDOCFLAGS='-D warnings' cargo doc -p inferlab-fake-engine --features smg-transport --no-deps --release
 
 # The full Python gate, exactly what CI's python job runs
 [group("checks")]
@@ -85,4 +85,4 @@ package-inferlab-crate out="target/package":
 # Install the operator skill into local agent runtimes from this checkout
 [group("release")]
 install-skill:
-    cargo run --quiet -p inferlab -- agent install --agent all --from-checkout .
+    cargo run --quiet --release -p inferlab -- agent install --agent all --from-checkout .

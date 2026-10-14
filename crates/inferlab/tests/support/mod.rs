@@ -883,3 +883,47 @@ pub(crate) fn wait_for_exit(
     }
     waited
 }
+
+/// The external tools the suite fakes, one implementation each under
+/// `fixtures/bin/`; scenario behaviors are selected by the environment
+/// variables each file documents.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FakeTool {
+    Docker,
+    Ibdev2netdev,
+    Ip,
+    Nsys,
+    NvidiaSmi,
+    Pixi,
+    Python,
+    Ss,
+    Ssh,
+}
+
+impl FakeTool {
+    const fn program(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Docker => ("docker", include_str!("../fixtures/bin/docker.py")),
+            Self::Ibdev2netdev => (
+                "ibdev2netdev",
+                include_str!("../fixtures/bin/ibdev2netdev.sh"),
+            ),
+            Self::Ip => ("ip", include_str!("../fixtures/bin/ip.sh")),
+            Self::Nsys => ("nsys", include_str!("../fixtures/bin/nsys.sh")),
+            Self::NvidiaSmi => ("nvidia-smi", include_str!("../fixtures/bin/nvidia-smi.sh")),
+            Self::Pixi => ("pixi", include_str!("../fixtures/bin/pixi.sh")),
+            Self::Python => ("python", include_str!("../fixtures/bin/python.sh")),
+            Self::Ss => ("ss", include_str!("../fixtures/bin/ss.sh")),
+            Self::Ssh => ("ssh", include_str!("../fixtures/bin/ssh.py")),
+        }
+    }
+}
+
+/// Install the named fakes into a harness's `PATH` directory.
+pub(crate) fn install_fake_tools(bin: &Path, tools: &[FakeTool]) -> Result<(), Box<dyn Error>> {
+    for tool in tools {
+        let (name, program) = tool.program();
+        write_executable(bin.join(name), program)?;
+    }
+    Ok(())
+}

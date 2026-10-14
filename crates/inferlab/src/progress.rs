@@ -329,6 +329,11 @@ impl Progress {
     }
 
     pub(crate) fn phase(&self, phase: Phase) -> Result<(), InferlabError> {
+        // Every record announces its creation here, so a job learns its
+        // first record whatever the workflow ([[RFC-0012:C-ACTIONS]]).
+        if let (Some(id), Some(dir)) = (&phase.record, &phase.record_dir) {
+            crate::jobs::link_record(id, Path::new(dir));
+        }
         let Some(shared) = &self.shared else {
             return Ok(());
         };

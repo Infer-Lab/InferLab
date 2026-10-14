@@ -5,7 +5,7 @@ use super::cleanup::{
 use super::observation::{remote_group_alive_script, run_cleanup_command};
 use super::{
     CleanupTrigger, HostProcessHandle, LaunchFailure, ProcessHandle, ProcessLauncher, ProcessSpec,
-    ServerLaunchError, SshProcessHandle, SystemProcessRuntime,
+    SERVER_PROCESS_MARKER_ENV, ServerLaunchError, SshProcessHandle, SystemProcessRuntime,
 };
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::plan::{CommandPlan, LaunchFilePlan, LaunchPlan};
@@ -101,13 +101,20 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
             command.env(name, value);
         }
     }
+    // Set last, so no declared or passed-through value can replace the
+    // ownership marker ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    command.env(SERVER_PROCESS_MARKER_ENV, spec.owner_marker);
     let mut child = command.spawn().map_err(|source| {
         LaunchFailure::from_error(ServerLaunchError::Process {
             program: program.clone(),
             source,
         })
     })?;
-    let handle = HostProcessHandle::new(child.id(), spec.container.map(str::to_owned));
+    let handle = HostProcessHandle::new(
+        child.id(),
+        spec.container.map(str::to_owned),
+        Some(spec.owner_marker.to_owned()),
+    );
     if let (Ok(handle), Some(state)) = (&handle, spec.data_directory) {
         // The marker only protects a later launch, so failing to write it
         // must not fail this one.
@@ -302,7 +309,8 @@ pub(super) fn spawn_ssh(
     let remote_stdout = spec.remote_dir.join("stdout.log");
     let remote_stderr = spec.remote_dir.join("stderr.log");
     let remote_handle = spec.remote_dir.join("launch.handle");
-    let command = render_env_command(spec.command).map_err(LaunchFailure::before_launch)?;
+    let command = render_env_command(spec.command, spec.owner_marker)
+        .map_err(LaunchFailure::before_launch)?;
     materialize_ssh_launch_files(target, spec.launch_files).map_err(LaunchFailure::from_error)?;
     let script = format!(
         "set -eu; mkdir -p {dir} {cache}; {state}cd {cwd}; nohup setsid {command} >{stdout} 2>{stderr} </dev/null & pid=$!; cleanup_pending=1; cleanup_launch() {{ if [ \"$cleanup_pending\" = 1 ]; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; }}; trap cleanup_launch EXIT; ticks=$(awk '{{print $22}}' /proc/$pid/stat); printf '%s %s\\n' \"$pid\" \"$ticks\" > {handle}; {owner_write}printf '{marker}%s\\t%s\\n' \"$pid\" \"$ticks\"; cleanup_pending=0; trap - EXIT",
@@ -372,6 +380,7 @@ pub(super) fn spawn_ssh(
         remote_stderr,
         &text,
         spec.container.map(str::to_owned),
+        spec.owner_marker,
     )
     .map_err(|error| failed_ssh_handle_delivery(target, &remote_handle, spec.container, error))
 }
@@ -428,6 +437,7 @@ fn parse_ssh_handle(
     remote_stderr: PathBuf,
     output: &str,
     container: Option<String>,
+    owner_marker: &str,
 ) -> Result<SshProcessHandle, ServerLaunchError> {
     let result = output
         .lines()
@@ -466,6 +476,7 @@ fn parse_ssh_handle(
         stdout: remote_stdout,
         stderr: remote_stderr,
         container,
+        owner_marker: Some(owner_marker.to_owned()),
     };
     handle
         .validate()
@@ -566,7 +577,7 @@ fn cleanup_incomplete_ssh_launch(target: &str, remote_handle: &Path) -> Result<(
     }
 }
 
-fn render_env_command(command: &CommandPlan) -> Result<String, String> {
+fn render_env_command(command: &CommandPlan, owner_marker: &str) -> Result<String, String> {
     if command.argv.is_empty() {
         return Err("resolved server command is empty".to_owned());
     }
@@ -590,6 +601,11 @@ fn render_env_command(command: &CommandPlan) -> Result<String, String> {
             .iter()
             .map(|name| format!("{name}=\"${{{name}}}\"")),
     );
+    // Last assignment wins under `env`, so no declared or passed-through
+    // value can replace the ownership marker ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    parts.push(shell_quote(&format!(
+        "{SERVER_PROCESS_MARKER_ENV}={owner_marker}"
+    )));
     parts.extend(command.argv.iter().map(|value| shell_quote(value)));
     Ok(parts.join(" "))
 }

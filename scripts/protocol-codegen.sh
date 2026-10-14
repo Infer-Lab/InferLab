@@ -11,7 +11,7 @@ temporary="$(mktemp -d)"
 trap 'rm -rf "${temporary}"' EXIT
 
 mkdir -p "${temporary}/schema"
-cargo run --quiet --locked --manifest-path "${root}/Cargo.toml" \
+cargo run --quiet --locked --release --manifest-path "${root}/Cargo.toml" \
   -p inferlab-protocol --example generate_schema -- \
   "${temporary}/schema/adapter-protocol-v13.schema.json" \
   "${temporary}/schema/measurement-protocol-v1.schema.json"

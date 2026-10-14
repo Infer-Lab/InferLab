@@ -38,7 +38,9 @@ inferlab bench <BENCH> --serve <SERVER_RECORD_ID> --dry-run
 inferlab bench <BENCH> --serve <SERVER_RECORD_ID>
 ```
 
-Both entry points consume the same resolved Bench definition. Invocation-scoped
+`bench --detach` runs the Bench as a job that outlives the session; see
+[Detached runs](serving-and-recipes.md#detached-runs). Both entry points
+consume the same resolved Bench definition. Invocation-scoped
 changes use repeatable `--set PATH=VALUE`; read
 [Invocation patches](execution-authoring.md#invocation-patches) for the owned
 paths and restrictions.

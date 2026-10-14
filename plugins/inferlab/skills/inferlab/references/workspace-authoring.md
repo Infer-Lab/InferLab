@@ -1,11 +1,15 @@
 # Workspace authoring references
 
-An InferLab workspace has two authorities:
+An InferLab workspace has three sources of definitions and bindings:
 
 - committed `.inferlab/workspace.toml` and `.inferlab/workspace.d/*.toml` files
   describe shareable models, stacks, servers, cases, measurements, and recipes;
 - git-ignored `.inferlab/local.toml` binds those definitions to model weights,
-  machines, devices, ports, and placement for one operator.
+  machines, devices, ports, and placement for one operator;
+- git-ignored `.inferlab/workspace.local.d/*.toml` files optionally add one
+  operator's experiment-only models, servers, Evals, Benches, workload suites,
+  and recipes (see
+  [Local definitions](workspace-definition.md#local-definitions)).
 
 Read only the reference matching the authoring task:
 

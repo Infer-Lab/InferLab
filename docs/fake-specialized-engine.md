@@ -48,8 +48,8 @@ The default offline checks require neither a GPU, model weights, SMG process,
 nor credentials:
 
 ```sh
-cargo test -p inferlab-fake-engine
-cargo test -p inferlab-fake-engine --features smg-transport
+cargo test --release -p inferlab-fake-engine
+cargo test --release -p inferlab-fake-engine --features smg-transport
 pixi run pytest python/inferlab-integration-specialized-engine/tests/test_integration.py
 ```
 
@@ -78,7 +78,7 @@ owns all tokenizer access.
 Start the Engine from this checkout:
 
 ```sh
-cargo run -p inferlab-fake-engine --features smg-transport \
+cargo run --release -p inferlab-fake-engine --features smg-transport \
   --bin inferlab-token-engine -- smg-worker \
   --listen 127.0.0.1:50051 \
   --model <model-locator> \

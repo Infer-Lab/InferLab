@@ -118,6 +118,7 @@ mod tests {
                 revision_reproducible: true,
                 pixi_manifest_sha256: "0000".to_owned(),
                 pixi_lock_sha256: "0000".to_owned(),
+                local_definitions: Vec::new(),
             },
         }
     }

@@ -95,7 +95,14 @@ pub(super) fn allocate_processes(
     image_identity: Option<&str>,
     requirements: &[ProcessRequirement],
     local_process: Option<&str>,
-) -> Result<Vec<ResolvedProcessAllocation>, InferlabError> {
+    occupancy: &mut super::occupancy::Occupancy<'_>,
+) -> Result<
+    (
+        Vec<ResolvedProcessAllocation>,
+        super::occupancy::Unavailable,
+    ),
+    InferlabError,
+> {
     let mut process_ids = BTreeSet::new();
     let mut usage = BTreeMap::<String, MachineAllocationUsage>::new();
     let mut allocations: Vec<ResolvedProcessAllocation> = Vec::with_capacity(requirements.len());
@@ -187,20 +194,60 @@ pub(super) fn allocate_processes(
                 });
             }
         }
-        let machine_id = candidates
-            .iter()
-            .find(|machine_id| {
-                let Some(machine) = workspace.local.machines.get(*machine_id) else {
-                    return false;
-                };
-                machine_capacity(
-                    machine,
-                    usage.get(*machine_id),
-                    requirement.device_count() as usize,
-                    requirement.ports().len() + 1,
-                )
-            })
-            .cloned();
+        // Candidates are observed in pool order and the first that can hold
+        // the process is taken, so a later machine — an expired host, say —
+        // is never reached once an earlier one fits. A pool allocation also
+        // skips occupied devices; explicitly bound devices are the
+        // operator's choice and face only the launch-time device check
+        // ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+        let pool_devices = requirement.fixed_devices().is_none() && requirement.device_count() > 0;
+        let mut machine_id = None;
+        for candidate in &candidates {
+            let Some(machine) = workspace.local.machines.get(candidate) else {
+                continue;
+            };
+            if !usage.contains_key(candidate) {
+                let unavailable = occupancy.unavailable(candidate, machine)?;
+                usage.insert(
+                    candidate.clone(),
+                    MachineAllocationUsage {
+                        unavailable,
+                        ..MachineAllocationUsage::default()
+                    },
+                );
+            }
+            if pool_devices
+                && let Some(used) = usage.get_mut(candidate)
+                && used.unavailable_devices.is_none()
+            {
+                used.unavailable_devices = Some(occupancy.unavailable_devices(candidate, machine)?);
+            }
+            // An explicit endpoint port is the operator's choice: occupancy
+            // fails it, naming the holder, rather than moving it.
+            if let Some(fixed) = requirement.fixed_devices()
+                && let Some(port) = fixed.endpoint_port()
+                && let Some(holder) = usage
+                    .get(fixed.machine())
+                    .and_then(|used| used.unavailable.get(&port))
+            {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!(
+                        "placement assigns endpoint port {port} on machine {:?} to process {:?}, but {holder} holds it",
+                        fixed.machine(),
+                        requirement.id()
+                    ),
+                });
+            }
+            if machine_capacity(
+                machine,
+                usage.get(candidate),
+                requirement.device_count() as usize,
+                requirement.ports().len() + 1,
+            ) {
+                machine_id = Some(candidate.clone());
+                break;
+            }
+        }
         let machine_id = match machine_id {
             Some(machine_id) => machine_id,
             None if candidates.len() == 1 => {
@@ -216,12 +263,15 @@ pub(super) fn allocate_processes(
                         machine: candidate.clone(),
                         required: requirement.device_count(),
                         available,
+                        held: held_devices_summary(usage.get(candidate)),
                     });
                 }
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "machine {candidate:?} has insufficient free ports for process {:?}",
-                        requirement.id()
+                        "machine {candidate:?} has insufficient free ports for process {:?}: it needs {}{}",
+                        requirement.id(),
+                        requirement.ports().len() + 1,
+                        unavailable_summary(usage.get(candidate))
                     ),
                 });
             }
@@ -250,6 +300,7 @@ pub(super) fn allocate_processes(
                         machine: machine.clone(),
                         required: requirement.device_count(),
                         available: free_devices(machine),
+                        held: held_devices_summary(usage.get(machine)),
                     });
                 }
                 return Err(InferlabError::InvalidConfig {
@@ -285,7 +336,7 @@ pub(super) fn allocate_processes(
                 machine
                     .devices
                     .iter()
-                    .filter(|device| !used.devices.contains(device))
+                    .filter(|device| used.is_free_device(**device))
                     .take(requirement.device_count() as usize)
                     .copied()
                     .collect::<Vec<_>>()
@@ -310,7 +361,7 @@ pub(super) fn allocate_processes(
             None => machine
                 .ports
                 .iter()
-                .find(|port| !used.ports.contains(port))
+                .find(|port| used.is_free(**port))
                 .copied()
                 .ok_or_else(|| InferlabError::InvalidConfig {
                     message: format!(
@@ -323,7 +374,7 @@ pub(super) fn allocate_processes(
         let selected_ports = machine
             .ports
             .iter()
-            .filter(|port| !used.ports.contains(port))
+            .filter(|port| used.is_free(**port))
             .take(requirement.ports().len())
             .copied()
             .collect::<Vec<_>>();
@@ -586,7 +637,46 @@ pub(super) fn allocate_processes(
             auxiliary_locator_sources,
         ));
     }
-    Ok(allocations)
+    // The observation is evidence only for machines that received a process.
+    let mut unavailable = super::occupancy::Unavailable::default();
+    for machine_id in allocations
+        .iter()
+        .map(ResolvedProcessAllocation::machine)
+        .collect::<BTreeSet<_>>()
+    {
+        let Some(used) = usage.get(machine_id) else {
+            continue;
+        };
+        if !used.unavailable.is_empty() {
+            unavailable.ports.insert(
+                machine_id.to_owned(),
+                used.unavailable
+                    .iter()
+                    .map(|(&port, holder)| super::occupancy::UnavailablePort {
+                        port,
+                        holder: holder.clone(),
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(devices) = used
+            .unavailable_devices
+            .as_ref()
+            .filter(|held| !held.is_empty())
+        {
+            unavailable.devices.insert(
+                machine_id.to_owned(),
+                devices
+                    .iter()
+                    .map(|(&device, holder)| super::occupancy::UnavailableDevice {
+                        device,
+                        holder: holder.clone(),
+                    })
+                    .collect(),
+            );
+        }
+    }
+    Ok((allocations, unavailable))
 }
 
 fn sanitize_path_segment(value: &str) -> String {
@@ -613,10 +703,66 @@ fn placement_machine_pool(placement: &PlacementBinding) -> Vec<String> {
         .collect()
 }
 
+/// The held pool devices a device shortage names ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+fn held_devices_summary(usage: Option<&MachineAllocationUsage>) -> String {
+    let held = usage
+        .and_then(|usage| usage.unavailable_devices.as_ref())
+        .map(|devices| {
+            devices
+                .iter()
+                .map(|(device, holder)| format!("device {device} held by {holder}"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if held.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", held.join(", "))
+    }
+}
+
+/// The held pool ports a port shortage names ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+fn unavailable_summary(usage: Option<&MachineAllocationUsage>) -> String {
+    let held = usage
+        .map(|usage| {
+            usage
+                .unavailable
+                .iter()
+                .map(|(port, holder)| format!("{port} held by {holder}"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if held.is_empty() {
+        String::new()
+    } else {
+        format!(", and {}", held.join(", "))
+    }
+}
+
 #[derive(Default)]
 struct MachineAllocationUsage {
     devices: BTreeSet<u32>,
     ports: BTreeSet<u16>,
+    /// Pool ports observed held on the machine's launch path before
+    /// allocation ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    unavailable: BTreeMap<u16, super::occupancy::Holder>,
+    /// Pool devices observed held on the machine's launch path, present once
+    /// a pool allocation considered the machine ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    unavailable_devices: Option<BTreeMap<u32, super::occupancy::Holder>>,
+}
+
+impl MachineAllocationUsage {
+    fn is_free_device(&self, device: u32) -> bool {
+        !self.devices.contains(&device)
+            && !self
+                .unavailable_devices
+                .as_ref()
+                .is_some_and(|held| held.contains_key(&device))
+    }
+
+    fn is_free(&self, port: u16) -> bool {
+        !self.ports.contains(&port) && !self.unavailable.contains_key(&port)
+    }
 }
 
 fn machine_capacity(
@@ -627,7 +773,7 @@ fn machine_capacity(
 ) -> bool {
     let free_devices = free_device_count(machine, usage);
     let available_ports = machine.ports.len();
-    let used_ports = usage.map_or(0, |usage| usage.ports.len());
+    let used_ports = usage.map_or(0, |usage| usage.ports.len() + usage.unavailable.len());
     free_devices >= devices && available_ports - used_ports >= ports
 }
 
@@ -640,7 +786,7 @@ fn free_device_count(
             machine
                 .devices
                 .iter()
-                .filter(|device| usage.devices.contains(device))
+                .filter(|device| !usage.is_free_device(**device))
                 .count()
         })
 }

@@ -62,30 +62,12 @@ impl RunWorkspace {
 
         let pixi_log = root.path().join("pixi-argv.log");
         let docker_log = root.path().join("docker-argv.log");
-        write_executable(
-            &bin.join("pixi"),
-            r#"#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$FAKE_PIXI_LOG"
-case "$*" in
-  *"--locked --no-install"*) exit "${FAKE_PIXI_PROBE_EXIT:-0}" ;;
-esac
-while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
-shift
-exec "$@"
-"#,
-        )?;
-        write_executable(
-            &bin.join("docker"),
-            r#"#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
-case "$1" in
-  image) exit "${FAKE_DOCKER_INSPECT_EXIT:-0}" ;;
-  run) exit "${FAKE_DOCKER_RUN_EXIT:-0}" ;;
-esac
-exit 2
-"#,
+        crate::support::install_fake_tools(
+            &bin,
+            &[
+                crate::support::FakeTool::Pixi,
+                crate::support::FakeTool::Docker,
+            ],
         )?;
 
         git(root.path(), &["init", "-q"])?;
@@ -131,6 +113,9 @@ exit 2
             .env("PATH", path)
             .env("FAKE_PIXI_LOG", &self.pixi_log)
             .env("FAKE_DOCKER_LOG", &self.docker_log)
+            // The image probe and container run only record their arguments.
+            .env("FAKE_DOCKER_INSPECT_EXIT", "0")
+            .env("FAKE_DOCKER_RUN_EXIT", "0")
             // Deterministic device projection: the operator environment must
             // not leak a device selection into the fixtures.
             .env_remove("CUDA_VISIBLE_DEVICES");
@@ -147,10 +132,6 @@ exit 2
     fn docker_argv(&self) -> String {
         fs::read_to_string(&self.docker_log).unwrap_or_default()
     }
-}
-
-fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
-    crate::support::write_executable(path, content)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {

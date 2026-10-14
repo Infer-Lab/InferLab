@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 
 /// Run with:
 ///
-/// `INFERLAB_E2E_WORKSPACE=/path/to/workspace cargo test -p inferlab --test manual_vllm -- --ignored --nocapture`
+/// `INFERLAB_E2E_WORKSPACE=/path/to/workspace cargo test --release -p inferlab --test manual_vllm -- --ignored --nocapture`
 ///
 /// The workspace must provide a runnable vLLM recipe, locked Pixi environment,
 /// integration package, model-weight binding, and local machine binding.
@@ -129,7 +129,7 @@ fn manual_vllm_recipe_eval_bench_cleanup() -> Result<(), Box<dyn Error>> {
 /// Run with a local bindings file whose selected placement contains at least
 /// two local or SSH machines sharing the checked-out revision and locked Pixi environment:
 ///
-/// `INFERLAB_E2E_WORKSPACE=/path/to/workspace INFERLAB_E2E_LOCAL=/path/to/local.toml cargo test -p inferlab --test manual_vllm manual_vllm_two_node_start_logs_stop_record -- --ignored --nocapture`
+/// `INFERLAB_E2E_WORKSPACE=/path/to/workspace INFERLAB_E2E_LOCAL=/path/to/local.toml cargo test --release -p inferlab --test manual_vllm manual_vllm_two_node_start_logs_stop_record -- --ignored --nocapture`
 #[test]
 #[ignore = "requires two device hosts, a shared checkout, model weights, and vLLM"]
 fn manual_vllm_two_node_start_logs_stop_record() -> Result<(), Box<dyn Error>> {
@@ -250,7 +250,7 @@ fn manual_vllm_two_node_start_logs_stop_record() -> Result<(), Box<dyn Error>> {
 
 /// Run the real profiled Mooncake P/D path with a finite matrix Bench:
 ///
-/// `INFERLAB_E2E_WORKSPACE=/path/to/workspace INFERLAB_E2E_LOCAL=/path/to/local.toml INFERLAB_E2E_PD_RECIPE=recipe INFERLAB_E2E_PD_MOONCAKE_CASE=case INFERLAB_E2E_BENCH=bench cargo test -p inferlab --test manual_vllm manual_vllm_mooncake_pd_profiled_bench -- --ignored --nocapture`
+/// `INFERLAB_E2E_WORKSPACE=/path/to/workspace INFERLAB_E2E_LOCAL=/path/to/local.toml INFERLAB_E2E_PD_RECIPE=recipe INFERLAB_E2E_PD_MOONCAKE_CASE=case INFERLAB_E2E_BENCH=bench cargo test --release -p inferlab --test manual_vllm manual_vllm_mooncake_pd_profiled_bench -- --ignored --nocapture`
 #[test]
 #[ignore = "requires a real multi-role vLLM Mooncake workspace, Nsight Systems, and devices"]
 fn manual_vllm_mooncake_pd_profiled_bench() -> Result<(), Box<dyn Error>> {
@@ -351,7 +351,7 @@ fn manual_vllm_pd_profiled_bench(
 /// Run with:
 ///
 /// `INFERLAB_E2E_WORKSPACE=/path/to/workspace INFERLAB_E2E_IMAGE=<image-id> \
-///  cargo test -p inferlab --test manual_vllm -- --ignored manual_image --nocapture`
+///  cargo test --release -p inferlab --test manual_vllm -- --ignored manual_image --nocapture`
 #[test]
 #[ignore = "requires a real vLLM workspace, model weights, a local Docker daemon, and devices"]
 fn manual_image_build_validates_one_runtime_image() -> Result<(), Box<dyn Error>> {

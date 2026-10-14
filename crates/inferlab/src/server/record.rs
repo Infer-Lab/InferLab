@@ -127,6 +127,10 @@ pub(crate) struct ServerRecord {
     /// when the launch failed before the probe.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hardware: BTreeMap<String, MachineHardwareEvidence>,
+    /// How long a launch waited for its occupied assigned devices to free,
+    /// and the occupants it first found ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_wait: Option<DeviceWaitEvidence>,
     pub process_evidence: BTreeMap<String, ServerProcessEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adapter_operations: Vec<AdapterOperationEvidence>,
@@ -134,6 +138,17 @@ pub(crate) struct ServerRecord {
     pub external_framework_probe:
         Option<inferlab_runtime::operation_bound::OperationTimingEvidence>,
     pub failure: Option<FailureEvidence>,
+    /// Present when `serve stop` finalized a starting record whose
+    /// controller was gone ([[RFC-0005:C-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_stop: Option<crate::record::OperatorStopEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeviceWaitEvidence {
+    pub waited_ms: u64,
+    pub occupants: Vec<String>,
 }
 
 impl ServerRecord {
@@ -141,7 +156,7 @@ impl ServerRecord {
     /// readiness bound copies ([[RFC-0005:C-EVIDENCE]]) MUST NOT be encoded
     /// under an earlier server record version, so the version gate stops
     /// older records before serde does.
-    pub(crate) const SCHEMA_VERSION: u32 = 13;
+    pub(crate) const SCHEMA_VERSION: u32 = 14;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -191,6 +206,9 @@ impl ServerRecord {
 pub(super) struct ServerRecordSession {
     root: PathBuf,
     record: ServerRecord,
+    /// The starting process's control of the record, taken before the record
+    /// exists ([[RFC-0003:C-RUNTIME-WORKFLOWS]]); absent for a stop.
+    _controller: Option<crate::controller::ControllerGuard>,
 }
 
 impl ServerRecordSession {
@@ -222,9 +240,10 @@ impl ServerRecordSession {
         )?;
         let record_dir = records_dir.join(&id);
         fs::create_dir(&record_dir).map_err(|source| InferlabError::RecordIo {
-            path: record_dir,
+            path: record_dir.clone(),
             source,
         })?;
+        let controller = crate::controller::ControllerGuard::acquire(&record_dir)?;
         let process_evidence = resolved
             .server
             .processes()
@@ -262,6 +281,7 @@ impl ServerRecordSession {
             resolved: resolved.clone(),
             environment_checks: Vec::new(),
             hardware: BTreeMap::new(),
+            device_wait: None,
             process_evidence,
             adapter_operations: adapter_operation_evidence(resolved),
             external_framework_probe: resolved
@@ -270,10 +290,12 @@ impl ServerRecordSession {
                 .as_ref()
                 .and_then(|external| external.framework_probe_timing.clone()),
             failure: None,
+            operator_stop: None,
         };
         let session = Self {
             root: root.to_path_buf(),
             record,
+            _controller: Some(controller),
         };
         session.rewrite()?;
         Ok(session)
@@ -283,6 +305,7 @@ impl ServerRecordSession {
         Self {
             root: root.to_path_buf(),
             record,
+            _controller: None,
         }
     }
 

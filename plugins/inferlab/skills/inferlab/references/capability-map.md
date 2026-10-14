@@ -14,7 +14,9 @@ this map are not implicitly exposed by InferLab.
 | `toolchain install` | Install the release-owned lm-eval and AIPerf runtimes | [Measurements](measurements.md) |
 | `serve start`, `status`, `logs`, `stop` | Own a long-running named server lifecycle | [Serving and recipes](serving-and-recipes.md) |
 | `recipe run` | Run serve, selected Eval/Bench suite, and cleanup as one closed loop | [Serving and recipes](serving-and-recipes.md) |
+| `recipe stop` | Stop a running recipe from any shell or host sharing the workspace | [Serving and recipes](serving-and-recipes.md#stopping-a-run) |
 | `bench` | Run one named Bench against an explicit managed server | [Measurements](measurements.md) |
+| `job interrupt` | Interrupt a detached job started by `--detach` or the web console | [Serving and recipes](serving-and-recipes.md#detached-runs) |
 | `run` | Execute a probe in a stack or image realization; with `--record`, keep a run record of a workload InferLab does not model | [Images and ad-hoc execution](images-and-run.md) |
 | `image build` | Assemble, inspect, optionally export, and validate a named runtime image | [Images and ad-hoc execution](images-and-run.md) |
 | `scratchpad note`, `scratchpad show` | Maintain the append-only operator narrative | [Evidence and diagnosis](evidence-and-diagnosis.md) |
@@ -35,6 +37,7 @@ invent generic config, endpoint, or engine-argument switches.
 | profiling, `images`, `external_images`, local `builders`, machine `container` | Profiler settings, runtime-image inputs, builders, container grants, and invocation patches | [Execution authoring](execution-authoring.md) |
 | `evals` | Eval tasks, datasets, prompt authority, and inference requests | [Eval authoring](eval-authoring.md) |
 | `benches` | Bench load, sources, sessions, prompt authority, metrics, and SLOs | [Bench authoring](bench-authoring.md) |
+| local `workspace.local.d` | One operator's experiment-only models, servers, Evals, Benches, workload suites, and recipes | [Local definitions](workspace-definition.md#local-definitions) |
 
 The [workspace-authoring index](workspace-authoring.md) routes every authoring
 task to one of these authorities. Operational references describe how to

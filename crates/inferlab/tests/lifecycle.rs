@@ -99,13 +99,21 @@ impl TestWorkspace {
             ),
         )?;
         ports.release();
-        write_executable(&bin.join("pixi"), PIXI)?;
+        use crate::support::FakeTool;
+        crate::support::install_fake_tools(
+            &bin,
+            &[
+                FakeTool::Pixi,
+                FakeTool::Ssh,
+                FakeTool::Ss,
+                FakeTool::Ip,
+                FakeTool::Ibdev2netdev,
+                FakeTool::NvidiaSmi,
+                FakeTool::Python,
+            ],
+        )?;
         write_executable(&bin.join("inferlab-adapter-vllm"), ADAPTER)?;
         write_executable(&bin.join("fixture-server"), FIXTURE_SERVER)?;
-        write_executable(&bin.join("ssh"), SSH)?;
-        write_executable(&bin.join("ip"), NETWORK_IP)?;
-        write_executable(&bin.join("ibdev2netdev"), IBDEV2NETDEV)?;
-        write_executable(&bin.join("nvidia-smi"), NVIDIA_SMI)?;
         git(root.path(), &["init", "-q"])?;
         git(root.path(), &["config", "user.email", "test@example.com"])?;
         git(root.path(), &["config", "user.name", "Inferlab Test"])?;
@@ -118,6 +126,23 @@ impl TestWorkspace {
             bin,
             ssh_events,
         })
+    }
+
+    /// Bind the server's devices explicitly. Pool allocation steps around
+    /// occupied devices, so only explicitly bound devices reach the
+    /// launch-time device check ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    fn bind_devices_explicitly(&self) -> Result<(), Box<dyn Error>> {
+        let path = self.root.path().join(".inferlab/local.toml");
+        let bindings = fs::read_to_string(&path)?.replacen(
+            "[placements.local]\nmachines = [\"local\"]\n",
+            "[placements.local.roles.serve]\nmachine = \"local\"\ndevices = [0, 1]\n",
+            1,
+        );
+        if !bindings.contains("[placements.local.roles.serve]") {
+            return Err("fixture placement shape changed".into());
+        }
+        fs::write(path, bindings)?;
+        Ok(())
     }
 
     fn run(&self, args: &[&str]) -> Result<Output, Box<dyn Error>> {
@@ -133,6 +158,8 @@ impl TestWorkspace {
             .current_dir(self.root.path().join("vendor/vllm"))
             .env("PATH", path)
             .env("FAKE_SSH_EVENTS", &self.ssh_events)
+            // These hosts route and address only over their RDMA NIC.
+            .env("FAKE_NETWORK_MODE", "rdma")
             .env("INFERLAB_LIFECYCLE_FIXTURE", "actual-value")
             .args(args);
         for (key, value) in self.reaper.env() {
@@ -201,9 +228,6 @@ impl TestWorkspace {
             self.root.path().join("tools/fixture-check.py"),
             "import sys\nprint(\"fixture preflight ran\")\nsys.exit(0)\n",
         )?;
-        // Checks run as `python <script>`; the test host may only provide
-        // `python3`.
-        write_executable(&self.bin.join("python"), "#!/bin/sh\nexec python3 \"$@\"\n")?;
         let manifest = self.root.path().join(".inferlab/workspace.toml");
         let mut text = fs::read_to_string(&manifest)?;
         text.push_str(
@@ -1222,6 +1246,7 @@ fn ssh_children_do_not_inherit_dynamic_linker_overrides() -> Result<(), Box<dyn 
 #[test]
 fn hardware_probe_failure_fails_the_launch_before_any_process() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
+    workspace.bind_devices_explicitly()?;
     let mut command = workspace.command(&["serve", "start", "deepseek-v4-flash-qualify"]);
     command.env("FIXTURE_NVIDIA_SMI_ERROR", "fixture probe boom");
     let output = command.output()?;
@@ -1249,9 +1274,104 @@ fn hardware_probe_failure_fails_the_launch_before_any_process() -> Result<(), Bo
 
 /// Another process holding memory on an assigned device refuses the launch
 /// before any serving process spawns ([[RFC-0005:C-EVIDENCE]]).
+/// With `--wait-for-devices`, an occupied assigned device delays the launch
+/// until it frees instead of failing it, and the record keeps how long the
+/// launch waited and on whom ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+#[test]
+fn waiting_for_devices_launches_once_the_occupant_leaves() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.bind_devices_explicitly()?;
+    let probes = workspace.root.path().join("compute-app-probes.log");
+    let mut command = workspace.command(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--wait-for-devices",
+    ]);
+    command
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", OCCUPANT_ROW)
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE", "1")
+        .env("FIXTURE_NVIDIA_SMI_PROBE_LOG", &probes)
+        // Device 1 reads occupied through the first three probe rounds, two
+        // compute-app probes each.
+        .env("FIXTURE_NVIDIA_SMI_HELD_PROBES", "6");
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let started: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        stderr.matches("waiting for devices").count(),
+        1,
+        "the wait shows once and steadily across its re-probes: {stderr}"
+    );
+    let wait = &started["device_wait"];
+    assert!(
+        wait["waited_ms"].as_u64().is_some_and(|ms| ms > 0),
+        "{started}"
+    );
+    assert!(
+        wait["occupants"][0]
+            .as_str()
+            .is_some_and(|occupant| occupant.contains("pid 4242")),
+        "{wait}"
+    );
+    workspace.run(&["serve", "stop", started["id"].as_str().ok_or("record id")?])?;
+    Ok(())
+}
+
+/// Interrupting a launch that waits for devices ends it as interrupted —
+/// even when the interrupt cuts a device probe short — with the wait kept
+/// in the record and no serving process started.
+#[test]
+fn interrupting_a_device_wait_records_an_interrupted_launch() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.bind_devices_explicitly()?;
+    let probes = workspace.root.path().join("compute-app-probes.log");
+    let mut child = workspace
+        .command(&[
+            "serve",
+            "start",
+            "deepseek-v4-flash-qualify",
+            "--wait-for-devices",
+        ])
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", OCCUPANT_ROW)
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE", "1")
+        .env("FIXTURE_NVIDIA_SMI_PROBE_LOG", &probes)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while fs::read_to_string(&probes).map_or(0, |log| log.lines().count()) < 2 {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            return Err("the launch never started waiting".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let signal = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()?;
+    assert!(signal.success());
+    let status = child.wait()?;
+    assert!(!status.success());
+
+    let records = workspace.root.path().join(".inferlab/records");
+    let entries = fs::read_dir(records)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(entries.len(), 1);
+    let record: Value = serde_json::from_slice(&fs::read(entries[0].path().join("record.json"))?)?;
+    assert_eq!(record["failure"]["phase"], "interrupted", "{record}");
+    assert!(
+        record["device_wait"]["occupants"][0].is_string(),
+        "{record}"
+    );
+    assert_eq!(process_evidence(&record, "server")?["handle"], Value::Null);
+    Ok(())
+}
+
 #[test]
 fn occupied_assigned_device_fails_the_launch_before_any_process() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
+    workspace.bind_devices_explicitly()?;
     let mut command = workspace.command(&["serve", "start", "deepseek-v4-flash-qualify"]);
     command
         .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS", OCCUPANT_ROW)
@@ -1490,6 +1610,51 @@ fn sigterm_during_readiness_rolls_back_the_recorded_process_group() -> Result<()
     Ok(())
 }
 
+/// `serve stop` of a starting server asks the starting process to stop and
+/// reports the record it finalized ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+#[test]
+fn serve_stop_of_a_starting_server_asks_its_controller_to_stop() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let mut command = workspace.command(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.settings.fixture_mode=\"timeout\"",
+    ]);
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let record_path = wait_for_process_handle(workspace.root.path())?;
+    let id = record_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("record path has no id")?
+        .to_owned();
+
+    let output = workspace.command(&["serve", "stop", &id]).output()?;
+    let starting = child.wait()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!starting.success());
+    assert!(
+        stderr.contains("stop requested of the record's controller"),
+        "{stderr}"
+    );
+    let record: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(record["status"], "failed");
+    assert_eq!(record["failure"]["phase"], "interrupted");
+    assert_eq!(record["operator_stop"], Value::Null);
+    assert_eq!(
+        process_evidence(&record, "server")?["cleanup"][0]["verified"],
+        true
+    );
+    Ok(())
+}
+
 fn wait_for_process_handle(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let deadline = Instant::now() + support::FIXTURE_HANG_GUARD;
     loop {
@@ -1536,68 +1701,6 @@ fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
     }
 }
 
-const PIXI: &str = r#"#!/bin/sh
-if [ "$1" = run ] && [ "$2" = --locked ] && [ "$3" = --no-install ] && [ "$4" = --executable ] && [ "$5" = -e ] && [ "$6" = vllm ] && [ "$7" = -- ]; then
-  shift 7
-elif [ "$1" = run ] && [ "$2" = --as-is ] && [ "$3" = --executable ] && [ "$4" = -e ] && [ "$5" = vllm ] && [ "$6" = -- ]; then
-  shift 6
-elif [ "$1" = -q ] && [ "$2" = run ] && [ "$3" = --as-is ] && [ "$4" = --executable ] && [ "$5" = --manifest-path ] && [ "$7" = -e ] && [ "$8" = vllm ] && [ "$9" = -- ]; then
-  shift 9
-else
-  printf 'unexpected pixi fixture arguments\n' >&2
-  exit 2
-fi
-exec "$@"
-"#;
-
-const NETWORK_IP: &str = r#"#!/bin/sh
-if [ "$1" = route ] && [ "$2" = get ]; then
-  printf '8.8.8.8 dev ens-rdma src 192.0.2.10\n'
-  exit 0
-fi
-if [ "$1" = -o ] && [ "$2" = -4 ] && [ "$3" = addr ]; then
-  printf '1: ens-rdma inet 192.0.2.10/24\n'
-  exit 0
-fi
-exit 2
-"#;
-
-const IBDEV2NETDEV: &str = r#"#!/bin/sh
-printf 'mlx5_0 port 1 ==> ens-rdma (Up)\n'
-"#;
-
-const SSH: &str = r#"#!/bin/sh
-while [ "$1" != -- ]; do shift; done
-shift
-target="$1"
-shift
-if [ -n "${FAKE_SSH_ENV_LOG:-}" ]; then
-  printf '%s ld_library_path=%s ld_preload=%s\n' "$target" "${LD_LIBRARY_PATH:+set}" "${LD_PRELOAD:+set}" >> "$FAKE_SSH_ENV_LOG"
-fi
-if [ "$1" = cat ]; then
-  printf '%s logs\n' "$target" >> "$FAKE_SSH_EVENTS"
-  eval "exec cat -- $3"
-fi
-command="$3"
-case "$command" in
-  *INFERLAB_LAUNCH_FILE*) operation=materialize ;;
-  *INFERLAB_PREFLIGHT*) operation=preflight ;;
-  *INFERLAB_HANDLE*) operation=launch ;;
-  *INFERLAB_CLEANUP*) operation=cleanup ;;
-  *INFERLAB_HARDWARE*) operation=hardware ;;
-  *INFERLAB_DEVICE_RESIDUAL*) operation=residual ;;
-  *) operation=status ;;
-esac
-printf '%s %s\n' "$target" "$operation" >> "$FAKE_SSH_EVENTS"
-if [ "$operation" = preflight ] && [ -n "${FAKE_SSH_HANG_PREFLIGHT:-}" ]; then
-  printf '%s' "$$" > "$FAKE_SSH_HANG_PREFLIGHT"
-  sleep 3600
-fi
-printf 'fixture login banner\n'
-export FAKE_SSH_TARGET="$target"
-eval "exec bash -c $command"
-"#;
-
 /// A compute-apps row held by a process that cannot exist: Linux PIDs stay
 /// below `pid_max`, whose ceiling is 2^22. Memory held this way is the stopped
 /// server's residual ([[RFC-0005:C-EVIDENCE]]).
@@ -1606,65 +1709,6 @@ const GONE_PROCESS_ROW: &str = "4194304, 1024";
 /// A launch-time compute-apps row (`pid, used_memory, process_name`) of a
 /// process occupying an assigned device.
 const OCCUPANT_ROW: &str = "4242, 2048, fixture-occupant";
-
-/// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape;
-/// `FIXTURE_NVIDIA_SMI_ERROR` forces a loud probe failure, and a
-/// compute-apps query answers with the `FIXTURE_NVIDIA_SMI_COMPUTE_APPS`
-/// rows (empty — no surviving compute applications — when unset), only for
-/// the `-i` device `FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE` names when set. With
-/// `FIXTURE_NVIDIA_SMI_HELD_PROBES`, each compute-apps query appends a line
-/// to `FIXTURE_NVIDIA_SMI_PROBE_LOG` and the rows stop after that many
-/// queries — memory the driver releases while the probe waits. With
-/// `FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES`, compute-apps queries past that
-/// count never return — a wedged driver.
-const NVIDIA_SMI: &str = r#"#!/bin/sh
-if [ -n "${FIXTURE_NVIDIA_SMI_ERROR_ON:-}" ] && [ "${FAKE_SSH_TARGET:-}" = "$FIXTURE_NVIDIA_SMI_ERROR_ON" ]; then
-  printf 'fixture probe failure on %s\n' "$FAKE_SSH_TARGET" >&2
-  exit 9
-fi
-if [ -n "${FIXTURE_NVIDIA_SMI_ERROR:-}" ]; then
-  printf '%s\n' "$FIXTURE_NVIDIA_SMI_ERROR" >&2
-  exit 9
-fi
-case " $* " in
-  *" --query-compute-apps="*)
-    if [ -n "${FIXTURE_NVIDIA_SMI_PROBE_LOG:-}" ]; then
-      printf 'probe\n' >> "$FIXTURE_NVIDIA_SMI_PROBE_LOG"
-      probes="$(wc -l < "$FIXTURE_NVIDIA_SMI_PROBE_LOG")"
-    fi
-    if [ -n "${FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES:-}" ] && [ "$probes" -gt "$FIXTURE_NVIDIA_SMI_HANG_AFTER_PROBES" ]; then
-      sleep 3600
-    fi
-    if [ -n "${FIXTURE_NVIDIA_SMI_HELD_PROBES:-}" ] && [ "$probes" -gt "$FIXTURE_NVIDIA_SMI_HELD_PROBES" ]; then
-      exit 0
-    fi
-    device=""
-    previous=""
-    for argument in "$@"; do
-      if [ "$previous" = "-i" ]; then device="$argument"; fi
-      previous="$argument"
-    done
-    if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE:-}" ] && [ "$device" != "$FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE" ]; then
-      exit 0
-    fi
-    if [ -n "${FIXTURE_NVIDIA_SMI_COMPUTE_APPS:-}" ]; then
-      printf '%s\n' "$FIXTURE_NVIDIA_SMI_COMPUTE_APPS"
-    fi
-    exit 0
-    ;;
-esac
-ids="0,1,2,3,4,5,6,7"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -i) ids="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-IFS=,
-for id in $ids; do
-  printf '%s, Fixture GPU, 97871, GPU-fixture-000%s, 580.65.06\n' "$id" "$id"
-done
-"#;
 
 const ADAPTER: &str = r#"#!/usr/bin/env python3
 import hashlib

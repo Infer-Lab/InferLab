@@ -198,6 +198,53 @@ async fn a_launched_note_runs_as_a_job_that_survives_a_restart() -> Result<(), B
     Ok(())
 }
 
+/// A CLI-detached job is named by the record it created — its vector ends
+/// with whatever the operator typed last — and its detail leads to that
+/// record ([[ADR-0066]]).
+#[tokio::test]
+async fn a_detached_job_is_named_by_and_leads_to_its_record() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let workspace = workspace(&root.path().join("ws"))?;
+    let detached = |id: &str| -> Result<PathBuf, Box<dyn Error>> {
+        let directory = workspace.join(JOBS).join(id);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("job.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2, "action": "recipe-run",
+                "argv": ["recipe", "run", "fixture-recipe", "--wait-for-devices"],
+                "started_unix_ms": 1, "cwd": "/fixture/cwd",
+            }))?,
+        )?;
+        Ok(directory)
+    };
+    let linked = detached("linked-job")?;
+    fs::write(
+        linked.join("record.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "record_id": "fixture-recipe-record", "record_dir": "/fixture/records/fixture-recipe-record",
+        }))?,
+    )?;
+    detached("unlinked-job")?;
+
+    let console = Console::start(&workspace, state.path()).await?;
+    let base = console.workspace_path().await?;
+    let page = console.page(&format!("{base}/jobs?job=linked-job")).await?;
+
+    assert!(!page.contains(">--wait-for-devices</a>"), "{page}");
+    assert!(page.contains(">fixture-recipe-record</a>"), "{page}");
+    assert!(page.contains(">unlinked-job</a>"), "{page}");
+    assert!(
+        page.contains(&format!(
+            "href=\"{base}/records?selected=fixture-recipe-record\""
+        )),
+        "{page}"
+    );
+    assert!(page.contains("/fixture/cwd"), "{page}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_supervisor_detaches_and_cancel_interrupts_only_a_matching_job()
 -> Result<(), Box<dyn Error>> {

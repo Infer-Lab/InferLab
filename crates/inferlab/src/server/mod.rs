@@ -5,8 +5,10 @@ mod record;
 mod residual;
 
 use crate::InferlabError;
+use crate::controller::Controller;
 use crate::execution::{ProcessContext, ProcessPlan, ResolvedExecution};
 use crate::progress::{Phase, Progress};
+use crate::record::OperatorStopEvidence;
 use crate::workspace::WorkspaceSnapshot;
 use fs2::FileExt;
 use inferlab_runtime::operation_bound::OperationBound;
@@ -67,11 +69,19 @@ pub(crate) struct ServerLogsReport {
 pub(crate) fn start(
     root: &Path,
     resolved: ResolvedExecution,
+    allocation: Option<crate::resolve::occupancy::AllocationLock>,
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
     inferlab_runtime::interrupt::prepare()
         .map_err(|source| InferlabError::ServerInterrupt { source })?;
-    start_with_runtime(root, resolved, None, &SystemProcessRuntime, progress)
+    start_with_runtime(
+        root,
+        resolved,
+        None,
+        allocation,
+        &SystemProcessRuntime,
+        progress,
+    )
 }
 
 pub(crate) fn start_for_recipe(
@@ -80,7 +90,14 @@ pub(crate) fn start_for_recipe(
     id: &str,
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
-    start_with_runtime(root, resolved, Some(id), &SystemProcessRuntime, progress)
+    start_with_runtime(
+        root,
+        resolved,
+        Some(id),
+        None,
+        &SystemProcessRuntime,
+        progress,
+    )
 }
 
 pub(crate) fn status(root: &Path, id: &str) -> Result<ServerStatusReport, InferlabError> {
@@ -165,13 +182,54 @@ pub(crate) fn logs_with_progress(
     logs_with_runtime(root, id, &SystemProcessRuntime, progress)
 }
 
+/// Stop one server record. A starting record is still driven by the
+/// process that started it: while that controller lives the stop is a
+/// request it honors, and once it is gone — or `--force` overrides its lock —
+/// this command stops what the record started and finalizes it as stopped by
+/// the operator ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub(crate) fn stop(
     root: &Path,
     id: &str,
+    force: bool,
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
+    let record = load_record(root, id)?;
+    let mut operator_stop = None;
+    let mut _controller = None;
+    if record.status == ServerStatus::Starting {
+        let record_dir = root.join(crate::record::RECORDS_DIR).join(id);
+        match crate::controller::inspect(&record_dir)? {
+            Controller::Gone(lock) => {
+                _controller = Some(lock);
+                operator_stop = Some(OperatorStopEvidence { forced: false });
+            }
+            Controller::Running(holder) if force => {
+                progress.phase(
+                    Phase::named("stopping past the record's controller")
+                        .current_item(crate::controller::describe(holder.as_ref())),
+                )?;
+                operator_stop = Some(OperatorStopEvidence { forced: true });
+            }
+            Controller::Running(holder) => {
+                progress.phase(
+                    Phase::named("stop requested of the record's controller")
+                        .current_item(crate::controller::describe(holder.as_ref())),
+                )?;
+                crate::controller::request_stop(&record_dir)?;
+                let released = crate::controller::wait_for_release(&record_dir, progress)?;
+                // A start that failed is reported as its controller finalized
+                // it; a start that reached running before it saw the request
+                // is stopped below as any running server is.
+                if load_record(root, id)?.status == ServerStatus::Starting {
+                    // The controller exited without finalizing the record.
+                    _controller = Some(released);
+                    operator_stop = Some(OperatorStopEvidence { forced: false });
+                }
+            }
+        }
+    }
     let _operation = acquire_operation(root, id)?;
-    stop_with_runtime(root, id, &SystemProcessRuntime, progress)
+    stop_with_runtime(root, id, operator_stop, &SystemProcessRuntime, progress)
 }
 
 pub(crate) fn acquire_operation(
@@ -238,6 +296,34 @@ pub(crate) fn apply_numa_pinning<'a>(
     numa::apply(processes, machines).map_err(|source| InferlabError::NumaPinning { source })
 }
 
+/// The devices on one machine that report compute applications, read by
+/// the same probe the launch-time device check runs, each with its
+/// occupants described as that check names them; a probe that cannot
+/// answer is an error ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+pub(crate) fn occupied_devices(
+    launch: &inferlab_runtime::plan::LaunchPlan,
+    machine: &str,
+    devices: &[u32],
+) -> Result<std::collections::BTreeMap<u32, String>, String> {
+    let mut occupied = std::collections::BTreeMap::<u32, Vec<String>>::new();
+    match SystemProcessRuntime.probe_hardware(launch, machine, devices) {
+        Ok(_) => {}
+        Err(HardwareProbeError::Occupied { occupants, .. }) => {
+            for occupant in &occupants {
+                occupied
+                    .entry(occupant.device())
+                    .or_default()
+                    .push(occupant.description());
+            }
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(occupied
+        .into_iter()
+        .map(|(device, occupants)| (device, occupants.join(", ")))
+        .collect())
+}
+
 pub(crate) fn resolve_network(
     processes: &[ProcessPlan],
 ) -> Result<Option<crate::execution::NetworkPlan>, InferlabError> {
@@ -250,10 +336,13 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     root: &Path,
     resolved: ResolvedExecution,
     requested_id: Option<&str>,
+    allocation: Option<crate::resolve::occupancy::AllocationLock>,
     runtime: &R,
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
     let mut session = ServerRecordSession::begin(root, &resolved, requested_id)?;
+    // The record now carries the allocation ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    drop(allocation);
     progress.phase(
         Phase::named("record created").record(
             session.record().id.clone(),
@@ -556,52 +645,102 @@ fn run_preflight_checks<R: ServerRuntime + PreflightObserver + ResidualProbe>(
 
 /// Device hardware identity is probed once per hosting machine through the
 /// same launch path as its serving processes, and a failed probe fails
-/// the launch before any process starts ([[RFC-0005:C-EVIDENCE]]).
+/// the launch before any process starts ([[RFC-0005:C-EVIDENCE]]). With
+/// `--wait-for-devices`, occupied assigned devices — and nothing else —
+/// instead hold the launch: every assigned machine is probed again each
+/// interval until no assigned device is occupied, so a machine that freed
+/// early cannot be taken unchecked during the wait; an operator interrupt
+/// ends the wait, and the record keeps how long it waited and on whom from
+/// the first occupied probe on ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
     resolved: &ResolvedExecution,
     session: &mut ServerRecordSession,
     runtime: &R,
     progress: &Progress,
 ) -> Result<(), InferlabError> {
-    let mut probe_targets = std::collections::BTreeMap::new();
+    let mut targets = std::collections::BTreeMap::new();
     for process in resolved.server.processes() {
-        let entry = probe_targets
+        let entry = targets
             .entry(process.machine.clone())
             .or_insert_with(|| (&process.launch, std::collections::BTreeSet::new()));
         entry.1.extend(process.allocation.devices.iter().copied());
     }
-    let probe_total = probe_targets.len();
-    // Every machine is probed so one failure names every finding: occupied
-    // devices are a verdict about the devices, a probe failure about the
-    // probe, and neither hides the other.
-    let mut findings = Vec::new();
-    for (probe_index, (machine, (launch, devices))) in probe_targets.into_iter().enumerate() {
-        progress.phase(Phase::named("local and remote preflight").item(
-            &machine,
-            probe_index + 1,
-            probe_total,
-        ))?;
-        let devices = devices.into_iter().collect::<Vec<_>>();
-        match runtime.probe_hardware(launch, &machine, &devices) {
-            Ok(evidence) => {
-                session.record_mut().hardware.insert(machine, evidence);
+    let probe_total = targets.len();
+    let waiting_since = std::time::Instant::now();
+    let mut reported_occupants = None;
+    loop {
+        // Every machine is probed so one failure names every finding:
+        // occupied devices are a verdict about the devices, a probe failure
+        // about the probe, and neither hides the other.
+        let mut findings = Vec::new();
+        let mut probe_failed = false;
+        for (probe_index, (machine, (launch, devices))) in targets.iter().enumerate() {
+            // Re-probes during a device wait stay under the one steady
+            // waiting phase, which names the occupants.
+            if session.record().device_wait.is_none() {
+                progress.phase(Phase::named("local and remote preflight").item(
+                    machine,
+                    probe_index + 1,
+                    probe_total,
+                ))?;
             }
-            Err(error @ HardwareProbeError::Occupied { .. }) => findings.push(error.to_string()),
-            Err(error) => findings.push(format!(
-                "device hardware probe failed on machine {machine:?}: {error}"
-            )),
+            let devices = devices.iter().copied().collect::<Vec<_>>();
+            match runtime.probe_hardware(launch, machine, &devices) {
+                Ok(evidence) => {
+                    session
+                        .record_mut()
+                        .hardware
+                        .insert(machine.clone(), evidence);
+                }
+                Err(error @ HardwareProbeError::Occupied { .. }) => {
+                    findings.push(error.to_string());
+                }
+                Err(error) => {
+                    probe_failed = true;
+                    findings.push(format!(
+                        "device hardware probe failed on machine {machine:?}: {error}"
+                    ));
+                }
+            }
         }
-    }
-    if !findings.is_empty() {
-        return Err(fail_with(
-            session,
-            runtime,
-            &[],
-            FailurePhase::Preflight,
-            None,
-            findings.join("; "),
-            true,
-        )?);
+        // The wait is evidence from its first occupied probe, whatever ends
+        // it — an interrupt arriving during that very round included.
+        let waiting = !findings.is_empty() && !probe_failed && resolved.server.wait_for_devices;
+        if let Some(wait) = session.record_mut().device_wait.as_mut() {
+            wait.waited_ms =
+                inferlab_runtime::operation_bound::duration_millis(waiting_since.elapsed());
+        } else if waiting {
+            session.record_mut().device_wait = Some(record::DeviceWaitEvidence {
+                waited_ms: 0,
+                occupants: findings.clone(),
+            });
+            session.rewrite()?;
+        }
+        // A probe an operator interrupt cut short is an interruption, not a
+        // failed probe.
+        fail_if_startup_interrupted(session, runtime, &[], None)?;
+        if findings.is_empty() {
+            break;
+        }
+        if !waiting {
+            return Err(fail_with(
+                session,
+                runtime,
+                &[],
+                FailurePhase::Preflight,
+                None,
+                findings.join("; "),
+                true,
+            )?);
+        }
+        let occupants = findings.join("; ");
+        if reported_occupants.as_ref() != Some(&occupants) {
+            progress.phase(Phase::named("waiting for devices").current_item(&occupants))?;
+            reported_occupants = Some(occupants);
+        }
+        fail_if_startup_interrupted(session, runtime, &[], None)?;
+        std::thread::sleep(RESIDUAL_SETTLE_INTERVAL);
+        fail_if_startup_interrupted(session, runtime, &[], None)?;
     }
     session.rewrite()?;
     Ok(())
@@ -674,6 +813,7 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
             }
         };
         session.process_mut(&process.id)?.profiler = prepared.target;
+        let owner_marker = format!("{}/{}", session.record().id, process.id);
         let handle = match runtime.spawn(ProcessSpec {
             launch: &process.launch,
             command: &prepared.command,
@@ -687,6 +827,7 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
                 .container
                 .as_ref()
                 .map(|container| container.name.as_str()),
+            owner_marker: &owner_marker,
         }) {
             Ok(handle) => handle,
             Err(failure) => {
@@ -1051,6 +1192,7 @@ fn logs_with_runtime<R: ProcessObserver>(
 fn stop_with_runtime<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     root: &Path,
     id: &str,
+    operator_stop: Option<OperatorStopEvidence>,
     runtime: &R,
     progress: &Progress,
 ) -> Result<ServerRecord, InferlabError> {
@@ -1060,6 +1202,17 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     }
     let process_order = record.process_order()?;
     let mut session = ServerRecordSession::from_record(root, record);
+    if let Some(operator_stop) = operator_stop {
+        if session.record().failure.is_none() {
+            session.record_mut().failure = Some(FailureEvidence {
+                phase: FailurePhase::Interrupted,
+                process_id: None,
+                message: operator_stop.message().to_owned(),
+            });
+        }
+        session.record_mut().operator_stop = Some(operator_stop);
+        session.rewrite()?;
+    }
     let mut all_verified = true;
     let mut first_error = None;
     let process_total = process_order.len();
@@ -1538,6 +1691,7 @@ mod tests {
                 container_removal: None,
                 device_residuals: None,
                 device_residual_settle_window_ms: None,
+                marked_process_sweep: None,
             }
         }
     }
@@ -1548,6 +1702,7 @@ mod tests {
             process_group: pid,
             leader_start_time_ticks: 1,
             container: None,
+            owner_marker: None,
         })
     }
 
@@ -1645,8 +1800,14 @@ mod tests {
             fail_first_readiness: false,
         };
 
-        let result =
-            start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent());
+        let result = start_with_runtime(
+            root.path(),
+            resolved(),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        );
 
         assert!(result.is_err());
         assert_eq!(*runtime.terminated.borrow(), vec![41]);
@@ -1694,8 +1855,14 @@ mod tests {
             events: RefCell::new(Vec::new()),
             fail_first_readiness: false,
         };
-        let record =
-            start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
+        let record = start_with_runtime(
+            root.path(),
+            resolved(),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
         let process_count = record.process_evidence.len();
         let bound = inferlab_runtime::operation_bound::OperationBound::finite(
             std::time::Duration::from_secs(1),
@@ -1729,7 +1896,14 @@ mod tests {
             fail_first_readiness: false,
         };
 
-        start_with_runtime(root.path(), resolved(), None, &runtime, &Progress::silent())?;
+        start_with_runtime(
+            root.path(),
+            resolved(),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
 
         let readiness_bounds = runtime.readiness_bounds.borrow();
         assert_eq!(readiness_bounds.len(), 2);
@@ -1782,6 +1956,7 @@ mod tests {
             root.path(),
             resolved_with_discovery(),
             None,
+            None,
             &runtime,
             &Progress::silent(),
         )?;
@@ -1804,6 +1979,7 @@ mod tests {
         let result = start_with_runtime(
             root.path(),
             resolved_with_discovery(),
+            None,
             None,
             &runtime,
             &Progress::silent(),
@@ -1927,6 +2103,7 @@ mod tests {
                 revision_reproducible: true,
                 pixi_manifest_sha256: "manifest".to_owned(),
                 pixi_lock_sha256: "lock".to_owned(),
+                local_definitions: Vec::new(),
             },
             recipe: None,
             stack: StackPlan {
@@ -1938,6 +2115,7 @@ mod tests {
                 checks: Vec::new(),
             },
             server: ServerPlan {
+                wait_for_devices: false,
                 id: "server".to_owned(),
                 case: Some(CasePlan {
                     id: "default".to_owned(),
@@ -2000,6 +2178,8 @@ mod tests {
                     id: "placement".to_owned(),
                     selection: PlacementSelectionSource::Explicit,
                     machines: (0..2).map(|index| format!("node-{index}")).collect(),
+                    unavailable_ports: BTreeMap::new(),
+                    unavailable_devices: BTreeMap::new(),
                     remote_workspaces: BTreeMap::new(),
                     remote_containers: BTreeMap::new(),
                 },

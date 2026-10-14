@@ -626,6 +626,23 @@ mod tests {
         }
     }
 
+    /// A starting server — possibly waiting for its devices — shows how long
+    /// it has been under way, as a running one does.
+    #[test]
+    fn a_starting_record_shows_its_elapsed_duration() {
+        let duration = |status: &str| {
+            record("server", "server", status)
+                .display()
+                .details
+                .iter()
+                .flat_map(|section| section.rows.iter())
+                .find(|(label, _)| label == "Duration")
+                .map(|(_, value)| value.render(60_001))
+        };
+        assert_eq!(duration("starting"), duration("running"));
+        assert_ne!(duration("starting"), duration("failed"));
+    }
+
     #[test]
     fn probes_only_server_records_whose_recorded_status_is_running() {
         let root = PathBuf::from("/workspace");

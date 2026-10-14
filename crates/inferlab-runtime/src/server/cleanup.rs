@@ -1,12 +1,14 @@
 use super::observation::{remote_group_alive_script, run_cleanup_command};
 use super::{
-    CleanupEvidence, CleanupTrigger, ContainerRemovalEvidence, HostProcessHandle, ProcessCleanup,
-    ProcessHandle, SshProcessHandle, SystemProcessRuntime,
+    CleanupEvidence, CleanupTrigger, ContainerRemovalEvidence, HostProcessHandle,
+    MarkedProcessSweepEvidence, ProcessCleanup, ProcessHandle, SERVER_PROCESS_MARKER_ENV,
+    SshProcessHandle, SystemProcessRuntime,
 };
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::process_group::{
     KILL_GRACE, LocalProcessGroup, SignalEvidence, TERM_GRACE, TerminationSignal, VerifiedStatus,
 };
+use crate::shell::shell_quote;
 use crate::ssh::{SSH_ENV_REMOVE, ssh_argv};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
@@ -28,6 +30,7 @@ pub(super) fn remote_poll_sleep() -> String {
     )
 }
 const CLEANUP_MARKER: &str = "INFERLAB_CLEANUP\t";
+const SWEEP_MARKER: &str = "INFERLAB_SWEEP\t";
 
 impl CleanupEvidence {
     pub fn unavailable(trigger: CleanupTrigger, message: String) -> Self {
@@ -47,6 +50,7 @@ impl CleanupEvidence {
             container_removal: None,
             device_residuals: None,
             device_residual_settle_window_ms: None,
+            marked_process_sweep: None,
         }
     }
 
@@ -78,6 +82,7 @@ impl CleanupEvidence {
             container_removal: Some(removal),
             device_residuals: None,
             device_residual_settle_window_ms: None,
+            marked_process_sweep: None,
         }
     }
 }
@@ -250,6 +255,7 @@ pub(super) fn terminate_local(
                     container_removal: None,
                     device_residuals: None,
                     device_residual_settle_window_ms: None,
+                    marked_process_sweep: None,
                 },
                 Err(error) => cleanup_error(trigger, true, signals, error.to_string()),
             }
@@ -481,6 +487,139 @@ pub(super) fn remove_server_container(
     }
 }
 
+/// The marked-process sweep, one script for both launch paths: it lists
+/// every live process whose initial environment holds the exact marker
+/// entry — a zombie's environment reads empty, and another user's is
+/// unreadable — then sends SIGTERM, polls through the termination grace,
+/// sends SIGKILL to what remains, and polls through the kill grace
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). The script's own processes inherit no
+/// marker, so the listing never names the sweep itself.
+pub(super) fn marked_process_sweep_script(marker: &str) -> String {
+    format!(
+        "set +e; entry={entry}; marked() {{ grep -lsxzF -e \"$entry\" /proc/[0-9]*/environ | sed -n 's#^/proc/\\([0-9]*\\)/environ$#\\1#p' | tr '\\n' ' '; }}; found=$(marked); term=-; forced=0; kill_code=-; left=$found; if [ -n \"$found\" ]; then kill -TERM $found 2>/dev/null; term=$?; i=0; left=$(marked); while [ -n \"$left\" ] && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); left=$(marked); done; if [ -n \"$left\" ]; then forced=1; kill -KILL $left 2>/dev/null; kill_code=$?; i=0; left=$(marked); while [ -n \"$left\" ] && [ $i -lt {kill_limit} ]; do sleep {poll}; i=$((i+1)); left=$(marked); done; fi; fi; printf '{sweep}%s\\t%s\\t%s\\t%s\\t%s\\n' \"$found\" \"$term\" \"$forced\" \"$kill_code\" \"$left\"",
+        entry = shell_quote(&format!("{SERVER_PROCESS_MARKER_ENV}={marker}")),
+        term_limit = TERM_POLL_LIMIT,
+        kill_limit = KILL_POLL_LIMIT,
+        poll = remote_poll_sleep(),
+        sweep = SWEEP_MARKER,
+    )
+}
+
+/// Run the marked-process sweep on a launch machine — locally, or over SSH
+/// to `target` — under the remote cleanup deadline that bounds the group
+/// cleanup script of the same shape.
+pub(super) fn sweep_marked_processes(
+    target: Option<&str>,
+    marker: &str,
+) -> MarkedProcessSweepEvidence {
+    let started = Instant::now();
+    let script = marked_process_sweep_script(marker);
+    let bound = OperationBound::finite(REMOTE_SERVER_CLEANUP_DEADLINE);
+    let output = match target {
+        None => run_cleanup_command(
+            &["sh", "-c", script.as_str()],
+            &[],
+            &bound,
+            "marked-process sweep",
+        ),
+        Some(target) => run_cleanup_command(
+            &ssh_argv(target, &script),
+            SSH_ENV_REMOVE,
+            &bound,
+            "SSH marked-process sweep",
+        ),
+    };
+    let mut evidence = MarkedProcessSweepEvidence {
+        marker: marker.to_owned(),
+        elapsed_ms: 0,
+        deadline_ms: duration_millis(REMOTE_SERVER_CLEANUP_DEADLINE),
+        found: Vec::new(),
+        term_exit_code: None,
+        forced: false,
+        kill_exit_code: None,
+        remaining: Vec::new(),
+        error: None,
+    };
+    match output {
+        Ok(output) if output.status.success() => {
+            match parse_sweep_output(&String::from_utf8_lossy(&output.stdout)) {
+                Some(result) => {
+                    evidence.found = result.found;
+                    evidence.term_exit_code = result.term_exit_code;
+                    evidence.forced = result.forced;
+                    evidence.kill_exit_code = result.kill_exit_code;
+                    evidence.remaining = result.remaining;
+                    if !evidence.remaining.is_empty() {
+                        evidence.error = Some(format!(
+                            "processes carrying {SERVER_PROCESS_MARKER_ENV}={marker} remained after SIGKILL: {}",
+                            join_pids(&evidence.remaining)
+                        ));
+                    }
+                }
+                None => {
+                    evidence.error = Some("marked-process sweep returned no result".to_owned());
+                }
+            }
+        }
+        Ok(output) => {
+            evidence.error = Some(format!(
+                "marked-process sweep exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Err(error) => evidence.error = Some(error.to_string()),
+    }
+    evidence.elapsed_ms = duration_millis(started.elapsed());
+    evidence
+}
+
+struct SweepOutput {
+    found: Vec<u32>,
+    term_exit_code: Option<i32>,
+    forced: bool,
+    kill_exit_code: Option<i32>,
+    remaining: Vec<u32>,
+}
+
+fn parse_sweep_output(output: &str) -> Option<SweepOutput> {
+    let result = output
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(SWEEP_MARKER))?;
+    let mut fields = result.split('\t');
+    let pids = |field: &str| {
+        field
+            .split_whitespace()
+            .map(str::parse::<u32>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    };
+    let code = |field: &str| match field {
+        "-" => Some(None),
+        value => value.parse::<i32>().ok().map(Some),
+    };
+    let found = pids(fields.next()?)?;
+    let term_exit_code = code(fields.next()?)?;
+    let forced = fields.next()? == "1";
+    let kill_exit_code = code(fields.next()?)?;
+    let remaining = pids(fields.next()?)?;
+    Some(SweepOutput {
+        found,
+        term_exit_code,
+        forced,
+        kill_exit_code,
+        remaining,
+    })
+}
+
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(super) fn completed_cleanup(
     trigger: CleanupTrigger,
     already_exited: bool,
@@ -503,6 +642,7 @@ pub(super) fn completed_cleanup(
         container_removal: None,
         device_residuals: None,
         device_residual_settle_window_ms: None,
+        marked_process_sweep: None,
     }
 }
 
@@ -528,6 +668,7 @@ pub(super) fn cleanup_error(
         container_removal: None,
         device_residuals: None,
         device_residual_settle_window_ms: None,
+        marked_process_sweep: None,
     }
 }
 
@@ -607,6 +748,25 @@ impl ProcessCleanup for SystemProcessRuntime {
             ProcessHandle::Local(handle) => terminate_local(handle, trigger),
             ProcessHandle::Ssh(handle) => terminate_ssh(handle, trigger),
         };
+        // A launch tool can move the serving tree out of the group the kill
+        // above reached; every process still carrying the marker is this
+        // server's, so the sweep runs even when the group had already
+        // exited — the case in which nothing else can reach the tree
+        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+        let (marker, sweep_target) = match handle {
+            ProcessHandle::Local(handle) => (handle.owner_marker.as_deref(), None),
+            ProcessHandle::Ssh(handle) => (handle.owner_marker.as_deref(), Some(&*handle.target)),
+        };
+        if let Some(marker) = marker {
+            let sweep = sweep_marked_processes(sweep_target, marker);
+            if !sweep.verified() {
+                evidence.verified = false;
+                if evidence.error.is_none() {
+                    evidence.error.clone_from(&sweep.error);
+                }
+            }
+            evidence.marked_process_sweep = Some(sweep);
+        }
         // The container is a daemon-owned object: the group kill reaches
         // only the docker client, so a known container must be confirmed
         // removed on its launch machine — unconditionally, because it can

@@ -58,10 +58,19 @@ pub struct HostProcessHandle {
     /// process-group kill cannot reach ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// The `INFERLAB_SERVER_PROCESS` value this process and its descendants
+    /// inherit, which cleanup sweeps after the group; absent on a handle
+    /// recorded before the marker existed ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_marker: Option<String>,
 }
 
 impl HostProcessHandle {
-    fn new(leader_pid: u32, container: Option<String>) -> Result<Self, String> {
+    fn new(
+        leader_pid: u32,
+        container: Option<String>,
+        owner_marker: Option<String>,
+    ) -> Result<Self, String> {
         if leader_pid == 0 {
             return Err("host process-group handle requires a non-zero leader pid".to_owned());
         }
@@ -75,6 +84,7 @@ impl HostProcessHandle {
             process_group: leader_pid,
             leader_start_time_ticks,
             container,
+            owner_marker,
         })
     }
 
@@ -102,6 +112,11 @@ pub struct SshProcessHandle {
     /// process-group kill cannot reach ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// The `INFERLAB_SERVER_PROCESS` value this process and its descendants
+    /// inherit, which cleanup sweeps after the group; absent on a handle
+    /// recorded before the marker existed ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_marker: Option<String>,
 }
 
 impl SshProcessHandle {
@@ -184,6 +199,36 @@ pub struct CleanupEvidence {
     /// present exactly when `device_residuals` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_residual_settle_window_ms: Option<u64>,
+    /// The sweep of processes carrying the handle's ownership marker on its
+    /// launch machine, run after the group termination
+    /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]); absent when the handle records no
+    /// marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked_process_sweep: Option<MarkedProcessSweepEvidence>,
+}
+
+/// Termination of every live process carrying a server process's ownership
+/// marker on its launch machine ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): what was
+/// found, the signals sent, and what remained after the kill grace.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarkedProcessSweepEvidence {
+    pub marker: String,
+    pub elapsed_ms: u64,
+    pub deadline_ms: u64,
+    pub found: Vec<u32>,
+    pub term_exit_code: Option<i32>,
+    pub forced: bool,
+    pub kill_exit_code: Option<i32>,
+    pub remaining: Vec<u32>,
+    pub error: Option<String>,
+}
+
+impl MarkedProcessSweepEvidence {
+    #[must_use]
+    pub fn verified(&self) -> bool {
+        self.error.is_none() && self.remaining.is_empty()
+    }
 }
 
 /// The post-cleanup probe outcome for one assigned device
@@ -341,7 +386,15 @@ pub struct ProcessSpec<'a> {
     /// The resolver-assigned container name when the command is a
     /// containerized substitution.
     pub container: Option<&'a str>,
+    /// The value of [`SERVER_PROCESS_MARKER_ENV`] the process inherits:
+    /// the server record and process identities joined by `/`.
+    pub owner_marker: &'a str,
 }
+
+/// The environment variable naming the server process that owns a process
+/// and its descendants, wherever a launch tool moves them
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+pub const SERVER_PROCESS_MARKER_ENV: &str = "INFERLAB_SERVER_PROCESS";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerLaunchError {
@@ -1044,6 +1097,7 @@ mod tests {
             remote_dir: &root.path().join("remote"),
             container: None,
             data_directory: None,
+            owner_marker: "record-fixture/server",
         });
 
         let failure = match result {
@@ -1096,6 +1150,7 @@ mod tests {
             remote_dir: &root.path().join("remote"),
             container: None,
             data_directory: Some(&state),
+            owner_marker: "record-fixture/server",
         });
 
         let failure = match result {
@@ -1150,6 +1205,7 @@ mod tests {
             remote_dir: &root.path().join("remote"),
             container: None,
             data_directory: Some(&state),
+            owner_marker: "record-fixture/server",
         })
         .map_err(|failure| failure.message())?;
         let deadline = std::time::Instant::now() + TEST_HANG_GUARD;
@@ -1741,7 +1797,7 @@ mod tests {
             .process_group(0)
             .spawn()
             .map_err(|error| error.to_string())?;
-        let handle = HostProcessHandle::new(child.id(), None)?;
+        let handle = HostProcessHandle::new(child.id(), None, None)?;
         thread::sleep(Duration::from_millis(100));
         let reaper = thread::spawn(move || child.wait());
 
@@ -1783,7 +1839,7 @@ mod tests {
             .process_group(0)
             .spawn()
             .map_err(|error| error.to_string())?;
-        let handle = HostProcessHandle::new(child.id(), None)?;
+        let handle = HostProcessHandle::new(child.id(), None, None)?;
         let deadline = Instant::now() + TEST_HANG_GUARD;
         while !marker.exists() {
             if Instant::now() > deadline {
@@ -1869,6 +1925,7 @@ mod tests {
             stdout: root.path().join("stdout.log"),
             stderr: root.path().join("stderr.log"),
             container: None,
+            owner_marker: None,
         });
         // The fixture ssh shim execs the remote script through bash; running
         // it directly exercises the same bytes against local /proc and ps.
@@ -1910,6 +1967,7 @@ mod tests {
             stdout: root.path().join("stdout.log"),
             stderr: root.path().join("stderr.log"),
             container: None,
+            owner_marker: None,
         });
         let output = Command::new("bash")
             .args(["-c", &script])
@@ -1929,6 +1987,84 @@ mod tests {
             line.contains(&orphan.member_pid.to_string()),
             "the detail names the offending member: {line}"
         );
+        Ok(())
+    }
+
+    /// A launch tool that starts the serving tree in a new session — as a
+    /// managed Nsight Systems collection does — moves it beyond the group
+    /// signal; the inherited ownership marker still names it, so cleanup
+    /// terminates it and verifies it gone ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[test]
+    fn cleanup_terminates_a_marked_process_that_left_the_group() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let escaped_pid = root.path().join("escaped.pid");
+        let marker = format!("record-fixture-{}/server", std::process::id());
+        let command = CommandPlan {
+            argv: vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "setsid sh -c 'trap \"\" TERM; echo $$ > {pid}; exec sleep 300' & exec sleep 300",
+                    pid = shell_quote_path(&escaped_pid)
+                ),
+            ],
+            env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            explicit_env: Vec::new(),
+            pass_env: Vec::new(),
+            cwd: root.path().to_path_buf(),
+        };
+        let handle = spawn_local(ProcessSpec {
+            launch: &LaunchPlan::Local,
+            command: &command,
+            launch_files: &[],
+            cache_root: &root.path().join("cache"),
+            data_directory: None,
+            stdout: &root.path().join("stdout.log"),
+            stderr: &root.path().join("stderr.log"),
+            remote_dir: &root.path().join("remote"),
+            container: None,
+            owner_marker: &marker,
+        })
+        .map_err(|failure| failure.message())?;
+        let deadline = Instant::now() + TEST_HANG_GUARD;
+        let escaped = loop {
+            if let Ok(text) = fs::read_to_string(&escaped_pid)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            if Instant::now() > deadline {
+                force_kill_group(handle.process_group);
+                return Err("the escaped process did not start".to_owned());
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        let cleanup = SystemProcessRuntime.terminate(
+            &ProcessHandle::Local(handle.clone()),
+            CleanupTrigger::StartupRollback,
+            &mut |_| {},
+        );
+        let survived = process_start_time(escaped).map_err(|error| error.to_string())?;
+        if survived.is_some() {
+            let _ = Command::new("kill")
+                .args(["-KILL", &escaped.to_string()])
+                .status();
+        }
+
+        assert_eq!(handle.owner_marker.as_deref(), Some(marker.as_str()));
+        assert_eq!(survived, None, "the escaped process was terminated");
+        assert!(cleanup.verified, "{cleanup:?}");
+        let sweep = cleanup
+            .marked_process_sweep
+            .ok_or("cleanup records the marked-process sweep")?;
+        assert_eq!(sweep.marker, marker);
+        assert!(sweep.found.contains(&escaped), "{sweep:?}");
+        assert!(
+            sweep.forced,
+            "a TERM-ignoring process needs SIGKILL: {sweep:?}"
+        );
+        assert!(sweep.remaining.is_empty(), "{sweep:?}");
         Ok(())
     }
 
@@ -2013,6 +2149,7 @@ mod tests {
             process_group: pid,
             leader_start_time_ticks: recorded,
             container: None,
+            owner_marker: None,
         });
 
         assert!(status.queried);

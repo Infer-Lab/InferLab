@@ -3,6 +3,8 @@ use crate::support;
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 impl TestWorkspace {
     fn configure_readiness_timeout(&self, seconds: u64) -> Result<(), Box<dyn Error>> {
@@ -713,6 +715,101 @@ fn capture_armed_readiness_outlasts_the_profile_timeout() -> Result<(), Box<dyn 
         server["failure"]
     );
     Ok(())
+}
+
+/// A managed collection's launcher starts the server in a new session, so a
+/// server still starting up when the run is interrupted — one that does not
+/// exit within the termination grace — survives the launch group's kill.
+/// Its inherited ownership marker still names it: rollback terminates it
+/// and verifies it gone ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+#[test]
+fn interrupted_capture_startup_terminates_the_server_outside_the_launch_group()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let scratch = tempfile::tempdir()?;
+    let pid_file = scratch.path().join("server.pid");
+    let stdout = scratch.path().join("stdout.json");
+    let stderr = scratch.path().join("stderr.log");
+    let mut child = workspace
+        .command()
+        .env("FIXTURE_READY_DELAY_SECONDS", "300")
+        .env("FIXTURE_IGNORE_TERM", "1")
+        .env("FIXTURE_SERVER_PID_FILE", &pid_file)
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
+        .stdout(fs::File::create(&stdout)?)
+        .stderr(fs::File::create(&stderr)?)
+        .spawn()?;
+    support::wait_for_marker(&mut child, &pid_file)?;
+    let server_pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
+    let signal = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()?;
+    assert!(signal.success());
+    let finished = support::wait_for_exit(&mut child, "interrupted recipe did not finish cleanup");
+    if let Err(error) = finished {
+        return Err(format!("{error}: {}", fs::read_to_string(&stderr)?).into());
+    }
+    let server_alive = pid_alive(server_pid)?;
+    if server_alive {
+        let _ = Command::new("kill")
+            .args(["-KILL", &server_pid.to_string()])
+            .status();
+    }
+
+    assert!(
+        !server_alive,
+        "the server outside the launch group was terminated"
+    );
+    let record: Value = serde_json::from_slice(&fs::read(&stdout)?)?;
+    let server_id = record["server"]["id"]
+        .as_str()
+        .ok_or("recipe has no server record id")?;
+    let server = workspace.load_record(server_id)?;
+    let evidence = process_evidence(&server, "server")?;
+    assert_eq!(
+        evidence["handle"]["owner_marker"],
+        format!("{server_id}/server")
+    );
+    let cleanup = evidence["cleanup"]
+        .as_array()
+        .and_then(|cleanup| cleanup.last())
+        .ok_or("the server has no cleanup evidence")?;
+    assert_eq!(cleanup["trigger"], "startup-rollback");
+    assert_eq!(cleanup["verified"], true, "{cleanup}");
+    let sweep = &cleanup["marked_process_sweep"];
+    assert!(
+        sweep["found"].as_array().is_some_and(|found| found
+            .iter()
+            .any(|pid| pid.as_u64() == Some(server_pid.into()))),
+        "{sweep}"
+    );
+    assert_eq!(sweep["forced"], true, "{sweep}");
+    assert_eq!(sweep["remaining"], serde_json::json!([]), "{sweep}");
+    Ok(())
+}
+
+fn pid_alive(pid: u32) -> Result<bool, Box<dyn Error>> {
+    // The sweep's SIGKILL is delivered before cleanup returns, but the
+    // kernel may still be tearing the process down.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?
+            .success();
+        if !alive || Instant::now() > deadline {
+            return Ok(alive);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// The readiness probe cadence backs off instead of polling at a fixed

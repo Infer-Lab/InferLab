@@ -3,10 +3,11 @@
 
 use super::actions::{Action, ActionKind, Preview};
 use super::hub::{Feed, Generation};
-use super::jobs::{Job, JobState};
+use super::pages::encode;
 use super::views::{Tab, frame};
 use crate::console::records::LogPage;
 use crate::console::views::{compact_age, timestamp_with_age};
+use crate::jobs::{Job, JobState};
 use maud::{Markup, html};
 use std::time::Duration;
 
@@ -83,11 +84,16 @@ impl JobsPage<'_> {
 
     fn row(&self, job: &Job, selected: bool) -> Markup {
         let (glyph, tone) = state_tone(&job.state);
-        let target = job
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.argv.last())
-            .map_or("", String::as_str);
+        // A console job's last argument is its target; a CLI-detached job's
+        // vector is whatever the operator typed, so it is named by the
+        // record it created, or by its id until that exists.
+        let target = match &job.spec {
+            Some(spec) if spec.cwd.is_none() => spec.argv.last().map_or("", String::as_str),
+            _ => job
+                .record
+                .as_ref()
+                .map_or(job.id.as_str(), |record| record.record_id.as_str()),
+        };
         let action = job.spec.as_ref().map_or("job", |spec| spec.action.as_str());
         let age = job
             .spec
@@ -136,6 +142,14 @@ impl JobsPage<'_> {
                     dt { "Process" } dd { (producer.host) " · pid " (producer.pid) }
                 }
                 dt { "Directory" } dd.path { (job.directory.display()) }
+                @if let Some(spec) = &job.spec && let Some(cwd) = &spec.cwd {
+                    dt { "Working directory" } dd.path { (cwd.display()) }
+                }
+                @if let Some(record) = &job.record {
+                    dt { "Record" } dd {
+                        a href={ (base) "/records?selected=" (encode(&record.record_id)) } { (record.record_id) }
+                    }
+                }
             }
             @if let Some(spec) = &job.spec {
                 h3 { "VECTOR" }

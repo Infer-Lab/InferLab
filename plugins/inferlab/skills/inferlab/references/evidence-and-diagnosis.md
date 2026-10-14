@@ -7,7 +7,10 @@ logs and artifacts. `recipe run` and `bench` print the record as one JSON
 report carrying its `id`, and `image build` prints a report keyed `record_id`;
 all three print it even when the workflow fails and then exit with `E4001`. A
 failed `serve start` prints no report and names its record in the stderr
-error. Do not scrape diagnostic progress for results.
+error. With `--detach`, `serve start`, `recipe run`, and `bench` instead print
+the job's `job_id`, `job_dir`, `stdout`, `stderr`, `record_id`, and
+`record_dir` once the record exists; read the record from there. Do not scrape
+diagnostic progress for results.
 
 - Eval records reference `cases/eval/result.json` and `cases/eval/artifacts/`.
   They preserve normalized metrics, gate and repeated-trial evidence, task
@@ -20,17 +23,22 @@ error. Do not scrape diagnostic progress for results.
 - Server records preserve placement, device hardware identity, topology,
   frontend and role/rank bindings, effective settings, readiness, profiler
   targets, image selection, process state, and cleanup, including the
-  device-residual evidence described under
-  [Failure And Cleanup](#failure-and-cleanup).
+  marked-process sweep and device-residual evidence described under
+  [Failure And Cleanup](#failure-and-cleanup). A pool placement lists what it
+  skipped under `resolved.server.placement.unavailable_ports` and
+  `unavailable_devices`, each with its holder; a launch that waited for its
+  devices keeps `device_wait` (`waited_ms` and the first `occupants`).
 - Recipe and image records preserve child references and partial outcomes rather
   than flattening or discarding a failed branch.
 
 Compare runs on typed record facts: declared/effective definitions, revision,
 `source_digest`, package and integration identity, route, population, case load,
 metrics, and cleanup. `revision_reproducible: true` means the run used a clean
-source revision; it does not compare that run with another record. Reproduce by
-checking out the recorded revision, recreating local bindings, and comparing
-both revision and source digest.
+source revision and composed no local definitions; it does not compare that run
+with another record. Local definition files that composed are listed under
+`workspace.local_definitions` with their SHA-256 digests. Reproduce by checking
+out the recorded revision, recreating local bindings and any listed local
+definitions, and comparing both revision and source digest.
 
 ## TUI
 
@@ -90,13 +98,34 @@ inferlab serve logs <SERVER_RECORD_ID>
 inferlab serve stop <SERVER_RECORD_ID>
 ```
 
+A recipe or starting server whose controller was killed stays running or
+starting until `recipe stop` or `serve stop` finalizes it, and its records
+keep holding what [pool placement](workspace-definition.md) counts them as
+holding; see
+[Stopping a run](serving-and-recipes.md#stopping-a-run). A record finalized
+that way carries `operator_stop` with `forced` telling whether `--force`
+overrode a held controller lock.
+
 Before any serving process starts, the launch hardware probe asks every
 assigned device for its compute applications. Any reported application —
 another session, a process InferLab did not start, or memory a dead process
 still holds — fails the launch in `preflight`, and the error and record
 failure name the machine and each application's device, PID, process name,
-and memory. Stop the occupant or assign other devices in local bindings;
-InferLab does not queue for or share an occupied device.
+and memory. Pool placements already skip devices that were occupied at
+resolution, so this check fails explicitly bound devices and pool devices that
+became occupied after resolution. Stop the occupant, assign other devices in
+local bindings, or relaunch with `--wait-for-devices` to wait for the assigned
+devices to free; the wait is not a queue.
+
+Cleanup terminates each process group, then sweeps the launch machine for
+processes whose initial environment carries the record's ownership marker
+(`process_evidence.<process>.handle.owner_marker`, set as
+`INFERLAB_SERVER_PROCESS`), which catches descendants that left the group. The
+outcome is `cleanup[].marked_process_sweep`: the marked processes `found`,
+whether termination was `forced`, and any that `remaining`; the sweep verifies
+only with nothing remaining and no `error`. A process started with a cleared
+environment or as another user is outside that ownership, and a handle without
+a marker is cleaned up by process group only.
 
 `stop` is idempotent. Distinguish business-result failure, profiling/control
 failure, process cleanup failure, and incomplete evidence instead of reducing

@@ -1,5 +1,6 @@
 mod allocation;
 mod integration;
+pub(crate) mod occupancy;
 mod realization;
 mod selection;
 mod synthetic_acceptance;
@@ -51,6 +52,9 @@ pub(crate) struct ResolveRequest<'a> {
     /// override as an explicitly not-qualified realization
     /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     pub external: Option<&'a crate::image::launch::ExternalImagePlan>,
+    /// Wait for occupied assigned devices to free instead of failing the
+    /// launch ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    pub wait_for_devices: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,7 +183,7 @@ pub(crate) fn resolve<C: AdapterClient>(
 
     let served_name = selection.model.served_name.clone();
     let planned_stage = plan_integration(workspace, &selection, &effective, adapter)?;
-    let rendered_stage = render_integration(
+    let (rendered_stage, unavailable) = render_integration(
         workspace,
         request,
         &selection,
@@ -276,6 +280,7 @@ pub(crate) fn resolve<C: AdapterClient>(
         },
         server: ServerPlan {
             id: server_id.to_owned(),
+            wait_for_devices: request.wait_for_devices,
             case: case_id
                 .zip(selection.case_selection)
                 .map(|(id, selection)| CasePlan {
@@ -339,6 +344,8 @@ pub(crate) fn resolve<C: AdapterClient>(
                 id: selection.placement_id,
                 selection: selection.placement_selection,
                 machines: selected_machines,
+                unavailable_ports: unavailable.ports,
+                unavailable_devices: unavailable.devices,
                 remote_workspaces,
                 remote_containers,
             },

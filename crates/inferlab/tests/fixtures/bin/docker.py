@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Fake `docker` for every test harness, answering the client commands InferLab
+issues (version, manifest inspect, build, image inspect, save, rm, container
+inspect, run) the way Docker 28 does. FIXTURE_SCENARIO selects JSON faults;
+FAKE_DOCKER_LOG appends each argument vector; FAKE_DOCKER_INSPECT_EXIT and
+FAKE_DOCKER_RUN_EXIT end `image ...` and `run ...` with that status instead.
+"""
+
 import hashlib
 import json
 import os
@@ -16,6 +23,13 @@ def scenario():
 
 fault = scenario()
 args = sys.argv[1:]
+if os.environ.get("FAKE_DOCKER_LOG"):
+    with open(os.environ["FAKE_DOCKER_LOG"], "a") as handle:
+        handle.write(" ".join(args) + "\n")
+if args[:1] == ["image"] and os.environ.get("FAKE_DOCKER_INSPECT_EXIT"):
+    sys.exit(int(os.environ["FAKE_DOCKER_INSPECT_EXIT"]))
+if args[:1] == ["run"] and os.environ.get("FAKE_DOCKER_RUN_EXIT"):
+    sys.exit(int(os.environ["FAKE_DOCKER_RUN_EXIT"]))
 log = fault.get("docker_log")
 if log:
     with open(log, "a") as handle:
@@ -71,7 +85,7 @@ elif args[:2] == ["image", "inspect"]:
         # to one fixture machine via the ssh shim's target marker.
         absent_on = fault.get("external_absent_on_target")
         if fault.get("external_absent") or (
-            absent_on and absent_on == os.environ.get("FIXTURE_SSH_TARGET")
+            absent_on and absent_on == os.environ.get("FAKE_SSH_TARGET")
         ):
             sys.stderr.write("Error: No such image: " + args[-1] + "\n")
             sys.exit(1)

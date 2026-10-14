@@ -1,6 +1,6 @@
 pub(super) const ROOT: &str = "Run reproducible LLM inference experiments from a versioned workspace.
 
-Committed workspace definitions own shareable stacks, servers, measurements, recipes, and images. Machine-private bindings own model locators, machines, devices, ports, and placement. Managed workflows write file-first evidence under .inferlab/records; diagnostics and progress go to stderr while final machine-readable reports stay on stdout.";
+Committed workspace definitions own shareable stacks, servers, measurements, recipes, and images. Machine-private bindings own model locators, machines, devices, ports, and placement. Git-ignored local definitions under .inferlab/workspace.local.d add one operator's experiment-only definitions to serve start, recipe run, and bench. Managed workflows write file-first evidence under .inferlab/records; diagnostics and progress go to stderr while final machine-readable reports stay on stdout.";
 
 pub(super) const ROOT_EXAMPLES: &str = "FIRST RUN:
   inferlab workspace show
@@ -60,6 +60,7 @@ Resolution freezes the selected case, placement, ranks, devices, endpoints, inte
 pub(super) const SERVE_START_EXAMPLES: &str = "EXAMPLES:
   inferlab serve start qwen --case tp2 --placement local --dry-run
   inferlab serve start qwen --set server.settings.max_model_len=32768
+  inferlab serve start qwen --wait-for-devices --detach
 
 IMAGE SELECTION:
   --image selects a successful InferLab image-build record.
@@ -79,7 +80,9 @@ pub(super) const RECIPE_RUN_EXAMPLES: &str = "WORKSPACE TOML — MINIMAL OPENAI 
 EXAMPLES:
   inferlab recipe run qualify --case tp1 --placement local --dry-run
   inferlab recipe run qualify --set evals.gsm8k.limit=10
-  inferlab recipe run qualify --capture latency --capture throughput";
+  inferlab recipe run qualify --capture latency --capture throughput
+  inferlab recipe run qualify --detach     # prints job_id and record_id
+  inferlab recipe stop <RECIPE_RECORD_ID>";
 
 pub(super) const BENCH: &str = "Run one named serving Bench against an explicit running managed-server record.
 

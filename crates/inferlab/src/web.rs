@@ -7,7 +7,7 @@ mod actions;
 mod compare;
 mod hub;
 mod job_pages;
-mod jobs;
+use crate::jobs;
 mod pages;
 mod registry;
 mod views;
@@ -837,7 +837,7 @@ async fn launch_action(
     let key = action.kind.key();
     let argv = action.launch_argv().to_vec();
     let started = crate::record::now_unix_ms().unwrap_or_default();
-    match tokio::task::spawn_blocking(move || jobs::launch(&root, key, argv, started)).await {
+    match tokio::task::spawn_blocking(move || jobs::launch(&root, key, argv, started, None)).await {
         Ok(Ok(job)) => Redirect::to(&format!("/w/{id}/jobs?job={job}")).into_response(),
         Ok(Err(message)) => (
             StatusCode::INTERNAL_SERVER_ERROR,

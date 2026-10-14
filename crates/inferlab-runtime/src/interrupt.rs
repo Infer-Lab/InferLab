@@ -50,6 +50,12 @@ pub fn received() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
 }
 
+/// Raise the same interruption an operator's Ctrl-C raises, for a stop
+/// request delivered by other means ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+pub fn request() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
 #[cfg(test)]
 mod tests {
     use super::InterruptInstallError;

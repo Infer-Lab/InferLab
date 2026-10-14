@@ -95,6 +95,10 @@ pub(crate) struct StackPlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ServerPlan {
     pub id: String,
+    /// The launch waits for occupied assigned devices to free instead of
+    /// failing ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wait_for_devices: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub case: Option<CasePlan>,
     pub explicit_overrides: Vec<String>,
@@ -417,6 +421,14 @@ pub(crate) struct PlacementPlan {
     pub id: String,
     pub selection: PlacementSelectionSource,
     pub machines: Vec<String>,
+    /// Pool ports observed held on each used machine's launch path before
+    /// allocation, with what held each ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unavailable_ports: BTreeMap<String, Vec<crate::resolve::occupancy::UnavailablePort>>,
+    /// Pool devices observed held on each used machine's launch path before
+    /// allocation, with what held each ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unavailable_devices: crate::resolve::occupancy::UnavailableDevices,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub remote_workspaces: BTreeMap<String, RemoteWorkspacePlan>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

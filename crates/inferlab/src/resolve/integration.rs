@@ -613,14 +613,15 @@ pub(super) fn render_integration<C: AdapterClient>(
     effective: &EffectiveServerInput,
     planned_stage: &PlannedServeStage,
     adapter: &C,
-) -> Result<RenderedServeStage, InferlabError> {
+) -> Result<(RenderedServeStage, super::occupancy::Unavailable), InferlabError> {
     let stack = selection.stack;
     let planned = planned_stage.planned();
     let control_plane_frontend = planned
         .gateway
         .as_ref()
         .is_some_and(|gateway| gateway.render_source == RenderSource::ControlPlane);
-    let allocations = allocate_processes(
+    let mut occupancy = super::occupancy::Occupancy::new(&workspace.root);
+    let (allocations, unavailable) = allocate_processes(
         workspace,
         &selection.server_id,
         &selection.placement_id,
@@ -634,6 +635,7 @@ pub(super) fn render_integration<C: AdapterClient>(
             .or_else(|| request.external.map(|external| external.digest.as_str())),
         planned_stage.requirements(),
         control_plane_frontend.then_some(planned_stage.public_process()),
+        &mut occupancy,
     )?;
     gate_engine_trace_placement(
         workspace,
@@ -762,10 +764,9 @@ pub(super) fn render_integration<C: AdapterClient>(
             message: "rendering returned processes outside the resolved topology".to_owned(),
         });
     }
-    Ok(RenderedServeStage::new(
-        evidence,
-        allocations,
-        rendered_processes,
+    Ok((
+        RenderedServeStage::new(evidence, allocations, rendered_processes),
+        unavailable,
     ))
 }
 

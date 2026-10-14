@@ -7,7 +7,8 @@ description: "Use when operating InferLab: run reproducible LLM inference experi
 
 InferLab runs reproducible LLM inference experiments. A committed workspace
 fixes the shareable baseline; `.inferlab/local.toml` supplies machine-private
-bindings; managed workflows write durable records under
+bindings; git-ignored `.inferlab/workspace.local.d/` holds experiment-only
+definitions; managed workflows write durable records under
 `.inferlab/records/<ID>/`. Select declared objects and run them. Do not
 hand-compose framework launch commands or substitute an engine-native benchmark
 for a declared InferLab Bench.
@@ -75,8 +76,9 @@ A non-dry-run `recipe run`, `bench`, or successful `serve start` prints its
 record as JSON keyed by `id`; `image build` prints a report keyed by
 `record_id`. `recipe run`, `bench`, and `image build` print that output even
 when they fail; a failed `serve start` instead names its record in the error on
-stderr. Every failed managed workflow still finalizes evidence and attempts
-cleanup.
+stderr. With `--detach` they print the job and record identities instead (see
+[Detached runs](references/serving-and-recipes.md#detached-runs)). Every failed
+managed workflow still finalizes evidence and attempts cleanup.
 
 ## Privacy
 

@@ -1527,3 +1527,127 @@ fn measurements_read_the_controller_machines_model_locator() -> Result<(), Box<d
     );
     Ok(())
 }
+
+const LOCAL_DEFINITIONS: &str = "\
+[benches.local-c1]
+request_source = { kind = \"random\", input_tokens = 128, output_tokens = 16 }
+concurrency = [1]
+prompts_per_concurrency = 1
+timeout_seconds = 300
+
+[workload_suites.local-suite]
+evals = [\"smoke\"]
+benches = [\"local-c1\"]
+
+[recipes.local-qualify]
+server = \"deepseek-v4-flash-qualify\"
+workload_suite = \"local-suite\"
+";
+
+impl TestWorkspace {
+    /// Ignore the local-definitions directory as an operator would, commit
+    /// that, and write one local fragment.
+    fn write_local_definitions(&self, body: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
+        let root = self.root.path();
+        fs::write(
+            root.join(".gitignore"),
+            ".inferlab/local.toml\n.inferlab/workspace.local.d/\n",
+        )?;
+        Self::git(root, &["add", "-A"])?;
+        Self::git(root, &["commit", "-qm", "ignore local definitions"])?;
+        let directory = root.join(".inferlab/workspace.local.d");
+        fs::create_dir_all(&directory)?;
+        let path = directory.join("experiment.toml");
+        fs::write(&path, body)?;
+        Ok(path)
+    }
+}
+
+/// Local definitions add to the committed workspace without dirtying it,
+/// and the plan names each local file that composed, by digest
+/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+#[test]
+fn local_definitions_compose_without_dirtying_the_workspace() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let path = workspace.write_local_definitions(LOCAL_DEFINITIONS)?;
+    let digest = Command::new("sha256sum").arg(&path).output()?;
+    let digest = String::from_utf8(digest.stdout)?
+        .split_whitespace()
+        .next()
+        .ok_or("no digest")?
+        .to_owned();
+
+    let plan = workspace.run_json(&["recipe", "run", "local-qualify", "--dry-run"])?;
+
+    assert_eq!(plan["workspace"]["dirty"], false);
+    assert_eq!(
+        plan["workspace"]["revision_reproducible"], false,
+        "the revision alone cannot reproduce a run that used local definitions"
+    );
+    assert_eq!(
+        plan["workspace"]["local_definitions"],
+        serde_json::json!([{
+            "path": ".inferlab/workspace.local.d/experiment.toml",
+            "sha256": digest
+        }])
+    );
+    assert_eq!(plan["recipe"]["id"], "local-qualify");
+    Ok(())
+}
+
+/// A local definition only adds: redeclaring a committed identifier is a
+/// load error naming both files.
+#[test]
+fn a_local_definition_cannot_redeclare_a_committed_one() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_local_definitions(
+        "[benches.c8k1k]\nrequest_source = { kind = \"random\", input_tokens = 1, output_tokens = 1 }\nconcurrency = [1]\nprompts_per_concurrency = 1\ntimeout_seconds = 60\n",
+    )?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("c8k1k") && stderr.contains("workspace.local.d/experiment.toml"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// Stacks shape the remote realization and images must come wholly from
+/// committed content, so neither may be local.
+#[test]
+fn a_local_definition_cannot_declare_a_stack() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_local_definitions(
+        "[stacks.local-vllm]\nintegration = \"vllm\"\npixi_environment = \"vllm\"\nsource_paths = []\n",
+    )?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("stacks") && stderr.contains("experiment.toml"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// An unignored local-definitions directory would enter the source digest
+/// and the dirty marker, so it is rejected with the remedy.
+#[test]
+fn a_local_definitions_directory_must_be_git_ignored() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let directory = workspace.root.path().join(".inferlab/workspace.local.d");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("experiment.toml"), LOCAL_DEFINITIONS)?;
+    let output = workspace.run(&["recipe", "run", "local-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("git-ignored") || stderr.contains(".gitignore"),
+        "{stderr}"
+    );
+    Ok(())
+}

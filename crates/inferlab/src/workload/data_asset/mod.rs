@@ -23,4 +23,6 @@ pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 /// source materialization, and each SPEED-Bench acceptance value with the
 /// AIPerf source it came from in place of report invocations
 /// ([[RFC-0005:C-EVIDENCE]], [[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]).
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 23;
+/// Version 24 names the local workspace definition files composed into the
+/// run beside its workspace identity ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 24;

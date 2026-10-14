@@ -18,7 +18,7 @@ cd "${root}"
 # Workspace-side package versions remain untouched.
 pixi run python scripts/product_version.py bump "${version}"
 
-cargo build --workspace
+cargo build --workspace --release
 pixi run build-python
 
 echo

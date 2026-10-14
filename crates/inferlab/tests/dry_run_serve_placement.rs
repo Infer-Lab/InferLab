@@ -2531,3 +2531,348 @@ fn synthetic_acceptance_curve_evidence_case_replacement_and_eval_exclusion()
     assert!(control["server"].get("synthetic_acceptance").is_none());
     Ok(())
 }
+
+fn widen_local_port_pool(workspace: &TestWorkspace) -> Result<(), Box<dyn Error>> {
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings =
+        fs::read_to_string(&bindings_path)?.replacen("ports = [8000]", "ports = [8000, 8001]", 1);
+    fs::write(bindings_path, bindings)?;
+    Ok(())
+}
+
+/// A port already listening on the launch machine is skipped, in pool order,
+/// and the plan names what held it ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn pool_allocation_skips_a_port_listening_on_the_launch_machine() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    widen_local_port_pool(&workspace)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_LISTENING_PORTS", "8000")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    assert_eq!(plan["server"]["endpoint"]["port"], 8001);
+    assert_eq!(
+        plan["server"]["placement"]["unavailable_ports"]["local"],
+        serde_json::json!([{ "port": 8000, "holder": { "kind": "listening_socket" } }])
+    );
+    Ok(())
+}
+
+/// An explicit endpoint port is the operator's choice: occupancy fails it,
+/// naming the holder, instead of moving it ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn an_occupied_explicit_endpoint_port_fails_resolution() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[placements.local.roles.serve]\nmachine = \"local\"\ndevices = [0, 1]\nendpoint_port = 8000\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_LISTENING_PORTS", "8000")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("endpoint port 8000") && stderr.contains("listening socket"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// Pool allocation takes the first devices no compute application occupies,
+/// in declared order, and the plan names what held each skipped device
+/// ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn pool_allocation_skips_an_occupied_device() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace
+        .command()
+        .env(
+            "FIXTURE_NVIDIA_SMI_COMPUTE_APPS",
+            "4242, 2048, fixture-occupant",
+        )
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE", "0")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    let ranks = resolved_ranks(&plan["server"])?;
+    assert_eq!(ranks[0].rank.devices, [1, 2]);
+    let held = &plan["server"]["placement"]["unavailable_devices"]["local"];
+    assert_eq!(held[0]["device"], 0, "{held}");
+    assert_eq!(held[0]["holder"]["kind"], "compute_application", "{held}");
+    assert!(
+        held[0]["holder"]["occupant"]
+            .as_str()
+            .is_some_and(|occupant| occupant.contains("pid 4242")),
+        "{held}"
+    );
+    Ok(())
+}
+
+/// Explicitly bound devices are the operator's choice: resolution keeps them
+/// even when occupied, leaving occupancy to the launch-time device check.
+#[test]
+fn explicitly_bound_occupied_devices_are_kept() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[placements.local.roles.serve]\nmachine = \"local\"\ndevices = [0, 1]\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+    let output = workspace
+        .command()
+        .env(
+            "FIXTURE_NVIDIA_SMI_COMPUTE_APPS",
+            "4242, 2048, fixture-occupant",
+        )
+        .env("FIXTURE_NVIDIA_SMI_COMPUTE_APPS_DEVICE", "0")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    assert_eq!(resolved_ranks(&plan["server"])?[0].rank.devices, [0, 1]);
+    Ok(())
+}
+
+/// A pool allocation that cannot read its machine's devices fails resolution
+/// naming the machine rather than guessing them free.
+#[test]
+fn an_unreadable_device_probe_fails_pool_resolution() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_NVIDIA_SMI_ERROR", "fixture probe boom")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("\"local\"") && stderr.contains("fixture probe boom"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// A server record as the workspace would hold it: current schema unless
+/// stated, one local rank on `devices` serving `port`.
+fn write_server_record(
+    workspace: &TestWorkspace,
+    id: &str,
+    status: &str,
+    schema_version: u32,
+    devices: &[u32],
+    port: u16,
+) -> Result<(), Box<dyn Error>> {
+    let record_dir = workspace.root.path().join(".inferlab/records").join(id);
+    fs::create_dir_all(&record_dir)?;
+    fs::write(
+        record_dir.join("record.json"),
+        serde_json::json!({
+            "schema_version": schema_version,
+            "id": id,
+            "status": status,
+            "process_evidence": {},
+            "resolved": { "server": { "roles": [{ "replicas": [{ "ranks": [{
+                "launch": { "kind": "local" },
+                "devices": devices,
+                "endpoint": { "host": "127.0.0.1", "port": port },
+                "ports": {}
+            }] }] }] } }
+        })
+        .to_string(),
+    )?;
+    Ok(())
+}
+
+const CURRENT_SERVER_SCHEMA: u32 = 14;
+
+/// A running server keeps its ports, which observation may not see while
+/// idle, and the plan names the command that releases them
+/// ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn a_running_server_record_holds_its_ports_but_not_its_devices() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    widen_local_port_pool(&workspace)?;
+    write_server_record(
+        &workspace,
+        "fixture-running",
+        "running",
+        CURRENT_SERVER_SCHEMA,
+        &[0, 1],
+        8000,
+    )?;
+
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert_eq!(plan["server"]["endpoint"]["port"], 8001);
+    let holder = &plan["server"]["placement"]["unavailable_ports"]["local"][0]["holder"];
+    assert_eq!(holder["kind"], "record", "{holder}");
+    assert_eq!(holder["record_id"], "fixture-running");
+    assert_eq!(holder["record_kind"], "server");
+    // A running server's devices hold compute applications that the device
+    // probe sees; the record itself does not hold them.
+    assert_eq!(resolved_ranks(&plan["server"])?[0].rank.devices, [0, 1]);
+    Ok(())
+}
+
+/// A server still starting holds its devices before it allocates memory on
+/// them ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn a_starting_server_record_holds_its_devices() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    write_server_record(
+        &workspace,
+        "fixture-starting",
+        "starting",
+        CURRENT_SERVER_SCHEMA,
+        &[0, 1],
+        9999,
+    )?;
+
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert_eq!(resolved_ranks(&plan["server"])?[0].rank.devices, [2, 3]);
+    assert_eq!(
+        plan["server"]["placement"]["unavailable_devices"]["local"][0]["holder"]["record_id"],
+        "fixture-starting"
+    );
+    Ok(())
+}
+
+/// A record an earlier release wrote holds nothing: this release cannot stop
+/// it, and whatever it still runs is observable directly.
+#[test]
+fn an_earlier_schema_record_holds_nothing() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    write_server_record(
+        &workspace,
+        "fixture-old",
+        "starting",
+        CURRENT_SERVER_SCHEMA - 1,
+        &[0, 1],
+        8000,
+    )?;
+
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert_eq!(plan["server"]["endpoint"]["port"], 8000);
+    assert_eq!(resolved_ranks(&plan["server"])?[0].rank.devices, [0, 1]);
+    Ok(())
+}
+
+/// A held explicit endpoint port names the record and the command that
+/// releases it.
+#[test]
+fn a_record_holder_names_the_command_that_releases_it() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[placements.local.roles.serve]\nmachine = \"local\"\ndevices = [0, 1]\nendpoint_port = 8000\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+    write_server_record(
+        &workspace,
+        "fixture-running",
+        "running",
+        CURRENT_SERVER_SCHEMA,
+        &[4, 5],
+        8000,
+    )?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("inferlab serve stop fixture-running"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// A listening socket names its owning process when the launch path shows it.
+#[test]
+fn a_listening_socket_names_its_process() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    widen_local_port_pool(&workspace)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_LISTENING_PORTS", "8000")
+        .env("FIXTURE_LISTENING_PROCESS", "fixture-listener,4242")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    assert_eq!(
+        plan["server"]["placement"]["unavailable_ports"]["local"][0]["holder"],
+        serde_json::json!({ "kind": "listening_socket", "process": "pid 4242 (fixture-listener)" })
+    );
+    Ok(())
+}
+
+/// Pool machines are observed in order until one fits, so an unreachable
+/// later machine — an expired host — does not fail a pool whose first
+/// machine can hold the server ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn a_pool_stops_observing_at_the_first_machine_that_fits() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[machines.expired]\nhost = \"expired.example\"\nworkspace = \"/remote/workspace\"\nports = [8000]\ndevices = [0, 1]\nlaunch = { kind = \"ssh\", target = \"expired-host\" }\n\n[placements.local]\nmachines = [\"local\", \"expired\"]\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_NVIDIA_SMI_ERROR_ON", "expired-host")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        plan["server"]["roles"][0]["replicas"][0]["ranks"][0]["machine"],
+        "local"
+    );
+    Ok(())
+}

@@ -68,6 +68,25 @@ pub(crate) fn now_unix_ms() -> Result<u64, InferlabError> {
         })
 }
 
+/// An operator stop that finalized a record whose controller was gone
+/// ([[RFC-0005:C-EVIDENCE]]): `forced` when `--force` overrode a held
+/// controller lock.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OperatorStopEvidence {
+    pub(crate) forced: bool,
+}
+
+impl OperatorStopEvidence {
+    pub(crate) fn message(&self) -> &'static str {
+        if self.forced {
+            "stopped by the operator with --force over a held controller lock"
+        } else {
+            "stopped by the operator after its controller was gone"
+        }
+    }
+}
+
 /// The lenient version header every record family decodes before its strict
 /// parse: only the version, no field policy, so an old record reaches the
 /// version gate even when its body predates the current record shape.

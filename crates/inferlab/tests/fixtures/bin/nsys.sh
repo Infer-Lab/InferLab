@@ -1,4 +1,7 @@
 #!/bin/sh
+# Fake `nsys` for every test harness: managed collection launch, start,
+# session listing, and stop as Nsight Systems 2026.6 behaves for InferLab;
+# like the real launcher, `launch` starts its target in a new session.
 set -eu
 operation="$1"
 shift
@@ -10,9 +13,19 @@ if [ "$operation" = launch ]; then
     case "$1" in
       --session-new) shift 2 ;;
       -*) shift ;;
-      *) exec "$@" ;;
+      *) break ;;
     esac
   done
+  # Like the real launcher, start the target in a new session, outside this
+  # process group, forward SIGTERM to it, and wait for it to exit.
+  setsid "$@" &
+  target=$!
+  trap 'kill -TERM "$target" 2>/dev/null' TERM
+  status=0
+  while kill -0 "$target" 2>/dev/null; do
+    wait "$target" && status=0 || status=$?
+  done
+  exit "$status"
 elif [ "$operation" = start ]; then
   output=
   count=1

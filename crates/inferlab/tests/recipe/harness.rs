@@ -98,14 +98,22 @@ impl TestWorkspace {
             ),
         )?;
         ports.release();
-        write_executable(&bin.join("pixi"), PIXI)?;
+        use crate::support::FakeTool;
+        crate::support::install_fake_tools(
+            &bin,
+            &[
+                FakeTool::Pixi,
+                FakeTool::Ssh,
+                FakeTool::Ss,
+                FakeTool::Nsys,
+                FakeTool::NvidiaSmi,
+                FakeTool::Python,
+            ],
+        )?;
         write_executable(&bin.join("inferlab-adapter-vllm"), ADAPTER)?;
         write_executable(&bin.join("fixture-server"), FIXTURE_SERVER)?;
-        write_executable(&bin.join("ssh"), SSH)?;
-        write_executable(&bin.join("nsys"), NSYS)?;
         write_executable(&bin.join("fixture-eval-client"), EVAL_CLIENT)?;
         write_executable(&bin.join("fixture-bench-client"), BENCH_CLIENT)?;
-        write_executable(&bin.join("nvidia-smi"), NVIDIA_SMI)?;
         let data_home = root.path().join("data");
         let mut path = OsString::from(&bin);
         path.push(":");
@@ -248,10 +256,6 @@ impl TestWorkspace {
         self.root.path()
     }
 
-    pub(crate) fn bin(&self) -> &Path {
-        &self.bin
-    }
-
     pub(crate) fn bench_marker(&self) -> &Path {
         &self.bench_marker
     }
@@ -292,41 +296,10 @@ fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
     }
 }
 
-const PIXI: &str = include_str!("../fixtures/bin/pixi.sh");
-
-const SSH: &str = r#"#!/bin/sh
-while [ "$1" != -- ]; do shift; done
-shift
-target="$1"
-shift
-if [ "$1" = cat ]; then
-  printf '%s logs\n' "$target" >> "$FAKE_SSH_EVENTS"
-  eval "exec cat -- $3"
-fi
-command="$3"
-case "$command" in
-  *INFERLAB_LAUNCH_FILE*) operation=materialize ;;
-  *INFERLAB_PREFLIGHT*) operation=preflight ;;
-  *INFERLAB_HANDLE*) operation=launch ;;
-  *INFERLAB_CLEANUP*) operation=cleanup ;;
-  *INFERLAB_HARDWARE*) operation=hardware ;;
-  *INFERLAB_DEVICE_RESIDUAL*) operation=residual ;;
-  *) operation=status ;;
-esac
-printf '%s %s\n' "$target" "$operation" >> "$FAKE_SSH_EVENTS"
-printf 'fixture login banner\n'
-eval "exec bash -c $command"
-"#;
-
 const ADAPTER: &str = include_str!("../fixtures/bin/recipe-adapter.py");
 
 const FIXTURE_SERVER: &str = include_str!("../fixtures/bin/recipe-server.py");
 
-const NSYS: &str = include_str!("../fixtures/bin/recipe-nsys.sh");
-
 const EVAL_CLIENT: &str = include_str!("../fixtures/bin/recipe-eval-client.py");
 
 const BENCH_CLIENT: &str = include_str!("../fixtures/bin/bench-client.py");
-
-/// Fixture GPU inventory in nvidia-smi's `csv,noheader,nounits` row shape.
-const NVIDIA_SMI: &str = include_str!("../fixtures/bin/recipe-nvidia-smi.sh");

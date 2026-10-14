@@ -364,6 +364,59 @@ declared node is absent there or has no CPUs, or when a host launch's machine
 lacks `numactl`; the list must be nonempty and must not repeat a node. Leave
 it unset for a machine whose devices span NUMA nodes.
 
+Servers on one host can share one machine binding, its devices, and its port
+pool. Resolution, dry-run included, observes candidate machines in placement
+order until one fits: on each launch path it lists the TCP sockets listening
+there with `ss -Hltnp` (iproute2, which must be on the launch machine's
+`PATH`), reads which devices report compute applications with the same
+`nvidia-smi` probe the launch-time device check uses, and counts what the
+workspace's records hold there. A starting server record holds its ports and
+devices; a running one holds its ports, its devices being visible as compute
+applications; a running recipe whose server record does not yet exist holds
+both. Finished records, and records written by an earlier record version, hold
+nothing. Pool allocation then takes the first remaining devices and ports in
+declared order, and the resolved placement lists each skipped one under
+`unavailable_devices` or `unavailable_ports` with its holder: a compute
+application, a listening socket with its process when visible, or the record
+that holds it together with the `serve stop` or `recipe stop` command that
+releases it — see
+[Stopping a run](serving-and-recipes.md#stopping-a-run). Too few free devices
+fails resolution naming the holders; it does not wait. A launch path that
+cannot be read fails resolution naming the machine. Launches in one workspace
+take turns observing and allocating; a launch that waits for its turn names
+the launch it waits on and ends on Ctrl+C.
+
+One pool placement per host is then enough for concurrent servers of any
+size:
+
+```toml
+[machines.shared]
+host = "shared.example"
+devices = [0, 1, 2, 3, 4, 5, 6, 7]
+ports = [8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007]
+
+[placements.shared]
+machines = ["shared"]
+```
+
+A second TP2 server started while the first holds devices 0 and 1 receives 2
+and 3, and its own ports. To pin a server to particular devices — for NUMA or
+interconnect topology — bind them explicitly; explicit devices are never
+moved and face only the launch-time device check, an explicit `endpoint_port`
+that is held fails resolution, and `--wait-for-devices` can wait for explicit
+devices to free:
+
+```toml
+[placements.shared-high.roles.serve]
+machine = "shared"
+devices = [4, 5, 6, 7]
+```
+
+Launches from one workspace take their devices and ports one at a time; a
+launch from another workspace or user that has not yet started its processes
+is not seen, and a collision with it fails at the launch-time device check or
+at bind.
+
 A machine with `launch = { kind = "ssh", target = "..." }` runs its processes
 through noninteractive SSH (`BatchMode`), so authentication must not prompt.
 Remote commands run in a login shell, whose initialization must put `pixi`, and
@@ -470,6 +523,38 @@ two or more machines; use a `replicas` list only when the role has two or more
 replicas. Replica and rank numbers are derived from list order. The derived
 `gateway` placement is instead one process-only binding and accepts only one
 direct `machine`, an empty `devices` list, and an optional `endpoint_port`.
+
+## Local definitions
+
+Experiment-only definitions — a Bench over a private corpus, a capture recipe,
+a server variant with a debug hook — belong in git-ignored fragments under
+`.inferlab/workspace.local.d/*.toml` rather than untracked `workspace.d`
+files, which dirty the workspace and block `image build`. Add the directory to
+`.gitignore`; InferLab rejects it otherwise:
+
+```gitignore
+.inferlab/local.toml
+.inferlab/workspace.local.d/
+```
+
+A local fragment uses the `workspace.d` fragment format but may declare only
+`models`, `servers`, `evals`, `benches`, `workload_suites`, and `recipes`. It
+only adds: redeclaring an identifier the committed workspace declares fails
+load naming both files, and committed definitions validate without local ones,
+so they can never depend on them. Local definitions compose into `serve
+start`, `recipe run`, `bench`, and their dry runs, stay outside the source
+digest and dirty marker, and need no copy on remote launch machines, because
+definitions resolve on the controller; a file a local definition makes a remote
+process read, such as a `PYTHONPATH` entry, must still exist there. Each
+record names the local files that composed under
+`workspace.local_definitions`, with their SHA-256 digests, and sets
+`workspace.revision_reproducible` to false, since the commit alone no longer
+reproduces the run. `image build` and `run` never load local definitions, so
+an image validation recipe must be committed. `workspace show`, the TUI, and the
+web console show committed definitions only, and the web console's launch forms
+offer only those; launch a local definition from the CLI, with `--detach` when
+the run must outlive the session. The directory and its files must
+stay git-ignored and untracked.
 
 ## Workload suites and recipes
 

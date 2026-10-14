@@ -45,7 +45,7 @@ pub fn cleanup_target_agent(
 ) -> ProfilerCleanupRecord {
     let started = Instant::now();
     let strategy = strategy(target);
-    let pattern = format!("nsys --start-agent --session-name {}", target.session);
+    let pattern = agent_discovery_pattern(&target.session);
     let discovery_bound = OperationBound::finite(PROFILER_AGENT_DISCOVERY_DEADLINE);
     let output = target_output(
         target,
@@ -191,6 +191,14 @@ where
         verified,
         errors,
     }
+}
+
+/// The `pgrep -f` pattern naming one session's agent. The bracketed first
+/// letter still matches the agent's `nsys --start-agent` command line but not
+/// the literal pattern text, so the shell running the discovery — whose own
+/// command line carries that text — never matches itself.
+fn agent_discovery_pattern(session: &str) -> String {
+    format!("[n]sys --start-agent --session-name {session}")
 }
 
 fn cleanup_error(
@@ -362,9 +370,22 @@ fn target_pid_alive(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProfilerCleanupCommandError, terminate_agents};
+    use super::{ProfilerCleanupCommandError, agent_discovery_pattern, terminate_agents};
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
+
+    /// The SSH discovery runs inside a remote shell whose own command line
+    /// contains the pattern; it must not match itself and report a phantom
+    /// agent whose termination then fails.
+    #[test]
+    fn agent_discovery_does_not_match_its_own_shell() -> Result<(), std::io::Error> {
+        let pattern = agent_discovery_pattern("inferlab-fixture-no-such-session");
+        let status = std::process::Command::new("sh")
+            .args(["-c", &format!("pgrep -f '{pattern}'")])
+            .status()?;
+        assert_eq!(status.code(), Some(1), "pattern {pattern:?} matched");
+        Ok(())
+    }
 
     #[test]
     fn inconclusive_liveness_during_term_grace_escalates_to_kill() {

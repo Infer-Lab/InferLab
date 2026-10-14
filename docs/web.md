@@ -96,7 +96,10 @@ interpretation. A Bench record's detail offers **Compare** to start from it.
 **Jobs** launches `serve start`, `serve stop`, `recipe run`, `bench`, and
 `scratchpad note`, and nothing else. Each form has typed fields: definitions
 and running server records are chosen from the workspace, and the case,
-placement, topic, and record references are optional. The console builds the
+placement, topic, and record references are optional. The forms offer the
+committed definitions only; launch a definition from
+`.inferlab/workspace.local.d/` with the CLI, adding `--detach` when the run
+must outlive the session, and it appears here as a job. The console builds the
 command for its own executable with `--workspace` set to the workspace root.
 Field values are passed as values, never parsed as options or by a shell.
 
@@ -109,12 +112,17 @@ not bind it.
 A launch creates `.inferlab/runtime/jobs/<job-id>/` in the workspace. It holds
 the launched command, its start time, the process's host, boot, process
 identifier, and start time, its stdout and stderr as separate logs, and its exit
-status once it ends. The job runs detached in its own process group, so
+status once it ends, and, if the command creates a record, the identifier and
+directory of the first one. A job's detail links to that record, and a job
+launched from the CLI is listed under that record, or under its job identifier
+until the record exists. The job runs detached in its own process group, so
 stopping or restarting the console does not stop it, and a restarted console
 finds every job again from its directory. A launch that cannot start shows its
 error and leaves no job directory. The console does not queue or deduplicate
 launches; the CLI's own locks govern concurrent work. Job files are run-time
-conveniences rather than evidence, and the console never deletes them.
+conveniences rather than evidence, and the console never deletes them. Jobs
+launched from the CLI with `--detach` use the same directories and appear here
+too.
 
 A job reads as **running**, as **exited** with its exit code, as
 **interrupted** or ended by another signal, as **ended, status unknown** when

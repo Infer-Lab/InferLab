@@ -17,7 +17,8 @@ inferlab workspace show --json
 
 The first form validates and browses the merged catalog. The JSON form emits
 the canonical merged public definition for another tool. Neither reads local
-bindings. The global `--workspace <DIR>` selects a root explicitly; otherwise
+bindings or local definitions; `serve start`, `recipe run`, `bench`, and their
+dry runs are what validate local definitions. The global `--workspace <DIR>` selects a root explicitly; otherwise
 InferLab searches the current directory and its parents.
 
 ## Stack Lifecycle

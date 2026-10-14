@@ -45,7 +45,8 @@ you can inspect, compare, and reproduce.
 - **Profiling** — attach managed Nsight Systems collection or engine-native
   traces to selected workloads.
 - **Source identity** — records carry the workspace revision and a source
-  digest; a clean-workspace run is reproducible from a fresh checkout.
+  digest; a run from a clean workspace with no local definitions is
+  reproducible from a fresh checkout.
 - **Operator journal** — an append-only scratchpad on the same time axis as
   the records.
 - **View-only TUI** — one responsive workspace console for declared definitions,

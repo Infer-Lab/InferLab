@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
@@ -22,7 +22,7 @@ impl TestHome {
         let data = root.path().join("data");
         let log = root.path().join("pixi.log");
         fs::create_dir_all(&bin)?;
-        write_executable(&bin.join("pixi"), PIXI)?;
+        crate::support::install_fake_tools(&bin, &[crate::support::FakeTool::Pixi])?;
         Ok(Self {
             root,
             bin,
@@ -52,7 +52,7 @@ impl TestHome {
             .current_dir(self.root.path())
             .env("PATH", path)
             .env("XDG_DATA_HOME", &self.data)
-            .env("PIXI_FIXTURE_LOG", &self.log)
+            .env("FAKE_PIXI_INSTALL_LOG", &self.log)
             .envs(env.iter().copied())
             .args(extra)
             .args(["toolchain", "install"]);
@@ -229,59 +229,3 @@ fn host_platform() -> &'static str {
         "linux-x86_64"
     }
 }
-
-fn write_executable(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
-    crate::support::write_executable(path, contents)
-}
-
-const PIXI: &str = r#"#!/bin/sh
-set -eu
-if [ "$1" = info ] && [ "$2" = --json ]; then
-  case "$(uname -m)" in
-    x86_64) detected_platform=linux-64 ;;
-    aarch64) detected_platform=linux-aarch64 ;;
-    *) detected_platform=unsupported ;;
-  esac
-  if [ "${PIXI_FIXTURE_GLIBC:-1}" = 1 ]; then
-    virtual_packages='["__unix=0=0", "__linux=6.11.0=0", "__glibc=2.35=0"]'
-  else
-    virtual_packages='["__unix=0=0", "__linux=6.11.0=0"]'
-  fi
-  printf '{"platform":"%s","virtual_packages":%s}\n' \
-    "${PIXI_FIXTURE_PLATFORM:-$detected_platform}" "$virtual_packages"
-  exit 0
-fi
-if [ "$1" != install ] || [ "$2" != --manifest-path ] || [ "$4" != --all ] || [ "$5" != --locked ]; then
-  printf 'unexpected pixi fixture arguments: %s\n' "$*" >&2
-  exit 2
-fi
-manifest="$3"
-prefix="$(dirname "$manifest")"
-printf '%s\n' "$*" >> "$PIXI_FIXTURE_LOG"
-mkdir -p "$prefix/.pixi/envs/eval/bin" "$prefix/.pixi/envs/bench/bin"
-cat > "$prefix/.pixi/envs/eval/bin/python" <<'PYTHON'
-#!/bin/sh
-if [ "$2" = --handshake ]; then
-  printf '{"lm_eval_version":"0.4.13"}\n'
-  exit 0
-fi
-printf 'unexpected python fixture arguments: %s\n' "$*" >&2
-exit 2
-PYTHON
-cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
-#!/bin/sh
-if [ "$2" = --handshake ]; then
-  printf '{"aiperf_version":"0.13.0+inferlab.3","transformers_version":"5.12.1"}\n'
-  exit 0
-fi
-printf 'unexpected python fixture arguments: %s\n' "$*" >&2
-exit 2
-PYTHON
-chmod +x "$prefix/.pixi/envs/eval/bin/python" "$prefix/.pixi/envs/bench/bin/python"
-# The image-packaging tools print what the release-pinned tools print.
-mkdir -p "$prefix/.pixi/envs/image/bin"
-printf '%s\n' '#!/bin/sh' 'printf "patchelf 0.19.2\n"' > "$prefix/.pixi/envs/image/bin/patchelf"
-printf '%s\n' '#!/bin/sh' 'printf "cuobjdump: NVIDIA (R) fat binary listing tool\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Sep_01_08:45:21_PDT_2026\nCuda compilation tools, release 13.4, V13.4.92\nBuild cuda_13.4.r13.4/compiler.38855100_0\n"' > "$prefix/.pixi/envs/image/bin/cuobjdump"
-printf '%s\n' '#!/bin/sh' 'if [ "$1" = -m ] && [ "$2" = wheel ] && [ "$3" = version ]; then printf "wheel 0.48.0\n"; exit 0; fi' 'printf "unexpected python fixture arguments: %s\n" "$*" >&2' 'exit 2' > "$prefix/.pixi/envs/image/bin/python"
-chmod +x "$prefix/.pixi/envs/image/bin/patchelf" "$prefix/.pixi/envs/image/bin/cuobjdump" "$prefix/.pixi/envs/image/bin/python"
-"#;

@@ -2,6 +2,7 @@
 import http.server
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -39,6 +40,12 @@ def register_with_reaper():
 
 
 register_with_reaper()
+if os.environ.get("FIXTURE_SERVER_PID_FILE"):
+    with open(os.environ["FIXTURE_SERVER_PID_FILE"], "w") as pid_file:
+        pid_file.write(f"{os.getpid()}\n")
+if os.environ.get("FIXTURE_IGNORE_TERM"):
+    # A framework still busy starting up can outlast the termination grace.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 time.sleep(float(os.environ.get("FIXTURE_READY_DELAY_SECONDS", "0")))
 if os.environ.get("FIXTURE_EXIT_BEFORE_READY"):
     sys.exit(7)

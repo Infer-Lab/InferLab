@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-14
+
+### Added
+
+- Concurrent servers can share one host's machine binding, devices, and port
+  pool ([[ADR-0065]]). Before allocating from a pool, resolution observes
+  each candidate machine in placement order until one fits: the TCP ports
+  listening there, the devices reporting compute applications, and what the
+  workspace's records hold — a starting server its ports and devices, a
+  running server its ports, a running recipe both until its server record
+  exists. It takes the first free ports and devices in declared order and
+  lists each skipped one under `unavailable_ports` or `unavailable_devices`
+  with its holder. A listening socket names its process when `ss` shows it,
+  and a holding record names its kind, status, and the `serve stop` or
+  `recipe stop` command that releases it. Too few free devices, or a held
+  explicit `endpoint_port`, fails resolution naming the holders; explicitly
+  bound devices are never moved. Launches in one workspace take turns
+  allocating, and a launch waiting for its turn names the launch it waits on
+  and ends on Ctrl+C. Launch machines need `ss` (iproute2) on `PATH`.
+- `serve start` and `recipe run` accept `--wait-for-devices`: a launch whose
+  assigned devices are occupied waits for them to free instead of failing,
+  showing the occupants while it waits and recording the wait in
+  `device_wait`. It is not a queue; runs waiting on the same devices can start
+  together.
+- `serve start`, `recipe run`, and `bench` accept `--detach` ([[ADR-0066]]):
+  the command runs as a web-console job that outlives the invoking session,
+  and the invocation returns once the command has created its first record,
+  printing the job and record identities. `inferlab job interrupt <job>` interrupts such a job as a
+  terminal Ctrl+C would. Each job directory now also names the first record
+  its command created, and the web console's job detail links to it.
+- `recipe stop <record>` stops a recipe from any shell or host sharing the
+  workspace, and `serve stop` now also stops a server that is still starting.
+  While the run's controlling process lives, the command names it (host, PID,
+  command), asks it to stop, and waits for it to finalize the record as Ctrl+C
+  would; when the controller is gone, the command stops the run's server and
+  finalizes the record as stopped by the operator (`operator_stop`). `--force`
+  proceeds past a controller lock whose host has died.
+- Git-ignored `.inferlab/workspace.local.d/*.toml` fragments hold
+  experiment-only models, servers, Evals, Benches, workload suites, and
+  recipes without dirtying the workspace or blocking `image build`. They only
+  add to the committed workspace, compose into `serve start`, `recipe run`,
+  and `bench`, need no copy on remote launch machines, and each record names
+  the local files that composed with their digests. The web console's launch
+  forms offer committed definitions only; launch local ones from the CLI.
+
+### Changed
+
+- Server records move to schema version 14, which records the ownership
+  marker in each runtime handle, the marked-process sweep in each cleanup,
+  the unavailable pool ports and devices observed during resolution, the
+  device wait, operator stops, and the local definition files that composed.
+  Recipe records move to schema version 5 and workload records to 24 for the
+  local definition files and operator stops.
+  Stop servers and recipes started by an earlier InferLab before upgrading:
+  their records use an earlier schema, which this release neither reads nor
+  counts as holding ports or devices.
+
+### Fixed
+
+- Interrupting or stopping a server under managed Nsight Systems collection
+  no longer leaves the server running. `nsys launch` starts the server in a
+  new session, outside the process group InferLab stopped, so a server that
+  did not exit within the termination grace — for example one still starting
+  up — kept its GPUs while the record claimed verified cleanup and freed
+  devices. Every server process now carries an `INFERLAB_SERVER_PROCESS`
+  ownership marker that its descendants inherit, and cleanup terminates every
+  marked process on the launch machine and verifies none remains
+  ([[ADR-0064]]).
+- Nsight Systems agent cleanup over SSH no longer matches its own discovery
+  shell, which recorded a failed termination for a process that was never an
+  agent.
+- The TUI and web console show how long a starting server, including one
+  waiting for its devices, has been under way instead of no duration.
+
 ## [0.21.1] - 2026-10-07
 
 ### Added

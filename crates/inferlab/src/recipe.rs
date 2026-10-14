@@ -1,7 +1,10 @@
 use crate::InferlabError;
+use crate::controller::Controller;
 use crate::execution::ResolvedExecution;
 use crate::progress::{Phase, Progress};
-use crate::record::{RECORD_FILE, RECORDS_DIR, RecordIdentity, now_unix_ms, record_id};
+use crate::record::{
+    OperatorStopEvidence, RECORD_FILE, RECORDS_DIR, RecordIdentity, now_unix_ms, record_id,
+};
 use crate::server::{self, ServerRecord, ServerStatus};
 use crate::workload::{
     self, DataAssetConsumerKind, DataAssetPreparationAttempt, WorkloadDataAssetEvidence,
@@ -67,18 +70,25 @@ pub(crate) struct RecipeRecord {
     pub source_preparation_completed: bool,
     pub serving_launch_attempted: bool,
     pub source_preparation_timing: Option<OperationTimingEvidence>,
+    /// Present when `recipe stop` finalized the record after its controller
+    /// was gone ([[RFC-0005:C-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_stop: Option<crate::record::OperatorStopEvidence>,
 }
 
 impl RecipeRecord {
     /// Bumped with `ServerRecord::SCHEMA_VERSION` on the protocol-v7 to v8
     /// hard cut: version-3 records (products 0.10 and 0.11) embed a
-    /// pre-cut resolved execution and record references.
-    const SCHEMA_VERSION: u32 = 4;
+    /// pre-cut resolved execution and record references. Version 5 names
+    /// the local workspace definition files composed into the run
+    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+    pub(crate) const SCHEMA_VERSION: u32 = 5;
 }
 
 pub(crate) fn run(
     root: &Path,
     resolved: ResolvedExecution,
+    allocation: Option<crate::resolve::occupancy::AllocationLock>,
     progress: &Progress,
 ) -> Result<RecipeRecord, InferlabError> {
     interrupt::prepare().map_err(|source| InferlabError::ServerInterrupt { source })?;
@@ -90,6 +100,9 @@ pub(crate) fn run(
                 message: "closed-loop recipe has no resolved measurements".to_owned(),
             })?;
     let mut session = RecipeRecordSession::begin(root, &resolved)?;
+    // The running recipe record carries the server allocation until the
+    // server record does ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    drop(allocation);
     progress.phase(Phase::named("record created").record(
         session.record().id.clone(),
         root.join(RECORDS_DIR).join(&session.record().id),
@@ -299,7 +312,7 @@ pub(crate) fn run(
 
     if server_started {
         progress.phase(Phase::named("server cleanup"))?;
-        match server::stop(root, &server_id, progress) {
+        match server::stop(root, &server_id, false, progress) {
             Ok(record) => {
                 let (verified, cleanup_error) = server_cleanup_summary(&record);
                 session.record_mut().server.status = Some(record.status);
@@ -373,6 +386,120 @@ pub(crate) fn run(
     Ok(session.into_record())
 }
 
+/// Stop one recipe record ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). A terminal
+/// record is reported unchanged. While its controller lives the stop is a
+/// request the controller honors; once the controller is gone — or `--force`
+/// overrides its lock — this command stops the recipe's server and
+/// finalizes the record as failed and stopped by the operator.
+pub(crate) fn stop(
+    root: &Path,
+    id: &str,
+    force: bool,
+    progress: &Progress,
+) -> Result<RecipeRecord, InferlabError> {
+    let record = load_record(root, id)?;
+    if record.status != RecipeStatus::Running {
+        return Ok(record);
+    }
+    let record_dir = root.join(RECORDS_DIR).join(id);
+    let (record, forced, _controller) = match crate::controller::inspect(&record_dir)? {
+        Controller::Gone(lock) => (record, false, Some(lock)),
+        Controller::Running(holder) if force => {
+            progress.phase(
+                Phase::named("stopping past the record's controller")
+                    .current_item(crate::controller::describe(holder.as_ref())),
+            )?;
+            (record, true, None)
+        }
+        Controller::Running(holder) => {
+            progress.phase(
+                Phase::named("stop requested of the record's controller")
+                    .current_item(crate::controller::describe(holder.as_ref())),
+            )?;
+            crate::controller::request_stop(&record_dir)?;
+            let released = crate::controller::wait_for_release(&record_dir, progress)?;
+            let record = load_record(root, id)?;
+            if record.status != RecipeStatus::Running {
+                return Ok(record);
+            }
+            // The controller exited without finalizing the record.
+            (record, false, Some(released))
+        }
+    };
+    let operator_stop = OperatorStopEvidence { forced };
+    let mut session = RecipeRecordSession {
+        root: root.to_path_buf(),
+        record,
+        _controller: None,
+    };
+    let server_id = session.record().server.id.clone();
+    if root
+        .join(RECORDS_DIR)
+        .join(&server_id)
+        .join(RECORD_FILE)
+        .is_file()
+    {
+        progress.phase(Phase::named("server cleanup"))?;
+        let cleanup = match server::stop(root, &server_id, force, progress) {
+            Ok(record) => {
+                let (verified, error) = server_cleanup_summary(&record);
+                session.record_mut().server.status = Some(record.status);
+                RecipeCleanupEvidence {
+                    server_record_id: server_id,
+                    status: Some(record.status),
+                    verified,
+                    error,
+                }
+            }
+            Err(error) => {
+                session
+                    .record_mut()
+                    .errors
+                    .push(format!("server cleanup failed: {error}"));
+                RecipeCleanupEvidence {
+                    server_record_id: server_id,
+                    status: Some(ServerStatus::Failed),
+                    verified: false,
+                    error: Some(error.to_string()),
+                }
+            }
+        };
+        session.record_mut().cleanup = Some(cleanup);
+    }
+    session
+        .record_mut()
+        .errors
+        .push(operator_stop.message().to_owned());
+    session.record_mut().interrupted = true;
+    session.record_mut().operator_stop = Some(operator_stop);
+    session.finish(RecipeStatus::Failed)?;
+    Ok(session.into_record())
+}
+
+fn load_record(root: &Path, id: &str) -> Result<RecipeRecord, InferlabError> {
+    crate::record::validate_record_id("recipe record", id)?;
+    let path = root.join(RECORDS_DIR).join(id).join(RECORD_FILE);
+    let bytes = fs::read(&path).map_err(|source| InferlabError::RecordIo {
+        path: path.clone(),
+        source,
+    })?;
+    let header: crate::record::SchemaVersionHeader =
+        serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode {
+            path: path.clone(),
+            source,
+        })?;
+    if header.schema_version != RecipeRecord::SCHEMA_VERSION {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "recipe record {id:?} has unsupported schema version {}; expected {}",
+                header.schema_version,
+                RecipeRecord::SCHEMA_VERSION
+            ),
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode { path, source })
+}
+
 fn recipe_workload_data_assets(
     record: &RecipeRecord,
     measurements: &crate::workload::MeasurementPlan,
@@ -412,6 +539,10 @@ fn server_cleanup_summary(record: &ServerRecord) -> (bool, Option<String>) {
 struct RecipeRecordSession {
     root: PathBuf,
     record: RecipeRecord,
+    /// The running process's control of the record, taken before the record
+    /// exists and held until it is finalized
+    /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]); absent for a stop.
+    _controller: Option<crate::controller::ControllerGuard>,
 }
 
 impl RecipeRecordSession {
@@ -438,9 +569,10 @@ impl RecipeRecordSession {
         )?;
         let record_dir = records_dir.join(&id);
         fs::create_dir(&record_dir).map_err(|source| InferlabError::RecordIo {
-            path: record_dir,
+            path: record_dir.clone(),
             source,
         })?;
+        let controller = crate::controller::ControllerGuard::acquire(&record_dir)?;
         let server_record_id = record_id(
             RecordIdentity::Serve {
                 server: &resolved.server.id,
@@ -473,10 +605,12 @@ impl RecipeRecordSession {
             source_preparation_completed: false,
             serving_launch_attempted: false,
             source_preparation_timing: None,
+            operator_stop: None,
         };
         let session = Self {
             root: root.to_path_buf(),
             record,
+            _controller: Some(controller),
         };
         session.rewrite()?;
         Ok(session)

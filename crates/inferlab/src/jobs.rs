@@ -16,13 +16,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub(super) const JOBS_DIR: &str = concat!(state_dir!(), "/runtime/jobs");
+pub(crate) const JOBS_DIR: &str = concat!(state_dir!(), "/runtime/jobs");
 const JOB_FILE: &str = "job.json";
 const PROCESS_FILE: &str = "process.json";
 const EXIT_FILE: &str = "exit.json";
-pub(super) const STDOUT_LOG: &str = "stdout.log";
-pub(super) const STDERR_LOG: &str = "stderr.log";
-const SCHEMA_VERSION: u32 = 1;
+const RECORD_FILE: &str = "record.json";
+/// Names a job's directory to its command, which links its first record
+/// there ([[RFC-0012:C-ACTIONS]]).
+const JOB_DIR_ENV: &str = "INFERLAB_JOB_DIR";
+const DETACH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const STDOUT_LOG: &str = "stdout.log";
+pub(crate) const STDERR_LOG: &str = "stderr.log";
+/// Version 2 adds the working directory of a CLI-detached job; readers
+/// accept both, since a version-1 file is a version-2 file without it.
+const SCHEMA_VERSION: u32 = 2;
 /// How long a launch waits for the supervisor to confirm the CLI started.
 const START_DEADLINE: Duration = Duration::from_secs(30);
 const SIGINT: i32 = 2;
@@ -30,24 +37,36 @@ const SIGINT: i32 = 2;
 /// What the service records before the supervisor starts.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JobSpec {
-    pub(super) schema_version: u32,
-    pub(super) action: String,
-    pub(super) argv: Vec<String>,
-    pub(super) started_unix_ms: u64,
+pub(crate) struct JobSpec {
+    pub(crate) schema_version: u32,
+    pub(crate) action: String,
+    pub(crate) argv: Vec<String>,
+    pub(crate) started_unix_ms: u64,
+    /// The working directory of a CLI-detached invocation, so its relative
+    /// paths resolve as they would have; console jobs run at the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cwd: Option<PathBuf>,
+}
+
+/// The first record a job's command created ([[RFC-0012:C-ACTIONS]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JobRecord {
+    pub(crate) record_id: String,
+    pub(crate) record_dir: PathBuf,
 }
 
 /// How the CLI process ended, as its supervisor observed it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JobExit {
-    pub(super) exit_code: Option<i32>,
-    pub(super) signal: Option<i32>,
-    pub(super) ended_unix_ms: u64,
+pub(crate) struct JobExit {
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) signal: Option<i32>,
+    pub(crate) ended_unix_ms: u64,
 }
 
 /// What the page may say about a job; it never infers an outcome.
-pub(super) enum JobState {
+pub(crate) enum JobState {
     Running,
     Exited(JobExit),
     Unknown,
@@ -56,7 +75,7 @@ pub(super) enum JobState {
 }
 
 impl JobState {
-    pub(super) fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::Running => "running".to_owned(),
             Self::Exited(JobExit {
@@ -77,17 +96,19 @@ impl JobState {
     }
 }
 
-pub(super) struct Job {
-    pub(super) id: String,
-    pub(super) directory: PathBuf,
-    pub(super) spec: Option<JobSpec>,
-    pub(super) producer: Option<ProducerIdentity>,
-    pub(super) state: JobState,
+pub(crate) struct Job {
+    pub(crate) id: String,
+    pub(crate) directory: PathBuf,
+    pub(crate) spec: Option<JobSpec>,
+    pub(crate) producer: Option<ProducerIdentity>,
+    pub(crate) state: JobState,
+    /// The first record the job's command created, once it exists.
+    pub(crate) record: Option<JobRecord>,
 }
 
 /// Every job of a workspace, newest first, read from its job directories so
 /// that a restarted service finds them again.
-pub(super) fn list(root: &Path) -> Vec<Job> {
+pub(crate) fn list(root: &Path) -> Vec<Job> {
     let Ok(entries) = fs::read_dir(root.join(JOBS_DIR)) else {
         return Vec::new();
     };
@@ -105,7 +126,7 @@ pub(super) fn list(root: &Path) -> Vec<Job> {
     jobs
 }
 
-pub(super) fn read(root: &Path, id: &str) -> Option<Job> {
+pub(crate) fn read(root: &Path, id: &str) -> Option<Job> {
     if crate::record::validate_record_id("job", id).is_err() {
         return None;
     }
@@ -115,6 +136,7 @@ pub(super) fn read(root: &Path, id: &str) -> Option<Job> {
     }
     let spec = read_json::<JobSpec>(&directory.join(JOB_FILE));
     let producer = read_json::<ProducerIdentity>(&directory.join(PROCESS_FILE));
+    let record = read_json::<JobRecord>(&directory.join(RECORD_FILE));
     let state = match read_json::<JobExit>(&directory.join(EXIT_FILE)) {
         Some(exit) => JobState::Exited(exit),
         None if producer.as_ref().is_some_and(is_live) => JobState::Running,
@@ -132,6 +154,7 @@ pub(super) fn read(root: &Path, id: &str) -> Option<Job> {
         spec,
         producer,
         state,
+        record,
     })
 }
 
@@ -154,11 +177,12 @@ fn is_live(producer: &ProducerIdentity) -> bool {
 
 /// Create the job directory and start its supervisor. A launch that cannot
 /// start leaves no job directory and returns its error.
-pub(super) fn launch(
+pub(crate) fn launch(
     root: &Path,
     action: &str,
     argv: Vec<String>,
     started_unix_ms: u64,
+    cwd: Option<PathBuf>,
 ) -> Result<String, String> {
     let jobs = root.join(JOBS_DIR);
     fs::create_dir_all(&jobs)
@@ -181,6 +205,7 @@ pub(super) fn launch(
         action: action.to_owned(),
         argv,
         started_unix_ms,
+        cwd,
     };
     match start(&directory, &spec) {
         Ok(()) => Ok(id),
@@ -249,7 +274,7 @@ fn start(directory: &Path, spec: &JobSpec) -> Result<(), String> {
 
 /// Deliver the interrupt a terminal Ctrl+C delivers to the job's process
 /// group, only when the recorded identity is the live process.
-pub(super) fn cancel(job: &Job) -> Result<(), String> {
+pub(crate) fn cancel(job: &Job) -> Result<(), String> {
     let Some(producer) = &job.producer else {
         return Err("the job recorded no process, so nothing was signalled".to_owned());
     };
@@ -302,7 +327,8 @@ pub(crate) fn supervise(directory: &Path) -> Result<(), InferlabError> {
     let root = directory.ancestors().nth(4).unwrap_or(directory);
     let mut child = Command::new(executable)
         .args(arguments)
-        .current_dir(root)
+        .current_dir(spec.cwd.as_deref().unwrap_or(root))
+        .env(JOB_DIR_ENV, directory)
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -340,4 +366,105 @@ pub(crate) fn supervise(directory: &Path) -> Result<(), InferlabError> {
             message: format!("could not record the exit status: {error}"),
         }
     })
+}
+
+/// Link the record this process created into its job directory when it runs
+/// as a job. Only the first record links — a recipe's, before the server and
+/// Bench records it creates — and a failure leaves the run itself unaffected.
+pub(crate) fn link_record(record_id: &str, record_dir: &Path) {
+    let Some(directory) = std::env::var_os(JOB_DIR_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let target = directory.join(RECORD_FILE);
+    if target.exists() {
+        return;
+    }
+    let staged = directory.join(format!("{RECORD_FILE}.{}", std::process::id()));
+    let record = JobRecord {
+        record_id: record_id.to_owned(),
+        record_dir: record_dir.to_path_buf(),
+    };
+    if crate::atomic_json::write(&staged, &record).is_ok() {
+        // A hard link publishes atomically and refuses an existing target,
+        // so the first record wins.
+        let _ = fs::hard_link(&staged, &target);
+    }
+    let _ = fs::remove_file(&staged);
+}
+
+/// What a detached invocation reports once its job's first record exists.
+#[derive(Debug, Serialize)]
+pub(crate) struct DetachedJob {
+    pub(crate) job_id: String,
+    pub(crate) job_dir: PathBuf,
+    pub(crate) stdout: PathBuf,
+    pub(crate) stderr: PathBuf,
+    pub(crate) record_id: String,
+    pub(crate) record_dir: PathBuf,
+}
+
+/// Launch this invocation without `--detach` as a job and wait until its
+/// command links its first record or exits without one
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). The wait is unbounded and ends on the
+/// job's exit or an operator interrupt, which never signals the job.
+pub(crate) fn detach(
+    root: &Path,
+    action: &str,
+    argv: Vec<String>,
+    cwd: PathBuf,
+) -> Result<DetachedJob, InferlabError> {
+    inferlab_runtime::interrupt::prepare()
+        .map_err(|source| InferlabError::ServerInterrupt { source })?;
+    let started = crate::record::now_unix_ms()?;
+    let failure = |job_id: &str, message: String| InferlabError::DetachedJob {
+        job_id: job_id.to_owned(),
+        message,
+    };
+    let job_id = launch(root, action, argv, started, Some(cwd))
+        .map_err(|message| failure("not started", message))?;
+    let job_dir = root.join(JOBS_DIR).join(&job_id);
+    // Diagnostics name the job at once, so an interrupted wait never leaves
+    // a running job without a name.
+    eprintln!(
+        "detached job {job_id} started in {}; waiting for its first record",
+        job_dir.display()
+    );
+    loop {
+        if let Some(record) = read_json::<JobRecord>(&job_dir.join(RECORD_FILE)) {
+            return Ok(DetachedJob {
+                stdout: job_dir.join(STDOUT_LOG),
+                stderr: job_dir.join(STDERR_LOG),
+                job_id,
+                job_dir,
+                record_id: record.record_id,
+                record_dir: record.record_dir,
+            });
+        }
+        if let Some(exit) = read_json::<JobExit>(&job_dir.join(EXIT_FILE)) {
+            let stderr = fs::read_to_string(job_dir.join(STDERR_LOG)).unwrap_or_default();
+            let status = match (exit.exit_code, exit.signal) {
+                (Some(code), _) => format!("exit status {code}"),
+                (None, Some(signal)) => format!("signal {signal}"),
+                (None, None) => "an unknown status".to_owned(),
+            };
+            return Err(failure(
+                &job_id,
+                format!(
+                    "the job in {} ended with {status} before creating a record: {}",
+                    job_dir.display(),
+                    stderr.trim()
+                ),
+            ));
+        }
+        if inferlab_runtime::interrupt::received() {
+            return Err(failure(
+                &job_id,
+                format!(
+                    "stopped waiting for its first record; the job continues in {}",
+                    job_dir.display()
+                ),
+            ));
+        }
+        std::thread::sleep(DETACH_POLL_INTERVAL);
+    }
 }

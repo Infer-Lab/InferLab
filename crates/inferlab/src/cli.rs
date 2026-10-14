@@ -83,6 +83,9 @@ enum Command {
     /// Keep the operator experiment journal.
     #[command(subcommand)]
     Scratchpad(ScratchpadCommand),
+    /// Act on detached jobs of the workspace.
+    #[command(subcommand)]
+    Job(JobCommand),
     /// Manage the InferLab agent plugin on supported agent runtimes.
     #[command(subcommand)]
     Agent(AgentCommand),
@@ -376,7 +379,7 @@ enum ServeCommand {
     /// Show the log paths owned by one managed server record.
     Logs(RecordArgs),
     /// Stop one managed server and finalize its record.
-    Stop(RecordArgs),
+    Stop(StopArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -384,6 +387,9 @@ enum RecipeCommand {
     /// Resolve and run one recipe as a closed loop.
     #[command(long_about = help::RECIPE_RUN, after_long_help = help::RECIPE_RUN_EXAMPLES)]
     Run(RecipeRunArgs),
+    /// Stop one recipe record: ask its controller to stop, or finalize it
+    /// when its controller is gone.
+    Stop(RecipeStopArgs),
 }
 
 #[derive(Debug, Args)]
@@ -427,6 +433,15 @@ struct SelectionArgs {
     /// Resolve and validate without launching a server or running a measurement.
     #[arg(long)]
     dry_run: bool,
+
+    /// Run as a detached job and return once its first record exists.
+    #[arg(long, conflicts_with = "dry_run")]
+    detach: bool,
+
+    /// Wait for occupied assigned devices to free instead of failing the
+    /// launch.
+    #[arg(long)]
+    wait_for_devices: bool,
 }
 
 #[derive(Debug, Args)]
@@ -507,6 +522,28 @@ struct RecordArgs {
 }
 
 #[derive(Debug, Args)]
+struct StopArgs {
+    /// Managed server record identifier returned by `serve start`.
+    id: String,
+
+    /// Stop a starting record even though its controller's lock is held,
+    /// for a controller whose host is gone.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct RecipeStopArgs {
+    /// Recipe record identifier returned by `recipe run`.
+    id: String,
+
+    /// Stop a running record even though its controller's lock is held,
+    /// for a controller whose host is gone.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
 struct BenchArgs {
     /// Bench identifier from the current workspace.
     bench: String,
@@ -526,6 +563,22 @@ struct BenchArgs {
     /// Resolve and validate without executing the Bench.
     #[arg(long)]
     dry_run: bool,
+
+    /// Run as a detached job and return once its record exists.
+    #[arg(long, conflicts_with = "dry_run")]
+    detach: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum JobCommand {
+    /// Interrupt a running job as a terminal Ctrl+C would.
+    Interrupt(JobInterruptArgs),
+}
+
+#[derive(Debug, Args)]
+struct JobInterruptArgs {
+    /// Job identifier returned by --detach or shown by the web console.
+    job: String,
 }
 
 pub fn run(cli: Cli) -> Result<(), InferlabError> {
@@ -589,6 +642,26 @@ pub fn run(cli: Cli) -> Result<(), InferlabError> {
                 Ok(()) => progress_result,
             }
         }
+        Command::Serve(ServeCommand::Start(args)) if args.selection.detach => {
+            detach(workspace.as_deref(), "serve-start")
+        }
+        Command::Recipe(RecipeCommand::Run(args)) if args.selection.detach => {
+            detach(workspace.as_deref(), "recipe-run")
+        }
+        Command::Bench(args) if args.detach => detach(workspace.as_deref(), "bench"),
+        Command::Job(JobCommand::Interrupt(args)) => {
+            let root = discover_workspace(workspace.as_deref())?;
+            let job =
+                crate::jobs::read(&root, &args.job).ok_or_else(|| InferlabError::DetachedJob {
+                    job_id: args.job.clone(),
+                    message: "no such job in this workspace".to_owned(),
+                })?;
+            crate::jobs::cancel(&job).map_err(|message| InferlabError::DetachedJob {
+                job_id: args.job.clone(),
+                message,
+            })?;
+            write_json(&serde_json::json!({ "job_id": args.job, "interrupted": true }))
+        }
         Command::Serve(ServeCommand::Start(args)) => {
             let mode = if args.selection.dry_run {
                 ProgressMode::Delayed
@@ -631,7 +704,15 @@ pub fn run(cli: Cli) -> Result<(), InferlabError> {
             ProgressMode::Immediate,
             |root, progress| {
                 progress.phase(Phase::named("process termination"))?;
-                write_json(&server::stop(root, &args.id, progress)?)
+                write_json(&server::stop(root, &args.id, args.force, progress)?)
+            },
+        ),
+        Command::Recipe(RecipeCommand::Stop(args)) => with_workspace_progress(
+            workspace,
+            "recipe stop",
+            ProgressMode::Immediate,
+            |root, progress| {
+                write_json(&crate::recipe::stop(root, &args.id, args.force, progress)?)
             },
         ),
         Command::Recipe(RecipeCommand::Run(args)) => {
@@ -986,8 +1067,7 @@ fn run_bench_command(
     progress: &Progress,
 ) -> Result<(), InferlabError> {
     progress.phase(Phase::named("resolution and admission"))?;
-    let config = load_workspace_config(root)?;
-    let snapshot = crate::workspace::snapshot_workspace(root, &config)?;
+    let (config, snapshot) = crate::workspace::load_workspace_config_with_local_definitions(root)?;
     let status = server::status(root, &args.serve)?;
     server::require_running(&status)?;
     let mut plan = workload::resolve_manual_bench(
@@ -1045,7 +1125,10 @@ fn run_selection(
     inferlab_runtime::interrupt::prepare()
         .map_err(|source| InferlabError::ServerInterrupt { source })?;
     progress.phase(Phase::named("resolution"))?;
-    let workspace = load_workspace(root.to_path_buf(), local.as_deref())?;
+    let workspace = crate::workspace::load_workspace_with_local_definitions(
+        root.to_path_buf(),
+        local.as_deref(),
+    )?;
     let server_id = match workflow {
         Workflow::ServeStart => target_id.as_str(),
         Workflow::RecipeRun => workspace
@@ -1084,6 +1167,7 @@ fn run_selection(
         captures,
         image: image.as_ref(),
         external: external.as_ref(),
+        wait_for_devices: selection.wait_for_devices,
     };
     let image_client =
         |image_id: String, explicit_entrypoint: bool| crate::adapter::ImageAdapterClient {
@@ -1093,6 +1177,12 @@ fn run_selection(
             explicit_entrypoint,
         };
     let process_adapter = ProcessAdapterClient::new(workspace.local.adapter.process_timeout());
+    // A launching workflow holds the workspace allocation lock from port
+    // observation until a record carries its allocation
+    // ([[RFC-0002:C-LOCAL-PLACEMENT]]); dry-run observes without it.
+    let allocation = (!selection.dry_run)
+        .then(|| crate::resolve::occupancy::acquire_allocation_lock(root, progress))
+        .transpose()?;
     progress.phase(Phase::named("local and remote preflight"))?;
     let mut resolved = if let Some(image) = &image {
         resolve(
@@ -1116,9 +1206,11 @@ fn run_selection(
         write_json(&resolved.dry_run_plan())
     } else {
         match workflow {
-            Workflow::ServeStart => write_json(&server::start(root, resolved, progress)?),
+            Workflow::ServeStart => {
+                write_json(&server::start(root, resolved, allocation, progress)?)
+            }
             Workflow::RecipeRun => {
-                let record = recipe::run(root, resolved, progress)?;
+                let record = recipe::run(root, resolved, allocation, progress)?;
                 let failed = record.status == RecipeStatus::Failed;
                 let record_id = record.id.clone();
                 write_json(&record)?;
@@ -1214,6 +1306,28 @@ fn operation_failure_with_context(
         }
         other => other,
     }
+}
+
+/// Relaunch this invocation without `--detach` as a job of the workspace,
+/// from the same working directory, and report its job and first record
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+fn detach(workspace: Option<&std::path::Path>, action: &str) -> Result<(), InferlabError> {
+    let root = discover_workspace(workspace)?;
+    let executable = std::env::current_exe().map_err(|source| InferlabError::Read {
+        path: PathBuf::from("/proc/self/exe"),
+        source,
+    })?;
+    let cwd = std::env::current_dir().map_err(|source| InferlabError::Read {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let mut argv = vec![executable.display().to_string()];
+    argv.extend(
+        std::env::args()
+            .skip(1)
+            .filter(|argument| argument != "--detach"),
+    );
+    write_json(&crate::jobs::detach(&root, action, argv, cwd)?)
 }
 
 #[cfg(test)]

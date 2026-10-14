@@ -5,18 +5,19 @@ use super::catalog_validation::validate_workspace;
 use super::definitions::{
     BenchDefinition, DEFAULT_LOCAL_FILE, EvalDefinition, ExternalImageDefinition, ImageDefinition,
     ImplicitCaseSelection, ModelDefinition, RecipeDefinition, ServerDefinition, StackDefinition,
-    WORKSPACE_FILE, WORKSPACE_FRAGMENT_DIR, WorkloadSuiteDefinition, WorkspaceConfig,
-    deserialize_defaulted_bench_definitions,
+    WORKSPACE_FILE, WORKSPACE_FRAGMENT_DIR, WORKSPACE_LOCAL_FRAGMENT_DIR, WorkloadSuiteDefinition,
+    WorkspaceConfig, deserialize_defaulted_bench_definitions,
 };
 use super::invalid;
 use super::local::{LocalBindings, validate_local_bindings};
 use super::realization::validate_pixi;
 use super::source::{git_text, inspect_workspace, symlink_guard, workspace_mutations};
-use super::state::{LoadedWorkspace, WorkspaceIdentity, WorkspaceSnapshot};
+use super::state::{LoadedWorkspace, LocalDefinitionFile, WorkspaceIdentity, WorkspaceSnapshot};
 use crate::InferlabError;
 use crate::record::STATE_DIR;
 use inferlab_protocol::ServeTopology;
 use serde::Deserialize;
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -269,6 +270,53 @@ const fn topology_label(topology: ServeTopology) -> &'static str {
     }
 }
 
+/// Load the workspace for a workflow that composes local definitions —
+/// `serve start` and `recipe run` — after the committed workspace stands
+/// validated on its own, so no committed definition can depend on one
+/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+pub(crate) fn load_workspace_with_local_definitions(
+    root: PathBuf,
+    local: Option<&Path>,
+) -> Result<LoadedWorkspace, InferlabError> {
+    let mut workspace = load_workspace(root, local)?;
+    let local_definitions =
+        compose_validated_local_definitions(&workspace.root, &mut workspace.config)?;
+    record_local_definitions(&mut workspace.snapshot, local_definitions);
+    Ok(workspace)
+}
+
+/// The committed configuration plus local definitions, for a manual Bench,
+/// which resolves without local bindings.
+pub(crate) fn load_workspace_config_with_local_definitions(
+    root: &Path,
+) -> Result<(WorkspaceConfig, WorkspaceSnapshot), InferlabError> {
+    let mut config = load_workspace_config(root)?;
+    let local_definitions = compose_validated_local_definitions(root, &mut config)?;
+    let mut snapshot = snapshot_workspace(root, &config)?;
+    record_local_definitions(&mut snapshot, local_definitions);
+    Ok((config, snapshot))
+}
+
+fn compose_validated_local_definitions(
+    root: &Path,
+    config: &mut WorkspaceConfig,
+) -> Result<Vec<LocalDefinitionFile>, InferlabError> {
+    let local_definitions = compose_local_definitions(root, config)?;
+    if !local_definitions.is_empty() {
+        validate_workspace(root, config)?;
+    }
+    Ok(local_definitions)
+}
+
+/// A run that composed local definitions names them, and its workspace
+/// revision alone can no longer reproduce it ([[RFC-0005:C-EVIDENCE]]).
+fn record_local_definitions(snapshot: &mut WorkspaceSnapshot, files: Vec<LocalDefinitionFile>) {
+    if !files.is_empty() {
+        snapshot.revision_reproducible = false;
+    }
+    snapshot.local_definitions = files;
+}
+
 pub(crate) fn snapshot_workspace(
     root: &Path,
     config: &WorkspaceConfig,
@@ -333,14 +381,68 @@ fn compose_workspace_fragments(
     root: &Path,
     config: &mut WorkspaceConfig,
 ) -> Result<(), InferlabError> {
-    let fragment_dir = root.join(WORKSPACE_FRAGMENT_DIR);
-    symlink_guard(&fragment_dir, WORKSPACE_FRAGMENT_DIR)?;
+    compose_fragment_dir(root, config, WORKSPACE_FRAGMENT_DIR, false).map(|_| ())
+}
+
+/// Compose the git-ignored local definitions under
+/// `.inferlab/workspace.local.d/*.toml` into an already composed and
+/// validated committed workspace: the same disjoint union, restricted to
+/// measurement and serving definitions, outside source identity, and named
+/// with its digests for the run's records ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+fn compose_local_definitions(
+    root: &Path,
+    config: &mut WorkspaceConfig,
+) -> Result<Vec<LocalDefinitionFile>, InferlabError> {
+    let directory = root.join(WORKSPACE_LOCAL_FRAGMENT_DIR);
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    // Inside source identity the directory would dirty the workspace and
+    // change its digest, so it must be ignored the way local.toml is.
+    let ignored = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["check-ignore", "-q", "--", WORKSPACE_LOCAL_FRAGMENT_DIR])
+        .status()
+        .map_err(|source| InferlabError::Read {
+            path: PathBuf::from(WORKSPACE_LOCAL_FRAGMENT_DIR),
+            source,
+        })?;
+    if !ignored.success() {
+        return invalid(format!(
+            "local workspace definitions under {WORKSPACE_LOCAL_FRAGMENT_DIR}/ must be \
+             git-ignored; add `{WORKSPACE_LOCAL_FRAGMENT_DIR}/` to .gitignore"
+        ));
+    }
+    // A file force-added despite the ignore rule is inside source identity.
+    let tracked = git_text(root, &["ls-files", "--", WORKSPACE_LOCAL_FRAGMENT_DIR])?;
+    if !tracked.trim().is_empty() {
+        return invalid(format!(
+            "local workspace definitions must be untracked, but git tracks {}; remove them \
+             from the index with `git rm --cached`",
+            tracked.trim().lines().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    compose_fragment_dir(root, config, WORKSPACE_LOCAL_FRAGMENT_DIR, true)
+}
+
+/// Compose every regular `*.toml` fragment of one directory, in sorted name
+/// order. Local fragments may carry only models, servers, Evals, Benches,
+/// workload suites, and recipes, and each is returned with its digest.
+fn compose_fragment_dir(
+    root: &Path,
+    config: &mut WorkspaceConfig,
+    fragment_dir_name: &str,
+    local: bool,
+) -> Result<Vec<LocalDefinitionFile>, InferlabError> {
+    let mut composed = Vec::new();
+    let fragment_dir = root.join(fragment_dir_name);
+    symlink_guard(&fragment_dir, fragment_dir_name)?;
     let entries = match fs::read_dir(&fragment_dir) {
         Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(composed),
         Err(source) => {
             return Err(InferlabError::Read {
-                path: PathBuf::from(WORKSPACE_FRAGMENT_DIR),
+                path: PathBuf::from(fragment_dir_name),
                 source,
             });
         }
@@ -354,7 +456,7 @@ fn compose_workspace_fragments(
     let mut fragments: Vec<PathBuf> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| InferlabError::Read {
-            path: PathBuf::from(WORKSPACE_FRAGMENT_DIR),
+            path: PathBuf::from(fragment_dir_name),
             source,
         })?;
         let path = entry.path();
@@ -367,7 +469,7 @@ fn compose_workspace_fragments(
         })?;
         if file_type.is_symlink() {
             return invalid(format!(
-                "workspace fragment {WORKSPACE_FRAGMENT_DIR}/{} must be a regular \
+                "workspace fragment {fragment_dir_name}/{} must be a regular \
                  filesystem entry, not a symbolic link; the workspace source digest \
                  records link text rather than target content",
                 path.file_name().unwrap_or_default().to_string_lossy()
@@ -388,7 +490,7 @@ fn compose_workspace_fragments(
 
     for path in fragments {
         let relative = format!(
-            "{WORKSPACE_FRAGMENT_DIR}/{}",
+            "{fragment_dir_name}/{}",
             path.file_name().unwrap_or_default().to_string_lossy()
         );
         let content = fs::read_to_string(&path).map_err(|source| InferlabError::Read {
@@ -418,9 +520,28 @@ fn compose_workspace_fragments(
                 path: PathBuf::from(&relative),
                 source,
             })?;
+        if local {
+            for (section, declared) in [
+                ("stacks", !fragment.stacks.is_empty()),
+                ("images", !fragment.images.is_empty()),
+                ("external_images", !fragment.external_images.is_empty()),
+            ] {
+                if declared {
+                    return invalid(format!(
+                        "local workspace definition {relative} declares {section}; local \
+                         definitions may declare only models, servers, evals, benches, \
+                         workload_suites, and recipes"
+                    ));
+                }
+            }
+            composed.push(LocalDefinitionFile {
+                path: relative.clone(),
+                sha256: base16ct::lower::encode_string(&sha2::Sha256::digest(content.as_bytes())),
+            });
+        }
         merge_fragment(config, &mut provenance, fragment, &relative)?;
     }
-    Ok(())
+    Ok(composed)
 }
 
 /// Fold one parsed fragment into the composed config, rejecting any identifier

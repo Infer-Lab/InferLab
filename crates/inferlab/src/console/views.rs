@@ -359,7 +359,9 @@ impl RecordView {
                         DetailValue::Elapsed {
                             start: self.started_unix_ms,
                             finish: self.finished_unix_ms,
-                            advances: status == "running",
+                            // A starting server — possibly waiting for its devices —
+                            // is under way too.
+                            advances: matches!(status, "running" | "starting"),
                         },
                     ),
                     (

@@ -723,6 +723,19 @@ fn validate(
         timeout: workspace.local.adapter.image_timeout(),
         explicit_entrypoint: false,
     };
+    // Validation launches a recipe: hold the workspace allocation lock from
+    // port observation until its recipe record exists
+    // ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    let allocation =
+        match crate::resolve::occupancy::acquire_allocation_lock(&workspace.root, progress) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                return ValidationOutcome::Failed {
+                    recipe_record_id: None,
+                    message: format!("validation resolution failed: {error}"),
+                };
+            }
+        };
     let resolved = match resolve(
         workspace,
         &ResolveRequest {
@@ -734,6 +747,7 @@ fn validate(
             captures: &[],
             image: Some(&image),
             external: None,
+            wait_for_devices: false,
         },
         &adapter,
     ) {
@@ -745,7 +759,7 @@ fn validate(
             };
         }
     };
-    match recipe::run(&workspace.root, resolved, progress) {
+    match recipe::run(&workspace.root, resolved, Some(allocation), progress) {
         Ok(record) if record.status == RecipeStatus::Failed => ValidationOutcome::Failed {
             recipe_record_id: Some(record.id),
             message: "validation recipe failed".to_owned(),

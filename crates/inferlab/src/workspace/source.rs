@@ -561,6 +561,7 @@ pub(super) fn inspect_workspace(
         revision_reproducible: !dirty,
         pixi_manifest_sha256: crate::digest::hash_file(&root.join(PIXI_MANIFEST))?,
         pixi_lock_sha256: crate::digest::hash_file(&root.join(PIXI_LOCK))?,
+        local_definitions: Vec::new(),
     })
 }
 

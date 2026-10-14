@@ -46,6 +46,7 @@ fn representative_errors() -> Vec<InferlabError> {
             machine: "fixture".to_owned(),
             required: 1,
             available: 0,
+            held: String::new(),
         },
         InferlabError::NetworkResolution {
             source: Box::new(std::io::Error::other("fixture")),

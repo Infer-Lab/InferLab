@@ -16,13 +16,7 @@ use wait_timeout::ChildExt;
 
 use crate::operation_bound::{OperationBound, Remaining, duration_millis};
 
-/// How long a removal may take before it is reported as unconfirmed: a
-/// wedged daemon is a plausible cause of the original deadline miss, and a
-/// cleanup path must not hang on its own cleanup.
-pub const REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const CONTAINER_ABSENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const COMMAND_REAP_GRACE: Duration = Duration::from_secs(5);
 /// How long a command's output may stay open after the command exits.
 pub const COMMAND_IO_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
@@ -74,7 +68,9 @@ pub enum BoundedWait {
 pub struct CommandCleanupEvidence {
     pub trigger: CommandCleanupTrigger,
     pub elapsed_ms: u64,
-    pub reap_grace_ms: u64,
+    /// The wait until every thread of the killed command's process group
+    /// exited ([[RFC-0009:C-COMPLETION-WAITS]]).
+    pub exit_wait: Option<Box<crate::completion::CompletionWaitEvidence>>,
     pub io_drain_grace_ms: u64,
     pub kill_attempted: bool,
     pub verified: bool,
@@ -342,7 +338,7 @@ fn terminate_group_and_finish_io(
     trigger: CommandCleanupTrigger,
 ) -> (std::io::Result<()>, CommandCleanupEvidence) {
     let started = std::time::Instant::now();
-    let kill = terminate_process_group(child);
+    let (kill, exit_wait) = terminate_process_group(child);
     let result = match kill {
         Ok(()) => finish_io_with_grace(writer, stdout, stderr),
         Err(error) => Err(error),
@@ -350,7 +346,7 @@ fn terminate_group_and_finish_io(
     let evidence = CommandCleanupEvidence {
         trigger,
         elapsed_ms: duration_millis(started.elapsed()),
-        reap_grace_ms: duration_millis(COMMAND_REAP_GRACE),
+        exit_wait,
         io_drain_grace_ms: duration_millis(COMMAND_IO_DRAIN_GRACE),
         kill_attempted: true,
         verified: result.is_ok(),
@@ -359,23 +355,48 @@ fn terminate_group_and_finish_io(
     (result, evidence)
 }
 
-fn terminate_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
-    let pid = rustix::process::Pid::from_raw(child.id() as i32)
-        .ok_or_else(|| std::io::Error::other("child process id is zero"))?;
+/// SIGKILL the command's process group, wait until every thread of it has
+/// exited, and reap the command, the group's leader.
+fn terminate_process_group(
+    child: &mut std::process::Child,
+) -> (
+    std::io::Result<()>,
+    Option<Box<crate::completion::CompletionWaitEvidence>>,
+) {
+    let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) else {
+        return (Err(std::io::Error::other("child process id is zero")), None);
+    };
     let signal = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-    if signal.is_err() && child.try_wait()?.is_none() {
-        child.kill()?;
+    if signal.is_err() {
+        match child.try_wait() {
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    return (Err(error), None);
+                }
+            }
+            Ok(Some(_)) => {}
+            Err(error) => return (Err(error), None),
+        }
     }
-    match child.wait_timeout(COMMAND_REAP_GRACE)? {
-        Some(_) => Ok(()),
-        None => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!(
-                "command child did not reap within {} seconds",
-                COMMAND_REAP_GRACE.as_secs()
-            ),
-        )),
-    }
+    let wait = crate::completion::wait(
+        &mut crate::completion::process::ProcessExit {
+            target: None,
+            processes: crate::completion::process::Processes::Group(child.id()),
+        },
+        &mut |_| {},
+    );
+    let result = match wait.failure() {
+        Some(failure) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, failure)),
+        // Every thread of the group, the command included, has exited.
+        None => match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(std::io::Error::other(
+                "the command's process group exited but the command did not",
+            )),
+            Err(error) => Err(error),
+        },
+    };
+    (result, Some(Box::new(wait)))
 }
 
 fn finish_io_with_grace(
@@ -446,40 +467,52 @@ fn join_drain(drain: std::thread::JoinHandle<Vec<u8>>) -> Result<Vec<u8>, Bounde
         .map_err(|_| BoundedError::Wait(std::io::Error::other("output drain thread panicked")))
 }
 
-/// The outcome of a confirmed-removal attempt.
-pub enum Removal {
-    Confirmed { already_absent: bool },
-    Unconfirmed(RemovalFailure),
+/// A container's removal on its launch machine
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): one bounded `docker rm -f` request,
+/// then, when the daemon did not complete it, a completion wait until the
+/// container is gone ([[RFC-0009:C-COMPLETION-WAITS]]).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerRemovalEvidence {
+    pub container: String,
+    pub elapsed_ms: u64,
+    /// The bound of the `docker rm -f` request.
+    pub attempt_bound_ms: u64,
+    /// Why the request did not itself complete the removal — including the
+    /// daemon giving up on its own kill wait.
+    pub removal_attempt_error: Option<String>,
+    /// Termination of a request client that outlived its bound.
+    pub client_cleanup: Option<CommandCleanupEvidence>,
+    /// The wait for the container to disappear after an incomplete request.
+    pub removal_wait: Option<crate::completion::CompletionWaitEvidence>,
+    pub confirmed: bool,
+    pub already_absent: bool,
+    pub error: Option<String>,
 }
 
-/// Why a removal stayed unconfirmed; callers format their own messages.
-pub enum RemovalFailure {
-    Launch(std::io::Error),
-    Wait(std::io::Error),
-    WaitCleanup {
-        source: std::io::Error,
-        operation_elapsed_ms: u64,
-        client_cleanup: CommandCleanupEvidence,
-    },
-    Deadline {
-        operation_elapsed_ms: u64,
-        client_cleanup: Option<CommandCleanupEvidence>,
-    },
-    Exit {
-        status: ExitStatus,
-        stderr: String,
-    },
-    Ssh(String),
-}
-
-/// `docker rm -f` on the container's launch machine, always under
-/// [`REMOVAL_TIMEOUT`]: the SSH client itself runs through the bounded
-/// invocation, because transport liveness configuration cannot bound a live
-/// connection to a wedged remote daemon. A container the daemon no longer
-/// knows is the confirmation, not a failure
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
-pub fn remove_container(target: Option<&str>, container: &str) -> Removal {
-    let bound = OperationBound::finite(REMOVAL_TIMEOUT);
+/// Remove `container` on its launch machine — locally, or over SSH to
+/// `target` — and confirm it is gone. A container the daemon no longer
+/// knows is the confirmation, not a failure; a request the daemon did not
+/// complete is an attempt outcome, and the container disappearing within
+/// the completion wait confirms the removal.
+pub fn remove_container(
+    target: Option<&str>,
+    container: &str,
+    notice: &mut dyn FnMut(&str),
+) -> ContainerRemovalEvidence {
+    let started = std::time::Instant::now();
+    let attempt_bound = crate::completion::ATTEMPT_BOUND;
+    let mut evidence = ContainerRemovalEvidence {
+        container: container.to_owned(),
+        elapsed_ms: 0,
+        attempt_bound_ms: duration_millis(attempt_bound),
+        removal_attempt_error: None,
+        client_cleanup: None,
+        removal_wait: None,
+        confirmed: false,
+        already_absent: false,
+        error: None,
+    };
     // The SSH transport is a host tool: strip the stack's dynamic-linker
     // overrides ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). A local docker client is
     // not in that scope.
@@ -501,121 +534,59 @@ pub fn remove_container(target: Option<&str>, container: &str) -> Removal {
             &[],
         ),
     };
-    let (status, stderr) = match run_cleanup_with_bound(&argv, env_remove, None, None, &bound, None)
+    let attempt = OperationBound::finite(attempt_bound);
+    let attempt_error = match run_cleanup_with_bound(&argv, env_remove, None, None, &attempt, None)
     {
         Ok(BoundedWait::Exited { status, stderr, .. }) => {
-            (status, String::from_utf8_lossy(&stderr).into_owned())
+            let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
+            if status.success() || stderr.contains("No such container") {
+                evidence.confirmed = true;
+                evidence.already_absent = !status.success();
+                evidence.elapsed_ms = duration_millis(started.elapsed());
+                return evidence;
+            }
+            format!("docker rm -f exited with {status}: {stderr}")
         }
-        Ok(BoundedWait::Expired {
-            operation_elapsed_ms,
-            cleanup,
-            ..
-        }) => {
-            return Removal::Unconfirmed(RemovalFailure::Deadline {
-                operation_elapsed_ms,
-                client_cleanup: cleanup,
-            });
+        Ok(BoundedWait::Expired { cleanup, .. }) => {
+            evidence.client_cleanup = cleanup;
+            format!(
+                "docker rm -f did not answer within its {} s attempt bound",
+                attempt_bound.as_secs()
+            )
         }
-        Ok(BoundedWait::Interrupted { .. }) => {
-            return Removal::Unconfirmed(RemovalFailure::Wait(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "container cleanup was interrupted",
-            )));
+        Ok(BoundedWait::Interrupted { cleanup, .. }) => {
+            evidence.client_cleanup = Some(cleanup);
+            "docker rm -f was interrupted".to_owned()
         }
-        Err(BoundedError::Launch(error)) => {
-            return Removal::Unconfirmed(match target {
-                Some(target) => {
-                    RemovalFailure::Ssh(format!("failed to launch SSH for {target:?}: {error}"))
-                }
-                None => RemovalFailure::Launch(error),
-            });
-        }
-        Err(BoundedError::Stdin(error)) | Err(BoundedError::Wait(error)) => {
-            return Removal::Unconfirmed(RemovalFailure::Wait(error));
+        Err(BoundedError::Launch(error)) => match target {
+            Some(target) => format!("failed to launch SSH for {target:?}: {error}"),
+            None => format!("docker rm failed to launch: {error}"),
+        },
+        Err(BoundedError::Stdin(error) | BoundedError::Wait(error)) => {
+            format!("docker rm wait failed: {error}")
         }
         Err(BoundedError::WaitCleanup {
-            source,
-            operation_elapsed_ms,
-            cleanup,
+            source, cleanup, ..
         }) => {
-            return Removal::Unconfirmed(RemovalFailure::WaitCleanup {
-                source,
-                operation_elapsed_ms,
-                client_cleanup: cleanup,
-            });
+            evidence.client_cleanup = Some(cleanup);
+            format!("docker rm wait failed: {source}")
         }
     };
-    if status.success() {
-        return Removal::Confirmed {
-            already_absent: false,
-        };
+    evidence.removal_attempt_error = Some(attempt_error.clone());
+    let wait = crate::completion::wait(
+        &mut crate::completion::container::ContainerGone::new(target, container),
+        notice,
+    );
+    evidence.confirmed = wait.reached();
+    if !evidence.confirmed {
+        evidence.error = Some(match wait.failure() {
+            Some(failure) => format!("{failure}; removal request: {attempt_error}"),
+            None => attempt_error,
+        });
     }
-    if stderr.contains("No such container") {
-        return Removal::Confirmed {
-            already_absent: true,
-        };
-    }
-    // A `--rm` container whose exit races this removal: the daemon owns an
-    // in-flight removal it refuses to double-remove, so confirmation is
-    // observing the container disappear within the same removal deadline.
-    if stderr.contains("is already in progress")
-        && confirm_container_absent(target, container, &bound)
-    {
-        return Removal::Confirmed {
-            already_absent: true,
-        };
-    }
-    Removal::Unconfirmed(RemovalFailure::Exit { status, stderr })
-}
-
-/// Poll the daemon on the container's launch machine until it no longer
-/// knows the container, bounded by [`REMOVAL_TIMEOUT`]. Any answer other
-/// than a definitive not-found keeps polling; the deadline decides.
-fn confirm_container_absent(target: Option<&str>, container: &str, bound: &OperationBound) -> bool {
-    let (argv, env_remove): (Vec<String>, &[&str]) = match target {
-        Some(target) => (
-            crate::ssh::ssh_argv(
-                target,
-                &format!(
-                    "docker container inspect --format {{{{.Id}}}} {}",
-                    crate::shell::shell_quote(container)
-                ),
-            ),
-            crate::ssh::SSH_ENV_REMOVE,
-        ),
-        None => (
-            vec![
-                "docker".to_owned(),
-                "container".to_owned(),
-                "inspect".to_owned(),
-                "--format".to_owned(),
-                "{{.Id}}".to_owned(),
-                container.to_owned(),
-            ],
-            &[],
-        ),
-    };
-    loop {
-        if let Ok(BoundedWait::Exited { status, stderr, .. }) =
-            run_cleanup_with_bound(&argv, env_remove, None, None, bound, None)
-            && !status.success()
-            && String::from_utf8_lossy(&stderr).contains("No such container")
-        {
-            return true;
-        }
-        if bound.is_expired() {
-            return false;
-        }
-        let sleep = match bound
-            .attempt(Some(CONTAINER_ABSENCE_POLL_INTERVAL))
-            .remaining()
-        {
-            Remaining::Finite(duration) => duration,
-            Remaining::Expired => return false,
-            Remaining::Unbounded => CONTAINER_ABSENCE_POLL_INTERVAL,
-        };
-        std::thread::sleep(sleep);
-    }
+    evidence.removal_wait = Some(wait);
+    evidence.elapsed_ms = duration_millis(started.elapsed());
+    evidence
 }
 
 #[cfg(test)]
@@ -667,7 +638,13 @@ mod tests {
         assert!(cleanup.verified, "{cleanup:?}");
         assert_eq!(cleanup.trigger, CommandCleanupTrigger::Interruption);
         assert!(cleanup.kill_attempted);
-        assert_eq!(cleanup.reap_grace_ms, 5_000);
+        assert!(
+            cleanup
+                .exit_wait
+                .as_ref()
+                .is_some_and(|wait| wait.reached()),
+            "{cleanup:?}"
+        );
         assert_eq!(cleanup.io_drain_grace_ms, 5_000);
     }
 

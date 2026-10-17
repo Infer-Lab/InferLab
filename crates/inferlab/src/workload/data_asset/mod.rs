@@ -25,4 +25,6 @@ pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 /// ([[RFC-0005:C-EVIDENCE]], [[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]).
 /// Version 24 names the local workspace definition files composed into the
 /// run beside its workspace identity ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 24;
+/// Version 25 records each client and command termination's exit wait in
+/// place of a fixed post-kill grace ([[RFC-0009:C-COMPLETION-WAITS]]).
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 25;

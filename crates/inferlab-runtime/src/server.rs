@@ -172,14 +172,18 @@ pub struct CleanupEvidence {
     pub elapsed_ms: u64,
     pub status_deadline_ms: u64,
     pub term_grace_ms: u64,
-    pub kill_grace_ms: u64,
-    pub reap_grace_ms: Option<u64>,
-    pub remote_deadline_ms: Option<u64>,
+    /// The bound of the termination request run on a remote launch machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_attempt_bound_ms: Option<u64>,
     pub verified: bool,
     pub already_exited: bool,
     pub forced: bool,
     pub signals: Vec<SignalEvidence>,
     pub error: Option<String>,
+    /// The wait until every thread of the process group has exited, once
+    /// it was signalled ([[RFC-0009:C-COMPLETION-WAITS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_wait: Option<crate::completion::CompletionWaitEvidence>,
     /// Confirmed removal of the process's container on its launch machine
     /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]); present when the cleanup path
     /// attempted to remove a known container — from a running server's
@@ -194,11 +198,11 @@ pub struct CleanupEvidence {
     /// carries no probe claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_residuals: Option<Vec<DeviceResidualEvidence>>,
-    /// The settle window within which a device still holding memory was
-    /// probed again before the cleanup was judged ([[RFC-0009:C-CLEANUP-GRACE]]);
-    /// present exactly when `device_residuals` is.
+    /// The wait for held device memory to be released after process
+    /// cleanup ([[RFC-0009:C-COMPLETION-WAITS]]); present when a probed
+    /// device still held memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_residual_settle_window_ms: Option<u64>,
+    pub device_residual_wait: Option<crate::completion::CompletionWaitEvidence>,
     /// The sweep of processes carrying the handle's ownership marker on its
     /// launch machine, run after the group termination
     /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]); absent when the handle records no
@@ -209,25 +213,31 @@ pub struct CleanupEvidence {
 
 /// Termination of every live process carrying a server process's ownership
 /// marker on its launch machine ([[RFC-0003:C-RUNTIME-WORKFLOWS]]): what was
-/// found, the signals sent, and what remained after the kill grace.
+/// found, the signals sent, and the wait until the found processes exited.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MarkedProcessSweepEvidence {
     pub marker: String,
     pub elapsed_ms: u64,
-    pub deadline_ms: u64,
+    /// The bound of the request that finds and signals marked processes.
+    pub attempt_bound_ms: u64,
     pub found: Vec<u32>,
     pub term_exit_code: Option<i32>,
     pub forced: bool,
     pub kill_exit_code: Option<i32>,
-    pub remaining: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_wait: Option<crate::completion::CompletionWaitEvidence>,
     pub error: Option<String>,
 }
 
 impl MarkedProcessSweepEvidence {
     #[must_use]
     pub fn verified(&self) -> bool {
-        self.error.is_none() && self.remaining.is_empty()
+        self.error.is_none()
+            && self
+                .exit_wait
+                .as_ref()
+                .is_none_or(crate::completion::CompletionWaitEvidence::reached)
     }
 }
 
@@ -256,18 +266,7 @@ pub enum DeviceResidualEvidence {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContainerRemovalEvidence {
-    pub container: String,
-    pub elapsed_ms: u64,
-    pub operation_elapsed_ms: u64,
-    pub deadline_ms: u64,
-    pub client_cleanup: Option<crate::container::CommandCleanupEvidence>,
-    pub confirmed: bool,
-    pub already_absent: bool,
-    pub error: Option<String>,
-}
+pub use crate::container::ContainerRemovalEvidence;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -548,12 +547,22 @@ pub trait ReadinessObserver {
     ) -> Result<ReadinessEvidence, ReadinessFailure>;
 }
 
+/// What a cleanup reports to the operator while it runs.
+#[derive(Clone, Copy, Debug)]
+pub enum CleanupEvent<'a> {
+    /// Removal of this container begins.
+    ContainerRemoval(&'a str),
+    /// A completion wait is still waiting, and on what
+    /// ([[RFC-0009:C-COMPLETION-WAITS]]).
+    Waiting(&'a str),
+}
+
 pub trait ProcessCleanup {
     fn terminate(
         &self,
         handle: &ProcessHandle,
         trigger: CleanupTrigger,
-        on_container_removal: &mut dyn FnMut(&str),
+        report: &mut dyn FnMut(CleanupEvent<'_>),
     ) -> CleanupEvidence;
 }
 
@@ -1103,7 +1112,7 @@ mod tests {
         let failure = match result {
             Err(failure) => failure,
             Ok(handle) => {
-                let _ = terminate_local(&handle, CleanupTrigger::StartupRollback);
+                let _ = terminate_local(&handle, CleanupTrigger::StartupRollback, &mut |_| {});
                 return Err("mismatched launch file unexpectedly spawned a process".to_owned());
             }
         };
@@ -1156,7 +1165,7 @@ mod tests {
         let failure = match result {
             Err(failure) => failure,
             Ok(handle) => {
-                let _ = terminate_local(&handle, CleanupTrigger::StartupRollback);
+                let _ = terminate_local(&handle, CleanupTrigger::StartupRollback, &mut |_| {});
                 return Err("a live owner's data directory was emptied".to_owned());
             }
         };
@@ -1212,7 +1221,7 @@ mod tests {
         while !listing.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let _ = terminate_local(&handle, CleanupTrigger::StartupRollback);
+        let _ = terminate_local(&handle, CleanupTrigger::StartupRollback, &mut |_| {});
         assert!(state.is_dir());
         assert_eq!(
             fs::read_to_string(&listing).map_err(|error| error.to_string())?,
@@ -1801,7 +1810,7 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         let reaper = thread::spawn(move || child.wait());
 
-        let cleanup = terminate_local(&handle, CleanupTrigger::Stop);
+        let cleanup = terminate_local(&handle, CleanupTrigger::Stop, &mut |_| {});
         if !cleanup.verified {
             let _ = Command::new("kill")
                 .args(["-KILL", "--", &format!("-{}", handle.process_group)])
@@ -1814,7 +1823,11 @@ mod tests {
         assert!(cleanup.elapsed_ms >= cleanup.term_grace_ms);
         assert_eq!(cleanup.status_deadline_ms, 2_000);
         assert_eq!(cleanup.term_grace_ms, 2_000);
-        assert_eq!(cleanup.kill_grace_ms, 10_000);
+        let exit = cleanup
+            .exit_wait
+            .as_ref()
+            .ok_or("SIGKILL is followed by an exit wait")?;
+        assert!(exit.reached(), "{exit:?}");
         Ok(())
     }
 
@@ -1870,7 +1883,7 @@ mod tests {
     fn termination_reaps_orphaned_members_after_the_leader_exits() -> Result<(), String> {
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
         let orphan = spawn_orphan_group(root.path())?;
-        let cleanup = terminate_local(&orphan.handle, CleanupTrigger::Stop);
+        let cleanup = terminate_local(&orphan.handle, CleanupTrigger::Stop, &mut |_| {});
         if !cleanup.verified {
             force_kill_group(orphan.handle.process_group);
         }
@@ -1896,7 +1909,7 @@ mod tests {
             leader_start_time_ticks: orphan.handle.leader_start_time_ticks + 1_000_000_000,
             ..orphan.handle.clone()
         };
-        let cleanup = terminate_local(&inflated, CleanupTrigger::Stop);
+        let cleanup = terminate_local(&inflated, CleanupTrigger::Stop, &mut |_| {});
         force_kill_group(orphan.handle.process_group);
 
         assert!(!cleanup.verified, "{cleanup:?}");
@@ -2064,14 +2077,17 @@ mod tests {
             sweep.forced,
             "a TERM-ignoring process needs SIGKILL: {sweep:?}"
         );
-        assert!(sweep.remaining.is_empty(), "{sweep:?}");
+        assert!(
+            sweep.exit_wait.as_ref().is_some_and(|wait| wait.reached()),
+            "{sweep:?}"
+        );
         Ok(())
     }
 
     #[test]
     fn cleanup_evidence_without_device_residuals_still_decodes()
     -> Result<(), Box<dyn std::error::Error>> {
-        // A schema-10-era entry predates the device-residual probe: the
+        // A device-less process's cleanup carries no residual probe: the
         // optional member decodes as absent and stays absent on re-encode
         // ([[RFC-0005:C-EVIDENCE]]).
         let legacy = serde_json::json!({
@@ -2079,9 +2095,6 @@ mod tests {
             "elapsed_ms": 3,
             "status_deadline_ms": 2_000,
             "term_grace_ms": 2_000,
-            "kill_grace_ms": 10_000,
-            "reap_grace_ms": null,
-            "remote_deadline_ms": null,
             "verified": true,
             "already_exited": false,
             "forced": false,

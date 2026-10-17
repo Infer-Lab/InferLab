@@ -152,11 +152,13 @@ pub(crate) struct DeviceWaitEvidence {
 }
 
 impl ServerRecord {
-    /// The device-residual settle window and the removal of per-process
-    /// readiness bound copies ([[RFC-0005:C-EVIDENCE]]) MUST NOT be encoded
-    /// under an earlier server record version, so the version gate stops
-    /// older records before serde does.
-    pub(crate) const SCHEMA_VERSION: u32 = 14;
+    /// Evidence shapes MUST NOT be encoded under an earlier server record
+    /// version, so the version gate stops older records before serde does.
+    /// Version 15 records cleanup completion waits — process exit, container
+    /// disappearance, device-memory release — in place of fixed post-kill,
+    /// removal, and settle deadlines ([[RFC-0005:C-EVIDENCE]],
+    /// [[RFC-0009:C-COMPLETION-WAITS]]).
+    pub(crate) const SCHEMA_VERSION: u32 = 15;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

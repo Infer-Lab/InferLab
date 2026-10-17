@@ -5,16 +5,16 @@
 mod tests;
 
 use super::{
-    AcceptedClient, CLIENT_CLEANUP_STATUS_DEADLINE, CLIENT_HANDLE_FILE, CLIENT_KILL_GRACE,
-    CLIENT_POLL_INTERVAL, CLIENT_RESULT_SCHEMA_VERSION, CLIENT_TERM_GRACE, ClientCasePaths,
-    ClientCommandPlan, ClientGroupHandle, ClientProcessEvidence, ClientResultEnvelope, ClientRun,
+    AcceptedClient, CLIENT_CLEANUP_STATUS_DEADLINE, CLIENT_HANDLE_FILE, CLIENT_POLL_INTERVAL,
+    CLIENT_RESULT_SCHEMA_VERSION, CLIENT_TERM_GRACE, ClientCasePaths, ClientCommandPlan,
+    ClientGroupHandle, ClientProcessEvidence, ClientResultEnvelope, ClientRun,
     ClientTerminationEvidence, ClientTerminationTrigger, PendingClientCleanup, SWEEP_WALK_DEPTH,
     WorkloadRecordSession, write_json,
 };
 use crate::InferlabError;
 use inferlab_runtime::interrupt;
 use inferlab_runtime::operation_bound::{OperationBound, OperationTerminalCause, Remaining};
-use inferlab_runtime::process_group::{LocalProcessGroup, TerminationSignal, process_start_time};
+use inferlab_runtime::process_group::{LocalProcessGroup, SignalEvidence, process_start_time};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
@@ -462,9 +462,9 @@ pub(super) fn cleanup_remaining_client_group(
                 CLIENT_CLEANUP_STATUS_DEADLINE,
             ),
             term_grace_ms: inferlab_runtime::operation_bound::duration_millis(CLIENT_TERM_GRACE),
-            kill_grace_ms: inferlab_runtime::operation_bound::duration_millis(CLIENT_KILL_GRACE),
             term_sent: false,
             kill_sent: false,
+            exit_wait: None,
             verified: false,
             error: Some(error.to_string()),
         }),
@@ -477,51 +477,34 @@ pub(super) fn terminate_client_group(
     trigger: ClientTerminationTrigger,
 ) -> ClientTerminationEvidence {
     let started = Instant::now();
+    let termination = group.terminate(
+        Some(child),
+        CLIENT_TERM_GRACE,
+        CLIENT_POLL_INTERVAL,
+        &mut |_| {},
+    );
+    let verified = termination.verified();
     let mut errors = Vec::new();
-    let term_bound = OperationBound::finite(CLIENT_TERM_GRACE);
-    let term = group.send_signal(TerminationSignal::Term, &term_bound);
-    let term_sent = term.succeeded();
-    if let Some(error) = term.error {
-        errors.push(error);
-    }
-    let mut verified =
-        match group.wait_until_stopped(Some(child), &term_bound, CLIENT_POLL_INTERVAL) {
-            Ok(verified) => verified,
-            Err(error) => {
-                errors.push(error.to_string());
-                false
-            }
-        };
-    let mut kill_sent = false;
-    if !verified {
-        let kill_bound = OperationBound::finite(CLIENT_KILL_GRACE);
-        let kill = group.send_signal(TerminationSignal::Kill, &kill_bound);
-        kill_sent = kill.succeeded();
-        if let Some(error) = kill.error {
-            errors.push(error);
-        }
-        verified = match group.wait_until_stopped(Some(child), &kill_bound, CLIENT_POLL_INTERVAL) {
-            Ok(verified) => verified,
-            Err(error) => {
-                errors.push(error.to_string());
-                false
-            }
-        };
-    }
-    if !verified {
-        errors.push(format!(
-            "process group {} is still alive after SIGKILL",
-            group.process_group
-        ));
-    }
+    errors.extend(termination.term.error.clone());
+    errors.extend(
+        termination
+            .kill
+            .as_ref()
+            .and_then(|kill| kill.error.clone()),
+    );
+    errors.extend(termination.error.clone());
+    errors.extend(termination.exit_wait.failure());
     ClientTerminationEvidence {
         trigger,
         elapsed_ms: inferlab_runtime::operation_bound::duration_millis(started.elapsed()),
         status_deadline_ms: 0,
         term_grace_ms: inferlab_runtime::operation_bound::duration_millis(CLIENT_TERM_GRACE),
-        kill_grace_ms: inferlab_runtime::operation_bound::duration_millis(CLIENT_KILL_GRACE),
-        term_sent,
-        kill_sent,
+        term_sent: termination.term.succeeded(),
+        kill_sent: termination
+            .kill
+            .as_ref()
+            .is_some_and(SignalEvidence::succeeded),
+        exit_wait: Some(termination.exit_wait),
         verified,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
     }
@@ -698,24 +681,10 @@ pub(crate) fn sweep_stale_client_groups(root: &Path) {
                 continue;
             }
             if handle.group.identity_matches() {
-                let term_bound = OperationBound::finite(CLIENT_TERM_GRACE);
-                let _ = handle
+                let gone = handle
                     .group
-                    .send_signal(TerminationSignal::Term, &term_bound);
-                let mut gone = handle
-                    .group
-                    .wait_until_stopped(None, &term_bound, CLIENT_POLL_INTERVAL)
-                    .unwrap_or(false);
-                if !gone && handle.group.identity_matches() {
-                    let kill_bound = OperationBound::finite(CLIENT_KILL_GRACE);
-                    let _ = handle
-                        .group
-                        .send_signal(TerminationSignal::Kill, &kill_bound);
-                    gone = handle
-                        .group
-                        .wait_until_stopped(None, &kill_bound, CLIENT_POLL_INTERVAL)
-                        .unwrap_or(false);
-                }
+                    .terminate(None, CLIENT_TERM_GRACE, CLIENT_POLL_INTERVAL, &mut |_| {})
+                    .verified();
                 if !gone {
                     // Keep the handle: the next run must still be able to
                     // discharge the termination it could not verify.

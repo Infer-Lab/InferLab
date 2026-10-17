@@ -790,7 +790,7 @@ fn interrupted_capture_startup_terminates_the_server_outside_the_launch_group()
         "{sweep}"
     );
     assert_eq!(sweep["forced"], true, "{sweep}");
-    assert_eq!(sweep["remaining"], serde_json::json!([]), "{sweep}");
+    assert_eq!(sweep["exit_wait"]["ended"], "reached", "{sweep}");
     Ok(())
 }
 

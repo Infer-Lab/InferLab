@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-10-17
+
+### Changed
+
+- Cleanup no longer gives the environment a fixed time to finish what it
+  was asked to do ([[ADR-0067]]). After a server, Eval or Bench client,
+  recorded run, profiler agent, or InferLab's own docker or SSH client is
+  signalled, InferLab waits until none of its threads lives; after a
+  container removal is requested, until the container is gone; after
+  cleanup, until held device memory is released. A wait ends when its target
+  is gone, when nothing attributable to the target has progressed for 30
+  seconds — CPU time of its remaining threads, released memory, dirty and
+  writeback bytes, container status, device memory — or after 30 minutes of
+  work that never finishes, and a new Ctrl+C ends it; an unfinished wait
+  leaves cleanup unverified and retryable with `serve stop`. This replaces
+  the 10-second post-kill grace, the 30-second container-removal, remote
+  cleanup, and device-settle deadlines, and the 5-second client reap grace.
+  Long waits say what they are waiting on.
+- Server records move to schema version 15, workload records to 25, and run
+  records to 2: each cleanup records its completion waits — how each ended,
+  the signals it read, when it last saw progress, and what remained — in
+  place of the fixed grace and deadline fields, and a container removal
+  records why `docker rm -f` did not complete it. Stop servers started by an
+  earlier InferLab before upgrading.
+
+### Fixed
+
+- Stopping a server that holds a large footprint no longer reports
+  unverified cleanup while it is still exiting. A server releasing about
+  190 GB of pinned host memory needs about 20 seconds after SIGKILL; Docker
+  gives up on its own kill wait after about 12 seconds with "did not receive
+  an exit event", which InferLab took as final, and a server launched
+  directly on the host could be judged exited while one of its threads was
+  still releasing that memory.
+
 ## [0.22.0] - 2026-10-14
 
 ### Added

@@ -2712,7 +2712,7 @@ fn write_server_record(
     Ok(())
 }
 
-const CURRENT_SERVER_SCHEMA: u32 = 14;
+const CURRENT_SERVER_SCHEMA: u32 = 15;
 
 /// A running server keeps its ports, which observation may not see while
 /// idle, and the plan names the command that releases them

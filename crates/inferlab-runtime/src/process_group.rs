@@ -5,11 +5,11 @@ use std::thread;
 use std::time::Duration;
 use thiserror::Error;
 
-/// How long a process group has to exit after SIGTERM before SIGKILL, and
-/// after SIGKILL before termination is unverified: the one product-owned
-/// termination policy for processes InferLab starts ([[RFC-0009:C-CLEANUP-GRACE]]).
+/// How long a process group has to exit after SIGTERM before SIGKILL: the
+/// one product-owned escalation grace for processes InferLab starts
+/// ([[RFC-0009:C-CLEANUP-GRACE]]). What follows a kill is a completion wait
+/// ([[RFC-0009:C-COMPLETION-WAITS]]), not a grace.
 pub const TERM_GRACE: Duration = Duration::from_secs(2);
-pub const KILL_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum ProcessGroupError {
@@ -275,6 +275,71 @@ impl LocalProcessGroup {
             .filter(|(_, group, state)| *group == process_group && !state.starts_with('Z'))
             .filter_map(|(pid, _, _)| pid.parse().ok())
             .collect())
+    }
+}
+
+/// How terminating a process group went: the signals sent and the wait
+/// until every thread of the group exited ([[RFC-0009:C-COMPLETION-WAITS]]).
+#[derive(Clone, Debug)]
+pub struct GroupTermination {
+    pub term: SignalEvidence,
+    pub kill: Option<SignalEvidence>,
+    pub exit_wait: crate::completion::CompletionWaitEvidence,
+    /// A failed liveness check during the termination grace.
+    pub error: Option<String>,
+}
+
+impl GroupTermination {
+    #[must_use]
+    pub fn verified(&self) -> bool {
+        self.exit_wait.reached()
+    }
+}
+
+impl LocalProcessGroup {
+    /// SIGTERM, the escalation grace, SIGKILL when the group has not stopped,
+    /// then the exit wait; `child`, the group's leader, is reaped once every
+    /// thread has exited.
+    pub fn terminate(
+        &self,
+        mut child: Option<&mut Child>,
+        term_grace: Duration,
+        poll_interval: Duration,
+        notice: &mut dyn FnMut(&str),
+    ) -> GroupTermination {
+        let term_bound = OperationBound::finite(term_grace);
+        let term = self.send_signal(TerminationSignal::Term, &term_bound);
+        let mut error = None;
+        let stopped = self
+            .wait_until_stopped(child.as_deref_mut(), &term_bound, poll_interval)
+            .unwrap_or_else(|failure| {
+                error = Some(failure.to_string());
+                false
+            });
+        let kill = (!stopped).then(|| {
+            self.send_signal(
+                TerminationSignal::Kill,
+                &OperationBound::finite(crate::completion::ATTEMPT_BOUND),
+            )
+        });
+        let exit_wait = crate::completion::wait(
+            &mut crate::completion::process::ProcessExit {
+                target: None,
+                processes: crate::completion::process::Processes::Group(self.process_group),
+            },
+            notice,
+        );
+        if exit_wait.reached()
+            && let Some(child) = child
+        {
+            let _ = child.wait();
+        }
+        GroupTermination {
+            term,
+            kill,
+            exit_wait,
+            error,
+        }
     }
 }
 

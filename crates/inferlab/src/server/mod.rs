@@ -13,14 +13,14 @@ use crate::workspace::WorkspaceSnapshot;
 use fs2::FileExt;
 use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::server::{
-    CleanupEvidence, CleanupTrigger, DeviceResidualEvidence, ProcessCleanup, ProcessHandle,
-    ProcessObserver, ProcessSpec, ProcessStatus, REMOTE_LOG_SYNC_DEADLINE, ReadinessFailureKind,
-    ServerRuntime, SystemProcessRuntime,
+    CleanupEvent, CleanupEvidence, CleanupTrigger, DeviceResidualEvidence, ProcessCleanup,
+    ProcessHandle, ProcessObserver, ProcessSpec, ProcessStatus, REMOTE_LOG_SYNC_DEADLINE,
+    ReadinessFailureKind, ServerRuntime, SystemProcessRuntime,
 };
 use preflight::{HardwareProbeError, PreflightObserver, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
 use residual::{
-    RESIDUAL_SETTLE_INTERVAL, RESIDUAL_SETTLE_WINDOW, ResidualProbe, probe_device_residual,
+    DeviceRelease, ProbedDevice, RESIDUAL_SETTLE_INTERVAL, ResidualProbe, probe_device_residual,
     residual_held,
 };
 use serde::Serialize;
@@ -1041,12 +1041,7 @@ fn rollback_started<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
     for process_id in started.iter().rev() {
         let handle = session.process(process_id)?.handle.clone();
         if let Some(handle) = handle {
-            let mut ignore_container_removal = |_container: &str| {};
-            let cleanup = runtime.terminate(
-                &handle,
-                CleanupTrigger::StartupRollback,
-                &mut ignore_container_removal,
-            );
+            let cleanup = runtime.terminate(&handle, CleanupTrigger::StartupRollback, &mut |_| {});
             verified &= cleanup.verified;
             sync_logs_for_process(session, runtime, process_id, &handle)?;
             session.process_mut(process_id)?.cleanup.push(cleanup);
@@ -1282,14 +1277,18 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
             position,
             process_total,
         ))?;
-        let mut on_container_removal = |container: &str| {
-            let _ = progress.phase(
-                Phase::named("container removal")
+        let mut report = |event: CleanupEvent<'_>| {
+            let phase = match event {
+                CleanupEvent::ContainerRemoval(container) => Phase::named("container removal")
                     .item(process_id, position, process_total)
                     .current_item(format!("{process_id}:{container}")),
-            );
+                CleanupEvent::Waiting(message) => Phase::named("waiting for cleanup")
+                    .item(process_id, position, process_total)
+                    .current_item(message),
+            };
+            let _ = progress.phase(phase);
         };
-        let cleanup = runtime.terminate(&handle, CleanupTrigger::Stop, &mut on_container_removal);
+        let cleanup = runtime.terminate(&handle, CleanupTrigger::Stop, &mut report);
         if !cleanup.verified {
             all_verified = false;
             if first_error.is_none() {
@@ -1377,46 +1376,47 @@ fn verify_freed_devices<R: ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
 ) -> Result<Option<String>, InferlabError> {
-    let mut probes = Vec::new();
+    let mut devices = Vec::new();
+    let attempt = OperationBound::finite(inferlab_runtime::completion::ATTEMPT_BOUND);
     for process in session.record().resolved.server.processes() {
-        let verified = process_cleanup_verified(session, &process.id)?;
-        if verified {
-            probes.extend(process.allocation.devices.iter().map(|&device| {
-                (
-                    process.id.clone(),
-                    process.machine.clone(),
-                    process.launch.clone(),
+        if process_cleanup_verified(session, &process.id)? {
+            for &device in &process.allocation.devices {
+                devices.push(ProbedDevice {
+                    process_id: process.id.clone(),
+                    machine: process.machine.clone(),
+                    launch: process.launch.clone(),
                     device,
-                )
-            }));
+                    residual: probe_device_residual(
+                        runtime,
+                        &process.launch,
+                        &process.machine,
+                        device,
+                        &attempt,
+                    ),
+                });
+            }
         }
     }
-    let settle = OperationBound::finite(RESIDUAL_SETTLE_WINDOW);
-    let mut residuals = probes
+    let wait = devices
         .iter()
-        .map(|(_, machine, launch, device)| {
-            probe_device_residual(runtime, launch, machine, *device, &settle)
-        })
-        .collect::<Vec<_>>();
-    while residuals.iter().any(residual_held) && !settle.is_expired() {
-        std::thread::sleep(RESIDUAL_SETTLE_INTERVAL);
-        for ((_, machine, launch, device), residual) in probes.iter().zip(residuals.iter_mut()) {
-            if !residual_held(residual) {
-                continue;
-            }
-            // A re-probe that cannot answer is inconclusive: the device keeps
-            // the held reading it last showed.
-            let reprobed = probe_device_residual(runtime, launch, machine, *device, &settle);
-            if !matches!(reprobed, DeviceResidualEvidence::ProbeUnavailable { .. }) {
-                *residual = reprobed;
-            }
-        }
-    }
+        .any(|probed| residual_held(&probed.residual))
+        .then(|| {
+            inferlab_runtime::completion::wait(
+                &mut DeviceRelease {
+                    runtime,
+                    devices: &mut devices,
+                },
+                &mut |_| {},
+            )
+        });
 
     let mut first_error = None;
     let mut by_process = std::collections::BTreeMap::<String, Vec<DeviceResidualEvidence>>::new();
-    for ((process_id, _, _, _), residual) in probes.into_iter().zip(residuals) {
-        by_process.entry(process_id).or_default().push(residual);
+    for probed in devices {
+        by_process
+            .entry(probed.process_id)
+            .or_default()
+            .push(probed.residual);
     }
     for (process_id, residuals) in by_process {
         let held = residuals.iter().find_map(|entry| match entry {
@@ -1425,8 +1425,10 @@ fn verify_freed_devices<R: ResidualProbe>(
                 device,
                 bytes,
             } => Some(format!(
-                "device {device} on machine {machine:?} still holds {bytes} bytes of compute memory {}s after process cleanup",
-                RESIDUAL_SETTLE_WINDOW.as_secs()
+                "device {device} on machine {machine:?} still holds {bytes} bytes of compute memory after process cleanup{}",
+                wait.as_ref()
+                    .and_then(inferlab_runtime::completion::CompletionWaitEvidence::failure)
+                    .map_or(String::new(), |failure| format!(": {failure}"))
             )),
             _ => None,
         });
@@ -1434,9 +1436,7 @@ fn verify_freed_devices<R: ResidualProbe>(
             continue;
         };
         cleanup.device_residuals = Some(residuals);
-        cleanup.device_residual_settle_window_ms = Some(
-            inferlab_runtime::operation_bound::duration_millis(RESIDUAL_SETTLE_WINDOW),
-        );
+        cleanup.device_residual_wait.clone_from(&wait);
         if let Some(error) = held {
             cleanup.verified = false;
             cleanup.error = Some(error.clone());
@@ -1669,7 +1669,7 @@ mod tests {
             &self,
             handle: &ProcessHandle,
             trigger: CleanupTrigger,
-            _on_container_removal: &mut dyn FnMut(&str),
+            _report: &mut dyn FnMut(CleanupEvent<'_>),
         ) -> CleanupEvidence {
             let ProcessHandle::Local(handle) = handle else {
                 return CleanupEvidence::unavailable(trigger, "unexpected SSH handle".to_owned());
@@ -1680,17 +1680,16 @@ mod tests {
                 elapsed_ms: 0,
                 status_deadline_ms: 2_000,
                 term_grace_ms: 2_000,
-                kill_grace_ms: 10_000,
-                reap_grace_ms: None,
-                remote_deadline_ms: None,
+                remote_attempt_bound_ms: None,
                 verified: true,
                 already_exited: false,
                 forced: false,
                 signals: Vec::new(),
                 error: None,
+                exit_wait: None,
                 container_removal: None,
                 device_residuals: None,
-                device_residual_settle_window_ms: None,
+                device_residual_wait: None,
                 marked_process_sweep: None,
             }
         }

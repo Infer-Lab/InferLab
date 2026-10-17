@@ -121,8 +121,13 @@ fn termination_covers_the_whole_process_group() -> Result<(), String> {
     if evidence.trigger != super::ClientTerminationTrigger::ResultAccepted {
         return Err("client cleanup did not record its trigger".to_owned());
     }
-    if evidence.term_grace_ms != 2_000 || evidence.kill_grace_ms != 2_000 {
-        return Err("client cleanup did not record its independent graces".to_owned());
+    if evidence.term_grace_ms != 2_000
+        || !evidence
+            .exit_wait
+            .as_ref()
+            .is_some_and(inferlab_runtime::completion::CompletionWaitEvidence::reached)
+    {
+        return Err("client cleanup did not record its grace and exit wait".to_owned());
     }
     if alive {
         return Err("descendants survived group termination".to_owned());

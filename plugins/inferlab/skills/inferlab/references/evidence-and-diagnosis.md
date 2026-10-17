@@ -117,15 +117,35 @@ became occupied after resolution. Stop the occupant, assign other devices in
 local bindings, or relaunch with `--wait-for-devices` to wait for the assigned
 devices to free; the wait is not a queue.
 
-Cleanup terminates each process group, then sweeps the launch machine for
-processes whose initial environment carries the record's ownership marker
+Cleanup sends SIGTERM to each process group and SIGKILL to what has not stopped
+after a short grace, then sweeps the launch machine for processes whose initial
+environment carries the record's ownership marker
 (`process_evidence.<process>.handle.owner_marker`, set as
-`INFERLAB_SERVER_PROCESS`), which catches descendants that left the group. The
-outcome is `cleanup[].marked_process_sweep`: the marked processes `found`,
-whether termination was `forced`, and any that `remaining`; the sweep verifies
-only with nothing remaining and no `error`. A process started with a cleared
-environment or as another user is outside that ownership, and a handle without
-a marker is cleaned up by process group only.
+`INFERLAB_SERVER_PROCESS`), which catches descendants that left the group. A
+process has exited only when none of its threads lives: after a kill, a large
+server's leader can read as a zombie while another thread spends many seconds
+releasing pinned memory or writing back dirty pages. The outcome is
+`cleanup[].marked_process_sweep`: the marked processes `found` and whether
+termination was `forced`; the sweep verifies only without an `error`. A process
+started with a cleared environment or as another user is outside that
+ownership, and a handle without a marker is cleaned up by process group only.
+
+Waiting for the environment to finish what cleanup asked — threads exiting,
+a container disappearing, device memory being released — has no fixed time
+limit. Each wait is recorded where it happened (`cleanup[].exit_wait`,
+`marked_process_sweep.exit_wait`, `container_removal.removal_wait`,
+`cleanup[].device_residual_wait`) and ends with `ended`: `reached`; `stalled`
+when nothing attributable to the targets progressed — CPU time of their
+remaining threads, released memory or dirty and writeback bytes, container
+status, device memory — for `stall_window_ms`; `attention_ceiling` when the
+targets kept working past `attention_ceiling_ms` without finishing; or
+`interrupted` by a new Ctrl+C. The record also keeps the `signals` read, any
+`unavailable_signals`, `failed_observations` with the `last_error`,
+`last_progress_ms`, and what `remaining`. An unreached wait leaves the cleanup
+unverified and retryable with `serve stop`. A container removal also keeps the
+`removal_attempt_error` of a `docker rm -f` the daemon did not complete itself
+— Docker gives up on its own kill wait after about 12 seconds while a large
+container is still exiting, which is not a failure.
 
 `stop` is idempotent. Distinguish business-result failure, profiling/control
 failure, process cleanup failure, and incomplete evidence instead of reducing
@@ -137,10 +157,10 @@ device on its launch machine and records the outcome at
 `residual_held` with the observed bytes, or `probe_unavailable`. Only memory
 held by processes that no longer exist on that machine, or exist only as
 zombies, counts as residual; memory another live session holds on the same
-device does not. A device still holding residual memory is probed again until
-it frees or the settle window recorded as `device_residual_settle_window_ms`
-closes; residual memory at the window's end makes the cleanup unverified, and
-the error names the machine and device. `probe_unavailable`, for example on a
+device does not. A device still holding residual memory is probed again in the
+`device_residual_wait` until it frees; residual memory when that wait ends
+unreached makes the cleanup unverified, and the error names the machine and
+device. `probe_unavailable`, for example on a
 machine without the probe tool, does not fail cleanup.
 
 A server record is readable only by a binary that writes the same server record

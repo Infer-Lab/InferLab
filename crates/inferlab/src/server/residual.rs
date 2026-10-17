@@ -15,11 +15,8 @@ use std::time::Duration;
 
 const RESIDUAL_MARKER: &str = "INFERLAB_DEVICE_RESIDUAL\t";
 
-/// How long held devices are probed again after process cleanup: the driver
-/// releases a killed process's device memory after the process has exited,
-/// so a held reading right after cleanup is not yet a leak. Every probe
-/// consumes this window, so a wedged driver or host cannot hang cleanup.
-pub(super) const RESIDUAL_SETTLE_WINDOW: Duration = Duration::from_secs(30);
+/// The cadence between device probes while a launch waits for its devices:
+/// polling, not a bound.
 pub(super) const RESIDUAL_SETTLE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) trait ResidualProbe {
@@ -187,6 +184,86 @@ fn parse_residual_rows(machine: &str, stdout: &str) -> Result<u64, ResidualProbe
 
 pub(super) fn residual_held(evidence: &DeviceResidualEvidence) -> bool {
     matches!(evidence, DeviceResidualEvidence::ResidualHeld { .. })
+}
+
+/// One probed device after process cleanup.
+pub(super) struct ProbedDevice {
+    pub(super) process_id: String,
+    pub(super) machine: String,
+    pub(super) launch: LaunchPlan,
+    pub(super) device: u32,
+    pub(super) residual: DeviceResidualEvidence,
+}
+
+/// Release of device memory still held after process cleanup as a
+/// completion wait ([[RFC-0009:C-COMPLETION-WAITS]]): the driver releases a
+/// killed process's device memory after the process has exited, so a held
+/// reading right after cleanup is not yet a leak. Progress is fewer devices
+/// holding memory or fewer bytes held; a re-probe that cannot answer keeps
+/// the device's last reading.
+pub(super) struct DeviceRelease<'a, R: ResidualProbe> {
+    pub(super) runtime: &'a R,
+    pub(super) devices: &'a mut [ProbedDevice],
+}
+
+impl<R: ResidualProbe> inferlab_runtime::completion::CompletionTarget for DeviceRelease<'_, R> {
+    fn awaited(&self) -> String {
+        "device memory held after process cleanup is released".to_owned()
+    }
+
+    fn observe(
+        &mut self,
+        attempt: &OperationBound,
+    ) -> Result<inferlab_runtime::completion::Observation, String> {
+        let mut answered = false;
+        let mut last_failure = None;
+        for probed in self.devices.iter_mut() {
+            if !residual_held(&probed.residual) {
+                continue;
+            }
+            match probe_device_residual(
+                self.runtime,
+                &probed.launch,
+                &probed.machine,
+                probed.device,
+                attempt,
+            ) {
+                DeviceResidualEvidence::ProbeUnavailable { reason, .. } => {
+                    last_failure = Some(reason);
+                }
+                residual => {
+                    answered = true;
+                    probed.residual = residual;
+                }
+            }
+        }
+        if !answered && let Some(failure) = last_failure {
+            return Err(failure);
+        }
+        let held = self
+            .devices
+            .iter()
+            .filter_map(|probed| match &probed.residual {
+                DeviceResidualEvidence::ResidualHeld { bytes, .. } => {
+                    Some((probed.machine.as_str(), probed.device, *bytes))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let bytes = held.iter().map(|(_, _, bytes)| bytes).sum::<u64>();
+        Ok(inferlab_runtime::completion::Observation {
+            reached: held.is_empty(),
+            signals: vec![("held_devices", held.len() as u64), ("held_bytes", bytes)],
+            unavailable: Vec::new(),
+            remaining: held
+                .iter()
+                .map(|(machine, device, bytes)| {
+                    format!("device {device} on machine {machine:?} holds {bytes} bytes")
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        })
+    }
 }
 
 /// The evidence outcome for one probed device: a probe failure records

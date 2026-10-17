@@ -411,10 +411,8 @@ fn start_status_logs_and_stop_share_one_record() -> Result<(), Box<dyn Error>> {
         evidence["cleanup"][0]["device_residuals"],
         serde_json::json!(expected_residuals)
     );
-    assert_eq!(
-        evidence["cleanup"][0]["device_residual_settle_window_ms"],
-        30_000
-    );
+    // Devices free at the first probe need no release wait.
+    assert_eq!(evidence["cleanup"][0]["device_residual_wait"], Value::Null);
     Ok(())
 }
 
@@ -490,14 +488,15 @@ fn stop_waits_for_device_memory_the_driver_releases_after_cleanup() -> Result<()
     Ok(())
 }
 
-/// A stopped server whose assigned device still shows compute memory at the
-/// settle deadline reports unverified cleanup naming the device
+/// A stopped server whose assigned device keeps compute memory while its
+/// release stalls reports unverified cleanup naming the device
 /// ([[RFC-0005:C-EVIDENCE]]). A wedged driver cannot hang the stop: each
-/// residual probe consumes the settle window ([[RFC-0009:C-CLEANUP-GRACE]]),
-/// and a re-probe that never answers is inconclusive, so the device keeps the
-/// held reading rather than turning the cleanup verified.
+/// re-probe is a bounded attempt and the release wait stalls without
+/// progress ([[RFC-0009:C-COMPLETION-WAITS]]); a re-probe that never answers
+/// is inconclusive, so the device keeps the held reading rather than turning
+/// the cleanup verified.
 #[test]
-fn stop_reports_memory_still_held_at_the_settle_deadline() -> Result<(), Box<dyn Error>> {
+fn stop_reports_memory_still_held_when_its_release_stalls() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
     let id = started["id"].as_str().ok_or("missing record id")?;
@@ -519,7 +518,7 @@ fn stop_reports_memory_still_held_at_the_settle_deadline() -> Result<(), Box<dyn
     );
     assert!(stderr.contains("device 0"), "{stderr}");
     assert!(stderr.contains("\"local\""), "{stderr}");
-    assert!(stderr.contains("30s after process cleanup"), "{stderr}");
+    assert!(stderr.contains("no progress"), "{stderr}");
     let record: Value = serde_json::from_slice(&fs::read(
         workspace
             .root
@@ -529,7 +528,9 @@ fn stop_reports_memory_still_held_at_the_settle_deadline() -> Result<(), Box<dyn
     assert_eq!(record["status"], "failed");
     let cleanup = &process_evidence(&record, "server")?["cleanup"][0];
     assert_eq!(cleanup["verified"], false);
-    assert_eq!(cleanup["device_residual_settle_window_ms"], 30_000);
+    let wait = &cleanup["device_residual_wait"];
+    assert_eq!(wait["ended"], "stalled", "{cleanup}");
+    assert!(wait["failed_observations"].as_u64() > Some(0), "{cleanup}");
     assert!(
         cleanup["error"]
             .as_str()

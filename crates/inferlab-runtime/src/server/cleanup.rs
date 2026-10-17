@@ -1,27 +1,25 @@
 use super::observation::{remote_group_alive_script, run_cleanup_command};
 use super::{
-    CleanupEvidence, CleanupTrigger, ContainerRemovalEvidence, HostProcessHandle,
+    CleanupEvent, CleanupEvidence, CleanupTrigger, ContainerRemovalEvidence, HostProcessHandle,
     MarkedProcessSweepEvidence, ProcessCleanup, ProcessHandle, SERVER_PROCESS_MARKER_ENV,
     SshProcessHandle, SystemProcessRuntime,
 };
+use crate::completion::process::{ProcessExit, Processes};
+use crate::completion::{ATTEMPT_BOUND, CompletionWaitEvidence};
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::process_group::{
-    KILL_GRACE, LocalProcessGroup, SignalEvidence, TERM_GRACE, TerminationSignal, VerifiedStatus,
+    LocalProcessGroup, SignalEvidence, TERM_GRACE, TerminationSignal, VerifiedStatus,
 };
 use crate::shell::shell_quote;
 use crate::ssh::{SSH_ENV_REMOVE, ssh_argv};
 use std::time::{Duration, Instant};
-use wait_timeout::ChildExt;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SERVER_CLEANUP_STATUS_DEADLINE: Duration = Duration::from_secs(2);
-pub(super) const REMOTE_SERVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(30);
-const LOCAL_LAUNCH_FAILURE_REAP_GRACE: Duration = Duration::from_secs(5);
 pub(super) const TERM_POLL_LIMIT: u128 = TERM_GRACE.as_millis() / POLL_INTERVAL.as_millis();
-pub(super) const KILL_POLL_LIMIT: u128 = KILL_GRACE.as_millis() / POLL_INTERVAL.as_millis();
 
-/// The `sleep` operand of the remote TERM and KILL loops: the poll limits
-/// above count iterations of this same interval.
+/// The `sleep` operand of the remote TERM loops: the poll limit above counts
+/// iterations of this same interval.
 pub(super) fn remote_poll_sleep() -> String {
     format!(
         "{}.{:03}",
@@ -39,17 +37,16 @@ impl CleanupEvidence {
             elapsed_ms: 0,
             status_deadline_ms: duration_millis(SERVER_CLEANUP_STATUS_DEADLINE),
             term_grace_ms: duration_millis(TERM_GRACE),
-            kill_grace_ms: duration_millis(KILL_GRACE),
-            reap_grace_ms: None,
-            remote_deadline_ms: None,
+            remote_attempt_bound_ms: None,
             verified: false,
             already_exited: false,
             forced: false,
             signals: Vec::new(),
             error: Some(message),
+            exit_wait: None,
             container_removal: None,
             device_residuals: None,
-            device_residual_settle_window_ms: None,
+            device_residual_wait: None,
             marked_process_sweep: None,
         }
     }
@@ -71,23 +68,25 @@ impl CleanupEvidence {
             elapsed_ms: removal.elapsed_ms,
             status_deadline_ms: duration_millis(SERVER_CLEANUP_STATUS_DEADLINE),
             term_grace_ms: duration_millis(TERM_GRACE),
-            kill_grace_ms: duration_millis(KILL_GRACE),
-            reap_grace_ms: None,
-            remote_deadline_ms: None,
+            remote_attempt_bound_ms: None,
             verified,
             already_exited: false,
             forced: false,
             signals: Vec::new(),
             error,
+            exit_wait: None,
             container_removal: Some(removal),
             device_residuals: None,
-            device_residual_settle_window_ms: None,
+            device_residual_wait: None,
             marked_process_sweep: None,
         }
     }
 }
 
-pub(super) fn cleanup_failed_local_launch(child: &mut std::process::Child) -> CleanupEvidence {
+pub(super) fn cleanup_failed_local_launch(
+    child: &mut std::process::Child,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
+) -> CleanupEvidence {
     let started = Instant::now();
     let initial_status_error = match child.try_wait() {
         Ok(Some(_)) => {
@@ -96,13 +95,12 @@ pub(super) fn cleanup_failed_local_launch(child: &mut std::process::Child) -> Cl
             evidence.elapsed_ms = duration_millis(started.elapsed());
             evidence.status_deadline_ms = 0;
             evidence.term_grace_ms = 0;
-            evidence.reap_grace_ms = Some(duration_millis(LOCAL_LAUNCH_FAILURE_REAP_GRACE));
             return evidence;
         }
         Ok(None) => None,
-        // The subsequent kill and bounded reap are authoritative cleanup
+        // The subsequent kill and exit wait are authoritative cleanup
         // verification. Preserve this diagnostic only if that verification
-        // also fails; a successful reap resolves the transient status error.
+        // also fails; a reached exit resolves the transient status error.
         Err(error) => Some(format!("failed to inspect failed launch child: {error}")),
     };
     let group = match LocalProcessGroup::capture_child(child) {
@@ -115,19 +113,22 @@ pub(super) fn cleanup_failed_local_launch(child: &mut std::process::Child) -> Cl
             evidence.elapsed_ms = duration_millis(started.elapsed());
             evidence.status_deadline_ms = 0;
             evidence.term_grace_ms = 0;
-            evidence.reap_grace_ms = Some(duration_millis(LOCAL_LAUNCH_FAILURE_REAP_GRACE));
             return evidence;
         }
     };
-    let bound = OperationBound::finite(KILL_GRACE);
-    let signal = group.send_signal(TerminationSignal::Kill, &bound);
-    let reaped = match child.wait_timeout(LOCAL_LAUNCH_FAILURE_REAP_GRACE) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(format!(
-            "child did not reap within {} seconds",
-            LOCAL_LAUNCH_FAILURE_REAP_GRACE.as_secs()
-        )),
-        Err(error) => Err(format!("failed to reap failed launch child: {error}")),
+    let signal = group.send_signal(
+        TerminationSignal::Kill,
+        &OperationBound::finite(ATTEMPT_BOUND),
+    );
+    let wait = wait_for_exit(None, Processes::Group(group.process_group), report);
+    // Every thread has exited, so reaping the leader returns at once.
+    let reaped = if wait.reached() {
+        child
+            .wait()
+            .map(|_| ())
+            .map_err(|error| format!("failed to reap failed launch child: {error}"))
+    } else {
+        Err(wait.failure().unwrap_or_default())
     };
     let mut evidence = match reaped {
         Ok(()) => completed_cleanup(CleanupTrigger::StartupRollback, false, true, vec![signal]),
@@ -138,10 +139,42 @@ pub(super) fn cleanup_failed_local_launch(child: &mut std::process::Child) -> Cl
             cleanup_error(CleanupTrigger::StartupRollback, true, vec![signal], error)
         }
     };
+    evidence.exit_wait = Some(wait);
     evidence.elapsed_ms = duration_millis(started.elapsed());
     evidence.status_deadline_ms = 0;
     evidence.term_grace_ms = 0;
-    evidence.reap_grace_ms = Some(duration_millis(LOCAL_LAUNCH_FAILURE_REAP_GRACE));
+    evidence
+}
+
+/// Wait until every thread of `processes` has exited on the launch machine
+/// ([[RFC-0009:C-COMPLETION-WAITS]]).
+pub(super) fn wait_for_exit(
+    target: Option<&str>,
+    processes: Processes,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
+) -> CompletionWaitEvidence {
+    crate::completion::wait(
+        &mut ProcessExit {
+            target: target.map(str::to_owned),
+            processes,
+        },
+        &mut |message| report(CleanupEvent::Waiting(message)),
+    )
+}
+
+/// The cleanup outcome once the group was signalled: verified exactly when
+/// every thread of the group exited.
+fn after_signals(
+    trigger: CleanupTrigger,
+    forced: bool,
+    signals: Vec<SignalEvidence>,
+    wait: CompletionWaitEvidence,
+) -> CleanupEvidence {
+    let mut evidence = match wait.failure() {
+        None => completed_cleanup(trigger, false, forced, signals),
+        Some(failure) => cleanup_error(trigger, forced, signals, failure),
+    };
+    evidence.exit_wait = Some(wait);
     evidence
 }
 
@@ -162,6 +195,7 @@ pub(super) fn removal_summary(removal: &ContainerRemovalEvidence) -> String {
 pub(super) fn terminate_local(
     handle: &HostProcessHandle,
     trigger: CleanupTrigger,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
 ) -> CleanupEvidence {
     let started = Instant::now();
     if let Err(error) = handle.validate() {
@@ -229,59 +263,52 @@ pub(super) fn terminate_local(
     }
     let term_bound = OperationBound::finite(TERM_GRACE);
     let mut signals = vec![group.send_signal(TerminationSignal::Term, &term_bound)];
-    let mut evidence = match group.wait_until_stopped(None, &term_bound, POLL_INTERVAL) {
-        Ok(true) => completed_cleanup(trigger, false, false, signals),
+    // The termination grace only decides escalation; whether the group has
+    // exited is the exit wait's judgment, because a leader can read as gone
+    // while its threads still release what they held.
+    let forced = match group.wait_until_stopped(None, &term_bound, POLL_INTERVAL) {
+        Ok(true) => false,
         Ok(false) => {
-            let kill_bound = OperationBound::finite(KILL_GRACE);
-            signals.push(group.send_signal(TerminationSignal::Kill, &kill_bound));
-            match group.wait_until_stopped(None, &kill_bound, POLL_INTERVAL) {
-                Ok(true) => completed_cleanup(trigger, false, true, signals),
-                Ok(false) => CleanupEvidence {
-                    trigger,
-                    elapsed_ms: 0,
-                    status_deadline_ms: duration_millis(SERVER_CLEANUP_STATUS_DEADLINE),
-                    term_grace_ms: duration_millis(TERM_GRACE),
-                    kill_grace_ms: duration_millis(KILL_GRACE),
-                    reap_grace_ms: None,
-                    remote_deadline_ms: None,
-                    verified: false,
-                    already_exited: false,
-                    forced: true,
-                    signals,
-                    error: Some(format!(
-                        "server process group {} did not exit after SIGKILL",
-                        handle.process_group
-                    )),
-                    container_removal: None,
-                    device_residuals: None,
-                    device_residual_settle_window_ms: None,
-                    marked_process_sweep: None,
-                },
-                Err(error) => cleanup_error(trigger, true, signals, error.to_string()),
-            }
+            signals.push(group.send_signal(
+                TerminationSignal::Kill,
+                &OperationBound::finite(ATTEMPT_BOUND),
+            ));
+            true
         }
-        Err(error) => cleanup_error(trigger, false, signals, error.to_string()),
+        Err(error) => {
+            let mut evidence = cleanup_error(trigger, false, signals, error.to_string());
+            evidence.elapsed_ms = duration_millis(started.elapsed());
+            return evidence;
+        }
     };
+    let wait = wait_for_exit(None, Processes::Group(handle.process_group), report);
+    let mut evidence = after_signals(trigger, forced, signals, wait);
     evidence.elapsed_ms = duration_millis(started.elapsed());
     evidence
 }
 
-pub(super) fn terminate_ssh(handle: &SshProcessHandle, trigger: CleanupTrigger) -> CleanupEvidence {
+pub(super) fn terminate_ssh(
+    handle: &SshProcessHandle,
+    trigger: CleanupTrigger,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
+) -> CleanupEvidence {
     let started = Instant::now();
-    let bound = OperationBound::finite(REMOTE_SERVER_CLEANUP_DEADLINE);
-    let mut evidence = terminate_ssh_under(handle, trigger, &bound);
+    let bound = OperationBound::finite(ATTEMPT_BOUND);
+    let mut evidence = terminate_ssh_under(handle, trigger, &bound, report);
     evidence.elapsed_ms = duration_millis(started.elapsed());
-    evidence.remote_deadline_ms = Some(duration_millis(REMOTE_SERVER_CLEANUP_DEADLINE));
+    evidence.remote_attempt_bound_ms = Some(duration_millis(ATTEMPT_BOUND));
     evidence
 }
 
-/// The remote cleanup script: the leader-missing branch replicates the local
-/// cohort check — every live member must start at or after the recorded
+/// The remote termination script: it signals the group — SIGTERM, the
+/// termination grace, SIGKILL to what remains — and returns; whether the
+/// group exited is the exit wait's judgment. The leader-missing branch
+/// replicates the local cohort check — every live member must start at or after the recorded
 /// leader ticks, else the pgid reads as recycled and the script declines to
 /// signal, naming the offending members in the detail field.
 pub(super) fn remote_cleanup_script(handle: &SshProcessHandle) -> String {
     format!(
-        "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t0\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then bad=\"\"; for mpid in $(ps -eo pid=,pgid=,stat= | awk -v pgid=\"$pgid\" '$2 == pgid && $3 !~ /^Z/ {{print $1}}'); do mticks=$(awk '{{print $22}}' /proc/$mpid/stat 2>/dev/null) || mticks=\"\"; if [ -n \"$mticks\" ] && [ \"$mticks\" -lt \"$expected\" ]; then bad=\"$bad $mpid:$mticks\"; fi; done; if [ -n \"$bad\" ]; then printf '{marker}unknown\\t-\\t0\\t-\\t1\\tleader-missing; cohort members%s predate recorded leader start %s\\n' \"$bad\" \"$expected\"; exit 0; fi; else printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t0\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; i=0; while {} && [ $i -lt {kill_limit} ]; do sleep {poll}; i=$((i+1)); done; fi; alive=0; if {}; then alive=1; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\" \"$alive\"",
+        "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then bad=\"\"; for mpid in $(ps -eo pid=,pgid=,stat= | awk -v pgid=\"$pgid\" '$2 == pgid && $3 !~ /^Z/ {{print $1}}'); do mticks=$(awk '{{print $22}}' /proc/$mpid/stat 2>/dev/null) || mticks=\"\"; if [ -n \"$mticks\" ] && [ \"$mticks\" -lt \"$expected\" ]; then bad=\"$bad $mpid:$mticks\"; fi; done; if [ -n \"$bad\" ]; then printf '{marker}unknown\\t-\\t0\\t-\\tleader-missing; cohort members%s predate recorded leader start %s\\n' \"$bad\" \"$expected\"; exit 0; fi; else printf '{marker}already\\t-\\t0\\t-\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\"",
         handle.process_group,
         handle.leader_pid,
         handle.leader_start_time_ticks,
@@ -289,10 +316,7 @@ pub(super) fn remote_cleanup_script(handle: &SshProcessHandle) -> String {
         remote_group_alive_script("$pgid"),
         remote_group_alive_script("$pgid"),
         remote_group_alive_script("$pgid"),
-        remote_group_alive_script("$pgid"),
-        remote_group_alive_script("$pgid"),
         term_limit = TERM_POLL_LIMIT,
-        kill_limit = KILL_POLL_LIMIT,
         poll = remote_poll_sleep(),
         marker = CLEANUP_MARKER,
     )
@@ -302,6 +326,7 @@ pub(super) fn terminate_ssh_under(
     handle: &SshProcessHandle,
     trigger: CleanupTrigger,
     bound: &OperationBound,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
 ) -> CleanupEvidence {
     let script = remote_cleanup_script(handle);
     match run_cleanup_command(
@@ -367,19 +392,12 @@ pub(super) fn terminate_ssh_under(
                     &stderr,
                 ));
             }
-            if result.alive {
-                cleanup_error(
-                    trigger,
-                    result.forced,
-                    signals,
-                    format!(
-                        "SSH process group {} did not exit after cleanup",
-                        handle.process_group
-                    ),
-                )
-            } else {
-                completed_cleanup(trigger, false, result.forced, signals)
-            }
+            let wait = wait_for_exit(
+                Some(&handle.target),
+                Processes::Group(handle.process_group),
+                report,
+            );
+            after_signals(trigger, result.forced, signals, wait)
         }
         Ok(output) => cleanup_error(
             trigger,
@@ -396,125 +414,45 @@ pub(super) fn terminate_ssh_under(
 }
 
 /// Confirm a server container is gone from its launch machine
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]), mapping the shared removal outcome
-/// onto this record's evidence shape.
+/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]], [[RFC-0009:C-COMPLETION-WAITS]]).
 pub(super) fn remove_server_container(
     target: Option<&str>,
     container: &str,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
 ) -> ContainerRemovalEvidence {
-    use crate::container::{Removal, RemovalFailure, remove_container};
-    let started = Instant::now();
-    let evidence =
-        |confirmed: bool,
-         already_absent: bool,
-         error: Option<String>,
-         operation_elapsed_ms: u64,
-         client_cleanup: Option<crate::container::CommandCleanupEvidence>| {
-            ContainerRemovalEvidence {
-                container: container.to_owned(),
-                elapsed_ms: duration_millis(started.elapsed()),
-                operation_elapsed_ms,
-                deadline_ms: duration_millis(crate::container::REMOVAL_TIMEOUT),
-                client_cleanup,
-                confirmed,
-                already_absent,
-                error,
-            }
-        };
-    match remove_container(target, container) {
-        Removal::Confirmed { already_absent } => evidence(
-            true,
-            already_absent,
-            None,
-            duration_millis(started.elapsed()),
-            None,
-        ),
-        Removal::Unconfirmed(RemovalFailure::Exit { status, stderr }) => evidence(
-            false,
-            false,
-            Some(format!(
-                "docker rm -f exited with {status}: {}",
-                stderr.trim()
-            )),
-            duration_millis(started.elapsed()),
-            None,
-        ),
-        Removal::Unconfirmed(RemovalFailure::Deadline {
-            operation_elapsed_ms,
-            client_cleanup,
-        }) => evidence(
-            false,
-            false,
-            Some(format!(
-                "docker rm -f {container} exceeded its {}s deadline",
-                crate::container::REMOVAL_TIMEOUT.as_secs()
-            )),
-            operation_elapsed_ms,
-            client_cleanup,
-        ),
-        Removal::Unconfirmed(RemovalFailure::Launch(error)) => evidence(
-            false,
-            false,
-            Some(format!("docker rm failed to launch: {error}")),
-            duration_millis(started.elapsed()),
-            None,
-        ),
-        Removal::Unconfirmed(RemovalFailure::Wait(error)) => evidence(
-            false,
-            false,
-            Some(format!("docker rm wait failed: {error}")),
-            duration_millis(started.elapsed()),
-            None,
-        ),
-        Removal::Unconfirmed(RemovalFailure::WaitCleanup {
-            source,
-            operation_elapsed_ms,
-            client_cleanup,
-        }) => evidence(
-            false,
-            false,
-            Some(format!("docker rm wait failed: {source}")),
-            operation_elapsed_ms,
-            Some(client_cleanup),
-        ),
-        Removal::Unconfirmed(RemovalFailure::Ssh(error)) => evidence(
-            false,
-            false,
-            Some(error),
-            duration_millis(started.elapsed()),
-            None,
-        ),
-    }
+    crate::container::remove_container(target, container, &mut |message| {
+        report(CleanupEvent::Waiting(message));
+    })
 }
 
 /// The marked-process sweep, one script for both launch paths: it lists
 /// every live process whose initial environment holds the exact marker
 /// entry — a zombie's environment reads empty, and another user's is
-/// unreadable — then sends SIGTERM, polls through the termination grace,
-/// sends SIGKILL to what remains, and polls through the kill grace
+/// unreadable — with its start time, sends SIGTERM, polls through the
+/// termination grace, sends SIGKILL to what still matches, and returns
 /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). The script's own processes inherit no
-/// marker, so the listing never names the sweep itself.
+/// marker, so the listing never names the sweep itself. Whether the found
+/// processes exited is the exit wait's judgment.
 pub(super) fn marked_process_sweep_script(marker: &str) -> String {
     format!(
-        "set +e; entry={entry}; marked() {{ grep -lsxzF -e \"$entry\" /proc/[0-9]*/environ | sed -n 's#^/proc/\\([0-9]*\\)/environ$#\\1#p' | tr '\\n' ' '; }}; found=$(marked); term=-; forced=0; kill_code=-; left=$found; if [ -n \"$found\" ]; then kill -TERM $found 2>/dev/null; term=$?; i=0; left=$(marked); while [ -n \"$left\" ] && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); left=$(marked); done; if [ -n \"$left\" ]; then forced=1; kill -KILL $left 2>/dev/null; kill_code=$?; i=0; left=$(marked); while [ -n \"$left\" ] && [ $i -lt {kill_limit} ]; do sleep {poll}; i=$((i+1)); left=$(marked); done; fi; fi; printf '{sweep}%s\\t%s\\t%s\\t%s\\t%s\\n' \"$found\" \"$term\" \"$forced\" \"$kill_code\" \"$left\"",
+        "set +e; entry={entry}; marked() {{ grep -lsxzF -e \"$entry\" /proc/[0-9]*/environ | sed -n 's#^/proc/\\([0-9]*\\)/environ$#\\1#p' | tr '\\n' ' '; }}; found=$(marked); pairs=; for p in $found; do read -r line < /proc/$p/stat 2>/dev/null || continue; rest=${{line##*) }}; set -- $rest; pairs=\"$pairs $p:${{20}}\"; done; term=-; forced=0; kill_code=-; if [ -n \"$found\" ]; then kill -TERM $found 2>/dev/null; term=$?; i=0; left=$(marked); while [ -n \"$left\" ] && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); left=$(marked); done; if [ -n \"$left\" ]; then forced=1; kill -KILL $left 2>/dev/null; kill_code=$?; fi; fi; printf '{sweep}%s\\t%s\\t%s\\t%s\\n' \"$pairs\" \"$term\" \"$forced\" \"$kill_code\"",
         entry = shell_quote(&format!("{SERVER_PROCESS_MARKER_ENV}={marker}")),
         term_limit = TERM_POLL_LIMIT,
-        kill_limit = KILL_POLL_LIMIT,
         poll = remote_poll_sleep(),
         sweep = SWEEP_MARKER,
     )
 }
 
 /// Run the marked-process sweep on a launch machine — locally, or over SSH
-/// to `target` — under the remote cleanup deadline that bounds the group
-/// cleanup script of the same shape.
+/// to `target` — then wait until every found process has exited.
 pub(super) fn sweep_marked_processes(
     target: Option<&str>,
     marker: &str,
+    report: &mut dyn FnMut(CleanupEvent<'_>),
 ) -> MarkedProcessSweepEvidence {
     let started = Instant::now();
     let script = marked_process_sweep_script(marker);
-    let bound = OperationBound::finite(REMOTE_SERVER_CLEANUP_DEADLINE);
+    let bound = OperationBound::finite(ATTEMPT_BOUND);
     let output = match target {
         None => run_cleanup_command(
             &["sh", "-c", script.as_str()],
@@ -532,28 +470,30 @@ pub(super) fn sweep_marked_processes(
     let mut evidence = MarkedProcessSweepEvidence {
         marker: marker.to_owned(),
         elapsed_ms: 0,
-        deadline_ms: duration_millis(REMOTE_SERVER_CLEANUP_DEADLINE),
+        attempt_bound_ms: duration_millis(ATTEMPT_BOUND),
         found: Vec::new(),
         term_exit_code: None,
         forced: false,
         kill_exit_code: None,
-        remaining: Vec::new(),
+        exit_wait: None,
         error: None,
     };
     match output {
         Ok(output) if output.status.success() => {
             match parse_sweep_output(&String::from_utf8_lossy(&output.stdout)) {
                 Some(result) => {
-                    evidence.found = result.found;
+                    evidence.found = result.found.iter().map(|(pid, _)| *pid).collect();
                     evidence.term_exit_code = result.term_exit_code;
                     evidence.forced = result.forced;
                     evidence.kill_exit_code = result.kill_exit_code;
-                    evidence.remaining = result.remaining;
-                    if !evidence.remaining.is_empty() {
-                        evidence.error = Some(format!(
-                            "processes carrying {SERVER_PROCESS_MARKER_ENV}={marker} remained after SIGKILL: {}",
-                            join_pids(&evidence.remaining)
-                        ));
+                    if !result.found.is_empty() {
+                        let wait = wait_for_exit(target, Processes::Exact(result.found), report);
+                        if let Some(failure) = wait.failure() {
+                            evidence.error = Some(format!(
+                                "processes carrying {SERVER_PROCESS_MARKER_ENV}={marker}: {failure}"
+                            ));
+                        }
+                        evidence.exit_wait = Some(wait);
                     }
                 }
                 None => {
@@ -575,11 +515,10 @@ pub(super) fn sweep_marked_processes(
 }
 
 struct SweepOutput {
-    found: Vec<u32>,
+    found: Vec<(u32, u64)>,
     term_exit_code: Option<i32>,
     forced: bool,
     kill_exit_code: Option<i32>,
-    remaining: Vec<u32>,
 }
 
 fn parse_sweep_output(output: &str) -> Option<SweepOutput> {
@@ -588,36 +527,27 @@ fn parse_sweep_output(output: &str) -> Option<SweepOutput> {
         .rev()
         .find_map(|line| line.strip_prefix(SWEEP_MARKER))?;
     let mut fields = result.split('\t');
-    let pids = |field: &str| {
-        field
-            .split_whitespace()
-            .map(str::parse::<u32>)
-            .collect::<Result<Vec<_>, _>>()
-            .ok()
-    };
+    let found = fields
+        .next()?
+        .split_whitespace()
+        .map(|pair| {
+            let (pid, start) = pair.split_once(':')?;
+            Some((pid.parse().ok()?, start.parse().ok()?))
+        })
+        .collect::<Option<Vec<_>>>()?;
     let code = |field: &str| match field {
         "-" => Some(None),
         value => value.parse::<i32>().ok().map(Some),
     };
-    let found = pids(fields.next()?)?;
     let term_exit_code = code(fields.next()?)?;
     let forced = fields.next()? == "1";
     let kill_exit_code = code(fields.next()?)?;
-    let remaining = pids(fields.next()?)?;
     Some(SweepOutput {
         found,
         term_exit_code,
         forced,
         kill_exit_code,
-        remaining,
     })
-}
-
-fn join_pids(pids: &[u32]) -> String {
-    pids.iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 pub(super) fn completed_cleanup(
@@ -631,17 +561,16 @@ pub(super) fn completed_cleanup(
         elapsed_ms: 0,
         status_deadline_ms: duration_millis(SERVER_CLEANUP_STATUS_DEADLINE),
         term_grace_ms: duration_millis(TERM_GRACE),
-        kill_grace_ms: duration_millis(KILL_GRACE),
-        reap_grace_ms: None,
-        remote_deadline_ms: None,
+        remote_attempt_bound_ms: None,
         verified: true,
         already_exited,
         forced,
         signals,
         error: None,
+        exit_wait: None,
         container_removal: None,
         device_residuals: None,
-        device_residual_settle_window_ms: None,
+        device_residual_wait: None,
         marked_process_sweep: None,
     }
 }
@@ -657,17 +586,16 @@ pub(super) fn cleanup_error(
         elapsed_ms: 0,
         status_deadline_ms: duration_millis(SERVER_CLEANUP_STATUS_DEADLINE),
         term_grace_ms: duration_millis(TERM_GRACE),
-        kill_grace_ms: duration_millis(KILL_GRACE),
-        reap_grace_ms: None,
-        remote_deadline_ms: None,
+        remote_attempt_bound_ms: None,
         verified: false,
         already_exited: false,
         forced,
         signals,
         error: Some(error),
+        exit_wait: None,
         container_removal: None,
         device_residuals: None,
-        device_residual_settle_window_ms: None,
+        device_residual_wait: None,
         marked_process_sweep: None,
     }
 }
@@ -684,7 +612,6 @@ struct RemoteCleanupOutput {
     term_code: Option<i32>,
     forced: bool,
     kill_code: Option<i32>,
-    alive: bool,
     detail: String,
 }
 
@@ -710,14 +637,12 @@ fn parse_cleanup_output(output: &str) -> Option<RemoteCleanupOutput> {
         "-" => None,
         value => Some(value.parse().ok()?),
     };
-    let alive = fields.next()? == "1";
     let detail = fields.next()?.to_owned();
     Some(RemoteCleanupOutput {
         state,
         term_code,
         forced,
         kill_code,
-        alive,
         detail,
     })
 }
@@ -742,11 +667,11 @@ impl ProcessCleanup for SystemProcessRuntime {
         &self,
         handle: &ProcessHandle,
         trigger: CleanupTrigger,
-        on_container_removal: &mut dyn FnMut(&str),
+        report: &mut dyn FnMut(CleanupEvent<'_>),
     ) -> CleanupEvidence {
         let mut evidence = match handle {
-            ProcessHandle::Local(handle) => terminate_local(handle, trigger),
-            ProcessHandle::Ssh(handle) => terminate_ssh(handle, trigger),
+            ProcessHandle::Local(handle) => terminate_local(handle, trigger, report),
+            ProcessHandle::Ssh(handle) => terminate_ssh(handle, trigger, report),
         };
         // A launch tool can move the serving tree out of the group the kill
         // above reached; every process still carrying the marker is this
@@ -758,7 +683,7 @@ impl ProcessCleanup for SystemProcessRuntime {
             ProcessHandle::Ssh(handle) => (handle.owner_marker.as_deref(), Some(&*handle.target)),
         };
         if let Some(marker) = marker {
-            let sweep = sweep_marked_processes(sweep_target, marker);
+            let sweep = sweep_marked_processes(sweep_target, marker, report);
             if !sweep.verified() {
                 evidence.verified = false;
                 if evidence.error.is_none() {
@@ -777,8 +702,8 @@ impl ProcessCleanup for SystemProcessRuntime {
             ProcessHandle::Ssh(handle) => (handle.container.as_deref(), Some(&*handle.target)),
         };
         if let Some(container) = container {
-            on_container_removal(container);
-            let removal = remove_server_container(target, container);
+            report(CleanupEvent::ContainerRemoval(container));
+            let removal = remove_server_container(target, container, report);
             if !removal.confirmed {
                 evidence.verified = false;
                 if evidence.error.is_none() {

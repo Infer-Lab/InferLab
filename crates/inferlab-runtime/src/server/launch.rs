@@ -1,12 +1,14 @@
 use super::cleanup::{
-    KILL_POLL_LIMIT, REMOTE_SERVER_CLEANUP_DEADLINE, TERM_POLL_LIMIT, cleanup_error,
-    cleanup_failed_local_launch, completed_cleanup, remote_poll_sleep, remove_server_container,
+    TERM_POLL_LIMIT, cleanup_error, cleanup_failed_local_launch, completed_cleanup,
+    remote_poll_sleep, remove_server_container, wait_for_exit,
 };
 use super::observation::{remote_group_alive_script, run_cleanup_command};
 use super::{
     CleanupTrigger, HostProcessHandle, LaunchFailure, ProcessHandle, ProcessLauncher, ProcessSpec,
     SERVER_PROCESS_MARKER_ENV, ServerLaunchError, SshProcessHandle, SystemProcessRuntime,
 };
+use crate::completion::process::Processes;
+use crate::completion::{ATTEMPT_BOUND, CompletionWaitEvidence};
 use crate::operation_bound::{OperationBound, duration_millis};
 use crate::plan::{CommandPlan, LaunchFilePlan, LaunchPlan};
 use crate::shell::{shell_quote, shell_quote_path};
@@ -124,7 +126,7 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
         );
     }
     handle.map_err(|error| {
-        let mut cleanup = cleanup_failed_local_launch(&mut child);
+        let mut cleanup = cleanup_failed_local_launch(&mut child, &mut |_| {});
         let error = ServerLaunchError::Preparation { message: error };
         // The client may already have asked the daemon to create the
         // container, which the group kill cannot reach. The group was
@@ -133,7 +135,7 @@ pub(super) fn spawn_local(spec: ProcessSpec<'_>) -> Result<HostProcessHandle, La
         // cleanup must never call verified ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
         match spec.container {
             Some(container) => {
-                let removal = remove_server_container(None, container);
+                let removal = remove_server_container(None, container, &mut |_| {});
                 if !removal.confirmed {
                     cleanup.verified = false;
                     if cleanup.error.is_none() {
@@ -499,8 +501,9 @@ fn failed_ssh_handle_delivery(
     // early rm reported it absent, then do the final container-removal
     // confirmation against a quiescent group — the same order the local
     // path uses ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
-    let process_cleanup = cleanup_incomplete_ssh_launch(target, remote_handle);
-    let removal = container.map(|container| remove_server_container(Some(target), container));
+    let (process_cleanup, exit_wait) = cleanup_incomplete_ssh_launch(target, remote_handle);
+    let removal =
+        container.map(|container| remove_server_container(Some(target), container, &mut |_| {}));
     let removal_confirmed = removal.as_ref().is_none_or(|removal| removal.confirmed);
     let (process_confirmed, cleanup_note) = match &process_cleanup {
         Ok(()) => (
@@ -534,7 +537,8 @@ fn failed_ssh_handle_delivery(
         )
     };
     cleanup.elapsed_ms = duration_millis(cleanup_started.elapsed());
-    cleanup.remote_deadline_ms = Some(duration_millis(REMOTE_SERVER_CLEANUP_DEADLINE));
+    cleanup.remote_attempt_bound_ms = Some(duration_millis(ATTEMPT_BOUND));
+    cleanup.exit_wait = exit_wait;
     cleanup.container_removal = removal.clone();
     cleanup.verified = verified;
     if !verified && cleanup.error.is_none() {
@@ -549,32 +553,74 @@ fn failed_ssh_handle_delivery(
     }
 }
 
-fn cleanup_incomplete_ssh_launch(target: &str, remote_handle: &Path) -> Result<(), String> {
-    let bound = OperationBound::finite(REMOTE_SERVER_CLEANUP_DEADLINE);
+/// Stop a remote launcher whose handle never arrived: the script reads the
+/// remote handle file, signals the group — SIGTERM, the termination grace,
+/// SIGKILL to what remains — and names it; the exit wait then follows the
+/// group until every thread has exited, and only then is the handle file
+/// removed ([[RFC-0009:C-COMPLETION-WAITS]]).
+fn cleanup_incomplete_ssh_launch(
+    target: &str,
+    remote_handle: &Path,
+) -> (Result<(), String>, Option<CompletionWaitEvidence>) {
+    const SIGNALLED: &str = "INFERLAB_LAUNCH_CLEANUP\t";
+    let bound = OperationBound::finite(ATTEMPT_BOUND);
     let alive = remote_group_alive_script("$pid");
+    let file = shell_quote_path(remote_handle);
     let script = format!(
-        "set +e; file={file}; if [ ! -r \"$file\" ]; then exit 4; fi; read pid expected < \"$file\" || exit 4; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat) || exit 4; [ \"$actual\" = \"$expected\" ] || exit 4; elif {alive}; then exit 5; else rm -f \"$file\"; exit 0; fi; if ! {alive}; then rm -f \"$file\"; exit 0; fi; kill -TERM -- -$pid; i=0; while {alive} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; if {alive}; then kill -KILL -- -$pid; i=0; while {alive} && [ $i -lt {kill_limit} ]; do sleep {poll}; i=$((i+1)); done; fi; if {alive}; then exit 6; fi; rm -f \"$file\"",
-        file = shell_quote_path(remote_handle),
+        "set +e; file={file}; if [ ! -r \"$file\" ]; then exit 4; fi; read pid expected < \"$file\" || exit 4; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat) || exit 4; [ \"$actual\" = \"$expected\" ] || exit 4; elif {alive}; then exit 5; else rm -f \"$file\"; exit 0; fi; if ! {alive}; then rm -f \"$file\"; exit 0; fi; kill -TERM -- -$pid; i=0; while {alive} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; if {alive}; then kill -KILL -- -$pid; fi; printf '{SIGNALLED}%s\\n' \"$pid\"",
         term_limit = TERM_POLL_LIMIT,
-        kill_limit = KILL_POLL_LIMIT,
         poll = remote_poll_sleep(),
     );
-    let output = run_cleanup_command(
+    let output = match run_cleanup_command(
         &ssh_argv(target, &script),
         SSH_ENV_REMOVE,
         &bound,
         "SSH launch cleanup",
-    )
-    .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "SSH cleanup exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+    ) {
+        Ok(output) => output,
+        Err(error) => return (Err(error.to_string()), None),
+    };
+    if !output.status.success() {
+        return (
+            Err(format!(
+                "SSH cleanup exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            None,
+        );
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(group) = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(SIGNALLED))
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+    else {
+        // The launcher had already exited; the script removed the file.
+        return (Ok(()), None);
+    };
+    let wait = wait_for_exit(Some(target), Processes::Group(group), &mut |_| {});
+    if let Some(failure) = wait.failure() {
+        return (Err(failure), Some(wait));
+    }
+    let removed = run_cleanup_command(
+        &ssh_argv(target, &format!("rm -f {file}")),
+        SSH_ENV_REMOVE,
+        &OperationBound::finite(ATTEMPT_BOUND),
+        "SSH launch handle removal",
+    );
+    let result = match removed {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(
+            "the remote launcher exited, but removing its handle file exited with {}",
+            output.status
+        )),
+        Err(error) => Err(format!(
+            "the remote launcher exited, but removing its handle file failed: {error}"
+        )),
+    };
+    (result, Some(wait))
 }
 
 fn render_env_command(command: &CommandPlan, owner_marker: &str) -> Result<String, String> {

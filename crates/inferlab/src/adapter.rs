@@ -392,20 +392,15 @@ fn remove_adapter_container(cidfile: &Path) {
     if cid.is_empty() {
         return;
     }
-    use inferlab_runtime::container::{Removal, RemovalFailure, remove_container};
-    let detail = match remove_container(None, &cid) {
-        Removal::Confirmed { .. } => return,
-        Removal::Unconfirmed(RemovalFailure::Exit { stderr, .. }) => stderr.trim().to_owned(),
-        Removal::Unconfirmed(RemovalFailure::Deadline { .. }) => format!(
-            "docker rm did not finish within {} seconds",
-            inferlab_runtime::container::REMOVAL_TIMEOUT.as_secs()
-        ),
-        Removal::Unconfirmed(RemovalFailure::Launch(error) | RemovalFailure::Wait(error)) => {
-            error.to_string()
-        }
-        Removal::Unconfirmed(RemovalFailure::WaitCleanup { source, .. }) => source.to_string(),
-        Removal::Unconfirmed(RemovalFailure::Ssh(error)) => error,
-    };
+    let removal = inferlab_runtime::container::remove_container(None, &cid, &mut |message| {
+        eprintln!("{message}");
+    });
+    if removal.confirmed {
+        return;
+    }
+    let detail = removal
+        .error
+        .unwrap_or_else(|| "unknown outcome".to_owned());
     eprintln!("warning: unconfirmed removal of adapter container {cid}: {detail}");
 }
 

@@ -62,6 +62,9 @@ struct Scenario {
     /// `docker rm` answers "removal is already in progress", as a `--rm`
     /// container whose exit races the explicit removal does.
     rm_race: bool,
+    /// `docker rm` answers that the daemon's kill wait expired, as it does
+    /// while a container is still releasing a large pinned-memory footprint.
+    rm_kill_timeout: bool,
     /// The absence poll keeps finding the container (the in-flight removal
     /// never completes).
     container_lingers: bool,
@@ -3030,8 +3033,8 @@ fn swallowed_ssh_handle_removes_the_created_container() -> Result<(), Box<dyn Er
 fn unconfirmed_launch_removal_never_claims_verified_cleanup() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     enable_pair_placement(&workspace)?;
-    // The handle never arrives AND the removal hangs to its deadline: the
-    // remote container may still be running, so the launch failure is
+    // The handle never arrives AND the remote daemon is wedged: the remote
+    // container may still be running, so the launch failure is
     // ownership-unknown and cleanup never claims verification
     // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     let run = workspace
@@ -3078,17 +3081,33 @@ fn unconfirmed_launch_removal_never_claims_verified_cleanup() -> Result<(), Box<
         })
         .ok_or("structured container removal evidence for the failed remote launch")?;
     assert_eq!(removal["confirmed"], false);
+    assert_wedged_daemon_removal(&serde_json::Value::Object(removal))
+}
+
+/// A wedged remote daemon: the removal request outlives its attempt bound,
+/// every observation fails, and the disappearance wait stalls
+/// ([[RFC-0009:C-COMPLETION-WAITS]]).
+fn assert_wedged_daemon_removal(removal: &serde_json::Value) -> Result<(), Box<dyn Error>> {
+    assert!(
+        removal["removal_attempt_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("attempt bound")),
+        "{removal}"
+    );
+    let wait = &removal["removal_wait"];
+    assert_eq!(wait["ended"], "stalled", "{removal}");
+    assert!(wait["failed_observations"].as_u64() > Some(0), "{removal}");
     assert!(
         removal["error"]
             .as_str()
-            .is_some_and(|error| error.contains("deadline")),
-        "the structured evidence names the deadline reason: {removal:?}"
+            .is_some_and(|error| error.contains("no progress")),
+        "{removal}"
     );
     Ok(())
 }
 
 #[test]
-fn hung_remote_removal_expires_with_deadline_evidence() -> Result<(), Box<dyn Error>> {
+fn a_wedged_remote_daemon_stalls_the_removal_with_honest_evidence() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     enable_pair_placement(&workspace)?;
     let run = workspace
@@ -3104,8 +3123,8 @@ fn hung_remote_removal_expires_with_deadline_evidence() -> Result<(), Box<dyn Er
             "fixture-external",
         ])
         .output()?;
-    // The serve cycle itself completes; the wedged remote daemon costs the
-    // removal deadline and honest unverified-cleanup evidence, never a hang.
+    // The serve cycle itself completes; the wedged remote daemon costs one
+    // stall window and honest unverified-cleanup evidence, never a hang.
     let recipe = stdout_json(&run)?;
     assert_eq!(recipe["cleanup"]["verified"], false);
     let server_id = recipe["server"]["id"].as_str().ok_or("server id")?;
@@ -3118,14 +3137,7 @@ fn hung_remote_removal_expires_with_deadline_evidence() -> Result<(), Box<dyn Er
         .ok_or("remote process")?;
     let removal = &remote["cleanup"][0]["container_removal"];
     assert_eq!(removal["confirmed"], false);
-    assert!(
-        removal["error"]
-            .as_str()
-            .ok_or("removal error")?
-            .contains("deadline"),
-        "the unconfirmed removal names the expired deadline: {removal}"
-    );
-    Ok(())
+    assert_wedged_daemon_removal(removal)
 }
 
 /// The structured container-removal evidence of the failed remote launch
@@ -3215,6 +3227,7 @@ fn docker_exit_removal_reason_is_distinct_from_the_deadline() -> Result<(), Box<
         .command_with(&Scenario {
             ssh_swallow_handle: true,
             rm_fail: true,
+            container_lingers: true,
             ..Scenario::default()
         })
         .args([
@@ -3274,7 +3287,50 @@ fn in_progress_removal_confirms_by_observed_disappearance() -> Result<(), Box<dy
         removal["confirmed"], true,
         "an in-flight removal that completes is a confirmed removal: {removal:?}"
     );
-    assert_eq!(removal["already_absent"], true);
+    assert!(
+        removal["removal_attempt_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("already in progress")),
+        "{removal:?}"
+    );
+    assert_eq!(removal["removal_wait"]["ended"], "reached", "{removal:?}");
+    Ok(())
+}
+
+/// The daemon gives up on its own kill wait while a container that releases
+/// a large pinned-memory footprint is still exiting; the container then goes
+/// away by itself, and observing that within the removal deadline confirms
+/// the removal ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+#[test]
+fn removal_outlasting_the_daemon_kill_wait_confirms_by_observed_disappearance()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    enable_pair_placement(&workspace)?;
+    let run = workspace
+        .command_with(&Scenario {
+            ssh_swallow_handle: true,
+            rm_kill_timeout: true,
+            ..Scenario::default()
+        })
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-pair",
+            "--external-image",
+            "fixture-external",
+        ])
+        .output()?;
+    assert!(!run.status.success());
+    let report = stdout_json(&run)?;
+    let server_id = report["cleanup"]["server_record_id"]
+        .as_str()
+        .ok_or("server record id")?;
+    let server = workspace.load_json(&format!(".inferlab/records/{server_id}/record.json"))?;
+    let removal = failed_remote_removal(&server).ok_or("structured removal evidence")?;
+    assert_eq!(
+        removal["confirmed"], true,
+        "a container that exits after the daemon's kill wait is a confirmed removal: {removal:?}"
+    );
     Ok(())
 }
 

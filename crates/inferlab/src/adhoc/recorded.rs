@@ -8,7 +8,7 @@ use crate::record::{RECORD_FILE, RECORDS_DIR, RecordIdentity, new_record_id, now
 use crate::workspace::WorkspaceSnapshot;
 use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::process_group::{
-    KILL_GRACE, LocalProcessGroup, TERM_GRACE, TerminationSignal, TreeProcess, process_tree,
+    LocalProcessGroup, TERM_GRACE, TerminationSignal, TreeProcess, process_tree,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,7 +19,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-const SCHEMA_VERSION: u32 = 1;
+/// Version 2 records the process tree's exit wait in place of a fixed
+/// post-kill grace ([[RFC-0009:C-COMPLETION-WAITS]]).
+const SCHEMA_VERSION: u32 = 2;
 /// Polling cadence while waiting for the command; not a budget
 /// ([[RFC-0009:C-OPERATION-BUDGETS]]).
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -86,7 +88,10 @@ struct ExitEvidence {
 struct CleanupEvidence {
     trigger: String,
     term_grace_ms: u64,
-    kill_grace_ms: u64,
+    /// The wait until every process of the tree exited after SIGKILL
+    /// ([[RFC-0009:C-COMPLETION-WAITS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exit_wait: Option<inferlab_runtime::completion::CompletionWaitEvidence>,
     process_groups: Vec<u32>,
     elapsed_ms: u64,
     term_sent: bool,
@@ -413,54 +418,38 @@ fn terminate(child: &mut Child, trigger: &str) -> CleanupEvidence {
             term_sent = false;
         }
     }
-    let mut verified = loop {
+    // The termination grace ends early once no tree member reads alive; it
+    // only decides when SIGKILL becomes due. Whether the tree has exited —
+    // every thread gone, not merely its leaders reading as zombies — is the
+    // exit wait's judgment.
+    loop {
         let _ = child.try_wait();
         errors.extend(observe(&mut tree, &term));
-        if tree.iter().all(|process| !process.is_alive()) {
-            break true;
-        }
-        if term.is_expired() {
-            break false;
+        if tree.iter().all(|process| !process.is_alive()) || term.is_expired() {
+            break;
         }
         std::thread::sleep(POLL_INTERVAL);
-    };
-
-    let mut kill_sent = false;
-    if !verified {
-        let kill = OperationBound::finite(KILL_GRACE);
-        verified = loop {
-            let _ = child.try_wait();
-            errors.extend(observe(&mut tree, &kill));
-            let alive = tree
-                .iter()
-                .filter(|process| process.is_alive())
-                .collect::<Vec<_>>();
-            if alive.is_empty() {
-                break true;
-            }
-            for process in alive.iter().filter(|process| !is_nested_run(process)) {
-                match process.kill() {
-                    Ok(()) => kill_sent = true,
-                    Err(error) => {
-                        errors.push(format!("failed to SIGKILL {}: {error}", process.pid))
-                    }
-                }
-            }
-            if kill.is_expired() {
-                break false;
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        };
-        if !verified {
-            for process in tree.iter().filter(|process| process.is_alive()) {
-                let _ = process.kill();
-                errors.push(format!(
-                    "process {} was still alive when the SIGKILL grace ended",
-                    process.pid
-                ));
-            }
-        }
     }
+    let mut kill_sent = false;
+    let wait = inferlab_runtime::completion::wait(
+        &mut TreeExit {
+            leader,
+            tree: &mut tree,
+            is_nested_run: &is_nested_run,
+            child: &mut *child,
+            kill_sent: &mut kill_sent,
+        },
+        &mut |_| {},
+    );
+    let verified = wait.reached();
+    if let Some(failure) = wait.failure() {
+        // The wait ended without the tree exiting: nothing is spared now.
+        for process in tree.iter().filter(|process| process.is_alive()) {
+            let _ = process.kill();
+        }
+        errors.push(failure);
+    }
+    let exit_wait = Some(wait);
     for process in &tree {
         if !groups.contains(&process.process_group) {
             groups.push(process.process_group);
@@ -469,13 +458,62 @@ fn terminate(child: &mut Child, trigger: &str) -> CleanupEvidence {
     CleanupEvidence {
         trigger: trigger.to_owned(),
         term_grace_ms: inferlab_runtime::operation_bound::duration_millis(TERM_GRACE),
-        kill_grace_ms: inferlab_runtime::operation_bound::duration_millis(KILL_GRACE),
+        exit_wait,
         process_groups: groups,
         elapsed_ms: inferlab_runtime::operation_bound::duration_millis(started.elapsed()),
         term_sent,
         kill_sent,
         verified,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
+    }
+}
+
+/// Exit of the command's process tree after the termination grace, as a
+/// completion wait ([[RFC-0009:C-COMPLETION-WAITS]]): each observation adds
+/// the tree's newest descendants and SIGKILLs every live member except a
+/// nested `inferlab run`, which ends once the processes it started die and
+/// then finalizes its own record; exit is judged by the tree's live threads
+/// and their CPU time.
+struct TreeExit<'a> {
+    leader: u32,
+    tree: &'a mut Vec<TreeProcess>,
+    is_nested_run: &'a dyn Fn(&TreeProcess) -> bool,
+    child: &'a mut Child,
+    kill_sent: &'a mut bool,
+}
+
+impl inferlab_runtime::completion::CompletionTarget for TreeExit<'_> {
+    fn awaited(&self) -> String {
+        "every process of the command's process tree has exited".to_owned()
+    }
+
+    fn observe(
+        &mut self,
+        attempt: &OperationBound,
+    ) -> Result<inferlab_runtime::completion::Observation, String> {
+        let _ = self.child.try_wait();
+        let found = process_tree(self.leader, attempt).map_err(|error| error.to_string());
+        for process in found.as_deref().unwrap_or_default() {
+            if !self.tree.contains(process) {
+                self.tree.push(*process);
+            }
+        }
+        for process in self.tree.iter().filter(|process| process.is_alive()) {
+            if !(self.is_nested_run)(process) && process.kill().is_ok() {
+                *self.kill_sent = true;
+            }
+        }
+        let mut exit = inferlab_runtime::completion::process::ProcessExit {
+            target: None,
+            processes: inferlab_runtime::completion::process::Processes::Exact(
+                self.tree
+                    .iter()
+                    .map(|process| (process.pid, process.start_time_ticks))
+                    .collect(),
+            ),
+        };
+        let observation = exit.observe(attempt)?;
+        found.map(|_| observation)
     }
 }
 

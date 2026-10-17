@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static SIGNALS: AtomicU64 = AtomicU64::new(0);
 static CTRL_C_HANDLER: OnceLock<Result<(), InterruptInstallError>> = OnceLock::new();
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -40,14 +41,26 @@ pub fn prepare() -> Result<(), InterruptInstallError> {
     INTERRUPTED.store(false, Ordering::SeqCst);
     CTRL_C_HANDLER
         .get_or_init(|| {
-            ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
-                .map_err(InterruptInstallError::from)
+            ctrlc::set_handler(|| {
+                SIGNALS.fetch_add(1, Ordering::SeqCst);
+                INTERRUPTED.store(true, Ordering::SeqCst);
+            })
+            .map_err(InterruptInstallError::from)
         })
         .clone()
 }
 
 pub fn received() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
+}
+
+/// How many operator interrupt signals this process has received. A wait
+/// that must end only on an interrupt arriving while it runs — such as a
+/// cleanup completion wait, which often runs because of an earlier interrupt
+/// ([[RFC-0009:C-COMPLETION-WAITS]]) — compares this count with the one it
+/// started from. A stop request raised through [`request`] is not counted.
+pub fn signals() -> u64 {
+    SIGNALS.load(Ordering::SeqCst)
 }
 
 /// Raise the same interruption an operator's Ctrl-C raises, for a stop

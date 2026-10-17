@@ -102,6 +102,14 @@ elif args[0] == "rm":
         # deadline.
         sys.stderr.write("Error response from daemon: cannot remove running container\n")
         sys.exit(1)
+    if fault.get("rm_kill_timeout"):
+        # The daemon's own kill wait expired while the container was still
+        # exiting, as when a server releases a large pinned-memory footprint.
+        sys.stderr.write(
+            f'Error response from daemon: cannot remove container "/{args[-1]}": could not kill: '
+            "tried to kill container, but did not receive an exit event\n"
+        )
+        sys.exit(1)
     if fault.get("rm_race"):
         # A --rm container whose exit races the explicit removal: the daemon
         # owns an in-flight removal it refuses to double-remove.

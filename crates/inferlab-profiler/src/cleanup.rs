@@ -1,6 +1,8 @@
 use crate::poll::{Poll, poll_until};
 use crate::record::ProfilerTargetRecord;
 use crate::transport::{CommandActionMode, TargetCommandError, target_output};
+use inferlab_runtime::completion::CompletionWaitEvidence;
+use inferlab_runtime::completion::process::{ProcessExit, Processes};
 use inferlab_runtime::operation_bound::{OperationBound, duration_millis};
 use inferlab_runtime::plan::LaunchPlan;
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,6 @@ use std::time::{Duration, Instant};
 
 const PROFILER_AGENT_DISCOVERY_DEADLINE: Duration = Duration::from_secs(10);
 const PROFILER_AGENT_TERM_GRACE: Duration = Duration::from_secs(2);
-const PROFILER_AGENT_KILL_GRACE: Duration = Duration::from_secs(5);
 const PROFILER_AGENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,11 +22,14 @@ pub struct ProfilerCleanupRecord {
     pub elapsed_ms: u64,
     pub discovery_deadline_ms: u64,
     pub term_grace_ms: u64,
-    pub kill_grace_ms: u64,
     pub pids: Vec<u32>,
     pub already_exited: bool,
     pub term_sent: bool,
     pub kill_sent: bool,
+    /// The wait until every agent thread exited
+    /// ([[RFC-0009:C-COMPLETION-WAITS]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_wait: Option<CompletionWaitEvidence>,
     pub verified: bool,
     pub error: Option<String>,
 }
@@ -72,11 +76,11 @@ pub fn cleanup_target_agent(
             elapsed_ms: duration_millis(started.elapsed()),
             discovery_deadline_ms: duration_millis(PROFILER_AGENT_DISCOVERY_DEADLINE),
             term_grace_ms: duration_millis(PROFILER_AGENT_TERM_GRACE),
-            kill_grace_ms: duration_millis(PROFILER_AGENT_KILL_GRACE),
             pids: Vec::new(),
             already_exited: true,
             term_sent: false,
             kill_sent: false,
+            exit_wait: None,
             verified: true,
             error: None,
         };
@@ -112,12 +116,25 @@ pub fn cleanup_target_agent(
     let AgentTermination {
         term_sent,
         kill_sent,
-        verified,
+        exit_wait,
         errors,
     } = terminate_agents(
         |signal, bound| signal_pids(target, &pids, signal, bound),
         |bound| wait_for_pids(target, &pids, bound),
+        || {
+            inferlab_runtime::completion::wait(
+                &mut ProcessExit {
+                    target: match &target.launch {
+                        LaunchPlan::Local => None,
+                        LaunchPlan::Ssh { target } => Some(target.clone()),
+                    },
+                    processes: Processes::Listed(pids.clone()),
+                },
+                &mut |_| {},
+            )
+        },
     );
+    let verified = exit_wait.reached();
     ProfilerCleanupRecord {
         trigger,
         session: target.session.clone(),
@@ -125,11 +142,11 @@ pub fn cleanup_target_agent(
         elapsed_ms: duration_millis(started.elapsed()),
         discovery_deadline_ms: duration_millis(PROFILER_AGENT_DISCOVERY_DEADLINE),
         term_grace_ms: duration_millis(PROFILER_AGENT_TERM_GRACE),
-        kill_grace_ms: duration_millis(PROFILER_AGENT_KILL_GRACE),
         pids,
         already_exited: false,
         term_sent,
         kill_sent,
+        exit_wait: Some(exit_wait),
         verified,
         error: (!errors.is_empty()).then(|| errors.join("; ")),
     }
@@ -138,18 +155,20 @@ pub fn cleanup_target_agent(
 struct AgentTermination {
     term_sent: bool,
     kill_sent: bool,
-    verified: bool,
+    exit_wait: CompletionWaitEvidence,
     errors: Vec<String>,
 }
 
-/// TERM, wait out the grace, then KILL whatever may still live. A liveness
-/// observation that fails inside the TERM grace — an SSH `kill -0` reaching
-/// the grace deadline, for example — is inconclusive, so it escalates to
-/// SIGKILL like a still-alive agent rather than ending cleanup unkilled.
-fn terminate_agents<S, W>(mut signal: S, mut wait: W) -> AgentTermination
+/// TERM, wait out the grace, KILL whatever may still live, then wait until
+/// every agent thread has exited. A liveness observation that fails inside
+/// the TERM grace — an SSH `kill -0` reaching the grace deadline, for
+/// example — is inconclusive, so it escalates to SIGKILL like a still-alive
+/// agent rather than ending cleanup unkilled.
+fn terminate_agents<S, W, E>(mut signal: S, mut wait: W, exit: E) -> AgentTermination
 where
     S: FnMut(&str, &OperationBound) -> Result<bool, ProfilerCleanupCommandError>,
     W: FnMut(&OperationBound) -> Result<bool, ProfilerCleanupCommandError>,
+    E: FnOnce() -> CompletionWaitEvidence,
 {
     let mut errors = Vec::new();
     let term_bound = OperationBound::finite(PROFILER_AGENT_TERM_GRACE);
@@ -161,34 +180,24 @@ where
         errors.push(error.to_string());
         false
     });
-    if stopped_after_term {
-        return AgentTermination {
-            term_sent,
-            kill_sent: false,
-            verified: true,
-            errors,
-        };
-    }
-    let kill_bound = OperationBound::finite(PROFILER_AGENT_KILL_GRACE);
-    let kill_sent = signal("-KILL", &kill_bound).unwrap_or_else(|error| {
-        errors.push(error.to_string());
-        false
-    });
-    let verified = match wait(&kill_bound) {
-        Ok(true) => true,
-        Ok(false) => {
-            errors.push("Nsight Systems session agent remained alive".to_owned());
-            false
-        }
-        Err(error) => {
+    let mut kill_sent = false;
+    if !stopped_after_term {
+        let kill_bound = OperationBound::finite(inferlab_runtime::completion::ATTEMPT_BOUND);
+        kill_sent = signal("-KILL", &kill_bound).unwrap_or_else(|error| {
             errors.push(error.to_string());
             false
-        }
-    };
+        });
+    }
+    let exit_wait = exit();
+    errors.extend(
+        exit_wait
+            .failure()
+            .map(|failure| format!("Nsight Systems session agent: {failure}")),
+    );
     AgentTermination {
         term_sent,
         kill_sent,
-        verified,
+        exit_wait,
         errors,
     }
 }
@@ -214,11 +223,11 @@ fn cleanup_error(
         elapsed_ms: duration_millis(started.elapsed()),
         discovery_deadline_ms: duration_millis(PROFILER_AGENT_DISCOVERY_DEADLINE),
         term_grace_ms: duration_millis(PROFILER_AGENT_TERM_GRACE),
-        kill_grace_ms: duration_millis(PROFILER_AGENT_KILL_GRACE),
         pids: Vec::new(),
         already_exited: false,
         term_sent: false,
         kill_sent: false,
+        exit_wait: None,
         verified: false,
         error: Some(error),
     }
@@ -371,6 +380,7 @@ fn target_pid_alive(
 #[cfg(test)]
 mod tests {
     use super::{ProfilerCleanupCommandError, agent_discovery_pattern, terminate_agents};
+    use inferlab_runtime::completion::process::{ProcessExit, Processes};
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
 
@@ -408,10 +418,19 @@ mod tests {
                     Ok(true)
                 }
             },
+            || {
+                inferlab_runtime::completion::wait(
+                    &mut ProcessExit {
+                        target: None,
+                        processes: Processes::Listed(Vec::new()),
+                    },
+                    &mut |_| {},
+                )
+            },
         );
         assert_eq!(signals, ["-TERM", "-KILL"]);
         assert!(outcome.kill_sent);
-        assert!(outcome.verified);
+        assert!(outcome.exit_wait.reached());
         assert!(
             outcome
                 .errors

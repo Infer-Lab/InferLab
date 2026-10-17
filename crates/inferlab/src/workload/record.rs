@@ -60,9 +60,11 @@ pub(crate) struct ClientTerminationEvidence {
     pub elapsed_ms: u64,
     pub status_deadline_ms: u64,
     pub term_grace_ms: u64,
-    pub kill_grace_ms: u64,
     pub term_sent: bool,
     pub kill_sent: bool,
+    /// The wait until every thread of the client's process group exited
+    /// ([[RFC-0009:C-COMPLETION-WAITS]]).
+    pub exit_wait: Option<inferlab_runtime::completion::CompletionWaitEvidence>,
     pub verified: bool,
     pub error: Option<String>,
 }

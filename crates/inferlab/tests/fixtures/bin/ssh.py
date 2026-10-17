@@ -82,8 +82,11 @@ if operation == "preflight" and hang:
     with open(hang, "w") as handle:
         handle.write(str(os.getpid()))
     time.sleep(3600)
-if fault.get("ssh_hang_rm") and "docker rm -f" in command:
-    # A live connection to a wedged remote daemon: never returns.
+if fault.get("ssh_hang_rm") and (
+    "docker rm -f" in command or "docker container inspect" in command
+):
+    # A live connection to a wedged remote daemon: removal requests and
+    # container observations never return.
     time.sleep(3600)
 if fault.get("ssh_fail_cleanup") and "read pid expected" in command:
     # The incomplete-launch cleanup script (its handle read is distinctive)

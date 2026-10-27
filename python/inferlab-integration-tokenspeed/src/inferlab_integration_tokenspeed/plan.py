@@ -18,26 +18,24 @@ from inferlab_adapter_sdk import (
     ReadinessProbe,
     ReadinessProbeHttp,
     ReadinessProbeProcessAlive,
-    RenderSource,
     ServeReplicaRequirement,
     ServeRoleInput,
     ServeRoleKind,
     ServeRoleLink,
-    ServeRoleLinkBootstrap,
     ServeRoleLinkKvTransfer,
-    ServeRoleLinkRequestRouting,
     ServeRoleResult,
     ServeTopology,
-    TargetEndpointScheme,
     effective_settings,
-    fused_pd_frontend_plans,
+    fill_outer_tensor_parallel,
     integration_identity,
     replica_id,
+    require_declared_devices,
     require_role,
+    validate_settings,
 )
 
 from .auxiliary import validate_auxiliary_models
-from .settings import _settings
+from .settings import PdRouterSettings, _settings
 
 
 def _identity() -> IntegrationIdentity:
@@ -152,8 +150,20 @@ def _plan_role(
             f"role {role.id!r} replica count must be positive",
         )
     settings = _settings(role.settings)
-    parallelism = _effective_parallelism(role.parallelism)
+    parallelism = _effective_parallelism(
+        fill_outer_tensor_parallel(
+            role.parallelism,
+            role.devices,
+            1,
+            "no other TokenSpeed parallelism",
+        )
+    )
     outer = parallelism.outer or ParallelismOuter()
+    require_declared_devices(
+        outer.tensor_parallel_size or 1,
+        role.devices,
+        "TokenSpeed's reading (outer tensor parallelism)",
+    )
     replicas = [
         ServeReplicaRequirement(
             id=replica_id(role, replica_index),
@@ -223,6 +233,11 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
 
 
 def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
+    if input.kv_store is not None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the TokenSpeed integration does not support a KV store on a prefill/decode server",
+        )
     if input.kv_transfer != KvTransferMechanism.mooncake:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
@@ -232,11 +247,12 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     inferlab_gateway_smg.require_backend(input.pd_router_backend, component="P/D Router")
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
+    routing = validate_settings(PdRouterSettings, input.pd_router_settings or {})
     process_alive = ReadinessProbe(root=ReadinessProbeProcessAlive())
     prefill_result, prefill_replicas = _plan_role(
         input,
         prefill,
-        ["dist_init", "bootstrap"],
+        ["dist_init", inferlab_gateway_smg.BOOTSTRAP_PORT],
         process_alive,
     )
     decode_result, decode_replicas = _plan_role(
@@ -245,19 +261,27 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
         ["dist_init"],
         process_alive,
     )
+    gateway, pd_router, frontend_links = inferlab_gateway_smg.pd_frontend(
+        prefill_role=prefill.id,
+        decode_role=decode.id,
+        prefill_workers=prefill.replica_count,
+        decode_workers=decode.replica_count,
+        endpoint=EndpointDeclaration(
+            protocol=EndpointProtocol(),
+            # The SMG Gateway flushes every registered prefill and decode
+            # worker and counts them.
+            prefix_cache_reset=inferlab_gateway_smg.flush_cache_reset(
+                prefill.replica_count + decode.replica_count
+            ),
+        ),
+        policies=PdRoutingPolicies(prefill=routing.prefill_policy, decode=routing.decode_policy),
+        pd_router_settings=effective_settings(routing),
+    )
+    # The worker-to-worker KV transfer link sits between the frontend's
+    # routing and bootstrap links, as the qualified plan recorded it.
+    *routing_links, bootstrap_link = frontend_links
     links = [
-        ServeRoleLink(
-            root=ServeRoleLinkRequestRouting(
-                source="gateway",
-                targets=["pd_router"],
-            )
-        ),
-        ServeRoleLink(
-            root=ServeRoleLinkRequestRouting(
-                source="pd_router",
-                targets=[prefill.id, decode.id],
-            )
-        ),
+        *routing_links,
         ServeRoleLink(
             root=ServeRoleLinkKvTransfer(
                 source=prefill.id,
@@ -265,32 +289,8 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
                 mechanism=KvTransferMechanism.mooncake,
             )
         ),
-        ServeRoleLink(
-            root=ServeRoleLinkBootstrap(
-                source="pd_router",
-                target=prefill.id,
-                port="bootstrap",
-            )
-        ),
+        bootstrap_link,
     ]
-    gateway, pd_router = fused_pd_frontend_plans(
-        gateway_backend=inferlab_gateway_smg.BACKEND,
-        pd_router_backend=inferlab_gateway_smg.BACKEND,
-        implementation=inferlab_gateway_smg.IMPLEMENTATION,
-        implementation_version=inferlab_gateway_smg.installed_version(),
-        render_source=RenderSource.integration,
-        endpoint=_endpoint_declaration(),
-        gateway_readiness=inferlab_gateway_smg.gateway_readiness(),
-        pd_router_readiness=inferlab_gateway_smg.pd_router_readiness(
-            prefill_bootstrap_port="bootstrap"
-        ),
-        gateway_settings=inferlab_gateway_smg.gateway_settings(),
-        policies=PdRoutingPolicies(prefill="round_robin", decode="round_robin"),
-        prefill_role=prefill.id,
-        decode_role=decode.id,
-        target_scheme=TargetEndpointScheme.grpc,
-        pd_router_ports=["prometheus"],
-    )
     return PlanServeResult(
         integration=_identity(),
         roles=[prefill_result, decode_result],

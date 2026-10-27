@@ -17,6 +17,7 @@ from inferlab_bench_runner.result_population import (
 from inferlab_measurement_sdk import (
     PROTOCOL_VERSION,
     BenchPopulationPreparationRequest,
+    BenchPopulationPreparationResult,
     ClientStatus,
 )
 
@@ -658,7 +659,7 @@ def test_flat_prefix_geometry_supports_zero_and_full_sharing(
     assert (len(set(prompts)) == 1) is (expected_shared == 8)
 
 
-def test_primed_flat_population_freezes_the_exact_maximum_prefix_artifact(
+def test_primed_flat_population_conditions_through_the_drawn_maximum_prefix(
     tmp_path: Path,
 ) -> None:
     tokenizer = PeriodicCorpusTokenizer()
@@ -669,21 +670,94 @@ def test_primed_flat_population_freezes_the_exact_maximum_prefix_artifact(
             request_source={
                 "kind": "random",
                 "prompt": {"kind": "flat"},
-                "input_tokens": {"kind": "inclusive_uniform", "min": 8, "max": 12},
+                "input_tokens": {"kind": "inclusive_uniform", "min": 8, "max": 64},
                 "output_tokens": 2,
-                "prefix_sharing": {"shared_prefix_ratio": 0.5},
+                "prefix_sharing": {"shared_prefix_ratio": 0.5, "groups": 2},
             },
             cache_start="primed",
         ),
         tokenizer,
     )
 
+    assert result.prefix_geometry is not None
+    drawn = result.prefix_geometry.maximum_shared_prefix_tokens
+    # The population misses the longest allowed input, whose prefix is 32.
+    assert drawn == result.prefix_geometry.shared_prefix_tokens.maximum < 32
     assert result.prefix_conditioning is not None
-    conditioning = result.prefix_conditioning
-    content = Path(conditioning.path).read_text(encoding="utf-8")
-    assert conditioning.prompt_tokens == 6
-    assert len(tokenizer.encode(content, add_special_tokens=False)) == 6
-    assert hashlib.sha256(content.encode()).hexdigest() == conditioning.sha256
+    conditionings = [result.prefix_conditioning, *(result.group_prefix_conditioning or [])]
+    assert [item.group for item in conditionings] == [0, 1]
+    for conditioning in conditionings:
+        content = Path(conditioning.path).read_text(encoding="utf-8")
+        assert conditioning.prompt_tokens == drawn
+        assert len(tokenizer.encode(content, add_special_tokens=False)) == drawn
+        assert hashlib.sha256(content.encode()).hexdigest() == conditioning.sha256
+
+
+def _grouped_flat_population(
+    tmp_path: Path, entries: int, name: str, sharing: dict[str, object]
+) -> BenchPopulationPreparationResult:
+    return prepare_population(
+        random_preparation_request(
+            tmp_path,
+            entries,
+            request_source={
+                "kind": "random",
+                "prompt": {"kind": "flat"},
+                "input_tokens": 8,
+                "output_tokens": 2,
+                "prefix_sharing": sharing,
+            },
+            artifact_name=name,
+            cache_start="primed",
+        ),
+        PeriodicCorpusTokenizer(),
+    )
+
+
+def test_grouped_prefixes_draw_skewed_groups_with_independent_canonical_streams(
+    tmp_path: Path,
+) -> None:
+    sharing: dict[str, object] = {
+        "shared_prefix_tokens": 4,
+        "groups": 3,
+        "zipf_exponent": 1.5,
+    }
+    grouped = _grouped_flat_population(tmp_path, 60, "grouped", sharing)
+    shorter = _grouped_flat_population(tmp_path, 30, "shorter", sharing)
+    ungrouped = _grouped_flat_population(tmp_path, 4, "ungrouped", {"shared_prefix_tokens": 4})
+
+    assert grouped.population is not None and grouped.evidence_path is not None
+    assert shorter.evidence_path is not None
+    assert grouped.prefix_geometry is not None
+    counts = [count.root for count in grouped.prefix_geometry.group_entries or []]
+    assert len(counts) == 3 and sum(counts) == 60
+    assert counts[0] == max(counts)
+    groups = [
+        json.loads(line)["prefix_group"]
+        for line in Path(grouped.evidence_path).read_text().splitlines()
+    ]
+    shorter_groups = [
+        json.loads(line)["prefix_group"]
+        for line in Path(shorter.evidence_path).read_text().splitlines()
+    ]
+    assert groups[:30] == shorter_groups
+    tokenizer = PeriodicCorpusTokenizer()
+    prefixes = [
+        tuple(tokenizer.encode(json.loads(line)["text_input"], add_special_tokens=False)[:4])
+        for line in Path(grouped.population.path).read_text().splitlines()
+    ]
+    by_group = {
+        group: {p for p, g in zip(prefixes, groups, strict=True) if g == group}
+        for group in range(3)
+    }
+    assert all(len(group_prefixes) == 1 for group_prefixes in by_group.values())
+    assert len(set.union(*by_group.values())) == 3
+    # The first group is the ungrouped stream; every group is conditioned.
+    assert grouped.prefix_conditioning is not None
+    assert ungrouped.prefix_conditioning is not None
+    assert grouped.prefix_conditioning.sha256 == ungrouped.prefix_conditioning.sha256
+    assert [item.group for item in grouped.group_prefix_conditioning or []] == [1, 2]
+    assert not ungrouped.group_prefix_conditioning
 
 
 def test_distributed_flat_ratio_uses_nested_prefixes_and_equivalent_fixed_geometry(

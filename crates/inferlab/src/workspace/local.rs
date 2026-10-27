@@ -17,6 +17,10 @@ const DEFAULT_IMAGE_ADAPTER_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) struct LocalBindings {
     #[serde(default)]
     pub default_placement: Option<String>,
+    /// The placement a run of each named recipe selects unless
+    /// `--placement` names one ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    #[serde(default)]
+    pub recipe_placements: BTreeMap<String, String>,
     #[serde(default)]
     pub model_weights: BTreeMap<String, ModelWeightBinding>,
     #[serde(default)]
@@ -364,7 +368,33 @@ impl LocalBindings {
     }
 }
 
+/// Every recipe a placement is pinned for must exist, so a misspelled recipe
+/// fails instead of leaving its runs on the default placement
+/// ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+pub(super) fn validate_recipe_placements(
+    local: &LocalBindings,
+    config: &super::definitions::WorkspaceConfig,
+) -> Result<(), InferlabError> {
+    match local
+        .recipe_placements
+        .keys()
+        .find(|recipe| !config.recipes.contains_key(*recipe))
+    {
+        Some(recipe) => invalid(format!(
+            "recipe_placements maps recipe {recipe:?}, which the workspace does not declare"
+        )),
+        None => Ok(()),
+    }
+}
+
 pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), InferlabError> {
+    for (recipe, placement) in &local.recipe_placements {
+        if !local.placements.contains_key(placement) {
+            return invalid(format!(
+                "recipe_placements maps recipe {recipe:?} to unknown placement {placement:?}"
+            ));
+        }
+    }
     if let Some(default_placement) = &local.default_placement {
         require_nonempty("default placement", "local bindings", default_placement)?;
         if !local.placements.contains_key(default_placement) {

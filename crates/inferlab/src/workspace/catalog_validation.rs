@@ -80,6 +80,19 @@ pub(super) fn validate_workspace(
             &recipe.workload_suite,
             &config.workload_suites,
         )?;
+        if let Some(case) = &recipe.case
+            && config
+                .servers
+                .get(&recipe.server)
+                .is_some_and(|server| !server.cases.contains_key(case))
+        {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "recipe {id:?} selects case {case:?}, which server {:?} does not declare",
+                    recipe.server
+                ),
+            });
+        }
     }
 
     image::validate(config)?;

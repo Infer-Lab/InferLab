@@ -1165,3 +1165,15 @@ def test_operator_source_paths_resolve_against_the_request_state_dir() -> None:
     assert isinstance(request.root, AdapterRequestRenderServe)
     with pytest.raises(AdapterOperationError, match="was not supplied"):
         render_serve(request.root.input)
+
+
+def test_declared_devices_fills_outer_tensor_parallelism_over_pipeline_parallelism() -> None:
+    input = _plan_input(parallelism=Parallelism(outer=ParallelismOuter(pipeline_parallel_size=2)))
+    input.roles[0].devices = 8
+
+    result = plan_serve(input)
+
+    outer = result.roles[0].effective_parallelism.outer
+    assert outer is not None
+    assert outer.tensor_parallel_size == 4
+    assert result.replicas[0].device_count == 8

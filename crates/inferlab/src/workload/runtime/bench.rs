@@ -8,6 +8,7 @@ mod native;
 mod phase_barrier;
 mod prefix_cache;
 pub(super) mod result;
+mod reuse;
 pub(super) mod session;
 #[cfg(test)]
 mod test_support;

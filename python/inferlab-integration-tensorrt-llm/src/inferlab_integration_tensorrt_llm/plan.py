@@ -32,9 +32,11 @@ from inferlab_adapter_sdk import (
     TargetEndpointScheme,
     consistent_acceptance_outcome,
     effective_settings,
+    fill_outer_tensor_parallel,
     fused_pd_frontend_plans,
     integration_identity,
     replica_id,
+    require_declared_devices,
     require_role,
     resolve_golden_acceptance_length,
     validate_extra_args,
@@ -232,7 +234,19 @@ def _plan_role(
         outcome = _resolve_synthetic_acceptance(
             settings, input.synthetic_acceptance, role.id, input.state_dir
         )
-    parallelism = _effective_parallelism(role.parallelism)
+    parallelism = _effective_parallelism(
+        fill_outer_tensor_parallel(
+            role.parallelism,
+            role.devices,
+            (role.parallelism.outer or ParallelismOuter()).pipeline_parallel_size or 1,
+            "TensorRT-LLM pipeline parallelism",
+        )
+    )
+    require_declared_devices(
+        _device_count(parallelism),
+        role.devices,
+        "TensorRT-LLM's reading (outer tensor x pipeline parallelism)",
+    )
     replicas = [
         ServeReplicaRequirement(
             id=replica_id(role, replica_index),

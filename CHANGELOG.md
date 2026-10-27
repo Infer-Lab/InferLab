@@ -7,6 +7,179 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-27
+
+### Added
+
+- Servers, roles, cases, and `--set` can declare `devices`, the
+  whole-replica device count of each model-serving role ([[ADR-0068]]).
+  When declared it is the only placement authority: with no parallelism
+  declared the integration renders pure tensor parallelism of that width,
+  an omitted outer tensor parallelism is filled to match it, and a layout
+  that the framework would place on a different number of devices is
+  rejected before launch. Placement failures name the declared `devices`
+  and the layer that declared it. The `parallelism` components keep
+  working as a mapping onto framework options, read per integration as
+  the backend support matrix states, and are deprecated in favor of
+  `devices` plus framework layout settings.
+- A Specialized Engine may run attention data, context, and expert
+  parallelism inside its one rank process: attention tensor x data x context
+  parallelism equals the device count and expert parallelism divides it. The
+  worker receives `--tensor-parallel-size` as the attention tensor-parallel
+  width plus `--data-parallel-size`, `--context-parallel-size`, and
+  `--expert-parallel-size`, each only when not 1, so pure tensor-parallel
+  Engines see an unchanged command.
+- A routed `single` server may run several `serve` replicas behind its one
+  Gateway, and a server with a Gateway may declare typed `gateway_settings`.
+  The Specialized Engine uses both: its SMG Gateway routes across every
+  replica with the declared `policy` (`least_load` by default), and the
+  server is ready only when SMG's `/workers` registry lists every replica as
+  healthy, because SMG's `/readiness` turns ready after the first worker.
+- A stack may declare `settings`, facts of the framework or Engine
+  implementation it realizes that every server and role using it shares. The
+  stack's integration validates them, fills its defaults, and returns the
+  effective values, which dry-run output and server records keep; an
+  integration that defines none rejects every declared one.
+- A `single` server may declare an external KV store,
+  `kv_store.backend = "mooncake"`, which InferLab runs as its own process
+  beside the Gateway or the first replica: started first, ready before any
+  Engine, stopped last, and fatal if it exits. vLLM consumes it through
+  `MooncakeStoreConnector`, SGLang through HiCache's `mooncake` storage
+  backend, and a Specialized Engine through `--kv-tier-store`; each
+  integration keeps its own memory setting. The new
+  `inferlab-kvstore` 0.1.0 package renders the master, one module per
+  store backend.
+- With a KV store, controlled cache starts clear the store too. vLLM's
+  reset adds `reset_external=true`; SGLang declares no reset, so its cold
+  and primed starts are rejected, because `/flush_cache` leaves HiCache's
+  storage backend intact. An integration may declare a shared prefix cache,
+  which a primed start conditions with one request for the whole server; the
+  Specialized Engine does, and gains the typed `kv_tier_capacity_bytes`,
+  `kv_tier_snapshot_interval`, and `kv_tier_timeout_seconds` settings.
+- A Specialized Engine keeps serving without its store, so InferLab reads each
+  Engine's `kv_tier_state` and `kv_tier_store` from its `GetServerInfo`
+  through the integration's new `probe_serve` adapter operation: the server
+  becomes ready only once every Engine has engaged the store, every Bench case
+  records the state at its profiling window's start and end, and a case fails
+  when any Engine is not engaged at either boundary. SMG `/flush_cache`
+  resets now also require SMG to report every worker flushed.
+- The Specialized Engine serves the `prefill_decode` topology behind one
+  fused SMG Gateway and P/D Router, with independent prefill and decode
+  replica counts. Each Engine receives `--disaggregation-mode`, the declared
+  `--disaggregation-transfer-backend`, and on prefill an InferLab-allocated
+  `--disaggregation-bootstrap-port`. A prefill/decode server may declare a
+  KV store: both roles connect to it, prefill reading and writing and decode
+  writing its output blocks, and both are probed. It cannot yet be profiled.
+- A KV store plan declares each role's store access, `read_write` or
+  `write`, in place of a server-wide shared-prefix-cache flag. The server
+  shares one prefix cache when every cache-owning role reads and writes, and
+  the serve-state probe covers only roles that use the store. vLLM, SGLang,
+  and TokenSpeed reject a store on a prefill/decode server.
+- A KV store plan may declare a publication bound: how long after a request
+  completes a prefix it wrote may take to become readable. A primed start on
+  a shared prefix cache waits it after conditioning, and the workload record
+  keeps the wait. A Specialized Engine stack declares it as
+  `kv_tier_publication_seconds` (default 0).
+- A server with a P/D Router may declare `pd_router_settings`. SMG-backed
+  integrations take `prefill_policy` and `decode_policy` there (default
+  `round_robin`), so TokenSpeed prefill/decode routing is now configurable.
+- A recipe may declare `case`, the server case its runs select unless
+  `--case` names one, and local bindings may declare `recipe_placements`, the
+  placement each recipe's runs select unless `--placement` names one. A
+  recipe therefore reproduces its run without invocation flags, and records
+  name `recipe` as the selection source. A `recipe_placements` entry that
+  names an undeclared recipe or placement fails workspace loading.
+- `cold` and `primed` cases over a generated prefix-sharing population
+  record each request's reuse opportunity — reusable tokens and whether the
+  prefix was `first`, `in_flight`, or `available` when the request was sent —
+  and report `available_miss_ratio` and `available_reuse_efficiency`.
+- A generated `prefix_sharing` source may declare `groups`, several
+  independent canonical shared prefixes, and a `popularity` of `uniform` or
+  `{ zipf = s }` for how often each is drawn. Each entry draws its group
+  under the Bench seed and its evidence records the group; a primed start
+  conditions every group, and reuse opportunity counts only earlier requests
+  of the same group.
+- Serving Benches publish `draft_accepted_tokens`, `draft_tokens`, and
+  `draft_acceptance_rate` when responses report accepted and rejected
+  prediction tokens in their usage, as SMG does for a speculatively decoding
+  Specialized Engine; the console groups them with the speculation metrics.
+
+### Changed
+
+- **Breaking:** the adapter protocol is version 14, which carries the
+  declared `devices` in planning requests. The Adapter SDK is 0.14.0; the
+  vLLM, SGLang, and TensorRT-LLM integrations 0.13.0; TokenSpeed and the
+  Specialized Engine 0.14.0; `inferlab-gateway-smg` 0.4.0 and
+  `inferlab-gateway-dynamo` 0.3.0. Server records move to schema version
+  16, recipe records to 6, and workload records to 26. Stop servers and
+  recipes started by an earlier InferLab before upgrading.
+- **Breaking:** the Specialized Engine integration now renders the Engine's
+  layout, prefill/decode, and KV-tier arguments itself, so its `extra_args`
+  reject `--data-parallel-size`, `--context-parallel-size`,
+  `--expert-parallel-size`, `--disaggregation-mode`,
+  `--disaggregation-transfer-backend`, `--disaggregation-bootstrap-port`,
+  `--kv-tier-store`, `--kv-tier-capacity`, `--kv-tier-snapshot-interval`, and
+  `--kv-tier-timeout`. A server that passed them there fails planning: declare
+  `devices` and `parallelism` for the layout, the `prefill_decode` topology
+  with `kv_transfer` for disaggregation, and `kv_store` with the
+  `kv_tier_capacity_bytes`, `kv_tier_snapshot_interval`, and
+  `kv_tier_timeout_seconds` settings for the KV tier instead.
+- The Specialized Engine guide and contract follow the current SMG worker
+  protocol (`smg-grpc-proto` 0.4.27 and `smg-grpc-client` 1.15): an Engine
+  that is to be profiled implements `StartProfile` and `StopProfile`, which
+  the Gateway's profiling actions invoke; a speculatively decoding Engine
+  reports accepted and drafted speculative-token counts on each completion;
+  and the contract leaves scheduling, batching, and sampling to the Engine
+  rather than describing serial greedy generation.
+- A Specialized Engine stack may declare `settings.engine_command`, the
+  Engine implementation's executable and its fixed arguments, so each Engine
+  can ship under its own name. The Engine renders as `engine_command`
+  followed by the contract arguments; the default is the former fixed
+  command, `inferlab-token-engine smg-worker`.
+- The Specialized Engine guide describes the contract for any Engine
+  implementation, with a table of what an Engine implements and which
+  InferLab capability each part enables. The backend support matrix qualifies
+  `devices`, data x expert parallel layouts, several replicas, the KV store
+  with its tier-state probe, and Gateway cache resets on an 8-device MoE
+  Engine baseline.
+
+### Fixed
+
+- A prefill/decode server whose fused Gateway/P/D Router declares a
+  server-metrics port on the P/D Router no longer fails planning with E2001;
+  the check now uses every port the fused process serves.
+- An SMG-backed server that selects `power_of_two` over fewer than two
+  workers in a pool is rejected during planning instead of its Gateway
+  exiting at startup.
+- A placement whose replicas draw their ports from the machine's list no
+  longer fails when the Gateway declares an explicit `endpoint_port`:
+  explicit ports are now reserved before any port is drawn, so a replica can
+  no longer take the Gateway's port first.
+- A server start now fails as soon as any started process exits before the
+  server is ready, naming that process. Previously a process that had passed
+  its own readiness and then exited went unnoticed while a later process was
+  still starting, so the start ran out the whole readiness budget and blamed
+  the process still being waited on.
+- The Specialized Engine integration no longer declares a
+  `POST /prime_prefix_cache` conditioning fan-out, which current SMG Gateways
+  answer with 404. A primed start conditions the Engine, the contract's single
+  cache-owning target, through ordinary requests.
+- An SMG Gateway whose machine binding declares a hostname as its `host` now
+  starts. SMG binds only IP addresses, so the Gateway is rendered to bind the
+  address the hostname resolves to, and the recorded command shows it; a host
+  that does not resolve fails rendering with a message naming it. An IP
+  address is used as before.
+- Dynamo workers and their etcd discovery no longer require their machines to
+  be bound by IP. A hostname renders as the first address it resolves to
+  other than loopback, in every listener and advertised address; a hostname
+  that does not resolve, or resolves only to loopback, which processes on
+  other machines could not reach, is rejected before launch.
+- A primed Bench whose generated source shares a `shared_prefix_ratio` over a
+  range of input lengths or a mixture of shapes no longer fails preparation
+  when the population never draws the longest allowed input. Every group is
+  conditioned through the longest prefix the population drew, which the
+  record carries; a dry-run leaves that length unresolved.
+
 ## [0.22.1] - 2026-10-17
 
 ### Changed

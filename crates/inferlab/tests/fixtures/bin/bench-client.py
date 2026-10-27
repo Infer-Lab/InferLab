@@ -268,7 +268,9 @@ if args.prepare:
         corpus_words = Path(request["source_path"]).read_text(encoding="utf-8").split()
         input_target = request_source["input_tokens"]
         if not isinstance(input_target, int):
-            input_target = input_target["max"]
+            # A population may draw every entry below the range's maximum.
+            bound = "min" if os.environ.get("FIXTURE_DRAW_INPUT_MINIMUM") == "1" else "max"
+            input_target = input_target[bound]
         output_target = request_source["output_tokens"]
         if not isinstance(output_target, int):
             output_target = output_target["max"]
@@ -468,6 +470,7 @@ if args.prepare:
     prompt_token_targeting = None
     prefix_geometry = None
     prefix_conditioning = None
+    group_prefix_conditioning = []
     if request_source is not None and request_source["kind"] in ("random", "random_mixture"):
         projection_template = (
             None
@@ -503,6 +506,21 @@ if args.prepare:
                 "sha256": canonical_prefix_sha256,
                 "prompt_tokens": 8,
             }
+            groups = (request_source.get("prefix_sharing") or {}).get("groups") or 1
+            if groups > 1:
+                prefix_geometry["group_entries"] = [required_entries] + [0] * (groups - 1)
+                for group in range(1, groups):
+                    group_prefix = f"canonical prefix {group}"
+                    group_path = artifact_dir / f"canonical-prefix-{group}.txt"
+                    group_path.write_text(group_prefix, encoding="utf-8")
+                    group_prefix_conditioning.append(
+                        {
+                            "path": str(group_path),
+                            "sha256": hashlib.sha256(group_prefix.encode()).hexdigest(),
+                            "prompt_tokens": 8,
+                            "group": group,
+                        }
+                    )
     if os.environ.get("FIXTURE_OMIT_PROMPT_TARGETING") == "1":
         prompt_token_targeting = None
     result = {
@@ -527,6 +545,7 @@ if args.prepare:
         "prompt_token_targeting": prompt_token_targeting,
         "prefix_geometry": prefix_geometry,
         "prefix_conditioning": prefix_conditioning,
+        "group_prefix_conditioning": group_prefix_conditioning,
         "evidence_path": str(evidence_path),
         "error": None,
     }

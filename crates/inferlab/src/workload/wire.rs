@@ -9,9 +9,9 @@ use crate::InferlabError;
 use crate::adapter::project_setting_values;
 use crate::toolchain::BundledEvalTask;
 use crate::workspace::{
-    BenchArtifactLevel, BenchCacheStart, BenchOutputStop, BenchPrefixSharing, BenchPrompt,
-    BenchSharedSystemContent, BenchTokenSelector, EvalDefinition, EvalPrompt, EvalTaskSource,
-    RequestSlo, effective_lm_eval_base_seed,
+    BenchArtifactLevel, BenchCacheStart, BenchOutputStop, BenchPrefixLength, BenchPrefixSharing,
+    BenchPrompt, BenchSharedSystemContent, BenchTokenSelector, EvalDefinition, EvalPrompt,
+    EvalTaskSource, RequestSlo, effective_lm_eval_base_seed,
 };
 use inferlab_protocol::{
     BenchAgenticCatalogInput, BenchAgenticSourceInput, BenchArtifactLevelInput,
@@ -389,16 +389,26 @@ fn images_input(images: &ResolvedBenchImages) -> inferlab_protocol::BenchImagesI
 }
 
 fn prefix_sharing_input(sharing: &BenchPrefixSharing) -> BenchPrefixSharingInput {
-    match sharing {
-        BenchPrefixSharing::Tokens {
+    // One group is the ungrouped population, so it stays off the wire.
+    let groups = sharing.groups.filter(|groups| *groups > 1);
+    let zipf_exponent = match sharing.popularity {
+        Some(crate::workspace::BenchPrefixPopularity::Zipf(exponent)) => Some(exponent),
+        Some(crate::workspace::BenchPrefixPopularity::Uniform) | None => None,
+    };
+    match sharing.length() {
+        BenchPrefixLength::Tokens {
             shared_prefix_tokens,
         } => BenchPrefixSharingInput::Tokens {
-            shared_prefix_tokens: *shared_prefix_tokens,
+            shared_prefix_tokens,
+            groups,
+            zipf_exponent,
         },
-        BenchPrefixSharing::Ratio {
+        BenchPrefixLength::Ratio {
             shared_prefix_ratio,
         } => BenchPrefixSharingInput::Ratio {
-            shared_prefix_ratio: *shared_prefix_ratio,
+            shared_prefix_ratio,
+            groups,
+            zipf_exponent,
         },
     }
 }

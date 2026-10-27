@@ -105,6 +105,7 @@ mod tests {
             local: LocalBindings {
                 adapter: AdapterBinding::default(),
                 default_placement: Some("local".to_owned()),
+                recipe_placements: BTreeMap::new(),
                 model_weights,
                 machines,
                 placements: BTreeMap::new(),

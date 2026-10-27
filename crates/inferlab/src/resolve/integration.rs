@@ -28,6 +28,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// The process id of the derived discovery process ([[RFC-0003:C-SERVE-TOPOLOGY]]).
 pub(crate) const DISCOVERY_PROCESS_ID: &str = "discovery";
+/// The process id of the derived KV store process ([[RFC-0003:C-SERVE-KV-STORE]]).
+pub(crate) const KV_STORE_PROCESS_ID: &str = "kv-store";
 
 /// The built-in proxy serving a framework and KV-transfer mechanism, resolved
 /// through the proxy crate's registry ([[RFC-0006:C-INTEGRATIONS]]).
@@ -362,6 +364,10 @@ pub(super) fn plan_integration<C: AdapterClient>(
 ) -> Result<PlannedServeStage, InferlabError> {
     let stack = selection.stack;
     let served_name = selection.model.served_name.clone();
+    let declared_stack_settings = crate::adapter::project_setting_values(
+        &format!("stack {:?} settings", selection.server.stack),
+        &stack.settings,
+    )?;
     let lowering = adapter.plan_serve(
         &workspace.root,
         &stack.integration,
@@ -376,6 +382,10 @@ pub(super) fn plan_integration<C: AdapterClient>(
             gateway_backend: effective.gateway_backend.clone(),
             pd_router_backend: effective.pd_router_backend.clone(),
             kv_transfer: effective.kv_transfer,
+            gateway_settings: effective.gateway_settings.clone(),
+            pd_router_settings: effective.pd_router_settings.clone(),
+            kv_store: effective.kv_store.clone(),
+            stack_settings: declared_stack_settings.clone(),
             roles: effective.roles.clone(),
             profiling: effective.profiling,
             synthetic_acceptance: effective
@@ -421,6 +431,67 @@ pub(super) fn plan_integration<C: AdapterClient>(
             &role_input.parallelism,
             &role.effective_parallelism,
         )?;
+        // A declared device count is the sole authority; an integration
+        // that plans any other count violates the contract
+        // ([[RFC-0003:C-SERVE-PARALLELISM]]).
+        if let Some(devices) = role_input.devices
+            && let Some(replica) = planned
+                .replicas
+                .iter()
+                .find(|replica| replica.role_id == role_input.id && replica.device_count != devices)
+        {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {:?} planned {} devices for replica {:?}, but role {:?} declares {}",
+                    stack.integration,
+                    replica.device_count,
+                    replica.id,
+                    role_input.id,
+                    effective
+                        .devices_origin(&role_input.id)
+                        .unwrap_or_else(|| format!("devices = {devices}")),
+                ),
+            });
+        }
+    }
+    // Declared stack settings must reappear unchanged, so an integration
+    // cannot silently drop or rewrite one ([[RFC-0006:C-INTEGRATIONS]]).
+    for (name, value) in &declared_stack_settings {
+        if planned.stack_settings.get(name) != Some(value) {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {:?} did not preserve declared stack setting {name:?}",
+                    stack.integration
+                ),
+            });
+        }
+    }
+    // Declared Gateway settings must reappear unchanged, so an integration
+    // that does not type a setting cannot silently drop it
+    // ([[RFC-0006:C-INTEGRATIONS]]).
+    if let Some(gateway) = &planned.gateway {
+        for (name, value) in &effective.gateway_settings {
+            if gateway.effective_settings.get(name) != Some(value) {
+                return Err(InferlabError::AdapterSemantics {
+                    message: format!(
+                        "integration {:?} did not preserve declared Gateway setting {name:?}",
+                        stack.integration
+                    ),
+                });
+            }
+        }
+    }
+    if let Some(pd_router) = &planned.pd_router {
+        for (name, value) in &effective.pd_router_settings {
+            if pd_router.effective_settings.get(name) != Some(value) {
+                return Err(InferlabError::AdapterSemantics {
+                    message: format!(
+                        "integration {:?} did not preserve declared P/D Router setting {name:?}",
+                        stack.integration
+                    ),
+                });
+            }
+        }
     }
     validate_capture_targets(
         &stack.integration,
@@ -443,6 +514,7 @@ pub(super) fn plan_integration<C: AdapterClient>(
         selection.placement,
         selection.server,
         &role_render_inputs,
+        &effective.devices_origins(),
     )?;
     let mut integration_rendered_process_ids = requirements
         .iter()
@@ -588,6 +660,44 @@ pub(super) fn plan_integration<C: AdapterClient>(
                 ),
             })?
     };
+    // The KV store follows every Engine and the Gateway in requirement order
+    // so its machine is known when it is placed beside them; launch staging
+    // spawns it first ([[RFC-0003:C-SERVE-KV-STORE]]).
+    if let Some(store) = &planned.kv_store
+        && let Some(role) = store
+            .role_access
+            .keys()
+            .find(|role| !planned.roles.iter().any(|planned| &planned.id == *role))
+    {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {:?} declared KV store access for unplanned role {role:?}",
+                stack.integration
+            ),
+        });
+    }
+    if let Some(store) = validate_kv_store_plan(
+        &stack.integration,
+        effective.kv_store.as_ref(),
+        planned.kv_store.as_ref(),
+    )? {
+        let render_inputs =
+            load_render_inputs(&workspace.root, &stack.integration, &store.render_inputs)?;
+        requirements.push(ProcessRequirement::new(
+            KV_STORE_PROCESS_ID.to_owned(),
+            ProcessRequirementIdentity::KvStore {
+                plan: Box::new(store.clone()),
+                render_inputs,
+            },
+            0,
+            store.ports.clone(),
+            store.readiness.clone(),
+            Vec::new(),
+            None,
+            None,
+        ));
+        integration_rendered_process_ids.insert(KV_STORE_PROCESS_ID.to_owned());
+    }
     validate_launch_dependencies(&stack.integration, &requirements)?;
     Ok(PlannedServeStage::new(
         planned,
@@ -602,7 +712,8 @@ pub(super) fn rendered_process_id(process: &RenderedServeProcess) -> &str {
     match process {
         RenderedServeProcess::ModelRank { process, .. }
         | RenderedServeProcess::Frontend { process, .. }
-        | RenderedServeProcess::Discovery { process, .. } => process,
+        | RenderedServeProcess::Discovery { process, .. }
+        | RenderedServeProcess::KvStore { process, .. } => process,
     }
 }
 
@@ -635,6 +746,7 @@ pub(super) fn render_integration<C: AdapterClient>(
             .or_else(|| request.external.map(|external| external.digest.as_str())),
         planned_stage.requirements(),
         control_plane_frontend.then_some(planned_stage.public_process()),
+        &effective.devices_origins(),
         &mut occupancy,
     )?;
     gate_engine_trace_placement(
@@ -666,6 +778,7 @@ pub(super) fn render_integration<C: AdapterClient>(
             gateway_backend: effective.gateway_backend.clone(),
             pd_router_backend: effective.pd_router_backend.clone(),
             kv_transfer: effective.kv_transfer,
+            stack_settings: planned.stack_settings.clone(),
             allocations: render_allocations,
             profiling: effective.profiling,
             synthetic_acceptance: effective
@@ -768,6 +881,88 @@ pub(super) fn render_integration<C: AdapterClient>(
         RenderedServeStage::new(evidence, allocations, rendered_processes),
         unavailable,
     ))
+}
+
+/// The KV store plan must answer exactly the declared store, under its
+/// backend, preserving every declared setting unchanged
+/// ([[RFC-0006:C-INTEGRATIONS]], [[RFC-0003:C-SERVE-KV-STORE]]).
+fn validate_kv_store_plan<'a>(
+    integration: &str,
+    declared: Option<&inferlab_protocol::KvStoreInput>,
+    planned: Option<&'a inferlab_protocol::KvStorePlan>,
+) -> Result<Option<&'a inferlab_protocol::KvStorePlan>, InferlabError> {
+    let semantics = |message: String| InferlabError::AdapterSemantics { message };
+    match (declared, planned) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(semantics(format!(
+            "integration {integration:?} planned a KV store the server does not declare"
+        ))),
+        (Some(store), None) => Err(semantics(format!(
+            "integration {integration:?} did not plan the declared KV store {:?}",
+            store.backend
+        ))),
+        (Some(store), Some(plan)) => {
+            if plan.backend != store.backend {
+                return Err(semantics(format!(
+                    "integration {integration:?} planned KV store backend {:?} for declared {:?}",
+                    plan.backend, store.backend
+                )));
+            }
+            if let Some(name) = store
+                .settings
+                .iter()
+                .find(|(name, value)| plan.effective_settings.get(*name) != Some(*value))
+                .map(|(name, _)| name)
+            {
+                return Err(semantics(format!(
+                    "integration {integration:?} did not preserve declared KV store setting {name:?}"
+                )));
+            }
+            if !matches!(
+                plan.readiness,
+                inferlab_protocol::ReadinessProbe::Http { .. }
+                    | inferlab_protocol::ReadinessProbe::ProcessAlive
+            ) {
+                return Err(semantics(format!(
+                    "integration {integration:?} declared KV store readiness other than an HTTP path or process liveness"
+                )));
+            }
+            Ok(Some(plan))
+        }
+    }
+}
+
+/// The server shares one prefix cache when every cache-owning role — `serve`,
+/// or `prefill` on a prefill/decode server — reads and writes its KV store
+/// ([[RFC-0003:C-SERVE-KV-STORE]], [[RFC-0004:C-BENCH-CACHE-STATE]]).
+pub(super) fn shared_prefix_cache(planned: &inferlab_protocol::PlanServeResult) -> bool {
+    let Some(store) = &planned.kv_store else {
+        return false;
+    };
+    let mut owners = planned
+        .roles
+        .iter()
+        .filter(|role| {
+            matches!(
+                role.kind,
+                inferlab_protocol::ServeRoleKind::Serve | inferlab_protocol::ServeRoleKind::Prefill
+            )
+        })
+        .peekable();
+    owners.peek().is_some()
+        && owners.all(|role| {
+            store.role_access.get(&role.id) == Some(&inferlab_protocol::KvStoreAccess::ReadWrite)
+        })
+}
+
+/// The publication bound a primed start waits after conditioning: the store
+/// plan's declared bound when the server shares one prefix cache, else zero
+/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+pub(super) fn prefix_publication_ms(planned: &inferlab_protocol::PlanServeResult) -> u64 {
+    match &planned.kv_store {
+        Some(store) if shared_prefix_cache(planned) => store.publication_bound_ms,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]

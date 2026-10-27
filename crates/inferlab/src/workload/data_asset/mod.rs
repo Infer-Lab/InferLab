@@ -27,4 +27,4 @@ pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 /// run beside its workspace identity ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
 /// Version 25 records each client and command termination's exit wait in
 /// place of a fixed post-kill grace ([[RFC-0009:C-COMPLETION-WAITS]]).
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 25;
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 26;

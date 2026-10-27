@@ -292,7 +292,34 @@ pub(super) fn bench_result_error(
             "Bench client result metric \"acceptance_rate\" is outside [0, 1]: {value}"
         ));
     }
-    None
+    draft_acceptance_error(result)
+}
+
+/// Draft acceptance from per-request usage is all three values or none, the
+/// rate equals accepted over drafted tokens, and the counts are whole
+/// ([[RFC-0004:C-MEASUREMENTS]]).
+fn draft_acceptance_error(result: &BenchClientResult) -> Option<String> {
+    let rate = result.metrics.get("draft_acceptance_rate");
+    let accepted = result.metrics.get("draft_accepted_tokens");
+    let drafted = result.metrics.get("draft_tokens");
+    match (rate, accepted, drafted) {
+        (None, None, None) => None,
+        (Some(rate), Some(accepted), Some(drafted))
+            if accepted.is_finite()
+                && drafted.is_finite()
+                && accepted.fract() == 0.0
+                && drafted.fract() == 0.0
+                && *accepted >= 0.0
+                && *drafted > 0.0
+                && accepted <= drafted
+                && (rate - accepted / drafted).abs() <= f64::EPSILON * 4.0 =>
+        {
+            None
+        }
+        _ => Some(format!(
+            "Bench client returned inconsistent draft acceptance: rate {rate:?}, accepted {accepted:?}, drafted {drafted:?}"
+        )),
+    }
 }
 
 fn prompt_cache_result_error(result: &BenchClientResult, required: bool) -> Option<String> {

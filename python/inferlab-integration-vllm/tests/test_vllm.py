@@ -1217,3 +1217,92 @@ def test_plan_composes_synthetic_acceptance_with_a_declared_draft_model() -> Non
     outcome = result.synthetic_acceptance
     assert outcome is not None
     assert outcome.acceptance_length == 1.75
+
+
+def declared_devices_payload(parallelism: dict[str, object], devices: int) -> dict[str, object]:
+    payload = single_plan_payload(parallelism)
+    input_payload = cast(dict[str, object], payload["input"])
+    roles = cast(list[dict[str, object]], input_payload["roles"])
+    roles[0]["devices"] = devices
+    return payload
+
+
+def test_declared_devices_fills_outer_tensor_parallelism_under_data_parallelism() -> None:
+    request = AdapterRequest.model_validate(
+        declared_devices_payload({"attention": {"data_parallel_size": 8}}, 8)
+    )
+
+    assert isinstance(request.root, AdapterRequestPlanServe)
+    result = plan_serve(request.root.input)
+
+    outer = result.roles[0].effective_parallelism.outer
+    assert outer is not None
+    assert outer.tensor_parallel_size == 1
+    assert result.replicas[0].device_count == 8
+
+
+def test_declared_devices_rejects_a_shape_vllm_reads_as_more_devices() -> None:
+    payload = declared_devices_payload(
+        {"outer": {"tensor_parallel_size": 8}, "attention": {"data_parallel_size": 8}}, 8
+    )
+
+    response = handle_request(json.dumps(payload), plan_serve)
+
+    assert response.root.status == "error"
+    assert response.root.error.code == "invalid_settings"
+    assert "places 64 devices" in response.root.error.message
+    assert "devices = 8" in response.root.error.message
+
+
+def test_a_declared_kv_store_renders_the_mooncake_store_connector() -> None:
+    payload = load_json(FIXTURES / "valid" / "render-serve-request.json")
+    input_payload = cast(dict[str, object], payload["input"])
+    input_payload.update({"topology": "single", "gateway_backend": None, "pd_router_backend": None})
+    input_payload.pop("kv_transfer", None)
+    allocation = cast(list[dict[str, object]], input_payload["allocations"])[0]
+    allocation.update(
+        {
+            "role": "serve",
+            "role_kind": "serve",
+            "links": [],
+            "dependencies": [],
+            "kv_store": {"host": "store.example", "port": 50051},
+        }
+    )
+    settings = cast(dict[str, object], allocation["effective_settings"])
+    settings["kv_store_global_segment_size"] = "8GB"
+    input_payload["allocations"] = [allocation]
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestRenderServe)
+
+    process = render_serve(request.root.input).processes[0].root
+
+    argv = process.command.argv
+    transfer = json.loads(argv[argv.index("--kv-transfer-config") + 1])
+    assert transfer == {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"}
+    [launch_file] = process.launch_files
+    assert process.command.env["MOONCAKE_CONFIG_PATH"].endswith(launch_file.relative_path)
+    assert json.loads(launch_file.text) == {
+        "global_segment_size": "8GB",
+        "master_server_address": "store.example:50051",
+        "metadata_server": "P2PHANDSHAKE",
+    }
+
+
+def test_a_kv_store_reset_also_clears_the_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    from inferlab_kvstore import mooncake
+
+    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
+    payload = single_plan_payload({"outer": {"tensor_parallel_size": 1}})
+    cast(dict[str, object], payload["input"])["kv_store"] = {"backend": "mooncake", "settings": {}}
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+
+    plan = plan_serve(request.root.input)
+
+    endpoint = plan.roles[0].public_endpoint
+    assert endpoint is not None and endpoint.prefix_cache_reset is not None
+    assert endpoint.prefix_cache_reset.path == "/reset_prefix_cache?reset_external=true"
+    # vLLM claims no store access, so its replicas keep their own cache-owning
+    # targets ([[RFC-0003:C-SERVE-KV-STORE]]).
+    assert plan.kv_store is not None and not plan.kv_store.role_access

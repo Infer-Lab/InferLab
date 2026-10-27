@@ -12,10 +12,16 @@ from inferlab_bench_runner.aiperf import (
 )
 from inferlab_bench_runner.bench_client import main
 from inferlab_bench_runner.execution import execute
-from inferlab_bench_runner.result_metrics import normalize_summary, prompt_cache_evidence
+from inferlab_bench_runner.result_metrics import (
+    draft_acceptance_metrics,
+    normalize_summary,
+    prompt_cache_evidence,
+)
 from inferlab_bench_runner.result_policy import warmup_counts
+from inferlab_bench_runner.result_population import shared_prefix_by_session
 from inferlab_bench_runner.result_records import request_counts
 from inferlab_measurement_sdk import (
+    BenchClientRequest,
     BenchClientResult,
     CaseDeadline,
     ClientStatus,
@@ -731,3 +737,136 @@ def test_main_preserves_native_timeout_and_partial_warmup_evidence(
     assert "measurement-case deadline" in result.error
     assert "expected=2" in result.error
     assert "completed=1" in result.error
+
+
+def _usage_records(path: Path, usages: list[dict[str, object]]) -> Path:
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "metadata": {
+                        "benchmark_phase": "profiling",
+                        "session_num": request_id,
+                        "was_cancelled": False,
+                    },
+                    "error": None,
+                    "metrics": {name: {"value": value} for name, value in usage.items()},
+                }
+            )
+            for request_id, usage in enumerate(usages)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_draft_acceptance_is_token_weighted_over_reporting_requests(tmp_path: Path) -> None:
+    records = _usage_records(
+        tmp_path / "records.jsonl",
+        [
+            {"usage_accepted_prediction_tokens": 3, "usage_rejected_prediction_tokens": 2},
+            {"usage_accepted_prediction_tokens": 9, "usage_rejected_prediction_tokens": 1},
+            {"usage_prompt_tokens": 10},
+        ],
+    )
+
+    metrics, error = draft_acceptance_metrics(records)
+
+    assert error is None
+    assert metrics == {
+        "draft_accepted_tokens": 12.0,
+        "draft_tokens": 15.0,
+        "draft_acceptance_rate": 0.8,
+    }
+
+
+def test_draft_acceptance_is_omitted_without_reported_drafts(tmp_path: Path) -> None:
+    records = _usage_records(tmp_path / "records.jsonl", [{"usage_prompt_tokens": 10}])
+
+    assert draft_acceptance_metrics(records) == ({}, None)
+
+
+def test_draft_acceptance_rejects_a_half_reported_request(tmp_path: Path) -> None:
+    records = _usage_records(tmp_path / "records.jsonl", [{"usage_accepted_prediction_tokens": 3}])
+
+    metrics, error = draft_acceptance_metrics(records)
+
+    assert metrics == {}
+    assert error is not None and "only one of" in error
+
+
+def test_generated_population_observations_carry_reuse_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The control plane derives reuse opportunity from the entry's shared
+    # prefix and the request's send and first-token times
+    # ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "benchmark_phase": "profiling",
+                    "session_num": 0,
+                    "was_cancelled": False,
+                    "request_start_ns": 5_000_000_000,
+                },
+                "error": None,
+                "metrics": {
+                    "usage_prompt_tokens": {"value": 10},
+                    "usage_prompt_cache_read_tokens": {"value": 6},
+                    "time_to_first_token": {"value": 250.0},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        result_metrics,
+        "_aiperf_metric_result",
+        lambda _family, _values: SimpleNamespace(
+            avg=1.0, min=1.0, max=1.0, std=0.0, p50=1.0, p90=1.0, p95=1.0, p99=1.0
+        ),
+    )
+    observations, _, error = prompt_cache_evidence(
+        records, required=True, zero_representation=None, shared_prefix_by_session={0: (8, None)}
+    )
+
+    assert error is None
+    assert observations[0].shared_prefix_tokens == 8
+    assert observations[0].sent_unix_ns == 5_000_000_000
+    assert observations[0].first_token_unix_ns == 5_250_000_000
+
+
+def test_unreadable_population_evidence_is_named_instead_of_dropping_reuse_facts(
+    tmp_path: Path,
+) -> None:
+    # Reuse opportunity is derived from each entry's planned shared prefix, so
+    # a case that cannot read the population evidence fails naming it
+    # ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    raw = request(
+        tmp_path,
+        {"kind": "concurrency_limited", "concurrency": 1},
+        request_source={
+            "kind": "random",
+            "input_tokens": 8000,
+            "output_tokens": 1000,
+            "prefix_sharing": {"shared_prefix_tokens": 4000},
+        },
+    ).model_dump(mode="json")
+    missing = tmp_path / "missing-evidence.jsonl"
+    raw["population"] = {
+        "path": str(tmp_path / "population.jsonl"),
+        "evidence_path": str(missing),
+        "sha256": "1" * 64,
+        "entries": 4,
+        "tpot_applicable": True,
+    }
+
+    planned, error = shared_prefix_by_session(BenchClientRequest.model_validate(raw))
+
+    assert planned is None
+    assert error is not None and str(missing) in error

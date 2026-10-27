@@ -1,5 +1,5 @@
 {
-  "$id": "https://inferlab.dev/schema/adapter-protocol/v13",
+  "$id": "https://inferlab.dev/schema/adapter-protocol/v14",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdapterProtocol",
   "description": "The schema root for the independently released framework adapter SDK.",
@@ -112,6 +112,28 @@
             "protocol_version",
             "input"
           ]
+        },
+        {
+          "description": "Read the declared serve state of every model-serving rank-zero\nprocess of a running server ([[RFC-0006:C-INTEGRATIONS]]).",
+          "type": "object",
+          "properties": {
+            "input": {
+              "$ref": "#/$defs/ProbeServeInput"
+            },
+            "operation": {
+              "type": "string",
+              "const": "probe_serve"
+            },
+            "protocol_version": {
+              "$ref": "#/$defs/ProtocolVersion"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "protocol_version",
+            "input"
+          ]
         }
       ]
     },
@@ -195,6 +217,24 @@
             },
             "output": {
               "$ref": "#/$defs/RenderServeResult"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "output"
+          ]
+        },
+        {
+          "description": "The serve state of every probed process from a `ProbeServe` request.",
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "const": "probe_serve"
+            },
+            "output": {
+              "$ref": "#/$defs/ProbeServeResult"
             }
           },
           "additionalProperties": false,
@@ -776,10 +816,14 @@
       ]
     },
     "JsonScalar": {
-      "description": "The JSON scalar an HTTP action success predicate expects: a string, or\nfrom protocol version 13 a boolean ([[RFC-0006:C-INTEGRATIONS]]).",
+      "description": "The JSON scalar an HTTP action success predicate expects: a string, from\nprotocol version 13 a boolean, or from protocol version 14 an integer\n([[RFC-0006:C-INTEGRATIONS]]).",
       "anyOf": [
         {
           "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
         },
         {
           "type": "string"
@@ -801,6 +845,108 @@
       "required": [
         "pointer",
         "value"
+      ]
+    },
+    "KvStoreAccess": {
+      "description": "How one model-serving role uses the server's KV store\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+      "oneOf": [
+        {
+          "description": "Each process reads matching prefixes from the store and writes the\nprefixes it computes to it before the request completes.",
+          "type": "string",
+          "const": "read_write"
+        },
+        {
+          "description": "Each process only writes to the store.",
+          "type": "string",
+          "const": "write"
+        }
+      ]
+    },
+    "KvStoreInput": {
+      "description": "A declared external KV store: its backend identity and backend-typed\nsettings ([[RFC-0003:C-SERVE-KV-STORE]]).",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend"
+      ]
+    },
+    "KvStorePlan": {
+      "description": "The integration's plan for the declared KV store; the control plane\nderives, places, and launches its one process\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "effective_settings": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
+        "implementation": {
+          "type": "string"
+        },
+        "implementation_version": {
+          "type": "string"
+        },
+        "ports": {
+          "description": "Logical ports beyond the endpoint that consumers connect to.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "publication_bound_ms": {
+          "description": "How long after a request completes a prefix a `read_write` role wrote\nmay take to become readable from the store; zero when absent\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "readiness": {
+          "$ref": "#/$defs/ReadinessProbe"
+        },
+        "render_inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RenderInputDeclaration"
+          }
+        },
+        "role_access": {
+          "description": "How each model-serving role whose processes use the store uses it; a\nrole absent makes no claim and is treated as not using the store\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/KvStoreAccess"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "implementation",
+        "implementation_version",
+        "effective_settings",
+        "readiness"
+      ]
+    },
+    "KvStoreProcessRole": {
+      "description": "The canonical process role of the KV store process.",
+      "type": "string",
+      "enum": [
+        "kv_store"
       ]
     },
     "KvTransferMechanism": {
@@ -1104,6 +1250,24 @@
             "null"
           ]
         },
+        "gateway_settings": {
+          "description": "The resolved Gateway settings; every entry MUST reappear unchanged in\nthe Gateway plan's effective settings ([[RFC-0006:C-INTEGRATIONS]]).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
+        "kv_store": {
+          "description": "The server's external KV store declaration\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KvStoreInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "kv_transfer": {
           "anyOf": [
             {
@@ -1123,6 +1287,13 @@
             "null"
           ]
         },
+        "pd_router_settings": {
+          "description": "The resolved P/D Router settings; every entry MUST reappear unchanged\nin the P/D Router plan's effective settings\n([[RFC-0006:C-INTEGRATIONS]]).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
         "profiling": {
           "description": "The effective capture mechanism when profiling is requested; absent\nmeans no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
           "anyOf": [
@@ -1138,6 +1309,13 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ServeRoleInput"
+          }
+        },
+        "stack_settings": {
+          "description": "The stack's declared settings, typed by its integration\n([[RFC-0002:C-WORKSPACE-AUTHORITY]]); empty when none are declared.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
           }
         },
         "state_dir": {
@@ -1184,6 +1362,17 @@
         "integration": {
           "$ref": "#/$defs/IntegrationIdentity"
         },
+        "kv_store": {
+          "description": "Returned exactly when the request declares a KV store\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KvStorePlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "links": {
           "type": "array",
           "items": {
@@ -1212,6 +1401,17 @@
             "$ref": "#/$defs/ServeRoleResult"
           }
         },
+        "serve_state_probe": {
+          "description": "The integration answers `ProbeServe` for this server, so readiness\nwaits for every model-serving process to be engaged and Bench cases\nrecord its state ([[RFC-0003:C-SERVE-KV-STORE]]); declared only with a\nKV store plan.",
+          "type": "boolean"
+        },
+        "stack_settings": {
+          "description": "The complete effective stack settings: every declared entry\nunchanged plus the integration's defaults\n([[RFC-0002:C-WORKSPACE-AUTHORITY]]).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
+        },
         "synthetic_acceptance": {
           "description": "The resolved synthetic acceptance outcome; required in the accepted\nplan whenever the request carried the declaration, and forbidden\notherwise ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
           "anyOf": [
@@ -1230,6 +1430,124 @@
         "roles",
         "replicas",
         "links"
+      ]
+    },
+    "ProbeServeInput": {
+      "description": "What a `ProbeServe` request reads: the running server's model-serving\nrank-zero processes and the bound of one read\n([[RFC-0006:C-INTEGRATIONS]]).",
+      "type": "object",
+      "properties": {
+        "attempt_bound_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "kv_store": {
+          "description": "The KV store endpoint the Engines were rendered with, when the server\ndeclares one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EndpointAssignment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/ServeModelInput"
+        },
+        "processes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProbeServeTarget"
+          }
+        },
+        "topology": {
+          "$ref": "#/$defs/ServeTopology"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "topology",
+        "attempt_bound_seconds",
+        "processes"
+      ]
+    },
+    "ProbeServeProcessState": {
+      "description": "One process's serve state: engaged or not, the framework values that\ndecided it, or why it could not be read.",
+      "type": "object",
+      "properties": {
+        "engaged": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "process": {
+          "type": "string"
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "process",
+        "engaged"
+      ]
+    },
+    "ProbeServeResult": {
+      "description": "The integration's reading of every probed process.",
+      "type": "object",
+      "properties": {
+        "integration": {
+          "$ref": "#/$defs/IntegrationIdentity"
+        },
+        "processes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProbeServeProcessState"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "integration",
+        "processes"
+      ]
+    },
+    "ProbeServeTarget": {
+      "description": "One model-serving rank-zero process to probe.",
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/EndpointAssignment"
+        },
+        "process": {
+          "type": "string"
+        },
+        "replica": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "process",
+        "role",
+        "replica",
+        "endpoint"
       ]
     },
     "ProcessSpec": {
@@ -1264,12 +1582,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `13` (serialized as the\nstring `\"13\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `14` (serialized as the\nstring `\"14\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 13.",
+          "description": "Protocol version 14.",
           "type": "string",
-          "const": "13"
+          "const": "14"
         }
       ]
     },
@@ -1277,7 +1595,7 @@
       "description": "How the control plane decides a process is ready.",
       "oneOf": [
         {
-          "description": "Ready when an HTTP GET of `path` succeeds.",
+          "description": "Ready when an HTTP GET of `path` succeeds, on the process endpoint or\non the named logical `port` when given.",
           "type": "object",
           "properties": {
             "kind": {
@@ -1286,6 +1604,12 @@
             },
             "path": {
               "type": "string"
+            },
+            "port": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "additionalProperties": false,
@@ -1299,23 +1623,40 @@
           "type": "object",
           "properties": {
             "decode_role_value": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "kind": {
               "type": "string",
               "const": "http_target_registry"
             },
             "prefill_bootstrap_port": {
-              "type": "string"
+              "description": "The logical port whose value each prefill target registers.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "prefill_role_value": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "readiness_path": {
               "type": "string"
             },
             "registry_path": {
               "type": "string"
+            },
+            "serve_role_value": {
+              "description": "Each role value is the registry's spelling for that canonical role\nkind; a kind without one contributes no expected targets.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "target_bootstrap_port_field": {
               "type": "string"
@@ -1346,10 +1687,7 @@
             "target_url_field",
             "target_role_field",
             "target_healthy_field",
-            "target_bootstrap_port_field",
-            "prefill_role_value",
-            "decode_role_value",
-            "prefill_bootstrap_port"
+            "target_bootstrap_port_field"
           ]
         },
         {
@@ -1520,6 +1858,13 @@
               "type": "null"
             }
           ]
+        },
+        "stack_settings": {
+          "description": "The effective stack settings the plan returned\n([[RFC-0006:C-INTEGRATIONS]]).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SettingValue"
+          }
         },
         "state_dir": {
           "description": "The control-plane-owned state directory spelling,\nworkspace-root-relative, that the integration resolves operator-declared\nrelative paths against when matching them to supplied render-input\nsource paths.",
@@ -1700,6 +2045,38 @@
             "launch_files",
             "command"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "$ref": "#/$defs/ProcessSpec"
+            },
+            "kind": {
+              "type": "string",
+              "const": "kv_store"
+            },
+            "launch_files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LaunchFileDeclaration"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "process_role": {
+              "$ref": "#/$defs/KvStoreProcessRole"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "process_role",
+            "launch_files",
+            "command"
+          ]
         }
       ]
     },
@@ -1787,6 +2164,17 @@
             "kind": {
               "type": "string",
               "const": "model_rank"
+            },
+            "kv_store": {
+              "description": "The endpoint of the server's KV store, when it declares one\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EndpointAssignment"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "launch": {
               "$ref": "#/$defs/AllocationLaunch"
@@ -2033,6 +2421,71 @@
             "launch",
             "discovery"
           ]
+        },
+        {
+          "description": "The server's external KV store ([[RFC-0003:C-SERVE-KV-STORE]]):\nprocess-only, zero devices, placed beside the Gateway or the first\nserve replica's rank zero.",
+          "type": "object",
+          "properties": {
+            "cache": {
+              "type": "string"
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "endpoint": {
+              "$ref": "#/$defs/EndpointAssignment"
+            },
+            "kind": {
+              "type": "string",
+              "const": "kv_store"
+            },
+            "kv_store": {
+              "$ref": "#/$defs/KvStorePlan"
+            },
+            "launch": {
+              "$ref": "#/$defs/AllocationLaunch"
+            },
+            "machine": {
+              "type": "string"
+            },
+            "ports": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/EndpointAssignment"
+              }
+            },
+            "process": {
+              "type": "string"
+            },
+            "process_role": {
+              "$ref": "#/$defs/KvStoreProcessRole"
+            },
+            "render_inputs": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SuppliedRenderInput"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "process",
+            "process_role",
+            "machine",
+            "devices",
+            "endpoint",
+            "ports",
+            "cache",
+            "launch",
+            "kv_store"
+          ]
         }
       ]
     },
@@ -2101,6 +2554,15 @@
       "description": "A requested serving role: its identity, kind, replica cardinality, and\ndeclared (not-yet-completed) parallelism and settings.",
       "type": "object",
       "properties": {
+        "devices": {
+          "description": "The operator-declared whole-replica device count; when present it is\nthe sole device-count authority and every returned replica of this\nrole MUST require exactly this many devices\n([[RFC-0003:C-SERVE-PARALLELISM]]).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "id": {
           "type": "string"
         },

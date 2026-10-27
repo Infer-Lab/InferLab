@@ -39,8 +39,8 @@ Gateway process through the same contract used by real Engine implementations.
 The generic integration accepts arbitrary TP widths. This fake implementation
 deliberately accepts only TP1 and returns a typed CLI error for wider requests;
 its token core does not access the allocated device. The package contains no
-fake-Engine lowering: the fixture conforms by exposing the canonical
-`inferlab-token-engine smg-worker` command.
+fake-Engine lowering: the fixture's binary and subcommand,
+`inferlab-token-engine smg-worker`, are the default `engine_command`.
 
 ## Reproducible checks
 
@@ -66,7 +66,7 @@ and rendering under the current adapter protocol:
 - one closed `['gateway']` frontend binding and no P/D Router or KV transfer;
 - profiling plans that capture the Engine process tree while binding the
   framework-range window to the SMG Gateway;
-- exactly one rendered canonical token-Engine command and one rendered SMG command.
+- exactly one rendered Engine command, led by the stack's `engine_command`, and one rendered SMG command.
 
 ## Opt-in live SMG transport check
 

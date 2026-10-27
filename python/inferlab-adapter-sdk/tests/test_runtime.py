@@ -1,5 +1,12 @@
 import pytest
-from inferlab_adapter_sdk import AdapterErrorCode, AdapterOperationError, last_option_value
+from inferlab_adapter_sdk import (
+    AdapterErrorCode,
+    AdapterOperationError,
+    Parallelism,
+    ParallelismOuter,
+    fill_outer_tensor_parallel,
+    last_option_value,
+)
 from inferlab_adapter_sdk.runtime import merge_serve_args, validate_extra_args
 
 OWNED_OPTIONS: set[str] = {
@@ -103,3 +110,13 @@ def test_last_option_value_rejects_a_trailing_flag_without_its_value() -> None:
     assert captured.value.code == AdapterErrorCode.invalid_settings
     assert "role 'serve'" in captured.value.message
     assert "the test consumer" in captured.value.message
+
+
+def test_declared_devices_that_the_other_factors_do_not_divide_is_rejected() -> None:
+    declared = Parallelism(outer=ParallelismOuter(pipeline_parallel_size=4))
+
+    with pytest.raises(AdapterOperationError) as error:
+        fill_outer_tensor_parallel(declared, 6, 4, "pipeline parallelism")
+
+    assert error.value.code == AdapterErrorCode.invalid_settings
+    assert "devices (6) is not divisible by pipeline parallelism (4)" in error.value.message

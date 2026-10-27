@@ -32,6 +32,7 @@ from inferlab_measurement_sdk import (
     BenchTokenSelectorInput,
     BenchTokenSelectorInput1,
     ClientStatus,
+    GroupEntry,
     JsonObject,
     plain_setting,
 )
@@ -543,6 +544,48 @@ def _resolved_prefix_tokens(
     raise TypeError(f"unsupported prefix sharing {type(value).__name__}")
 
 
+def _prefix_group_count(
+    source: BenchRequestSourceInputRandom | BenchRequestSourceInputRandomMixture,
+) -> int:
+    sharing = source.prefix_sharing
+    if sharing is None or sharing.root.groups is None:
+        return 1
+    return sharing.root.groups
+
+
+_GROUP_DRAW_RESOLUTION = 1 << 53
+
+
+def _prefix_group(
+    source: BenchRequestSourceInputRandom | BenchRequestSourceInputRandomMixture,
+    seed: int,
+    population_index: int,
+) -> int:
+    """Draw an entry's prefix group under the seed, independently of its input
+    length, so a longer population keeps its first entries' groups
+    ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]])."""
+    groups = _prefix_group_count(source)
+    if groups == 1:
+        return 0
+    sharing = source.prefix_sharing
+    exponent = sharing.root.zipf_exponent if sharing is not None else None
+    if exponent is None:
+        return unbiased_index(seed, population_index, "prefix-group", groups)
+    # The group of rank k, counting from one, has weight 1 / k^s.
+    weights = [1.0 / (rank**exponent) for rank in range(1, groups + 1)]
+    draw = (
+        unbiased_index(seed, population_index, "prefix-group", _GROUP_DRAW_RESOLUTION)
+        / _GROUP_DRAW_RESOLUTION
+        * sum(weights)
+    )
+    cumulative = 0.0
+    for group, weight in enumerate(weights):
+        cumulative += weight
+        if draw < cumulative:
+            return group
+    return groups - 1
+
+
 def _resolved_system_tokens(source: BenchRequestSourceInputRandom, input_tokens: int) -> int | None:
     sharing = source.shared_system_content
     if sharing is None:
@@ -864,62 +907,72 @@ def write_synthetic_population(
     fallback_entries = 0
     fallback_reasons: dict[str, int] = {}
     text_factory = SyntheticTextFactory(tokenizer)
-    canonical_ids: list[int] | None = None
-    canonical_offset: int | None = None
-    canonical_targeting: SyntheticPromptTargeting | None = None
+    group_count = _prefix_group_count(source)
+    entry_groups = [_prefix_group(source, request.seed, index) for index in range(required)]
+    # One canonical stream per prefix group; the first is the ungrouped stream.
+    canonical_ids_by_group: list[list[int] | None] = [None] * group_count
+    canonical_offset_by_group: list[int | None] = [None] * group_count
+    canonical_targeting_by_group: list[SyntheticPromptTargeting | None] = [None] * group_count
     maximum_possible_input = _maximum_selected_input(source)
     maximum_prefix_tokens = _resolved_prefix_tokens(source, maximum_possible_input)
     if maximum_prefix_tokens is not None:
-        if isinstance(prompt, BenchPromptInputFlat):
-            if corpus_factory is not None:
-                # The shared prefix is one fixed corpus slice at a
-                # seed-determined offset, independent of the population size.
-                if len(corpus_factory.corpus_ids) < maximum_prefix_tokens:
-                    raise ValueError(
-                        f"corpus token stream has {len(corpus_factory.corpus_ids)} tokens, "
-                        f"shorter than the resolved maximum shared prefix "
-                        f"{maximum_prefix_tokens}"
+        for group in range(group_count):
+            canonical_ids: list[int] | None = None
+            canonical_offset: int | None = None
+            canonical_targeting: SyntheticPromptTargeting | None = None
+            if isinstance(prompt, BenchPromptInputFlat):
+                if corpus_factory is not None:
+                    # The shared prefix is one fixed corpus slice at a
+                    # seed-determined offset, independent of the population size.
+                    if len(corpus_factory.corpus_ids) < maximum_prefix_tokens:
+                        raise ValueError(
+                            f"corpus token stream has {len(corpus_factory.corpus_ids)} tokens, "
+                            f"shorter than the resolved maximum shared prefix "
+                            f"{maximum_prefix_tokens}"
+                        )
+                    canonical_offset = unbiased_index(
+                        request.seed,
+                        group,
+                        "corpus-canonical-slice",
+                        len(corpus_factory.corpus_ids) - maximum_prefix_tokens + 1,
                     )
-                canonical_offset = unbiased_index(
-                    request.seed,
-                    0,
-                    "corpus-canonical-slice",
-                    len(corpus_factory.corpus_ids) - maximum_prefix_tokens + 1,
-                )
-                canonical_ids = corpus_factory.corpus_ids[
-                    canonical_offset : canonical_offset + maximum_prefix_tokens
-                ]
-            else:
-                canonical_text = text_factory.exact_text(
+                    canonical_ids = corpus_factory.corpus_ids[
+                        canonical_offset : canonical_offset + maximum_prefix_tokens
+                    ]
+                else:
+                    canonical_text = text_factory.exact_text(
+                        maximum_possible_input,
+                        request.seed,
+                        group,
+                        "canonical-shared-stream",
+                    )
+                    canonical_ids = tokenizer.encode(canonical_text, add_special_tokens=False)
+            elif isinstance(prompt, BenchPromptInputRenderedChat):
+                if projection is None:
+                    raise ValueError(
+                        projection_detail
+                        or projection_reason
+                        or "rendered-chat prompt has no usable local template"
+                    )
+                canonical_targeting = _rendered_prompt_without_geometry(
+                    tokenizer,
+                    text_factory,
+                    projection,
                     maximum_possible_input,
                     request.seed,
-                    0,
-                    "canonical-shared-stream",
+                    group,
+                    "canonical-rendered-prompt",
                 )
-                canonical_ids = tokenizer.encode(canonical_text, add_special_tokens=False)
-        elif isinstance(prompt, BenchPromptInputRenderedChat):
-            if projection is None:
-                raise ValueError(
-                    projection_detail
-                    or projection_reason
-                    or "rendered-chat prompt has no usable local template"
+                if canonical_targeting.transport_prompt is None:
+                    raise ValueError("rendered-chat canonical prompt was not frozen")
+                canonical_ids = tokenizer.encode(
+                    canonical_targeting.transport_prompt, add_special_tokens=False
                 )
-            canonical_targeting = _rendered_prompt_without_geometry(
-                tokenizer,
-                text_factory,
-                projection,
-                maximum_possible_input,
-                request.seed,
-                0,
-                "canonical-rendered-prompt",
-            )
-            if canonical_targeting.transport_prompt is None:
-                raise ValueError("rendered-chat canonical prompt was not frozen")
-            canonical_ids = tokenizer.encode(
-                canonical_targeting.transport_prompt, add_special_tokens=False
-            )
-        else:
-            raise ValueError("server-chat prompt cannot declare exact prefix geometry")
+            else:
+                raise ValueError("server-chat prompt cannot declare exact prefix geometry")
+            canonical_ids_by_group[group] = canonical_ids
+            canonical_offset_by_group[group] = canonical_offset
+            canonical_targeting_by_group[group] = canonical_targeting
     canonical_system_text: str | None = None
     maximum_system_tokens: int | None = None
     if (
@@ -936,31 +989,48 @@ def write_synthetic_population(
             "canonical-system-content",
         )
 
-    prefix_conditioning: BenchPrefixConditioningInput | None = None
+    # A primed start conditions every group through the longest prefix the
+    # frozen population drew, which a ratio over variable inputs may leave
+    # short of the longest the declaration allows
+    # ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    drawn_prefix_tokens = max(
+        (value for value in resolved_prefix_counts if value is not None), default=None
+    )
+    group_conditioning: list[BenchPrefixConditioningInput] = []
     if (
         request.cache_start is BenchCacheStartInput.primed
-        and maximum_prefix_tokens is not None
-        and maximum_prefix_tokens > 0
+        and drawn_prefix_tokens is not None
+        and drawn_prefix_tokens > 0
     ):
-        if canonical_ids is None:
-            raise ValueError("canonical prefix token stream was not frozen")
-        canonical_prefix = decode_exact(
-            tokenizer,
-            canonical_ids[:maximum_prefix_tokens],
-            "canonical prefix conditioning prompt",
-        )
-        conditioning_path = artifact_dir / "canonical-prefix.txt"
-        conditioning_path.write_text(canonical_prefix, encoding="utf-8")
-        prefix_conditioning = BenchPrefixConditioningInput(
-            path=str(conditioning_path),
-            sha256=hashlib.sha256(canonical_prefix.encode()).hexdigest(),
-            prompt_tokens=maximum_prefix_tokens,
-        )
+        for group, group_ids in enumerate(canonical_ids_by_group):
+            if group_ids is None:
+                raise ValueError("canonical prefix token stream was not frozen")
+            canonical_prefix = decode_exact(
+                tokenizer,
+                group_ids[:drawn_prefix_tokens],
+                "canonical prefix conditioning prompt",
+            )
+            conditioning_path = artifact_dir / (
+                "canonical-prefix.txt" if group == 0 else f"canonical-prefix-{group}.txt"
+            )
+            conditioning_path.write_text(canonical_prefix, encoding="utf-8")
+            group_conditioning.append(
+                BenchPrefixConditioningInput(
+                    path=str(conditioning_path),
+                    sha256=hashlib.sha256(canonical_prefix.encode()).hexdigest(),
+                    prompt_tokens=drawn_prefix_tokens,
+                    group=group,
+                )
+            )
 
     pre_template_content_counts: list[int] = []
     with population_path.open("wb") as population_file, evidence_path.open("wb") as evidence_file:
         for index, (input_tokens, output_tokens) in enumerate(selected_shapes):
             shared_prefix_tokens = resolved_prefix_counts[index]
+            prefix_group = entry_groups[index]
+            canonical_ids = canonical_ids_by_group[prefix_group]
+            canonical_offset = canonical_offset_by_group[prefix_group]
+            canonical_targeting = canonical_targeting_by_group[prefix_group]
             system_content_tokens = resolved_system_counts[index]
             corpus_slice: CorpusSlice | None = None
             if isinstance(prompt, BenchPromptInputFlat):
@@ -1102,6 +1172,7 @@ def write_synthetic_population(
                         "prompt_token_fallback_reason": targeting.fallback_reason,
                         "prompt_token_fallback_detail": targeting.fallback_detail,
                         "resolved_shared_prefix_tokens": shared_prefix_tokens,
+                        "prefix_group": prefix_group if group_count > 1 else None,
                         "resolved_unique_suffix_tokens": (
                             input_tokens - shared_prefix_tokens
                             if shared_prefix_tokens is not None
@@ -1171,7 +1242,7 @@ def write_synthetic_population(
                 ),
                 maximum_shared_prefix_tokens=max(prefix_counts),
                 canonical_prefix_sha256=token_stream_digest(
-                    (canonical_ids or [])[: max(prefix_counts)]
+                    (canonical_ids_by_group[0] or [])[: max(prefix_counts)]
                 ),
                 full_prompt_entries=sum(
                     input_tokens == prefix_tokens
@@ -1179,11 +1250,17 @@ def write_synthetic_population(
                         selected_prompt_counts, prefix_counts, strict=True
                     )
                 ),
+                group_entries=(
+                    [GroupEntry(entry_groups.count(group)) for group in range(group_count)]
+                    if group_count > 1
+                    else []
+                ),
             )
             if prefix_counts
             else None
         ),
-        prefix_conditioning=prefix_conditioning,
+        prefix_conditioning=group_conditioning[0] if group_conditioning else None,
+        group_prefix_conditioning=group_conditioning[1:],
         shared_system_content=(
             BenchSharedSystemContentSummary(
                 system_content_tokens=count_summary(system_counts),

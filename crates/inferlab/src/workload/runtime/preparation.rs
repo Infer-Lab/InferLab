@@ -375,8 +375,9 @@ pub(super) fn finish_population_preparation(
             message: "population preparation returned no result".to_owned(),
         })?;
     validate_population_preparation(plan, expected_materialization_identity, result)?;
-    // A replay ratio declaration resolves its conditioning geometry from the
-    // prepared population; synthetic sources already planned a concrete value.
+    // A ratio declaration over variable input lengths, generated or
+    // replayed, resolves its conditioning geometry from the prepared
+    // population; other declarations already planned a concrete value.
     if let Some(conditioning) = plan.client.prefix_cache_conditioning.as_mut()
         && conditioning.maximum_shared_prefix_tokens.is_none()
     {
@@ -402,6 +403,7 @@ pub(super) fn finish_population_preparation(
             entries: population.entries,
             tpot_applicable: population.tpot_applicable,
             prefix_conditioning: result.prefix_conditioning.clone(),
+            group_prefix_conditioning: result.group_prefix_conditioning.clone(),
             session_templates: population
                 .session_templates
                 .iter()
@@ -776,6 +778,14 @@ pub(super) fn failed_acquisition(
     }
 }
 
+fn group_entries_reconciled(group_entries: &[u64], declared_groups: u32, entries: u32) -> bool {
+    if declared_groups <= 1 {
+        return group_entries.is_empty();
+    }
+    group_entries.len() == declared_groups as usize
+        && group_entries.iter().sum::<u64>() == u64::from(entries)
+}
+
 pub(super) fn validate_population_preparation(
     plan: &BenchPlan,
     expected_materialization_identity: &str,
@@ -837,7 +847,7 @@ pub(super) fn validate_population_preparation(
             ),
         });
     }
-    let (synthetic, prefix_declared, shared_system_declared) =
+    let (synthetic, prefix_sharing, shared_system_declared) =
         match &plan.client.effective_definition.source {
             ResolvedBenchSource::Requests {
                 request_source:
@@ -848,17 +858,21 @@ pub(super) fn validate_population_preparation(
                     },
             } => (
                 true,
-                prefix_sharing.is_some(),
+                prefix_sharing.as_ref(),
                 shared_system_content.is_some(),
             ),
             ResolvedBenchSource::Requests {
                 request_source: ResolvedBenchRequestSource::RandomMixture { prefix_sharing, .. },
-            } => (true, prefix_sharing.is_some(), false),
+            } => (true, prefix_sharing.as_ref(), false),
             ResolvedBenchSource::Requests {
                 request_source: ResolvedBenchRequestSource::Replay { prefix_sharing, .. },
-            } => (false, prefix_sharing.is_some(), false),
-            _ => (false, false, false),
+            } => (false, prefix_sharing.as_ref(), false),
+            _ => (false, None, false),
         };
+    let prefix_declared = prefix_sharing.is_some();
+    // A grouped population reports one entry count per group, summing to the
+    // population; an ungrouped one reports none.
+    let declared_groups = prefix_sharing.map_or(1, |sharing| sharing.group_count());
     let synthetic_prompt = synthetic.then_some(&plan.client.effective_definition.prompt.definition);
     match (synthetic, result.prompt_token_targeting.as_ref()) {
         (true, Some(targeting)) => {
@@ -938,7 +952,12 @@ pub(super) fn validate_population_preparation(
                 && valid_token_summary_allow_zero(&summary.unique_suffix_tokens)
                 && summary.maximum_shared_prefix_tokens == summary.shared_prefix_tokens.maximum
                 && summary.full_prompt_entries <= population.entries
-                && summary.canonical_prefix_sha256.len() == 64 => {}
+                && summary.canonical_prefix_sha256.len() == 64
+                && group_entries_reconciled(
+                    &summary.group_entries,
+                    declared_groups,
+                    population.entries,
+                ) => {}
         (false, None) => {}
         _ => {
             return Err(InferlabError::DatasetPreparation {
@@ -962,11 +981,36 @@ pub(super) fn validate_population_preparation(
                     observed: observed_sha256,
                 });
             }
+            for group in &result.group_prefix_conditioning {
+                let (_, observed_sha256) = hash_dataset_file(&group.path)?;
+                if observed_sha256 != group.sha256 {
+                    return Err(InferlabError::DatasetDigest {
+                        path: group.path.clone(),
+                        expected: group.sha256.clone(),
+                        observed: observed_sha256,
+                    });
+                }
+            }
             let maximum = result
                 .prefix_geometry
                 .as_ref()
                 .map(|summary| summary.maximum_shared_prefix_tokens);
-            if maximum != Some(conditioning.prompt_tokens) {
+            // Every group is conditioned through the population maximum, one
+            // artifact per further group in group order.
+            let groups = result
+                .prefix_geometry
+                .as_ref()
+                .map_or(0, |summary| summary.group_entries.len());
+            let groups_reconciled = conditioning.group == 0
+                && result.group_prefix_conditioning.len() == groups.saturating_sub(1)
+                && result
+                    .group_prefix_conditioning
+                    .iter()
+                    .zip(1_u32..)
+                    .all(|(item, group)| {
+                        item.group == group && Some(item.prompt_tokens) == maximum
+                    });
+            if maximum != Some(conditioning.prompt_tokens) || !groups_reconciled {
                 return Err(InferlabError::DatasetPreparation {
                     message: "canonical prefix conditioning tokens disagree with prefix geometry"
                         .to_owned(),

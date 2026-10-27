@@ -812,7 +812,7 @@ fn interrupted_recorded_run_terminates_its_process_group() -> Result<(), Box<dyn
         .status()?;
     let status = wrapper.wait()?;
 
-    let sleeper_alive = Path::new(&format!("/proc/{sleeper}")).exists();
+    let sleeper_alive = !support::has_exited(sleeper.unsigned_abs());
     if sleeper_alive {
         let _ = Command::new("kill")
             .args(["-KILL", &sleeper.to_string()])
@@ -874,7 +874,7 @@ fn interrupting_a_nested_run_finalizes_every_record_and_its_stubborn_command()
         .status()?;
     wrapper.wait()?;
 
-    let alive = Path::new(&format!("/proc/{stubborn}")).exists();
+    let alive = !support::has_exited(stubborn.unsigned_abs());
     if alive {
         let _ = Command::new("kill")
             .args(["-KILL", &stubborn.to_string()])

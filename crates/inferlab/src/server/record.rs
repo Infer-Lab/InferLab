@@ -142,6 +142,10 @@ pub(crate) struct ServerRecord {
     /// controller was gone ([[RFC-0005:C-EVIDENCE]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_stop: Option<crate::record::OperatorStopEvidence>,
+    /// Every serve-state probe attempt made while the server became ready
+    /// ([[RFC-0005:C-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serve_state_probes: Vec<super::serve_state::ServeStateProbeEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -157,8 +161,10 @@ impl ServerRecord {
     /// Version 15 records cleanup completion waits — process exit, container
     /// disappearance, device-memory release — in place of fixed post-kill,
     /// removal, and settle deadlines ([[RFC-0005:C-EVIDENCE]],
-    /// [[RFC-0009:C-COMPLETION-WAITS]]).
-    pub(crate) const SCHEMA_VERSION: u32 = 15;
+    /// [[RFC-0009:C-COMPLETION-WAITS]]). Version 16 records each role's
+    /// declared `devices` in the resolved declarations
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]).
+    pub(crate) const SCHEMA_VERSION: u32 = 16;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -291,6 +297,7 @@ impl ServerRecordSession {
                 .external_image
                 .as_ref()
                 .and_then(|external| external.framework_probe_timing.clone()),
+            serve_state_probes: Vec::new(),
             failure: None,
             operator_stop: None,
         };
@@ -467,11 +474,15 @@ mod tests {
         let plan = AdapterRequest::PlanServe {
             protocol_version: ProtocolVersion::CURRENT,
             input: PlanServeInput {
+                stack_settings: std::collections::BTreeMap::new(),
                 model: model.clone(),
                 topology: ServeTopology::Single,
                 state_dir: crate::record::STATE_DIR.to_owned(),
                 gateway_backend: None,
                 pd_router_backend: None,
+                gateway_settings: std::collections::BTreeMap::new(),
+                pd_router_settings: std::collections::BTreeMap::new(),
+                kv_store: None,
                 kv_transfer: None,
                 roles: Vec::new(),
                 profiling: None,
@@ -482,6 +493,7 @@ mod tests {
         let render = AdapterRequest::RenderServe {
             protocol_version: ProtocolVersion::CURRENT,
             input: RenderServeInput {
+                stack_settings: std::collections::BTreeMap::new(),
                 model,
                 topology: ServeTopology::Single,
                 state_dir: crate::record::STATE_DIR.to_owned(),

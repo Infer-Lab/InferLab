@@ -8,6 +8,7 @@ from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
+    KvStoreInput,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -245,6 +246,7 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
         "target_bootstrap_port_field": "bootstrap_port",
         "target_scheme": "grpc",
         "prefill_role_value": "prefill",
+        "serve_role_value": None,
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
     }
@@ -470,8 +472,8 @@ def _prefill_decode_render_input() -> RenderServeInput:
                 "components": ["gateway", "pd_router"],
                 "machine": "gateway",
                 "devices": [],
-                "endpoint": {"host": "gateway.example", "port": 30000},
-                "ports": {"prometheus": {"host": "gateway.example", "port": 30001}},
+                "endpoint": {"host": "192.0.2.10", "port": 30000},
+                "ports": {"prometheus": {"host": "192.0.2.10", "port": 30001}},
                 "cache": "/cache/gateway",
                 "launch": {"kind": "local"},
                 "gateway": plan.gateway,
@@ -620,7 +622,7 @@ def test_render_prefill_decode_uses_direct_grpc_workers_and_native_smg() -> None
 
     gateway = result.processes[-1].root.command.argv
     assert gateway[:2] == ["smg", "launch"]
-    assert gateway[gateway.index("--host") + 1] == "gateway.example"
+    assert gateway[gateway.index("--host") + 1] == "192.0.2.10"
     assert [gateway[index + 1] for index, arg in enumerate(gateway) if arg == "--prefill"] == [
         "grpc://node-0.example:8000",
         "grpc://node-1.example:8000",
@@ -675,3 +677,39 @@ def test_plan_rejects_a_declared_draft_model() -> None:
     assert response.root.error.code == "invalid_settings"
     assert "draft-model" in response.root.error.message
     assert "does not consume" in response.root.error.message
+
+
+def test_declared_devices_fills_the_tokenspeed_world() -> None:
+    input = _plan_input(parallelism=Parallelism())
+    input.roles[0].devices = 4
+
+    result = plan_serve(input)
+
+    outer = result.roles[0].effective_parallelism.outer
+    assert outer is not None
+    assert outer.tensor_parallel_size == 4
+    assert result.replicas[0].device_count == 4
+
+
+def test_prefill_decode_routing_policies_are_declarable_p_d_router_settings() -> None:
+    # The qualified pairing's round_robin stays the default; a declared policy
+    # reaches the P/D Router plan unchanged ([[RFC-0006:C-INTEGRATIONS]]).
+    plan_input = _prefill_decode_plan_input().model_copy(
+        update={"pd_router_settings": {"decode_policy": SettingValue(root="least_load")}}
+    )
+
+    result = plan_serve(plan_input)
+
+    assert result.pd_router is not None
+    assert result.pd_router.policies.prefill == "round_robin"
+    assert result.pd_router.policies.decode == "least_load"
+    assert result.pd_router.effective_settings["decode_policy"].root == "least_load"
+
+
+def test_a_kv_store_on_a_prefill_decode_server_is_rejected_during_planning() -> None:
+    plan_input = _prefill_decode_plan_input().model_copy(
+        update={"kv_store": KvStoreInput(backend="mooncake", settings={})}
+    )
+
+    with pytest.raises(AdapterOperationError, match="KV store on a prefill/decode server"):
+        plan_serve(plan_input)

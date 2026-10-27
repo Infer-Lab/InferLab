@@ -189,6 +189,15 @@ pub(crate) struct BenchClientPlan {
     pub replica_prefix_cache_resets: Vec<WorkloadReplicaReset>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_conditioning: Option<BenchPrefixCacheConditioningPlan>,
+    /// The store's declared publication bound on a shared prefix cache: how
+    /// long after a writer's first output token its prefix counts as
+    /// available to later requests ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "crate::execution::is_zero_u64")]
+    pub prefix_publication_ms: u64,
+    /// Probed at every profiling window's start and end; a case whose store
+    /// is not engaged at either boundary fails ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_state_probe: Option<WorkloadServeStateProbe>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -197,9 +206,10 @@ pub(crate) struct BenchPrefixCacheConditioningPlan {
     pub model: String,
     pub prompt: ResolvedBenchPrompt,
     pub request_body: BTreeMap<String, JsonValue>,
-    /// Resolved maximum shared-prefix token count. Synthetic sources compute
-    /// it at plan time; a replay ratio declaration resolves it from the
-    /// replayed population during preparation.
+    /// Maximum shared-prefix token count the frozen population resolved. A
+    /// token declaration, or a ratio over one input length, is known at plan
+    /// time; a ratio over variable input lengths or a replayed population
+    /// resolves it during preparation.
     pub maximum_shared_prefix_tokens: Option<u32>,
     pub output_tokens: u32,
     pub consumes_population_entry: bool,
@@ -211,6 +221,10 @@ pub(crate) struct BenchPrefixCacheConditioningPlan {
     /// capability: the control plane issues one request and the frontend
     /// covers every prefill replica and data-parallel rank.
     pub frontend_fanout: bool,
+    /// Waited after a successful conditioning request before profiling, for
+    /// the store to publish the shared prefix ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "crate::execution::is_zero_u64")]
+    pub publication_wait_ms: u64,
 }
 
 /// The public-serving shape prefix-cache conditioning plans against: whether
@@ -231,6 +245,9 @@ pub(crate) struct ConditioningServingShape {
     /// be missed by ordinary frontend routing, so the declared fan-out
     /// capability is required only when this exceeds one.
     pub conditioning_targets: u32,
+    /// How long a primed start waits after conditioning a shared prefix
+    /// cache for the store to publish it ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub publication_wait_ms: u64,
 }
 
 impl ConditioningServingShape {
@@ -259,6 +276,23 @@ impl ConditioningServingShape {
             gateway_frontend,
             attention_data_parallel_size,
             conditioning_targets,
+            publication_wait_ms: 0,
+        }
+    }
+
+    /// A shared prefix cache is one cache-owning target: one unpinned
+    /// conditioning request covers the server ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[must_use]
+    pub(crate) const fn shared(self, shared_prefix_cache: bool, publication_ms: u64) -> Self {
+        if shared_prefix_cache {
+            Self {
+                attention_data_parallel_size: 1,
+                conditioning_targets: 1,
+                publication_wait_ms: publication_ms,
+                ..self
+            }
+        } else {
+            self
         }
     }
 }
@@ -347,6 +381,40 @@ pub(crate) enum LoadShape {
     },
 }
 
+/// Everything a Bench case needs to ask the integration for the bound
+/// server's serve state at its profiling window boundaries
+/// ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkloadServeStateProbe {
+    pub integration: String,
+    pub pixi_environment: String,
+    pub adapter_timeout_seconds: u64,
+    pub input: inferlab_protocol::ProbeServeInput,
+}
+
+impl WorkloadServeStateProbe {
+    pub(crate) fn new(
+        integration: &str,
+        pixi_environment: &str,
+        model: inferlab_protocol::ServeModelInput,
+        topology: inferlab_protocol::ServeTopology,
+        plan: &crate::execution::ServeStateProbePlan,
+    ) -> Self {
+        Self {
+            integration: integration.to_owned(),
+            pixi_environment: pixi_environment.to_owned(),
+            adapter_timeout_seconds: plan.adapter_timeout_seconds,
+            input: inferlab_protocol::ProbeServeInput {
+                model,
+                topology,
+                attempt_bound_seconds: plan.attempt_bound_seconds,
+                processes: plan.processes.clone(),
+                kv_store: plan.kv_store.clone(),
+            },
+        }
+    }
+}
+
 pub(crate) struct MeasurementResolveContext<'a> {
     pub workspace_root: &'a Path,
     pub workspace_source_exclusions: &'a [PathBuf],
@@ -363,6 +431,9 @@ pub(crate) struct MeasurementResolveContext<'a> {
     /// frontend backend declares one ([[RFC-0004:C-BENCH-CACHE-STATE]]).
     pub prefix_cache_conditioning: Option<WorkloadHttpAction>,
     pub conditioning_serving: ConditioningServingShape,
+    /// The bound server's serve-state probe, when its integration declares
+    /// one ([[RFC-0003:C-SERVE-KV-STORE]]).
+    pub serve_state_probe: Option<WorkloadServeStateProbe>,
     /// Whether the bound server's resolved configuration carries synthetic
     /// acceptance ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]); every Eval kind
     /// fails measurement planning against it while Benches stay plannable.
@@ -398,6 +469,19 @@ mod tests {
     // [[RFC-0004:C-BENCH-CACHE-STATE]] 0.30.2: the fan-out capability is
     // required only when more than one cache-owning (prefill-side) target
     // sits behind the Gateway; decode roles are incidental and never count.
+    /// A shared prefix cache collapses every replica and rank into one
+    /// unpinned target ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[test]
+    fn a_shared_prefix_cache_is_one_unpinned_target() {
+        let shape = ConditioningServingShape::resolve(true, [(true, ServeRoleKind::Serve, 2, 8)]);
+        assert_eq!(shape.conditioning_targets, 16);
+
+        let shared = shape.shared(true, 0);
+        assert_eq!(shared.conditioning_targets, 1);
+        assert_eq!(shared.attention_data_parallel_size, 1);
+        assert_eq!(shape.shared(false, 0).conditioning_targets, 16);
+    }
+
     #[test]
     fn conditioning_targets_count_prefill_side_replicas_times_attention_dp() {
         let serve = |public, kind, replicas, dp| (public, kind, replicas, dp);

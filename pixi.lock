@@ -117,7 +117,11 @@ environments:
       - pypi: ./python/inferlab-integration-tensorrt-llm
       - pypi: ./python/inferlab-integration-tokenspeed
       - pypi: ./python/inferlab-integration-vllm
+      - pypi: ./python/inferlab-kvstore
       - pypi: ./python/inferlab-measurement-sdk
+      - pypi: https://files.pythonhosted.org/packages/00/98/456ef643a796ba04ad737e39a820c27291c238db87f7d168355dbdaf7b4b/grpcio-1.84.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/94/82/760c84998c37fc7bae8805f596cafc1117553c6b6af87863cc85d80dbc23/smg_grpc_proto-0.4.27-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl
   website:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -1650,54 +1654,84 @@ packages:
   name: inferlab-bench-runner
   requires_dist:
   - huggingface-hub>=0.25,<2
-  - inferlab-measurement-sdk==0.22.1
+  - inferlab-measurement-sdk==0.23.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-eval-runner
   name: inferlab-eval-runner
   requires_dist:
-  - inferlab-measurement-sdk==0.22.1
+  - inferlab-measurement-sdk==0.23.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-gateway-dynamo
   name: inferlab-gateway-dynamo
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
+  - inferlab-adapter-sdk==0.14.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-gateway-smg
   name: inferlab-gateway-smg
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
+  - inferlab-adapter-sdk==0.14.0
+  - smg-grpc-proto>=0.4.27,<0.5
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-sglang
   name: inferlab-integration-sglang
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
+  - inferlab-adapter-sdk==0.14.0
+  - inferlab-kvstore==0.1.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-specialized-engine
   name: inferlab-integration-specialized-engine
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
-  - inferlab-gateway-smg==0.3.0
+  - inferlab-adapter-sdk==0.14.0
+  - inferlab-gateway-smg==0.4.0
+  - inferlab-kvstore==0.1.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-tensorrt-llm
   name: inferlab-integration-tensorrt-llm
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
+  - inferlab-adapter-sdk==0.14.0
   - pyyaml>=6,<7
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-tokenspeed
   name: inferlab-integration-tokenspeed
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
-  - inferlab-gateway-smg==0.3.0
+  - inferlab-adapter-sdk==0.14.0
+  - inferlab-gateway-smg==0.4.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-vllm
   name: inferlab-integration-vllm
   requires_dist:
-  - inferlab-adapter-sdk==0.13.0
-  - inferlab-gateway-dynamo==0.2.0
+  - inferlab-adapter-sdk==0.14.0
+  - inferlab-gateway-dynamo==0.3.0
+  - inferlab-kvstore==0.1.0
+  requires_python: '>=3.12'
+- pypi: ./python/inferlab-kvstore
+  name: inferlab-kvstore
+  requires_dist:
+  - inferlab-adapter-sdk==0.14.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-measurement-sdk
   name: inferlab-measurement-sdk
   requires_dist:
   - pydantic>=2.13,<3
   requires_python: '>=3.12'
+- pypi: https://files.pythonhosted.org/packages/00/98/456ef643a796ba04ad737e39a820c27291c238db87f7d168355dbdaf7b4b/grpcio-1.84.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+  name: grpcio
+  version: 1.84.1
+  sha256: 474408c92b27c823ea6aab2315e2ea52d5a4e0040b37ce1e65e89d9149c48205
+  requires_dist:
+  - typing-extensions~=4.12
+  - grpcio-tools>=1.84.1 ; extra == 'protobuf'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/94/82/760c84998c37fc7bae8805f596cafc1117553c6b6af87863cc85d80dbc23/smg_grpc_proto-0.4.27-py3-none-any.whl
+  name: smg-grpc-proto
+  version: 0.4.27
+  sha256: 58dbd801d0d2745f8bc18ccdd73499e6d43f27a91bf84d7b18f99bfc9e59db14
+  requires_dist:
+  - grpcio>=1.81.1
+  - protobuf>=5.26.0
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl
+  name: protobuf
+  version: 7.36.2
+  sha256: 89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2
+  requires_python: '>=3.10'

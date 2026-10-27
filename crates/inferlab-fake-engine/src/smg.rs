@@ -130,6 +130,8 @@ impl TokenSpeedScheduler for SmgService {
                         cached_tokens: 0,
                         output_logprobs: None,
                         index: 0,
+                        // The fake loads no weights to version.
+                        weight_version: None,
                     })),
                 }));
             }
@@ -149,6 +151,7 @@ impl TokenSpeedScheduler for SmgService {
                 index: 0,
                 spec_accepted_tokens: 0,
                 spec_draft_tokens: 0,
+                weight_version: None,
             })),
         }));
 
@@ -214,6 +217,8 @@ impl TokenSpeedScheduler for SmgService {
             max_total_num_tokens: MAX_TOTAL_TOKENS,
             tokenspeed_version: format!("inferlab-fake-engine/{}", env!("CARGO_PKG_VERSION")),
             start_time: None,
+            // Unstated: the Gateway hands a grammar only when a request asks.
+            constrained_decoding: String::new(),
         }))
     }
 
@@ -235,6 +240,8 @@ impl TokenSpeedScheduler for SmgService {
                 max_total_num_tokens: MAX_TOTAL_TOKENS,
                 max_running_requests: 1,
                 token_usage: 0.0,
+                // The fake holds no KV cache.
+                active_token_usage: Some(0.0),
                 gen_throughput: 0.0,
                 cache_hit_rate: 0.0,
                 utilization: 0.0,

@@ -9,6 +9,7 @@ control routes. Integrations keep their framework's worker module and engine
 arguments.
 """
 
+import socket
 from collections.abc import Collection, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from ipaddress import ip_address
@@ -345,16 +346,36 @@ def _discovery_env(url: str) -> dict[str, str]:
 
 
 def _require_ip(process: str, host: str) -> str:
-    """etcd binds and Dynamo's request plane listens only on IP literals."""
+    """etcd binds and Dynamo's request plane listens only on IP literals, and
+    both advertise that address to processes on other machines: a hostname
+    renders as its first resolved address other than loopback."""
     try:
         ip_address(host)
     except ValueError:
+        pass
+    else:
+        return host
+    try:
+        resolved = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as error:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            f"Dynamo process {process!r} was allocated host {host!r}; Dynamo and its "
-            "etcd discovery listen only on IP addresses, so bind its machine by IP",
-        ) from None
-    return host
+            f"Dynamo process {process!r} was allocated host {host!r}, which does not resolve "
+            f"to an IP address to bind: {error}; declare a resolvable hostname or an IP "
+            "address as its machine's host",
+        ) from error
+    addresses = [str(entry[4][0]) for entry in resolved]
+    reachable = next(
+        (address for address in addresses if not ip_address(address).is_loopback), None
+    )
+    if reachable is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"Dynamo process {process!r} was allocated host {host!r}, which resolves only to "
+            f"loopback {', '.join(addresses)}; Dynamo advertises its listeners to processes "
+            "on other machines, so declare an address they can reach as its machine's host",
+        )
+    return reachable
 
 
 def worker_env(

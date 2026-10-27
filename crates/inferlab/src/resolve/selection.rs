@@ -40,9 +40,13 @@ pub(super) struct ServerOverridePatch {
     /// only profiler field an invocation may set
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     pub(super) profiler: ProfilerOverridePatch,
+    pub(super) devices: Option<u32>,
     pub(super) parallelism: Parallelism,
     pub(super) roles: BTreeMap<String, ServerRoleOverridePatch>,
     pub(super) settings: BTreeMap<String, JsonValue>,
+    pub(super) gateway_settings: BTreeMap<String, JsonValue>,
+    pub(super) pd_router_settings: BTreeMap<String, JsonValue>,
+    pub(super) kv_store: Option<crate::workspace::KvStorePatch>,
 }
 
 pub(super) struct IndexedServerOverride {
@@ -61,6 +65,7 @@ pub(super) struct ProfilerOverridePatch {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct ServerRoleOverridePatch {
     pub(super) replicas: Option<u32>,
+    pub(super) devices: Option<u32>,
     pub(super) parallelism: Parallelism,
     pub(super) settings: BTreeMap<String, JsonValue>,
 }
@@ -123,7 +128,59 @@ pub(super) struct EffectiveServerInput {
     pub(super) capture_finalization_deadline_seconds: u64,
     pub(super) override_patches: Vec<IndexedServerOverride>,
     pub(super) roles: Vec<ServeRoleInput>,
+    /// The resolved Gateway settings, typed by the integration
+    /// ([[RFC-0006:C-INTEGRATIONS]]); empty when none are declared.
+    pub(super) gateway_settings: BTreeMap<String, SettingValue>,
+    /// The resolved P/D Router settings, typed by the integration
+    /// ([[RFC-0006:C-INTEGRATIONS]]); empty when none are declared.
+    pub(super) pd_router_settings: BTreeMap<String, SettingValue>,
+    /// The resolved KV store declaration ([[RFC-0003:C-SERVE-KV-STORE]]).
+    pub(super) kv_store: Option<inferlab_protocol::KvStoreInput>,
     pub(super) declarations: Vec<ServerDeclarationPlan>,
+}
+
+impl EffectiveServerInput {
+    /// Names a role's declared `devices` and the declaration layer it came
+    /// from, for failures that the operator-declared count caused
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]). A role value at any layer wins
+    /// over a common value, as in [`resolve_role_inputs`].
+    pub(super) fn devices_origin(&self, role_id: &str) -> Option<String> {
+        let role_value = self.declarations.iter().rev().find_map(|declaration| {
+            declaration
+                .roles
+                .get(role_id)
+                .and_then(|role| role.devices)
+                .map(|devices| (declaration, devices, "role"))
+        });
+        let (declaration, devices, scope) = role_value.or_else(|| {
+            self.declarations.iter().rev().find_map(|declaration| {
+                declaration
+                    .common
+                    .devices
+                    .map(|devices| (declaration, devices, "common"))
+            })
+        })?;
+        let layer = match &declaration.source {
+            DeclarationSource::Server { id } => format!("server {id:?}"),
+            DeclarationSource::Case { id } => format!("case {id:?}"),
+            DeclarationSource::Invocation { index } => format!("invocation override {index}"),
+        };
+        Some(format!(
+            "devices = {devices} declared as a {scope} value by {layer}"
+        ))
+    }
+
+    /// The declared-device origin of every role that declares `devices`,
+    /// keyed by role id, for placement failures.
+    pub(super) fn devices_origins(&self) -> BTreeMap<String, String> {
+        self.roles
+            .iter()
+            .filter_map(|role| {
+                self.devices_origin(&role.id)
+                    .map(|origin| (role.id.clone(), origin))
+            })
+            .collect()
+    }
 }
 
 fn role_declarations(
@@ -169,6 +226,14 @@ fn resolve_role_inputs(
                 role.map(|role| &role.settings),
             )?;
             let replica_count = role.and_then(|role| role.replicas).unwrap_or(1);
+            // A role value at any layer wins over a common value, matching
+            // the parallelism layering ([[RFC-0003:C-SERVE-PARALLELISM]]).
+            let devices = role.and_then(|role| role.devices).or(server.devices);
+            if devices == Some(0) {
+                return Err(InferlabError::InvalidConfig {
+                    message: format!("role {id:?} devices must be nonzero"),
+                });
+            }
             if replica_count == 0 {
                 return Err(InferlabError::InvalidConfig {
                     message: format!("role {id:?} replica count must be nonzero"),
@@ -179,6 +244,7 @@ fn resolve_role_inputs(
             // launch unreachable. Cross-machine serving spans machines
             // through rank placement, not replicas ([[RFC-0003]]).
             if topology == ServeTopology::Single
+                && server.gateway_backend.is_none()
                 && kind == ServeRoleKind::Serve
                 && replica_count != 1
             {
@@ -192,6 +258,7 @@ fn resolve_role_inputs(
                 id,
                 kind,
                 replica_count,
+                devices,
                 parallelism,
                 settings,
             })
@@ -214,13 +281,18 @@ struct DeclarationLayer<'a> {
     profiling: Option<bool>,
     capture_control_deadline_seconds: Option<u64>,
     capture_finalization_deadline_seconds: Option<u64>,
+    devices: Option<u32>,
     parallelism: &'a Parallelism,
     settings: &'a BTreeMap<String, JsonValue>,
+    gateway_settings: &'a BTreeMap<String, JsonValue>,
+    pd_router_settings: &'a BTreeMap<String, JsonValue>,
+    kv_store: Option<(Option<&'a str>, &'a BTreeMap<String, JsonValue>)>,
     roles: Vec<(String, DeclarationLayerRole<'a>)>,
 }
 
 struct DeclarationLayerRole<'a> {
     replicas: Option<u32>,
+    devices: Option<u32>,
     parallelism: &'a Parallelism,
     settings: &'a BTreeMap<String, JsonValue>,
 }
@@ -238,8 +310,29 @@ fn declaration_plan(layer: DeclarationLayer<'_>) -> Result<ServerDeclarationPlan
             profiling: layer.profiling,
             capture_control_deadline_seconds: layer.capture_control_deadline_seconds,
             capture_finalization_deadline_seconds: layer.capture_finalization_deadline_seconds,
+            devices: layer.devices,
             parallelism: layer.parallelism.clone(),
             settings: declaration_settings(&format!("{} common", layer.scope), layer.settings)?,
+            gateway_settings: crate::adapter::project_setting_values(
+                &format!("{} gateway settings", layer.scope),
+                layer.gateway_settings,
+            )?,
+            pd_router_settings: crate::adapter::project_setting_values(
+                &format!("{} P/D Router settings", layer.scope),
+                layer.pd_router_settings,
+            )?,
+            kv_store: layer
+                .kv_store
+                .map(|(backend, settings)| {
+                    Ok::<_, InferlabError>(crate::execution::KvStoreDeclarationPlan {
+                        backend: backend.map(str::to_owned),
+                        settings: crate::adapter::project_setting_values(
+                            &format!("{} KV store settings", layer.scope),
+                            settings,
+                        )?,
+                    })
+                })
+                .transpose()?,
         },
         roles: layer
             .roles
@@ -249,6 +342,7 @@ fn declaration_plan(layer: DeclarationLayer<'_>) -> Result<ServerDeclarationPlan
                     id.clone(),
                     RoleDeclarationPlan {
                         replicas: role.replicas,
+                        devices: role.devices,
                         parallelism: role.parallelism.clone(),
                         settings: declaration_settings(
                             &format!("{} role {id:?}", layer.scope),
@@ -282,8 +376,15 @@ fn server_declarations(
         profiling: server.profiling,
         capture_control_deadline_seconds: server.capture_control_deadline_seconds,
         capture_finalization_deadline_seconds: server.capture_finalization_deadline_seconds,
+        devices: server.devices,
         parallelism: &server.parallelism,
         settings: &server.settings,
+        gateway_settings: &server.gateway_settings,
+        pd_router_settings: &server.pd_router_settings,
+        kv_store: server
+            .kv_store
+            .as_ref()
+            .map(|kv_store| (Some(kv_store.backend.as_str()), &kv_store.settings)),
         roles: server
             .roles
             .iter()
@@ -292,6 +393,7 @@ fn server_declarations(
                     id.clone(),
                     DeclarationLayerRole {
                         replicas: role.replicas,
+                        devices: role.devices,
                         parallelism: &role.parallelism,
                         settings: &role.settings,
                     },
@@ -318,8 +420,15 @@ fn server_declarations(
             profiling: case.profiling,
             capture_control_deadline_seconds: case.capture_control_deadline_seconds,
             capture_finalization_deadline_seconds: case.capture_finalization_deadline_seconds,
+            devices: case.devices,
             parallelism: &case.parallelism,
             settings: &case.settings,
+            gateway_settings: &case.gateway_settings,
+            pd_router_settings: &case.pd_router_settings,
+            kv_store: case
+                .kv_store
+                .as_ref()
+                .map(|kv_store| (None, &kv_store.settings)),
             roles: case
                 .roles
                 .iter()
@@ -328,6 +437,7 @@ fn server_declarations(
                         id.clone(),
                         DeclarationLayerRole {
                             replicas: role.replicas,
+                            devices: role.devices,
                             parallelism: &role.parallelism,
                             settings: &role.settings,
                         },
@@ -352,8 +462,15 @@ fn server_declarations(
             profiling: patch.profiling,
             capture_control_deadline_seconds: patch.capture_control_deadline_seconds,
             capture_finalization_deadline_seconds: patch.capture_finalization_deadline_seconds,
+            devices: patch.devices,
             parallelism: &patch.parallelism,
             settings: &patch.settings,
+            gateway_settings: &patch.gateway_settings,
+            pd_router_settings: &patch.pd_router_settings,
+            kv_store: patch
+                .kv_store
+                .as_ref()
+                .map(|kv_store| (None, &kv_store.settings)),
             roles: patch
                 .roles
                 .iter()
@@ -362,6 +479,7 @@ fn server_declarations(
                         id.clone(),
                         DeclarationLayerRole {
                             replicas: role.replicas,
+                            devices: role.devices,
                             parallelism: &role.parallelism,
                             settings: &role.settings,
                         },
@@ -446,8 +564,13 @@ pub(super) fn select_workflow<'a>(
             )
         })
         .transpose()?;
-    let (case_id, case, case_selection) = match request.case {
-        Some(selected) => (
+    let recipe_case = recipe_definition.and_then(|(_, recipe)| recipe.case.as_deref());
+    let selected_case = request
+        .case
+        .map(|selected| (selected, CaseSelectionSource::Explicit))
+        .or(recipe_case.map(|selected| (selected, CaseSelectionSource::Recipe)));
+    let (case_id, case, case_selection) = match selected_case {
+        Some((selected, source)) => (
             Some(selected.to_owned()),
             Some(
                 server
@@ -457,7 +580,7 @@ pub(super) fn select_workflow<'a>(
                         message: format!("unknown case {selected:?} for server {server_id:?}"),
                     })?,
             ),
-            Some(CaseSelectionSource::Explicit),
+            Some(source),
         ),
         None => match server.implicit_case_selection() {
             ImplicitCaseSelection::Default(selected) => (
@@ -512,8 +635,13 @@ pub(super) fn select_workflow<'a>(
             weight,
         });
     }
+    let recipe_placement = recipe_definition
+        .and_then(|(id, _)| workspace.local.recipe_placements.get(id))
+        .map(String::as_str);
     let (placement_id, placement_selection) = if let Some(selected) = request.placement {
         (selected, PlacementSelectionSource::Explicit)
+    } else if let Some(selected) = recipe_placement {
+        (selected, PlacementSelectionSource::Recipe)
     } else if let Some(selected) = workspace.local.default_placement.as_deref() {
         (selected, PlacementSelectionSource::Default)
     } else {
@@ -621,6 +749,15 @@ pub(super) fn resolve_effective_server_input(
                 value: item.raw().to_owned(),
                 message: format!(
                     "cannot add gateway_backend because server {:?} does not declare a Gateway",
+                    selection.server_id
+                ),
+            });
+        }
+        if patch.kv_store.is_some() && server.kv_store.is_none() {
+            return Err(InferlabError::InvalidOverride {
+                value: item.raw().to_owned(),
+                message: format!(
+                    "cannot add kv_store because server {:?} does not declare one",
                     selection.server_id
                 ),
             });
@@ -774,6 +911,43 @@ pub(super) fn resolve_effective_server_input(
         ServeTopology::Single | ServeTopology::PrefillDecode => {}
     }
 
+    if !effective_server.gateway_settings.is_empty() && gateway_backend.is_none() {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "server {:?} declares gateway_settings but its topology has no Gateway",
+                selection.server_id
+            ),
+        });
+    }
+    let gateway_settings = crate::adapter::project_setting_values(
+        "effective gateway settings",
+        &effective_server.gateway_settings,
+    )?;
+    if !effective_server.pd_router_settings.is_empty() && pd_router_backend.is_none() {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "server {:?} declares pd_router_settings but its topology has no P/D Router",
+                selection.server_id
+            ),
+        });
+    }
+    let pd_router_settings = crate::adapter::project_setting_values(
+        "effective P/D Router settings",
+        &effective_server.pd_router_settings,
+    )?;
+    let kv_store = effective_server
+        .kv_store
+        .as_ref()
+        .map(|kv_store| {
+            Ok::<_, InferlabError>(inferlab_protocol::KvStoreInput {
+                backend: kv_store.backend.clone(),
+                settings: crate::adapter::project_setting_values(
+                    "effective KV store settings",
+                    &kv_store.settings,
+                )?,
+            })
+        })
+        .transpose()?;
     let case_id = selection.case_id.as_deref();
     let roles = resolve_role_inputs(&effective_server, topology)?;
     let declarations = server_declarations(
@@ -809,6 +983,9 @@ pub(super) fn resolve_effective_server_input(
         capture_finalization_deadline_seconds,
         override_patches,
         roles,
+        gateway_settings,
+        pd_router_settings,
+        kv_store,
         declarations,
     })
 }

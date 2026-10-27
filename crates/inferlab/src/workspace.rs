@@ -30,14 +30,15 @@ pub(crate) use definitions::{
     AggregateSlo, BenchAgenticSource, BenchArtifactLevel, BenchCacheStart, BenchDefinition,
     BenchRequestSource, BenchSessionSource, BenchTokenSelector, BenchTpotApplicability,
     EvalDefinition, EvalPrompt, EvalTaskSource, ExternalImageEntrypoint, ImplicitCaseSelection,
-    JsonValue, ModelDefinition, RecipeDefinition, RequestRate, RequestSlo, ServerCaseDefinition,
-    ServerDefinition, StackDefinition, SyntheticAcceptanceCurveDefinition,
+    JsonValue, KvStorePatch, ModelDefinition, RecipeDefinition, RequestRate, RequestSlo,
+    ServerCaseDefinition, ServerDefinition, StackDefinition, SyntheticAcceptanceCurveDefinition,
     SyntheticAcceptanceDefinition, WorkloadSuiteDefinition, WorkspaceConfig,
     effective_lm_eval_base_seed,
 };
 pub(crate) use definitions::{
-    BenchImageSampling, BenchImagesDeclaration, BenchOutputStop, BenchPrefixSharing, BenchPrompt,
-    BenchPromptSelection, BenchSharedSystemContent,
+    BenchImageSampling, BenchImagesDeclaration, BenchOutputStop, BenchPrefixLength,
+    BenchPrefixPopularity, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
+    BenchSharedSystemContent,
 };
 pub(crate) use definitions::{
     DEFAULT_CAPTURE_ARM_DEADLINE_SECONDS, DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS,

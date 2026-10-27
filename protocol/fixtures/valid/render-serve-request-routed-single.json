@@ -1,6 +1,6 @@
 {
   "operation": "render_serve",
-  "protocol_version": "13",
+  "protocol_version": "14",
   "input": {
     "model": {
       "id": "fixture-model",
@@ -101,10 +101,6 @@
             "circuit_breaker": false
           },
           "endpoint": {
-            "prefix_cache_conditioning": {
-              "method": "post",
-              "path": "/prime_prefix_cache"
-            },
             "prefix_cache_reset": {
               "method": "post",
               "path": "/flush_cache"

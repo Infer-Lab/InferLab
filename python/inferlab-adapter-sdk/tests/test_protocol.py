@@ -68,7 +68,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
-SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v13.schema.json"
+SCHEMA = ROOT / "protocol" / "schema" / "adapter-protocol-v14.schema.json"
 
 
 class FixtureSettings(BaseModel):
@@ -454,6 +454,20 @@ def test_runtime_returns_typed_success_and_error_responses() -> None:
     assert response_error.status == "error"
     assert response_error.error.code == AdapterErrorCode.invalid_request
     assert response_error.error.message
+
+
+def test_an_integration_without_stack_settings_rejects_declared_ones() -> None:
+    # Integrations that define no stack setting need no code of their own to
+    # refuse one ([[RFC-0006:C-INTEGRATIONS]]).
+    request = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    cast(dict[str, object], request["input"])["stack_settings"] = {"engine_command": ["x"]}
+
+    response = handle_request(json.dumps(request), fixture_plan_serve)
+
+    response_error = response.root
+    assert isinstance(response_error, AdapterResponseError)
+    assert response_error.error.code == AdapterErrorCode.invalid_settings
+    assert "engine_command" in response_error.error.message
 
 
 @pytest.mark.parametrize("complete_body", [True, False])

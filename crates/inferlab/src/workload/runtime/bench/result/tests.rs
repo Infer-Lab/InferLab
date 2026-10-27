@@ -377,6 +377,10 @@ fn required_prompt_cache_evidence_reconciles_backend_token_observations() {
         cache_read_tokens: 6,
         uncached_prompt_tokens: 4,
         cache_read_ratio: 0.6,
+        shared_prefix_tokens: None,
+        prefix_group: None,
+        sent_unix_ns: None,
+        first_token_unix_ns: None,
     }];
     for family in ["prompt_cache_read_tokens", "uncached_prompt_tokens"] {
         for statistic in ["mean", "min", "max", "stddev", "p50", "p90", "p95", "p99"] {
@@ -485,4 +489,22 @@ fn complete_all_error_request_slo_result_is_measurement_evidence() {
         ),
         None
     );
+}
+
+#[test]
+fn bench_accepts_consistent_draft_acceptance_and_rejects_a_partial_one() {
+    let mut result = prefill_bench_result();
+    result
+        .metrics
+        .insert("draft_accepted_tokens".to_owned(), 12.0);
+    result.metrics.insert("draft_tokens".to_owned(), 15.0);
+    result
+        .metrics
+        .insert("draft_acceptance_rate".to_owned(), 0.8);
+
+    assert_eq!(bench_result_error(&result, expectations(1)), None);
+
+    result.metrics.remove("draft_tokens");
+    let error = bench_result_error(&result, expectations(1));
+    assert!(error.is_some_and(|error| error.contains("draft acceptance")));
 }

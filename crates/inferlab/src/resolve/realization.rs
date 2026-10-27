@@ -67,7 +67,8 @@ fn resolve_capture_target(
                                 capture_storage, ..
                             } => capture_storage.clone(),
                             ServeProcessAllocation::Frontend { .. }
-                            | ServeProcessAllocation::Discovery { .. } => None,
+                            | ServeProcessAllocation::Discovery { .. }
+                            | ServeProcessAllocation::KvStore { .. } => None,
                         })
                         .ok_or_else(|| InferlabError::InvalidConfig {
                             message: format!(
@@ -244,6 +245,32 @@ pub(super) fn realize_runtime(
                     true,
                 )
             }
+            (
+                ProcessRequirementIdentity::KvStore { .. },
+                ServeProcessAllocation::KvStore {
+                    process,
+                    process_role,
+                    ..
+                },
+                RenderedServeProcess::KvStore {
+                    process: rendered_id,
+                    process_role: rendered_role,
+                    command,
+                    launch_files,
+                },
+            ) if process == requirement.id()
+                && rendered_id == requirement.id()
+                && rendered_role == process_role =>
+            {
+                (
+                    ProcessIdentityPlan::KvStore {
+                        process_role: *process_role,
+                    },
+                    command,
+                    launch_files,
+                    true,
+                )
+            }
             _ => {
                 return Err(InferlabError::AdapterSemantics {
                     message: format!(
@@ -408,6 +435,7 @@ pub(super) fn realize_runtime(
                 requirement.readiness(),
                 allocations,
                 &selection.model.served_name,
+                allocation.ports(),
             )?,
             endpoint,
             container: None,
@@ -417,7 +445,8 @@ pub(super) fn realize_runtime(
                     Some(std::path::PathBuf::from(data_directory))
                 }
                 ServeProcessAllocation::ModelRank { .. }
-                | ServeProcessAllocation::Frontend { .. } => None,
+                | ServeProcessAllocation::Frontend { .. }
+                | ServeProcessAllocation::KvStore { .. } => None,
             },
         });
     }
@@ -520,6 +549,7 @@ pub(super) struct ProcessHierarchy {
     pub(super) roles: Vec<RolePlan>,
     pub(super) frontend: Option<FrontendPlan>,
     pub(super) discovery: Option<ProcessPlan>,
+    pub(super) kv_store: Option<crate::execution::KvStoreComponentPlan>,
 }
 
 pub(super) fn assemble_process_hierarchy(
@@ -708,6 +738,25 @@ pub(super) fn assemble_process_hierarchy(
             message: "resolved a discovery process without a Gateway component".to_owned(),
         });
     }
+    // The KV store belongs to the server ([[RFC-0003:C-SERVE-KV-STORE]]).
+    let kv_store = requirements
+        .iter()
+        .find_map(|requirement| match requirement.identity() {
+            ProcessRequirementIdentity::KvStore { plan, .. } => Some((requirement.id(), plan)),
+            _ => None,
+        })
+        .map(|(id, plan)| {
+            processes_by_id
+                .remove(id)
+                .map(|process| crate::execution::KvStoreComponentPlan {
+                    plan: (**plan).clone(),
+                    process,
+                })
+                .ok_or_else(|| InferlabError::InvalidConfig {
+                    message: format!("resolved KV store references missing process {id:?}"),
+                })
+        })
+        .transpose()?;
     if !processes_by_id.is_empty() {
         return Err(InferlabError::InvalidConfig {
             message: "resolved topology contains a process outside its owning hierarchy".to_owned(),
@@ -717,5 +766,6 @@ pub(super) fn assemble_process_hierarchy(
         roles: role_plans,
         frontend,
         discovery,
+        kv_store,
     })
 }

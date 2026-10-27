@@ -280,6 +280,24 @@ fn descriptor(name: String) -> MetricDescriptor {
             MetricUnit::Ratio,
             1,
         )),
+        Some(BenchMetric::DraftAcceptanceRate) => Some((
+            "Draft acceptance rate",
+            MetricFamily::Speculation,
+            MetricUnit::Ratio,
+            2,
+        )),
+        Some(BenchMetric::DraftAcceptedTokens) => Some((
+            "Accepted draft tokens",
+            MetricFamily::Speculation,
+            MetricUnit::Tokens,
+            3,
+        )),
+        Some(BenchMetric::DraftTokens) => Some((
+            "Draft tokens",
+            MetricFamily::Speculation,
+            MetricUnit::Tokens,
+            4,
+        )),
         Some(BenchMetric::GoodRequestRatio) => Some((
             "Good request ratio",
             MetricFamily::Slo,

@@ -99,6 +99,49 @@ impl ProcessAdapterClient {
     }
 }
 
+impl ProcessAdapterClient {
+    /// Ask the integration for the serve state of a running server's
+    /// model-serving processes ([[RFC-0006:C-INTEGRATIONS]]). Every requested
+    /// process must be answered exactly once.
+    pub(crate) fn probe_serve(
+        &self,
+        workspace_root: &Path,
+        integration: &str,
+        pixi_environment: &str,
+        input: inferlab_protocol::ProbeServeInput,
+    ) -> Result<inferlab_protocol::ProbeServeResult, InferlabError> {
+        let mut expected = input
+            .processes
+            .iter()
+            .map(|target| target.process.clone())
+            .collect::<Vec<_>>();
+        let request = AdapterRequest::ProbeServe {
+            protocol_version: ProtocolVersion::CURRENT,
+            input,
+        };
+        let invocation = self.invoke(workspace_root, integration, pixi_environment, request)?;
+        let output = match invocation.result {
+            AdapterResult::ProbeServe { output } => *output,
+            _ => return wrong_operation(integration),
+        };
+        let mut answered = output
+            .processes
+            .iter()
+            .map(|state| state.process.clone())
+            .collect::<Vec<_>>();
+        expected.sort();
+        answered.sort();
+        if answered != expected {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {integration:?} answered the serve-state probe for {answered:?}, expected {expected:?}"
+                ),
+            });
+        }
+        Ok(output)
+    }
+}
+
 impl AdapterClient for ProcessAdapterClient {
     fn plan_serve(
         &self,

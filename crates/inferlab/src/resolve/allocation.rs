@@ -95,6 +95,7 @@ pub(super) fn allocate_processes(
     image_identity: Option<&str>,
     requirements: &[ProcessRequirement],
     local_process: Option<&str>,
+    devices_origins: &BTreeMap<String, String>,
     occupancy: &mut super::occupancy::Occupancy<'_>,
 ) -> Result<
     (
@@ -118,7 +119,30 @@ pub(super) fn allocate_processes(
         })
         .map(|requirement| requirement.id().to_owned());
 
+    // Every explicitly bound endpoint port is reserved before any port is
+    // drawn from a machine's list, so a process without an explicit port
+    // never takes one another process declares; each reservation is released
+    // when its own process allocates it ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    let mut reserved = BTreeMap::<String, BTreeSet<u16>>::new();
+    for fixed in requirements
+        .iter()
+        .filter_map(ProcessRequirement::fixed_devices)
+    {
+        if let Some(port) = fixed.endpoint_port() {
+            reserved
+                .entry(fixed.machine().to_owned())
+                .or_default()
+                .insert(port);
+        }
+    }
+
     for requirement in requirements {
+        if let Some(fixed) = requirement.fixed_devices()
+            && let Some(port) = fixed.endpoint_port()
+            && let Some(ports) = reserved.get_mut(fixed.machine())
+        {
+            ports.remove(&port);
+        }
         if requirement.id().is_empty() || !process_ids.insert(requirement.id().to_owned()) {
             return Err(InferlabError::AdapterSemantics {
                 message: format!(
@@ -163,6 +187,34 @@ pub(super) fn allocate_processes(
                     message: "a discovery process requires a placed Gateway process".to_owned(),
                 })?;
             vec![gateway_machine]
+        } else if matches!(
+            requirement.identity(),
+            ProcessRequirementIdentity::KvStore { .. }
+        ) {
+            // The KV store sits beside the Gateway, or beside the first serve
+            // replica's rank zero on a direct server
+            // ([[RFC-0003:C-SERVE-KV-STORE]]).
+            let gateway = allocations.iter().find(|allocation| {
+                matches!(allocation.wire(), ServeProcessAllocation::Frontend { .. })
+            });
+            let first_rank = allocations.iter().find(|allocation| {
+                matches!(
+                    allocation.wire(),
+                    ServeProcessAllocation::ModelRank {
+                        role_kind: inferlab_protocol::ServeRoleKind::Serve,
+                        replica: 0,
+                        rank: 0,
+                        ..
+                    }
+                )
+            });
+            let machine = gateway
+                .or(first_rank)
+                .map(|allocation| allocation.machine().to_owned())
+                .ok_or_else(|| InferlabError::AdapterSemantics {
+                    message: "a KV store requires a placed Gateway or serve replica".to_owned(),
+                })?;
+            vec![machine]
         } else if let Some(fixed) = requirement.fixed_devices() {
             vec![fixed.machine().to_owned()]
         } else if let Some(role_machines) = placement
@@ -241,6 +293,7 @@ pub(super) fn allocate_processes(
             if machine_capacity(
                 machine,
                 usage.get(candidate),
+                reserved.get(candidate),
                 requirement.device_count() as usize,
                 requirement.ports().len() + 1,
             ) {
@@ -264,6 +317,10 @@ pub(super) fn allocate_processes(
                         required: requirement.device_count(),
                         available,
                         held: held_devices_summary(usage.get(candidate)),
+                        declared: super::topology::devices_origin_note(
+                            devices_origins,
+                            placement_role,
+                        ),
                     });
                 }
                 return Err(InferlabError::InvalidConfig {
@@ -301,14 +358,19 @@ pub(super) fn allocate_processes(
                         required: requirement.device_count(),
                         available: free_devices(machine),
                         held: held_devices_summary(usage.get(machine)),
+                        declared: super::topology::devices_origin_note(
+                            devices_origins,
+                            placement_role,
+                        ),
                     });
                 }
                 return Err(InferlabError::InvalidConfig {
                     message: format!(
-                        "placement {placement_id:?} has no machine with {} free devices and {} free ports for process {:?} in role {placement_role:?}",
+                        "placement {placement_id:?} has no machine with {} free devices and {} free ports for process {:?} in role {placement_role:?}{}",
                         requirement.device_count(),
                         requirement.ports().len() + 1,
-                        requirement.id()
+                        requirement.id(),
+                        super::topology::devices_origin_note(devices_origins, placement_role)
                     ),
                 });
             }
@@ -319,6 +381,10 @@ pub(super) fn allocate_processes(
             }
         })?;
         let used = usage.entry(machine_id.clone()).or_default();
+        let held_for_others = reserved.get(&machine_id);
+        let is_free = |used: &MachineAllocationUsage, port: u16| {
+            used.is_free(port) && !held_for_others.is_some_and(|ports| ports.contains(&port))
+        };
         let devices =
             if let Some(fixed) = requirement.fixed_devices() {
                 if fixed.devices().iter().any(|device| {
@@ -361,7 +427,7 @@ pub(super) fn allocate_processes(
             None => machine
                 .ports
                 .iter()
-                .find(|port| used.is_free(**port))
+                .find(|port| is_free(used, **port))
                 .copied()
                 .ok_or_else(|| InferlabError::InvalidConfig {
                     message: format!(
@@ -374,7 +440,7 @@ pub(super) fn allocate_processes(
         let selected_ports = machine
             .ports
             .iter()
-            .filter(|port| used.is_free(**port))
+            .filter(|port| is_free(used, **port))
             .take(requirement.ports().len())
             .copied()
             .collect::<Vec<_>>();
@@ -547,6 +613,7 @@ pub(super) fn allocate_processes(
                         launch,
                         effective_settings: effective_settings.clone(),
                         effective_parallelism: effective_parallelism.clone(),
+                        kv_store: None,
                         links: links.clone(),
                         dependencies: requirement.launch_dependencies().to_vec(),
                         discovery: discovery_process.clone(),
@@ -629,6 +696,32 @@ pub(super) fn allocate_processes(
                     Vec::new(),
                 )
             }
+            ProcessRequirementIdentity::KvStore {
+                plan,
+                render_inputs,
+            } => {
+                if requirement.device_count() != 0 || !devices.is_empty() {
+                    return Err(InferlabError::InvalidConfig {
+                        message: "the KV store process must not allocate model devices".to_owned(),
+                    });
+                }
+                (
+                    ServeProcessAllocation::KvStore {
+                        process: requirement.id().to_owned(),
+                        process_role: inferlab_protocol::KvStoreProcessRole::KvStore,
+                        machine: machine_id.clone(),
+                        devices,
+                        endpoint,
+                        ports: named_ports,
+                        cache,
+                        launch,
+                        kv_store: plan.clone(),
+                        render_inputs: render_inputs.clone(),
+                    },
+                    None,
+                    Vec::new(),
+                )
+            }
         };
         allocations.push(ResolvedProcessAllocation::new(
             wire,
@@ -636,6 +729,17 @@ pub(super) fn allocate_processes(
             model_locator_source,
             auxiliary_locator_sources,
         ));
+    }
+    if let Some(store) = allocations
+        .iter()
+        .find_map(|allocation| match allocation.wire() {
+            ServeProcessAllocation::KvStore { endpoint, .. } => Some(endpoint.clone()),
+            _ => None,
+        })
+    {
+        for allocation in &mut allocations {
+            allocation.bind_kv_store(&store);
+        }
     }
     // The observation is evidence only for machines that received a process.
     let mut unavailable = super::occupancy::Unavailable::default();
@@ -768,13 +872,20 @@ impl MachineAllocationUsage {
 fn machine_capacity(
     machine: &crate::workspace::MachineBinding,
     usage: Option<&MachineAllocationUsage>,
+    reserved: Option<&BTreeSet<u16>>,
     devices: usize,
     ports: usize,
 ) -> bool {
     let free_devices = free_device_count(machine, usage);
-    let available_ports = machine.ports.len();
-    let used_ports = usage.map_or(0, |usage| usage.ports.len() + usage.unavailable.len());
-    free_devices >= devices && available_ports - used_ports >= ports
+    let free_ports = machine
+        .ports
+        .iter()
+        .filter(|port| {
+            usage.is_none_or(|usage| usage.is_free(**port))
+                && !reserved.is_some_and(|reserved| reserved.contains(port))
+        })
+        .count();
+    free_devices >= devices && free_ports >= ports
 }
 
 fn free_device_count(
@@ -874,12 +985,28 @@ pub(super) fn readiness_plan(
     probe: &ReadinessProbe,
     allocations: &[ResolvedProcessAllocation],
     served_model: &str,
+    owner_ports: &BTreeMap<String, EndpointAssignment>,
 ) -> Result<ReadinessPlan, InferlabError> {
     match probe {
         ReadinessProbe::RegistryMembership(registry) => {
             registry_membership_plan(registry, allocations, served_model)
         }
-        ReadinessProbe::Http { path } => Ok(ReadinessPlan::Http { path: path.clone() }),
+        ReadinessProbe::Http { path, port } => Ok(ReadinessPlan::Http {
+            path: path.clone(),
+            port: port
+                .as_ref()
+                .map(|name| {
+                    owner_ports
+                        .get(name)
+                        .map(|endpoint| endpoint.port)
+                        .ok_or_else(|| InferlabError::AdapterSemantics {
+                            message: format!(
+                                "readiness names port {name:?}, which the process does not declare"
+                            ),
+                        })
+                })
+                .transpose()?,
+        }),
         ReadinessProbe::HttpTargetRegistry(registry) => {
             let expected_targets = allocations
                 .iter()
@@ -894,16 +1021,16 @@ pub(super) fn readiness_plan(
                     };
                     Some((allocation, *role_kind))
                 })
-                .filter_map(|(allocation, kind)| match kind {
-                    ServeRoleKind::Prefill => Some((
-                        allocation,
-                        registry.prefill_role_value.as_str(),
-                        Some(registry.prefill_bootstrap_port.as_str()),
-                    )),
-                    ServeRoleKind::Decode => {
-                        Some((allocation, registry.decode_role_value.as_str(), None))
-                    }
-                    ServeRoleKind::Serve => None,
+                .filter_map(|(allocation, kind)| {
+                    let (role, bootstrap_port) = match kind {
+                        ServeRoleKind::Serve => (registry.serve_role_value.as_deref()?, None),
+                        ServeRoleKind::Prefill => (
+                            registry.prefill_role_value.as_deref()?,
+                            registry.prefill_bootstrap_port.as_deref(),
+                        ),
+                        ServeRoleKind::Decode => (registry.decode_role_value.as_deref()?, None),
+                    };
+                    Some((allocation, role, bootstrap_port))
                 })
                 .map(|(allocation, role, bootstrap_port)| {
                     let bootstrap_port = bootstrap_port
@@ -1048,10 +1175,10 @@ mod tests {
                     ServeProcessAllocation::ModelRank {
                         process: process_id.to_owned(),
                         role: role_id.to_owned(),
-                        role_kind: if role_id == "prefill" {
-                            ServeRoleKind::Prefill
-                        } else {
-                            ServeRoleKind::Decode
+                        role_kind: match role_id {
+                            "prefill" => ServeRoleKind::Prefill,
+                            "serve" => ServeRoleKind::Serve,
+                            _ => ServeRoleKind::Decode,
                         },
                         replica: 0,
                         rank,
@@ -1074,6 +1201,7 @@ mod tests {
                         dependencies: Vec::new(),
                         render_inputs: Vec::new(),
                         discovery: None,
+                        kv_store: None,
                     },
                     RuntimeCachePlan {
                         storage_root: PathBuf::from("/cache"),
@@ -1105,12 +1233,13 @@ mod tests {
             target_role_field: "worker_type".to_owned(),
             target_healthy_field: "is_healthy".to_owned(),
             target_bootstrap_port_field: "bootstrap_port".to_owned(),
-            prefill_role_value: "prefill".to_owned(),
-            decode_role_value: "decode".to_owned(),
-            prefill_bootstrap_port: "bootstrap".to_owned(),
+            serve_role_value: None,
+            prefill_role_value: Some("prefill".to_owned()),
+            decode_role_value: Some("decode".to_owned()),
+            prefill_bootstrap_port: Some("bootstrap".to_owned()),
         }));
 
-        let readiness = readiness_plan(&probe, &allocations, "served-model")?;
+        let readiness = readiness_plan(&probe, &allocations, "served-model", &BTreeMap::new())?;
         assert!(matches!(
             &readiness,
             ReadinessPlan::HttpTargetRegistry { .. }
@@ -1135,6 +1264,41 @@ mod tests {
                 ]
             );
         }
+
+        // A routed single topology expects every serve replica's entry under
+        // the registry's serve spelling ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+        let serve = vec![
+            allocation("server-0", "serve", 0, 8200, None),
+            allocation("server-1", "serve", 0, 8201, None),
+        ];
+        let ReadinessProbe::HttpTargetRegistry(mut registry) = probe else {
+            return Ok(());
+        };
+        registry.serve_role_value = Some("regular".to_owned());
+        let routed = readiness_plan(
+            &ReadinessProbe::HttpTargetRegistry(registry),
+            &serve,
+            "served-model",
+            &BTreeMap::new(),
+        )?;
+        let ReadinessPlan::HttpTargetRegistry {
+            expected_targets, ..
+        } = routed
+        else {
+            return Err(InferlabError::InvalidConfig {
+                message: "routed single readiness is not target-registry readiness".to_owned(),
+            });
+        };
+        assert_eq!(
+            expected_targets
+                .iter()
+                .map(|target| (target.url.as_str(), target.role.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("grpc://node.example:8200", "regular"),
+                ("grpc://node.example:8201", "regular")
+            ]
+        );
         Ok(())
     }
 }

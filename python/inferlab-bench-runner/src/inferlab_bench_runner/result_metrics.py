@@ -111,7 +111,12 @@ def prompt_cache_evidence(
     path: Path,
     required: bool,
     zero_representation: PromptCacheReadZeroRepresentation | None,
+    shared_prefix_by_session: dict[int, tuple[int, int | None]] | None = None,
 ) -> tuple[list[BenchPromptCacheObservation], dict[str, float], str | None]:
+    """Per-request backend prompt and cache-read usage. For a generated
+    population the observation also carries the entry's shared-prefix tokens,
+    its prefix group, and the request's send and first-token times, from which the control
+    plane derives reuse opportunity ([[RFC-0004:C-BENCH-CACHE-STATE]])."""
     if not required:
         return [], {}, None
     records, parse_error = profiling_records(path)
@@ -162,6 +167,9 @@ def prompt_cache_evidence(
             return [], {}, f"AIPerf profiling record {request_id} has invalid cache-read usage"
         prompt = int(prompt_tokens)
         cache = int(cache_tokens)
+        planned = shared_prefix_by_session.get(request_id) if shared_prefix_by_session else None
+        shared, group = planned if planned is not None else (None, None)
+        sent, first_token = _request_times(metadata, raw_metrics)
         observations.append(
             BenchPromptCacheObservation(
                 request_id=request_id,
@@ -169,6 +177,10 @@ def prompt_cache_evidence(
                 cache_read_tokens=cache,
                 uncached_prompt_tokens=prompt - cache,
                 cache_read_ratio=cache / prompt,
+                shared_prefix_tokens=shared,
+                prefix_group=group,
+                sent_unix_ns=sent if shared is not None else None,
+                first_token_unix_ns=first_token if shared is not None else None,
             )
         )
     if not observations:
@@ -185,3 +197,64 @@ def prompt_cache_evidence(
     total_cache = sum(item.cache_read_tokens for item in observations)
     metrics["prompt_cache_read_ratio"] = total_cache / total_prompt
     return observations, metrics, None
+
+
+def draft_acceptance_metrics(path: Path) -> tuple[dict[str, float], str | None]:
+    """Token-weighted speculative draft acceptance from per-request usage
+    ([[RFC-0004:C-MEASUREMENTS]]): a request contributes when its backend
+    reported accepted and rejected prediction tokens; drafted tokens are their
+    sum. Acceptance length needs verify-step counts, which usage does not
+    carry, so it is not derived here."""
+    records, parse_error = profiling_records(path)
+    if parse_error is not None:
+        return {}, parse_error
+    accepted_total = 0
+    drafted_total = 0
+    for record in records:
+        metadata = record.get("metadata")
+        if record.get("error") is not None or (
+            isinstance(metadata, dict) and metadata.get("was_cancelled") is True
+        ):
+            continue
+        raw_metrics = record.get("metrics")
+        if not isinstance(raw_metrics, dict):
+            continue
+        accepted, accepted_error = record_metric_value(
+            raw_metrics, "usage_accepted_prediction_tokens"
+        )
+        rejected, rejected_error = record_metric_value(
+            raw_metrics, "usage_rejected_prediction_tokens"
+        )
+        if accepted_error is not None or rejected_error is not None:
+            return {}, accepted_error or rejected_error
+        if accepted is None and rejected is None:
+            continue
+        if accepted is None or rejected is None:
+            return (
+                {},
+                "AIPerf profiling record reports only one of accepted and rejected draft tokens",
+            )
+        if not accepted.is_integer() or not rejected.is_integer() or accepted < 0 or rejected < 0:
+            return {}, "AIPerf profiling record has invalid draft token usage"
+        accepted_total += int(accepted)
+        drafted_total += int(accepted + rejected)
+    if drafted_total == 0:
+        return {}, None
+    return {
+        "draft_accepted_tokens": float(accepted_total),
+        "draft_tokens": float(drafted_total),
+        "draft_acceptance_rate": accepted_total / drafted_total,
+    }, None
+
+
+def _request_times(
+    metadata: dict[str, object], raw_metrics: dict[str, object]
+) -> tuple[int | None, int | None]:
+    """AIPerf's wall-clock send time and the first-token time it implies."""
+    sent = metadata.get("request_start_ns")
+    if isinstance(sent, bool) or not isinstance(sent, int) or sent <= 0:
+        return None, None
+    ttft, error = record_metric_value(raw_metrics, "time_to_first_token")
+    if error is not None or ttft is None or ttft < 0:
+        return sent, None
+    return sent, sent + round(ttft * 1_000_000)

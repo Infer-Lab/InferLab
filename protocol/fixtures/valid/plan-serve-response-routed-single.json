@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "protocol_version": "13",
+  "protocol_version": "14",
   "result": {
     "operation": "plan_serve",
     "output": {
@@ -16,10 +16,6 @@
           "circuit_breaker": false
         },
         "endpoint": {
-          "prefix_cache_conditioning": {
-            "method": "post",
-            "path": "/prime_prefix_cache"
-          },
           "prefix_cache_reset": {
             "method": "post",
             "path": "/flush_cache"

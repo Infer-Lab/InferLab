@@ -1,8 +1,12 @@
+import json
+
+import inferlab_kvstore
 from inferlab_adapter_sdk import (
     ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
+    EndpointAssignment,
     ParallelismAttention,
     ParallelismExperts,
     ParallelismOuter,
@@ -11,6 +15,7 @@ from inferlab_adapter_sdk import (
     RenderServeInput,
     RenderServeResult,
     ServeProcessAllocationFrontend,
+    ServeProcessAllocationKvStore,
     ServeProcessAllocationModelRank,
     ServeRoleKind,
     ServeTopology,
@@ -23,10 +28,11 @@ from inferlab_adapter_sdk import (
     runtime_cache_env,
     split_serve_allocations,
 )
+from inferlab_kvstore import mooncake
 
 from .auxiliary import splice_draft_model
 from .plan import _identity
-from .settings import _INFERLAB_OWNED_OPTIONS, _settings
+from .settings import _INFERLAB_OWNED_OPTIONS, SglangServeSettings, _settings
 from .synthetic import resolve_synthetic_acceptance, synthetic_acceptance_env
 
 _RUNTIME_CACHE_EXTRA_SUBDIRS = {
@@ -175,6 +181,8 @@ def _render_process(
                 )
             inferlab_args.extend(["--disaggregation-bootstrap-port", str(bootstrap.port)])
     inferlab_args.extend(_multi_node_args(allocation, replica_ranks))
+    if allocation.kv_store is not None:
+        inferlab_args.extend(_kv_store_args(allocation.kv_store, settings))
     argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OWNED_OPTIONS))
     process_env = runtime_cache_env(allocation.cache, _RUNTIME_CACHE_EXTRA_SUBDIRS)
     process_env.update(settings.extra_env or {})
@@ -309,6 +317,30 @@ def _require_placeable_multi_node(allocation: ServeProcessAllocationModelRank) -
         )
 
 
+def _kv_store_args(store: EndpointAssignment, settings: SglangServeSettings) -> list[str]:
+    """HiCache with the Mooncake storage backend; the extra config carries
+    the master address, so SGLang ignores its `MOONCAKE_*` environment
+    ([[RFC-0003:C-SERVE-KV-STORE]])."""
+    config: dict[str, str | int] = {
+        "master_server_address": mooncake.client_address(store),
+        "metadata_server": mooncake.METADATA_SERVER,
+    }
+    for key, value in (
+        ("global_segment_size", settings.kv_store_global_segment_size),
+        ("protocol", settings.kv_store_protocol),
+        ("device_name", settings.kv_store_device_name),
+    ):
+        if value is not None:
+            config[key] = value
+    return [
+        "--enable-hierarchical-cache",
+        "--hicache-storage-backend",
+        "mooncake",
+        "--hicache-storage-backend-extra-config",
+        json.dumps(config, sort_keys=True),
+    ]
+
+
 def render_serve(input: RenderServeInput) -> RenderServeResult:
     if not input.allocations:
         raise AdapterOperationError(
@@ -332,4 +364,6 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
                 pd_router_backend="sglang-router",
             )
             processes.append(_render_router(allocation, model_allocations))
+        elif isinstance(allocation, ServeProcessAllocationKvStore):
+            processes.append(inferlab_kvstore.render(allocation))
     return RenderServeResult(integration=_identity(), processes=processes)

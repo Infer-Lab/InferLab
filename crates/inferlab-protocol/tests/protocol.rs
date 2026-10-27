@@ -155,7 +155,7 @@ const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../protocol/schema/adapter-protocol-v13.schema.json"
+    "/../../protocol/schema/adapter-protocol-v14.schema.json"
 ));
 const GENERATED_MEASUREMENT_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -368,7 +368,9 @@ fn replay_fixture_round_trips() -> Result<(), Box<dyn Error>> {
     assert!(matches!(
         prefix_sharing,
         Some(BenchPrefixSharingInput::Ratio {
-            shared_prefix_ratio: 1.0
+            shared_prefix_ratio: 1.0,
+            groups: None,
+            zipf_exponent: None,
         })
     ));
     assert_eq!(
@@ -406,7 +408,9 @@ fn random_corpus_fixture_round_trips() -> Result<(), Box<dyn Error>> {
     assert!(matches!(
         prefix_sharing,
         Some(BenchPrefixSharingInput::Ratio {
-            shared_prefix_ratio: 0.8
+            shared_prefix_ratio: 0.8,
+            groups: None,
+            zipf_exponent: None,
         })
     ));
     assert_eq!(
@@ -858,10 +862,12 @@ fn http_target_registry_readiness_fixture_preserves_registry_contract() -> Resul
         target_role_field,
         target_healthy_field,
         target_bootstrap_port_field,
+        serve_role_value,
         prefill_role_value,
         decode_role_value,
         prefill_bootstrap_port,
     } = *registry;
+    assert_eq!(serve_role_value, None);
 
     assert_eq!(target_scheme, TargetEndpointScheme::Http);
 
@@ -874,9 +880,9 @@ fn http_target_registry_readiness_fixture_preserves_registry_contract() -> Resul
             target_role_field.as_str(),
             target_healthy_field.as_str(),
             target_bootstrap_port_field.as_str(),
-            prefill_role_value.as_str(),
-            decode_role_value.as_str(),
-            prefill_bootstrap_port.as_str(),
+            prefill_role_value.as_deref(),
+            decode_role_value.as_deref(),
+            prefill_bootstrap_port.as_deref(),
         ),
         (
             "/readiness",
@@ -886,9 +892,9 @@ fn http_target_registry_readiness_fixture_preserves_registry_contract() -> Resul
             "worker_type",
             "is_healthy",
             "bootstrap_port",
-            "prefill",
-            "decode",
-            "bootstrap",
+            Some("prefill"),
+            Some("decode"),
+            Some("bootstrap"),
         )
     );
     Ok(())
@@ -1262,7 +1268,7 @@ fn discovery_registry_membership_and_per_target_reset_fixtures_round_trip()
             ServeProcessAllocation::ModelRank { discovery, .. } => {
                 assert_eq!(discovery.as_deref(), Some("discovery"));
             }
-            ServeProcessAllocation::Frontend { .. } => {}
+            ServeProcessAllocation::Frontend { .. } | ServeProcessAllocation::KvStore { .. } => {}
         }
     }
     assert_eq!(discovery_processes, 1);

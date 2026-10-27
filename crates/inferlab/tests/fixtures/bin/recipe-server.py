@@ -92,7 +92,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             length = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(length))
-            if request.get("prompt") == "canonical prefix":
+            if str(request.get("prompt", "")).startswith("canonical prefix"):
                 rank = self.headers.get("X-Data-Parallel-Rank")
                 conditioning_request = os.environ.get("FIXTURE_CONDITIONING_REQUEST")
                 if conditioning_request:
@@ -122,7 +122,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "model": request["model"],
                 "choices": [{"index": 0, "text": " San Francisco", "finish_reason": "stop"}],
             }
-            if request.get("prompt") == "canonical prefix":
+            if str(request.get("prompt", "")).startswith("canonical prefix"):
                 rank = self.headers.get("X-Data-Parallel-Rank") or "0"
                 cached = 8 if rank in primed_ranks else 0
                 primed_ranks.add(rank)

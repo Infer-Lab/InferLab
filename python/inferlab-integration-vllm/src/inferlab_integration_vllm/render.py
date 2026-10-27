@@ -1,6 +1,9 @@
+import hashlib
 import json
+from pathlib import Path
 
 import inferlab_gateway_dynamo
+import inferlab_kvstore
 from inferlab_adapter_sdk import (
     ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterErrorCode,
@@ -8,6 +11,7 @@ from inferlab_adapter_sdk import (
     CaptureMechanism,
     JsonValue,
     KvTransferMechanism,
+    LaunchFileDeclaration,
     ParallelismAttention,
     ParallelismExperts,
     ParallelismOuter,
@@ -17,6 +21,7 @@ from inferlab_adapter_sdk import (
     RenderServeResult,
     ServeAllocation,
     ServeProcessAllocationFrontend,
+    ServeProcessAllocationKvStore,
     ServeProcessAllocationModelRank,
     ServeRoleKind,
     ServeTopology,
@@ -29,6 +34,7 @@ from inferlab_adapter_sdk import (
     runtime_cache_env,
     split_serve_allocations,
 )
+from inferlab_kvstore import mooncake
 
 from .auxiliary import splice_draft_model
 from .plan import _identity
@@ -97,6 +103,12 @@ def _render_process(
         **runtime_cache_env(allocation.cache, _RUNTIME_CACHE_EXTRA_SUBDIRS),
     }
     process_env.update(settings.extra_env or {})
+    launch_files: list[LaunchFileDeclaration] = []
+    if allocation.kv_store is not None:
+        store_args, store_file, store_path = _kv_store_args(allocation, settings)
+        inferlab_args.extend(store_args)
+        launch_files.append(store_file)
+        process_env["MOONCAKE_CONFIG_PATH"] = store_path
     if input.topology == ServeTopology.prefill_decode:
         process_env.update(_kv_transfer_env(input.kv_transfer, settings))
         if (
@@ -146,6 +158,43 @@ def _render_process(
     return rendered_model_rank(
         allocation,
         ProcessSpec(argv=argv, env=process_env),
+        launch_files=launch_files,
+    )
+
+
+def _kv_store_args(
+    allocation: ServeProcessAllocationModelRank, settings: VllmServeSettings
+) -> tuple[list[str], LaunchFileDeclaration, str]:
+    """`MooncakeStoreConnector` reads its store from the JSON file named by
+    `MOONCAKE_CONFIG_PATH`; every worker rank contributes its own segment
+    ([[RFC-0003:C-SERVE-KV-STORE]])."""
+    store = allocation.kv_store
+    if store is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"allocation {allocation.process!r} has no KV store endpoint",
+        )
+    config: dict[str, str | int] = {
+        "master_server_address": mooncake.client_address(store),
+        "metadata_server": mooncake.METADATA_SERVER,
+    }
+    for key, value in (
+        ("global_segment_size", settings.kv_store_global_segment_size),
+        ("local_buffer_size", settings.kv_store_local_buffer_size),
+        ("protocol", settings.kv_store_protocol),
+        ("device_name", settings.kv_store_device_name),
+    ):
+        if value is not None:
+            config[key] = value
+    text = json.dumps(config, sort_keys=True, indent=2) + "\n"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    relative_path = f"launch-files/{digest}/mooncake-store.json"
+    declaration = LaunchFileDeclaration(relative_path=relative_path, sha256=digest, text=text)
+    transfer = {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"}
+    return (
+        ["--kv-transfer-config", json.dumps(transfer, sort_keys=True, separators=(",", ":"))],
+        declaration,
+        str(Path(allocation.cache) / relative_path),
     )
 
 
@@ -477,6 +526,8 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
                 pd_router_backend="vllm-router",
             )
             processes.append(_render_router(input, allocation, model_allocations))
+        elif isinstance(allocation, ServeProcessAllocationKvStore):
+            processes.append(inferlab_kvstore.render(allocation))
         else:
             raise AdapterOperationError(
                 AdapterErrorCode.invalid_request,
@@ -492,4 +543,9 @@ def _render_dynamo_process(
         return _render_dynamo_worker(input, allocation, allocations)
     if isinstance(allocation, ServeProcessAllocationFrontend):
         return inferlab_gateway_dynamo.render_frontend(allocation, allocations)
+    if isinstance(allocation, ServeProcessAllocationKvStore):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            "vLLM on Dynamo does not consume a KV store",
+        )
     return inferlab_gateway_dynamo.render_discovery(allocation)

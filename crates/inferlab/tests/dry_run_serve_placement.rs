@@ -2712,7 +2712,7 @@ fn write_server_record(
     Ok(())
 }
 
-const CURRENT_SERVER_SCHEMA: u32 = 15;
+const CURRENT_SERVER_SCHEMA: u32 = 16;
 
 /// A running server keeps its ports, which observation may not see while
 /// idle, and the plan names the command that releases them
@@ -2873,6 +2873,634 @@ fn a_pool_stops_observing_at_the_first_machine_that_fits() -> Result<(), Box<dyn
     assert_eq!(
         plan["server"]["roles"][0]["replicas"][0]["ranks"][0]["machine"],
         "local"
+    );
+    Ok(())
+}
+
+#[test]
+fn declared_devices_is_recorded_with_its_layer_and_reaches_the_plan() -> Result<(), Box<dyn Error>>
+{
+    let workspace = TestWorkspace::new()?;
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.devices=2",
+        "--dry-run",
+    ])?;
+    let invocation = &plan["server"]["declarations"][2];
+    assert_eq!(invocation["source"]["kind"], "invocation");
+    assert_eq!(invocation["common"]["devices"], 2);
+    assert!(
+        plan["server"]["declarations"][0]["common"]
+            .get("devices")
+            .is_none(),
+        "an undeclared layer records no devices"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_plan_that_disagrees_with_declared_devices_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_DEVICES_DRIFT", "1")
+        .args([
+            "serve",
+            "start",
+            "deepseek-v4-flash-qualify",
+            "--set",
+            "server.devices=2",
+            "--dry-run",
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("planned 3 devices"), "{stderr}");
+    assert!(
+        stderr.contains("devices = 2 declared as a common value by invocation override"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_placement_shortfall_names_the_declared_devices_layer() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.roles.serve.devices=64",
+        "--dry-run",
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("error[E3001]"), "{stderr}");
+    assert!(
+        stderr.contains("devices = 64 declared as a role value by invocation override"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+fn routed_single_workspace(ports: &str) -> Result<TestWorkspace, Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "topology = \"single\"\n",
+        "topology = \"single\"\ngateway_backend = \"fixture-gateway\"\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen("ports = [8000]", ports, 1);
+    fs::write(bindings_path, bindings)?;
+    Ok(workspace)
+}
+
+#[test]
+fn a_routed_single_server_places_several_replicas_behind_its_gateway() -> Result<(), Box<dyn Error>>
+{
+    let workspace = routed_single_workspace("ports = [8000, 8001, 8002]")?;
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.roles.serve.replicas=2",
+        "--set",
+        "server.gateway_settings.policy=\"cache_aware\"",
+        "--dry-run",
+    ])?;
+    let server = &plan["server"];
+
+    let engines = resolved_ranks(server)?;
+    assert_eq!(engines.len(), 2);
+    assert_eq!(
+        server["frontend"]["gateway"]["effective_settings"]["policy"],
+        "cache_aware"
+    );
+    assert_eq!(
+        server["declarations"][3]["source"]["kind"], "invocation",
+        "each --set is its own declaration layer"
+    );
+    assert_eq!(
+        server["declarations"][3]["common"]["gateway_settings"]["policy"],
+        "cache_aware"
+    );
+    Ok(())
+}
+
+#[test]
+fn gateway_settings_need_a_gateway() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.gateway_settings.policy=\"cache_aware\"",
+        "--dry-run",
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("declares gateway_settings but its topology has no Gateway"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_gateway_setting_the_integration_drops_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = routed_single_workspace("ports = [8000, 8001]")?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_DROP_GATEWAY_SETTINGS", "1")
+        .args([
+            "serve",
+            "start",
+            "deepseek-v4-flash-qualify",
+            "--set",
+            "server.gateway_settings.policy=\"cache_aware\"",
+            "--dry-run",
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("did not preserve declared Gateway setting \"policy\""),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+fn kv_store_workspace() -> Result<TestWorkspace, Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let mut manifest = fs::read_to_string(&manifest_path)?;
+    manifest.push_str(
+        "\n[servers.deepseek-v4-flash-qualify.kv_store]\nbackend = \"mooncake\"\n\n\
+         [servers.deepseek-v4-flash-qualify.kv_store.settings]\neviction_ratio = 0.1\n",
+    );
+    fs::write(manifest_path, manifest)?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "ports = [8000]",
+        "ports = [8000, 8001, 8002]",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+    Ok(workspace)
+}
+
+#[test]
+fn a_declared_kv_store_runs_beside_the_first_replica_and_reaches_every_rank()
+-> Result<(), Box<dyn Error>> {
+    let workspace = kv_store_workspace()?;
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.kv_store.settings.eviction_ratio=0.2",
+        "--dry-run",
+    ])?;
+    let server = &plan["server"];
+    let store = &server["kv_store"];
+
+    assert_eq!(store["plan"]["backend"], "mooncake");
+    assert_eq!(store["plan"]["effective_settings"]["eviction_ratio"], 0.2);
+    assert_eq!(store["process"]["id"], "kv-store");
+    assert!(
+        store["process"]["allocation"]
+            .get("devices")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "the KV store holds no devices"
+    );
+    let engine = &server["roles"][0]["replicas"][0]["ranks"][0];
+    assert_eq!(store["process"]["machine"], engine["machine"]);
+    let store_port = store["process"]["endpoint"]["port"]
+        .as_u64()
+        .ok_or("the KV store has no endpoint port")?;
+    let argv = engine["command"]["argv"]
+        .as_array()
+        .ok_or("the Engine has no argv")?;
+    let address = argv[argv
+        .iter()
+        .position(|argument| argument == "--kv-store")
+        .ok_or("the Engine did not receive the KV store")?
+        + 1]
+    .as_str()
+    .ok_or("the KV store address is not a string")?;
+    assert!(address.ends_with(&format!(":{store_port}")), "{address}");
+    // Readiness probes the admin port, not the RPC endpoint consumers use.
+    assert_eq!(store["process"]["readiness"]["path"], "/health");
+    let admin_port = store["process"]["readiness"]["port"]
+        .as_u64()
+        .ok_or("KV store readiness has no admin port")?;
+    assert_ne!(admin_port, store_port);
+    assert_eq!(
+        server["declarations"][0]["common"]["kv_store"]["backend"],
+        "mooncake"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_plan_without_the_declared_kv_store_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = kv_store_workspace()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_OMIT_KV_STORE_PLAN", "1")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("did not plan the declared KV store \"mooncake\""),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_invocation_cannot_add_a_kv_store() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace.run(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.kv_store.settings.eviction_ratio=0.2",
+        "--dry-run",
+    ])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("cannot add kv_store"), "{stderr}");
+    Ok(())
+}
+
+/// A server shares one prefix cache when its cache-owning role reads and
+/// writes the store; store access may name only planned roles
+/// ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[test]
+fn store_access_per_role_decides_the_shared_prefix_cache() -> Result<(), Box<dyn Error>> {
+    let workspace = kv_store_workspace()?;
+    let args = ["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"];
+
+    let shared = workspace
+        .command()
+        .env("FIXTURE_KV_STORE_ROLE_ACCESS", r#"{"serve": "read_write"}"#)
+        .args(args)
+        .output()?;
+    assert!(
+        shared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shared.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&shared.stdout)?;
+    assert_eq!(plan["server"]["shared_prefix_cache"], true);
+    assert!(plan["server"].get("prefix_publication_ms").is_none());
+
+    let published = workspace
+        .command()
+        .env("FIXTURE_KV_STORE_ROLE_ACCESS", r#"{"serve": "read_write"}"#)
+        .env("FIXTURE_KV_STORE_PUBLICATION_MS", "1000")
+        .args(args)
+        .output()?;
+    let plan: serde_json::Value = serde_json::from_slice(&published.stdout)?;
+    assert_eq!(plan["server"]["prefix_publication_ms"], 1000);
+
+    let write_only = workspace
+        .command()
+        .env("FIXTURE_KV_STORE_ROLE_ACCESS", r#"{"serve": "write"}"#)
+        .args(args)
+        .output()?;
+    let plan: serde_json::Value = serde_json::from_slice(&write_only.stdout)?;
+    assert!(plan["server"].get("shared_prefix_cache").is_none());
+
+    let unplanned = workspace
+        .command()
+        .env(
+            "FIXTURE_KV_STORE_ROLE_ACCESS",
+            r#"{"prefill": "read_write"}"#,
+        )
+        .args(args)
+        .output()?;
+    assert!(!unplanned.status.success());
+    let stderr = String::from_utf8(unplanned.stderr)?;
+    assert!(
+        stderr.contains("declared KV store access for unplanned role \"prefill\""),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+fn stack_settings_workspace() -> Result<TestWorkspace, Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "source_paths = [\"vendor/vllm\", \"vendor/flashinfer\"]\n",
+        "source_paths = [\"vendor/vllm\", \"vendor/flashinfer\"]\n\n\
+         [stacks.vllm.settings]\n\
+         engine_command = [\"example-engine\", \"serve\"]\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+    Ok(workspace)
+}
+
+#[test]
+fn stack_settings_reach_the_integration_and_the_plan_keeps_their_effective_values()
+-> Result<(), Box<dyn Error>> {
+    let workspace = stack_settings_workspace()?;
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert_eq!(
+        plan["server"]["stack_settings"]["engine_command"],
+        serde_json::json!(["example-engine", "serve"])
+    );
+    Ok(())
+}
+
+#[test]
+fn a_stack_setting_the_integration_drops_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = stack_settings_workspace()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_DROP_STACK_SETTINGS", "1")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("did not preserve declared stack setting \"engine_command\""),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// An explicitly bound endpoint port is reserved before any port is drawn
+/// from the machine's list, so replicas without an explicit port never take
+/// it ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn pool_allocated_replicas_never_take_an_explicit_gateway_port() -> Result<(), Box<dyn Error>> {
+    let workspace = routed_single_workspace("ports = [8000, 8001, 8002, 8003]")?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[placements.local.roles.serve]\n\
+         replicas = [\n\
+           { machine = \"local\", devices = [0, 1] },\n\
+           { machine = \"local\", devices = [2, 3] },\n\
+         ]\n\
+         \n\
+         [placements.local.roles.gateway]\n\
+         machine = \"local\"\n\
+         devices = []\n\
+         endpoint_port = 8000\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+
+    let plan = workspace.run_json(&[
+        "serve",
+        "start",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.roles.serve.replicas=2",
+        "--dry-run",
+    ])?;
+
+    let frontend = support::resolved_frontend(&plan["server"])?;
+    assert_eq!(frontend.endpoint.port, 8000);
+    for rank in resolved_ranks(&plan["server"])? {
+        assert_ne!(rank.rank.endpoint.port, 8000, "{}", rank.rank.id);
+    }
+    Ok(())
+}
+
+/// A recipe's declared case and its local placement reproduce the run
+/// without invocation flags, and explicit flags still take precedence
+/// ([[RFC-0003:C-RECIPE-COMPOSITION]], [[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn a_recipe_selects_its_case_and_local_placement_unless_flags_override()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "workload_suite = \"qualify\"\n",
+        "workload_suite = \"qualify\"\ncase = \"tp4\"\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[recipe_placements]\n\
+         deepseek-v4-flash-qualify = \"pinned\"\n\
+         \n\
+         [placements.local]\nmachines = [\"local\"]\n\
+         \n\
+         [placements.pinned]\nmachines = [\"local\"]\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+
+    let pinned =
+        workspace.run_json(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+    assert_eq!(pinned["server"]["case"]["id"], "tp4");
+    assert_eq!(pinned["server"]["case"]["selection"], "recipe");
+    assert_eq!(pinned["server"]["placement"]["id"], "pinned");
+    assert_eq!(pinned["server"]["placement"]["selection"], "recipe");
+
+    let overridden = workspace.run_json(&[
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--case",
+        "tp2",
+        "--placement",
+        "local",
+        "--dry-run",
+    ])?;
+    assert_eq!(overridden["server"]["case"]["id"], "tp2");
+    assert_eq!(overridden["server"]["case"]["selection"], "explicit");
+    assert_eq!(overridden["server"]["placement"]["id"], "local");
+    assert_eq!(overridden["server"]["placement"]["selection"], "explicit");
+    Ok(())
+}
+
+#[test]
+fn a_recipe_case_its_server_does_not_declare_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "workload_suite = \"qualify\"\n",
+        "workload_suite = \"qualify\"\ncase = \"tp8\"\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains(
+            "selects case \"tp8\", which server \"deepseek-v4-flash-qualify\" does not declare"
+        ),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// A recipe placement for a recipe the workspace does not declare would
+/// otherwise be silently ignored ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn a_recipe_placement_for_an_undeclared_recipe_is_rejected() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "[placements.local]\nmachines = [\"local\"]\n",
+        "[recipe_placements]\n\
+         deepseek-v4-flash-qualfy = \"local\"\n\
+         \n\
+         [placements.local]\nmachines = [\"local\"]\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains(
+            "recipe_placements maps recipe \"deepseek-v4-flash-qualfy\", which the workspace does not declare"
+        ),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+fn npmd_workspace() -> Result<TestWorkspace, Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    write_executable(
+        &workspace.adapter_bin.join("inferlab-adapter-vllm"),
+        PD_ADAPTER,
+    )?;
+    fs::write(
+        workspace.root.path().join(".inferlab/workspace.toml"),
+        prefill_decode_workspace("vllm", "mooncake"),
+    )?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"local\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             \n\
+             [machines.local]\n\
+             host = \"127.0.0.1\"\n\
+             ports = [8100, 8101, 8102, 8103, 8200, 8201, 8000]\n\
+             devices = [0, 1, 2, 3, 4, 5, 6, 7]\n\
+             \n\
+             [placements.local]\n\
+             machines = [\"local\"]\n",
+            workspace.private_weight
+        ),
+    )?;
+    Ok(workspace)
+}
+
+/// Declared P/D Router settings reach the integration and reappear unchanged
+/// in its plan; an integration that drops one is rejected
+/// ([[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn pd_router_settings_reach_the_p_d_router_plan_unchanged() -> Result<(), Box<dyn Error>> {
+    let workspace = npmd_workspace()?;
+    let args = [
+        "recipe",
+        "run",
+        "deepseek-v4-flash-qualify",
+        "--set",
+        "server.pd_router_settings.prefill_policy=\"cache_aware\"",
+        "--dry-run",
+    ];
+
+    let plan = workspace.run_json(&args)?;
+    assert_eq!(
+        plan["server"]["frontend"]["pd_router"]["effective_settings"]["prefill_policy"],
+        "cache_aware"
+    );
+
+    let output = workspace
+        .command()
+        .env("FIXTURE_DROP_PD_ROUTER_SETTINGS", "1")
+        .args(args)
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("did not preserve declared P/D Router setting \"prefill_policy\""),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn pd_router_settings_need_a_p_d_router() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?.replacen(
+        "readiness_timeout_seconds = 900\n",
+        "readiness_timeout_seconds = 900\n\
+         pd_router_settings = { prefill_policy = \"cache_aware\" }\n",
+        1,
+    );
+    fs::write(manifest_path, manifest)?;
+
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("declares pd_router_settings but its topology has no P/D Router"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// A fused Gateway/P/D Router is one process: a public port either component
+/// declares is that process's port ([[RFC-0006:C-INTEGRATIONS]]).
+#[test]
+fn a_fused_frontend_serves_metrics_from_a_p_d_router_port() -> Result<(), Box<dyn Error>> {
+    let workspace = npmd_workspace()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_PD_ROUTER_METRICS", "1")
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
 }

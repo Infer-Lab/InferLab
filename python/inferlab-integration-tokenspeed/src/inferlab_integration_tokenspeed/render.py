@@ -2,7 +2,6 @@ import inferlab_gateway_smg
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
-    EndpointAssignment,
     ParallelismAttention,
     ParallelismExperts,
     ParallelismOuter,
@@ -16,8 +15,6 @@ from inferlab_adapter_sdk import (
     ServeTopology,
     append_option,
     merge_serve_args,
-    rank_zero_allocations,
-    rendered_frontend,
     rendered_model_rank,
     require_integration_fused_frontend,
     runtime_cache_env,
@@ -159,63 +156,6 @@ def _render_worker(
     )
 
 
-def _render_router(
-    allocation: ServeProcessAllocationFrontend,
-    model_allocations: list[ServeProcessAllocationModelRank],
-) -> RenderedServeProcess:
-    prometheus = allocation.ports.get("prometheus")
-    if prometheus is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_request,
-            "TokenSpeed SMG allocation is missing its Prometheus port",
-        )
-    prefill = rank_zero_allocations(model_allocations, ServeRoleKind.prefill)
-    decode = rank_zero_allocations(model_allocations, ServeRoleKind.decode)
-    model_locator = next(
-        (item.model_locator for item in [*prefill, *decode]),
-        None,
-    )
-    if model_locator is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_request,
-            "TokenSpeed SMG requires a public endpoint and one serving model locator",
-        )
-    prefill_targets: list[tuple[EndpointAssignment, int]] = []
-    for item in prefill:
-        bootstrap = item.ports.get("bootstrap")
-        if bootstrap is None:
-            raise AdapterOperationError(
-                AdapterErrorCode.invalid_request,
-                f"prefill replica {item.replica!r} is missing its bootstrap port",
-            )
-        if item.endpoint is None:
-            raise AdapterOperationError(
-                AdapterErrorCode.invalid_request,
-                f"prefill allocation {item.process!r} has no endpoint",
-            )
-        prefill_targets.append((item.endpoint, bootstrap.port))
-    decode_targets: list[EndpointAssignment] = []
-    for item in decode:
-        if item.endpoint is None:
-            raise AdapterOperationError(
-                AdapterErrorCode.invalid_request,
-                f"decode allocation {item.process!r} has no endpoint",
-            )
-        decode_targets.append(item.endpoint)
-    return rendered_frontend(
-        allocation,
-        inferlab_gateway_smg.prefill_decode_command(
-            endpoint=allocation.endpoint,
-            prometheus=prometheus,
-            model_locator=model_locator,
-            prefill=prefill_targets,
-            decode=decode_targets,
-            prefill_policy="round_robin",
-            decode_policy="round_robin",
-        ),
-    )
-
-
 def render_serve(input: RenderServeInput) -> RenderServeResult:
     if not input.allocations:
         raise AdapterOperationError(
@@ -245,5 +185,5 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
                 gateway_backend=inferlab_gateway_smg.BACKEND,
                 pd_router_backend=inferlab_gateway_smg.BACKEND,
             )
-            processes.append(_render_router(allocation, model_allocations))
+            processes.append(inferlab_gateway_smg.render_pd_frontend(allocation, model_allocations))
     return RenderServeResult(integration=_identity(), processes=processes)

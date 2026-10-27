@@ -398,6 +398,9 @@ pub(crate) struct ResolvedBenchAgenticSource {
     pub catalog: Box<BenchAgenticCatalog>,
 }
 
+// Resolved once per Bench and moved, not copied in bulk, so the request
+// variant's size is not worth an indirection through every nested pattern.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ResolvedBenchSource {
@@ -474,6 +477,10 @@ pub(crate) struct BenchPopulation {
     pub entries: u32,
     pub tpot_applicable: bool,
     pub prefix_conditioning: Option<inferlab_protocol::BenchPrefixConditioningInput>,
+    /// The canonical prefixes of every further prefix group
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_prefix_conditioning: Vec<inferlab_protocol::BenchPrefixConditioningInput>,
     pub session_templates: Vec<BenchSessionTemplate>,
 }
 

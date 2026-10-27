@@ -32,9 +32,18 @@ from .aiperf import (
 )
 from .population import load_chat_tokenizer
 from .result_agentic import agentic_result_evidence, warmup_abort_detail
-from .result_metrics import NORMALIZATION_SCHEMA, normalize_summary, prompt_cache_evidence
+from .result_metrics import (
+    NORMALIZATION_SCHEMA,
+    draft_acceptance_metrics,
+    normalize_summary,
+    prompt_cache_evidence,
+)
 from .result_policy import request_slo_evidence, warmup_counts, warmup_error
-from .result_population import population_identity_error, prompt_token_reconciliation
+from .result_population import (
+    population_identity_error,
+    prompt_token_reconciliation,
+    shared_prefix_by_session,
+)
 from .result_records import request_counts
 from .result_sessions import session_result_evidence
 
@@ -140,11 +149,22 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
     prompt_reconciliation, prompt_reconciliation_error = prompt_token_reconciliation(
         request, records_path
     )
+    prompt_cache_required = requires_prompt_cache_evidence(request)
+    planned_prefixes, planned_prefix_error = (
+        shared_prefix_by_session(request) if prompt_cache_required else (None, None)
+    )
     prompt_cache_observations, prompt_cache_metrics, prompt_cache_error = prompt_cache_evidence(
         records_path,
-        requires_prompt_cache_evidence(request),
+        prompt_cache_required,
         request.endpoint.prompt_cache_read_zero_representation,
+        planned_prefixes,
     )
+    if planned_prefix_error is not None:
+        prompt_cache_error = (
+            planned_prefix_error
+            if prompt_cache_error is None
+            else f"{prompt_cache_error}; {planned_prefix_error}"
+        )
     session_evidence = None
     session_error: str | None = None
     if request.definition.session_source is not None:
@@ -271,6 +291,10 @@ def execute(request: BenchClientRequest, deadline: CaseDeadline | None = None) -
         try:
             metrics = normalize_summary(summary, prepared.population.tpot_applicable)
             metrics.update(prompt_cache_metrics)
+            draft_metrics, draft_error = draft_acceptance_metrics(records_path)
+            if draft_error is not None:
+                raise ValueError(draft_error)
+            metrics.update(draft_metrics)
         except ValueError as normalization_error:
             errors.append(str(normalization_error))
     if request_slo_result is not None:

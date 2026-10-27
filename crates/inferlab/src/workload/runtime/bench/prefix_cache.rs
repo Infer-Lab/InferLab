@@ -283,38 +283,77 @@ pub(super) fn prepare_prefix_cache(
         phase: BenchCachePreparationPhase::CacheReset,
         elapsed_ms: bound.elapsed_ms(),
     });
-    let conditioning = if reset.succeeded && input.start == BenchCacheStart::Primed {
-        input
-            .conditioning
-            .zip(input.population)
-            .map(|(conditioning, population)| {
-                let evidence =
-                    condition_prefix_cache(input.endpoint, conditioning, population, bound);
-                transitions.push(BenchCachePreparationTransition {
-                    phase: BenchCachePreparationPhase::CacheConditioned,
-                    elapsed_ms: bound.elapsed_ms(),
-                });
-                evidence
-            })
-    } else {
-        None
-    };
+    let mut conditioning = None;
+    let mut group_conditioning = Vec::new();
+    if reset.succeeded
+        && input.start == BenchCacheStart::Primed
+        && let (Some(plan), Some(population)) = (input.conditioning, input.population)
+    {
+        // Every prefix group is conditioned, the first group first; a failed
+        // group stops the rest ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+        let first = condition_prefix_cache(
+            input.endpoint,
+            plan,
+            population.prefix_conditioning.as_ref(),
+            bound,
+        );
+        let mut succeeded = first.succeeded;
+        conditioning = Some(first);
+        for group in &population.group_prefix_conditioning {
+            if !succeeded {
+                break;
+            }
+            let evidence = condition_prefix_cache(input.endpoint, plan, Some(group), bound);
+            succeeded = evidence.succeeded;
+            group_conditioning.push(evidence);
+        }
+        transitions.push(BenchCachePreparationTransition {
+            phase: BenchCachePreparationPhase::CacheConditioned,
+            elapsed_ms: bound.elapsed_ms(),
+        });
+        // The store may publish the conditioned prefixes only within its
+        // declared bound after the last request completes
+        // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+        if succeeded && plan.publication_wait_ms > 0 {
+            wait_for_publication(plan.publication_wait_ms, bound);
+            transitions.push(BenchCachePreparationTransition {
+                phase: BenchCachePreparationPhase::PublicationWaited,
+                elapsed_ms: bound.elapsed_ms(),
+            });
+        }
+    }
     BenchCachePreparationEvidence {
         start: input.start,
         transitions,
         reset,
         conditioning,
+        group_conditioning,
+    }
+}
+
+/// Waits the declared publication bound, ending early only when the case
+/// budget expires or the operator interrupts.
+fn wait_for_publication(publication_ms: u64, bound: &OperationBound) {
+    use inferlab_runtime::server::readiness_cadence::{POLL_INTERVAL, sleep_within_readiness};
+    let wait = std::time::Duration::from_millis(publication_ms);
+    let started = std::time::Instant::now();
+    while let Some(remaining) = wait.checked_sub(started.elapsed())
+        && !remaining.is_zero()
+        && !bound.is_expired()
+        && !inferlab_runtime::interrupt::received()
+    {
+        sleep_within_readiness(bound, remaining.min(POLL_INTERVAL));
     }
 }
 
 fn condition_prefix_cache(
     endpoint: &WorkloadEndpoint,
     plan: &BenchPrefixCacheConditioningPlan,
-    population: &BenchPopulation,
+    conditioning: Option<&inferlab_protocol::BenchPrefixConditioningInput>,
     bound: &OperationBound,
 ) -> PrefixCacheConditioningEvidence {
     let started_ms = bound.elapsed_ms();
-    let conditioning = population.prefix_conditioning.as_ref();
+    let group = conditioning.map_or(0, |item| item.group);
     let path = conditioning.map_or_else(std::path::PathBuf::new, |item| item.path.clone());
     let sha256 = conditioning.map_or_else(String::new, |item| item.sha256.clone());
     let prompt_tokens = conditioning.map_or(0, |item| item.prompt_tokens);
@@ -340,6 +379,8 @@ fn condition_prefix_cache(
             succeeded,
             elapsed_ms: bound.elapsed_ms().saturating_sub(started_ms),
             error,
+            completed_unix_ns: succeeded.then(unix_now_ns).flatten(),
+            group,
         }
     };
     let body = conditioning
@@ -636,6 +677,13 @@ fn finite_remaining(bound: &OperationBound) -> Result<std::time::Duration, Cache
         Remaining::Expired => Err(CachePreparationError::Deadline),
         Remaining::Unbounded => Err(CachePreparationError::UnboundedBudget),
     }
+}
+
+fn unix_now_ns() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
 }
 
 #[cfg(test)]
@@ -1137,6 +1185,7 @@ mod tests {
             _dir: dir,
             endpoint,
             plan: crate::workload::BenchPrefixCacheConditioningPlan {
+                publication_wait_ms: 0,
                 route: "/prime_prefix_cache".to_owned(),
                 model: "m".to_owned(),
                 prompt: ResolvedBenchPrompt::from_definition(&BenchPrompt::Flat),
@@ -1157,7 +1206,9 @@ mod tests {
                     path: prompt_path,
                     sha256: "unused".to_owned(),
                     prompt_tokens: 8,
+                    group: 0,
                 }),
+                group_prefix_conditioning: Vec::new(),
                 session_templates: Vec::new(),
             },
         };
@@ -1170,9 +1221,22 @@ mod tests {
         condition_prefix_cache(
             &fixture.endpoint,
             &fixture.plan,
-            &fixture.population,
+            fixture.population.prefix_conditioning.as_ref(),
             &OperationBound::finite(Duration::from_secs(5)),
         )
+    }
+
+    /// The publication wait lasts the declared bound, but never past the
+    /// case budget ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[test]
+    fn the_publication_wait_lasts_the_bound_within_the_case_budget() {
+        let started = std::time::Instant::now();
+        wait_for_publication(300, &OperationBound::finite(Duration::from_secs(5)));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        wait_for_publication(5_000, &OperationBound::finite(Duration::from_millis(100)));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

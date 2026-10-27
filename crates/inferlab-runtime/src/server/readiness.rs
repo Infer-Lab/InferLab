@@ -1,7 +1,7 @@
 use super::{
     ProcessHandle, ProcessObserver, ProcessStatus, ReadinessAttemptEvidence, ReadinessEvidence,
     ReadinessFailure, ReadinessFailureKind, ReadinessObserver, RegistryMemberMatchEvidence,
-    RegistryObservationEvidence, SystemProcessRuntime, TargetRegistryMatchEvidence,
+    RegistryObservationEvidence, SystemProcessRuntime, TargetRegistryMatchEvidence, WatchedProcess,
 };
 use crate::interrupt;
 use crate::operation_bound::{AttemptBound, OperationBound, OperationTerminalCause, Remaining};
@@ -12,11 +12,11 @@ use crate::plan::{
 use std::thread;
 use std::time::Duration;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Readiness probes back off by doubling from `POLL_INTERVAL` to a cap.
-fn next_probe_interval(interval: Duration) -> Duration {
+pub fn next_probe_interval(interval: Duration) -> Duration {
     (interval * 2).min(MAX_PROBE_INTERVAL)
 }
 const READINESS_START_BOUNDARY: &str = "after_process_spawn_before_readiness_attempt";
@@ -85,9 +85,8 @@ pub(super) fn timed_readiness_failure(
     failure
 }
 
-pub(super) fn wait_http_ready<R: ProcessObserver>(
-    runtime: &R,
-    handle: &ProcessHandle,
+pub(super) fn wait_http_ready(
+    status: impl Fn(&OperationBound) -> ProcessStatus,
     endpoint: &ProcessEndpointPlan,
     path: &str,
     attempt_timeout_seconds: u64,
@@ -129,7 +128,7 @@ pub(super) fn wait_http_ready<R: ProcessObserver>(
         let status_attempt = readiness_attempt(bound, attempt_timeout_seconds);
         let status_effective_bound_ms = status_attempt.configured_ms().unwrap_or_default();
         let status_bound = status_attempt.into_operation_bound();
-        let status = runtime.status_with_bound(handle, &status_bound);
+        let status = status(&status_bound);
         diagnostic_attempts = vec![process_status_evidence(&status, status_effective_bound_ms)];
         if !status.queried && status_bound.is_expired() && !bound.is_expired() {
             let last_error = status
@@ -262,7 +261,7 @@ pub(super) struct HttpTargetRegistryProbe<'a> {
     pub(super) expected_targets: &'a [TargetRegistryExpectedTarget],
 }
 
-fn sleep_within_readiness(bound: &OperationBound, cadence: Duration) {
+pub fn sleep_within_readiness(bound: &OperationBound, cadence: Duration) {
     match bound.remaining() {
         Remaining::Finite(remaining) => thread::sleep(cadence.min(remaining)),
         Remaining::Expired => {}
@@ -1161,10 +1160,38 @@ pub(super) fn wait_process_alive_ready(
     }
 }
 
+impl SystemProcessRuntime {
+    /// The waited process's status, unless a watched process has exited:
+    /// then that exit, named, so the wait fails at once instead of running
+    /// out its budget.
+    fn watched_status(
+        &self,
+        handle: &ProcessHandle,
+        watched: &[WatchedProcess<'_>],
+        bound: &OperationBound,
+    ) -> ProcessStatus {
+        for process in watched {
+            let status = self.status_with_bound(process.handle, bound);
+            if status.queried && !status.alive {
+                return ProcessStatus {
+                    queried: true,
+                    alive: false,
+                    error: Some(format!(
+                        "process {:?} exited before the server became ready",
+                        process.id
+                    )),
+                };
+            }
+        }
+        self.status_with_bound(handle, bound)
+    }
+}
+
 impl ReadinessObserver for SystemProcessRuntime {
     fn wait_ready(
         &self,
         handle: &ProcessHandle,
+        watched: &[WatchedProcess<'_>],
         endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
         bound: &OperationBound,
@@ -1173,15 +1200,17 @@ impl ReadinessObserver for SystemProcessRuntime {
     ) -> Result<ReadinessEvidence, ReadinessFailure> {
         match readiness {
             ReadinessPlan::ProcessAlive => wait_process_alive_ready(
-                |bound| self.status_with_bound(handle, bound),
+                |bound| self.watched_status(handle, watched, bound),
                 attempt_timeout_seconds,
                 bound,
                 on_probe_failure,
             ),
-            ReadinessPlan::Http { path } => wait_http_ready(
-                self,
-                handle,
-                endpoint,
+            ReadinessPlan::Http { path, port } => wait_http_ready(
+                |bound| self.watched_status(handle, watched, bound),
+                &ProcessEndpointPlan {
+                    port: port.unwrap_or(endpoint.port),
+                    ..endpoint.clone()
+                },
                 path,
                 attempt_timeout_seconds,
                 bound,
@@ -1197,7 +1226,7 @@ impl ReadinessObserver for SystemProcessRuntime {
                 target_bootstrap_port_field,
                 expected_targets,
             } => wait_http_target_registry_ready(
-                |bound| self.status_with_bound(handle, bound),
+                |bound| self.watched_status(handle, watched, bound),
                 endpoint,
                 HttpTargetRegistryProbe {
                     readiness_path,
@@ -1222,7 +1251,7 @@ impl ReadinessObserver for SystemProcessRuntime {
                 model_list,
                 expected_targets,
             } => wait_registry_membership_ready(
-                |bound| self.status_with_bound(handle, bound),
+                |bound| self.watched_status(handle, watched, bound),
                 endpoint,
                 RegistryMembershipProbe {
                     registry_path,

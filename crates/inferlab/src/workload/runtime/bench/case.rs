@@ -13,8 +13,8 @@ use crate::workload::domain::ResolvedBenchSource;
 use crate::workload::plan::session_population_layout;
 use crate::workload::record::{
     BenchCachePreparationEvidence, BenchCachePreparationPhase, BenchCachePreparationTransition,
-    BenchCaseEvidence, BenchCaseRecord, BenchPopulationSliceEvidence, ClientCasePaths,
-    DataAssetMaterializationEvidence, WorkloadRecordSession, WorkloadStatus,
+    BenchCaseEvidence, BenchCaseRecord, BenchPopulationSliceEvidence, BenchServeStateEvidence,
+    ClientCasePaths, DataAssetMaterializationEvidence, WorkloadRecordSession, WorkloadStatus,
 };
 use crate::workload::{BenchCasePlan, BenchPlan, BenchPreparationStep};
 use inferlab_protocol::BenchClientResult;
@@ -84,6 +84,15 @@ pub(super) fn run_bench_case(
             message,
         ));
     }
+    // The store must be engaged when profiling starts and still engaged when
+    // it ends ([[RFC-0003:C-SERVE-KV-STORE]]).
+    let serve_state_start = plan.client.serve_state_probe.as_ref().map(|probe| {
+        crate::server::serve_state::probe_for_workload(
+            session.workspace_root(),
+            probe,
+            std::time::Instant::now(),
+        )
+    });
     let run_and_adjudicate = |bound: &OperationBound| -> Result<_, InferlabError> {
         let accepted = run_bench_client(plan, case, session, &paths, bound, &[])?;
         Ok(adjudicate_bench_client(accepted, bound, plan, case))
@@ -167,6 +176,24 @@ pub(super) fn run_bench_case(
         mut succeeded,
         mut error,
     } = adjudicated;
+    let serve_state = serve_state_start.map(|start| {
+        let end = plan.client.serve_state_probe.as_ref().map(|probe| {
+            crate::server::serve_state::probe_for_workload(
+                session.workspace_root(),
+                probe,
+                std::time::Instant::now(),
+            )
+        });
+        serve_state_window(start, end)
+    });
+    if serve_state.as_ref().is_some_and(|state| state.lost) {
+        succeeded = false;
+        let lost = "the bound server's KV store was not engaged at a profiling window boundary";
+        error = Some(match error {
+            Some(existing) => format!("{existing}; {lost}"),
+            None => lost.to_owned(),
+        });
+    }
     accepted.timing.start_boundary = if controlled_cache && !requires_warmup_barrier {
         "before_prefix_cache_reset"
     } else {
@@ -174,6 +201,30 @@ pub(super) fn run_bench_case(
     }
     .to_owned();
     let result = accepted.result;
+    // Reuse opportunity is derived here, where the conditioning evidence and
+    // the publication bound meet the measured requests
+    // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    let prompt_reuse = result.as_ref().and_then(|result| {
+        super::reuse::prompt_reuse(
+            plan.client.effective_definition.cache_start,
+            &result.prompt_cache_observations,
+            cache_preparation
+                .as_ref()
+                .map(|preparation| preparation.all_conditioning().collect::<Vec<_>>())
+                .unwrap_or_default(),
+            plan.client.prefix_publication_ms,
+        )
+    });
+    let metrics = result.as_ref().map(|result| {
+        let mut metrics = result.metrics.clone();
+        if let Some(evidence) = &prompt_reuse {
+            metrics.extend(super::reuse::reuse_metrics(
+                evidence,
+                &result.prompt_cache_observations,
+            ));
+        }
+        metrics
+    });
     let slo = if succeeded {
         match result
             .as_ref()
@@ -212,7 +263,8 @@ pub(super) fn run_bench_case(
             ),
             data_asset_materialization_identity: population_materialization_identity(plan),
             cache_preparation,
-            metrics: result.as_ref().map(|result| result.metrics.clone()),
+            serve_state,
+            metrics,
             slo,
             population_slice: bench_population_slice(plan, case),
             completed_requests: result.as_ref().map(|result| result.completed_requests),
@@ -232,6 +284,7 @@ pub(super) fn run_bench_case(
             prompt_cache_observations: result
                 .as_ref()
                 .map_or_else(Vec::new, |result| result.prompt_cache_observations.clone()),
+            prompt_reuse,
             report_invocations: result
                 .as_ref()
                 .map_or_else(Vec::new, |result| result.report_invocations.clone()),
@@ -409,6 +462,16 @@ fn run_after_setup_barrier(
     })
 }
 
+/// A case keeps its store only when every process was engaged at both
+/// window boundaries ([[RFC-0003:C-SERVE-KV-STORE]]).
+fn serve_state_window(
+    start: crate::server::serve_state::ServeStateProbeEvidence,
+    end: Option<crate::server::serve_state::ServeStateProbeEvidence>,
+) -> BenchServeStateEvidence {
+    let lost = !start.engaged || !end.as_ref().is_some_and(|end| end.engaged);
+    BenchServeStateEvidence { start, end, lost }
+}
+
 fn failed_barrier_case(
     plan: &BenchPlan,
     case: &BenchCasePlan,
@@ -472,10 +535,10 @@ fn cache_preparation_error(preparation: &BenchCachePreparationEvidence) -> Optio
     if !preparation.reset.succeeded {
         Some("prefix-cache reset failed")
     } else if preparation.start == crate::workspace::BenchCacheStart::Primed
-        && preparation
-            .conditioning
-            .as_ref()
-            .is_none_or(|conditioning| !conditioning.succeeded)
+        && (preparation.conditioning.is_none()
+            || preparation
+                .all_conditioning()
+                .any(|conditioning| !conditioning.succeeded))
     {
         Some("prefix-cache conditioning failed")
     } else {
@@ -531,6 +594,7 @@ fn failed_case_record(
             data_asset_materialization: None,
             data_asset_materialization_identity: population_materialization_identity(plan),
             cache_preparation,
+            serve_state: None,
             metrics: None,
             slo: None,
             population_slice: bench_population_slice(plan, case),
@@ -541,6 +605,7 @@ fn failed_case_record(
             agentic: None,
             prompt_token_reconciliation: Vec::new(),
             prompt_cache_observations: Vec::new(),
+            prompt_reuse: None,
             report_invocations: Vec::new(),
             acceptance_sources: BTreeMap::new(),
         },
@@ -684,5 +749,28 @@ fn bench_population_slice(
             })
         }
         ResolvedBenchSource::Agentic { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serve_state_window;
+    use crate::server::serve_state::ServeStateProbeEvidence;
+
+    fn attempt(engaged: bool) -> ServeStateProbeEvidence {
+        ServeStateProbeEvidence {
+            elapsed_ms: 1,
+            engaged,
+            processes: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_store_is_kept_only_when_engaged_at_both_window_boundaries() {
+        assert!(!serve_state_window(attempt(true), Some(attempt(true))).lost);
+        assert!(serve_state_window(attempt(true), Some(attempt(false))).lost);
+        assert!(serve_state_window(attempt(false), Some(attempt(true))).lost);
+        assert!(serve_state_window(attempt(true), None).lost);
     }
 }

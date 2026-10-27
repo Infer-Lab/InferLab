@@ -58,6 +58,12 @@ class VllmServeSettings(BaseModel):
     enable_prompt_tokens_details: bool = False
     kv_transfer_protocol: str | None = None
     mooncake_num_workers: int | None = Field(default=None, ge=1)
+    # The memory each vLLM worker rank contributes to a declared KV store
+    # and its transfer settings ([[RFC-0003:C-SERVE-KV-STORE]]).
+    kv_store_global_segment_size: str | int | None = None
+    kv_store_local_buffer_size: str | int | None = None
+    kv_store_protocol: str | None = None
+    kv_store_device_name: str | None = None
     extra_args: list[str] | None = None
     extra_env: dict[str, str] | None = None
 

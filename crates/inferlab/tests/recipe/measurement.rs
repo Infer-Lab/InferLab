@@ -966,6 +966,63 @@ fn primed_corpus_conditions_the_cache_from_the_fixed_slice() -> Result<(), Box<d
 }
 
 #[test]
+fn primed_ratio_over_a_range_conditions_through_the_drawn_maximum() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.write_corpus("corpus/shakespeare.txt", 64)?;
+    workspace.configure_corpus_bench("corpus/shakespeare.txt", None, true)?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replacen(
+        "input_tokens = 8, output_tokens = 1024, corpus = { path = \"corpus/shakespeare.txt\" }, prefix_sharing = { shared_prefix_tokens = 2 }",
+        "input_tokens = { min = 4, max = 8 }, output_tokens = 1024, corpus = { path = \"corpus/shakespeare.txt\" }, prefix_sharing = { shared_prefix_ratio = 0.5 }",
+        1,
+    );
+    assert!(text.contains("shared_prefix_ratio = 0.5"));
+    fs::write(manifest, text)?;
+
+    let dry_run = workspace
+        .command()
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let planned: Value = serde_json::from_slice(&dry_run.stdout)?;
+    assert!(
+        planned["measurements"]["benches"][0]["client"]["prefix_cache_conditioning"]
+            ["maximum_shared_prefix_tokens"]
+            .is_null()
+    );
+
+    // Every entry draws the range minimum, so the drawn maximum prefix is 2
+    // while the range allows 4.
+    let output = workspace
+        .command()
+        .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
+        .env("FIXTURE_DRAW_INPUT_MINIMUM", "1")
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("recipe omitted its corpus Bench record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; stderr: {}",
+        bench["error"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conditioning = &bench["cases"][0]["cache_preparation"]["conditioning"];
+    assert_eq!(conditioning["prompt_tokens"], 2);
+    assert_eq!(conditioning["maximum_shared_prefix_tokens"], 2);
+    let request: Value = serde_json::from_slice(&fs::read(workspace.conditioning_request())?)?;
+    assert_eq!(request["prompt"], "canonical prefix");
+    Ok(())
+}
+
+#[test]
 fn images_bench_records_the_decoration_evidence() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     let digest = workspace.write_image_pool(
@@ -1860,6 +1917,58 @@ fn primed_prefix_preparation_precedes_profiling_and_records_exact_request()
         ["cache_reset", "cache_conditioning", "client_started",]
     );
     assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+/// Every prefix group is conditioned before profiling, the first group
+/// first ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[test]
+fn primed_grouped_prefixes_condition_every_group() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replacen(
+        "prefix_sharing = { shared_prefix_ratio = 1.0 }",
+        "prefix_sharing = { shared_prefix_ratio = 1.0, groups = 2 }",
+        1,
+    );
+    fs::write(manifest, text)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_RECORD_CACHE_PREPARATION", "1")
+        .env("FIXTURE_RECORD_CLIENT_START", "1")
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; case errors: {}; stderr: {}",
+        bench["error"],
+        bench["cases"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preparation = &bench["cases"][0]["cache_preparation"];
+    assert_eq!(preparation["conditioning"]["succeeded"], true);
+    assert_eq!(preparation["group_conditioning"][0]["group"], 1);
+    assert_eq!(preparation["group_conditioning"][0]["succeeded"], true);
+    let request: Value = serde_json::from_slice(&fs::read(workspace.conditioning_request())?)?;
+    assert_eq!(request["prompt"], "canonical prefix 1");
+    let events = fs::read_to_string(workspace.capture_events())?;
+    let events = events.lines().collect::<Vec<_>>();
+    assert_eq!(
+        &events[..4],
+        [
+            "cache_reset",
+            "cache_conditioning",
+            "cache_conditioning",
+            "client_started",
+        ]
+    );
     Ok(())
 }
 

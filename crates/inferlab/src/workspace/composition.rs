@@ -9,7 +9,7 @@ use super::definitions::{
     WorkspaceConfig, deserialize_defaulted_bench_definitions,
 };
 use super::invalid;
-use super::local::{LocalBindings, validate_local_bindings};
+use super::local::{LocalBindings, validate_local_bindings, validate_recipe_placements};
 use super::realization::validate_pixi;
 use super::source::{git_text, inspect_workspace, symlink_guard, workspace_mutations};
 use super::state::{LoadedWorkspace, LocalDefinitionFile, WorkspaceIdentity, WorkspaceSnapshot};
@@ -139,6 +139,7 @@ pub(crate) fn load_workspace(
     let config = load_workspace_config(&root)?;
     let bindings: LocalBindings = load_toml(&local_path)?;
     validate_local_bindings(&bindings)?;
+    validate_recipe_placements(&bindings, &config)?;
     let snapshot = inspect_workspace(&root, &local_path, &config)?;
     Ok(LoadedWorkspace {
         root,

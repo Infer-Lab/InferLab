@@ -15,12 +15,14 @@ from ._generated import (
     AdapterErrorCode,
     AdapterRequest,
     AdapterRequestPlanServe,
+    AdapterRequestProbeServe,
     AdapterRequestRenderServe,
     AdapterResponse,
     AdapterResponseError,
     AdapterResponseOk,
     AdapterResult,
     AdapterResultPlanServe,
+    AdapterResultProbeServe,
     AdapterResultRenderServe,
     AuxiliaryModelInput,
     EndpointDeclaration,
@@ -33,16 +35,21 @@ from ._generated import (
     GatewayTargetPdRouter,
     IntegrationIdentity,
     LaunchFileDeclaration,
+    Parallelism,
+    ParallelismOuter,
     PdRouterPlan,
     PdRoutingPolicies,
     PlanServeInput,
     PlanServeResult,
+    ProbeServeInput,
+    ProbeServeResult,
     ProcessSpec,
     ProtocolVersion,
     ReadinessProbe,
     RenderedServeProcess,
     RenderedServeProcessDiscovery,
     RenderedServeProcessFrontend,
+    RenderedServeProcessKvStore,
     RenderedServeProcessModelRank,
     RenderInputDeclaration,
     RenderServeInput,
@@ -51,6 +58,7 @@ from ._generated import (
     ServeProcessAllocation,
     ServeProcessAllocationDiscovery,
     ServeProcessAllocationFrontend,
+    ServeProcessAllocationKvStore,
     ServeProcessAllocationModelRank,
     ServeRoleInput,
     ServeRoleKind,
@@ -61,10 +69,16 @@ from ._generated import (
 
 type PlanServeHandler = Callable[[PlanServeInput], PlanServeResult]
 type RenderServeHandler = Callable[[RenderServeInput], RenderServeResult]
+type ProbeServeHandler = Callable[[ProbeServeInput], ProbeServeResult]
+# Validates a stack's declared settings and returns the effective settings:
+# every declared value unchanged plus the integration's defaults
+# ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+type StackSettingsHandler = Callable[[dict[str, SettingValue]], dict[str, SettingValue]]
 type ServeAllocation = (
     ServeProcessAllocationModelRank
     | ServeProcessAllocationFrontend
     | ServeProcessAllocationDiscovery
+    | ServeProcessAllocationKvStore
 )
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
@@ -352,6 +366,21 @@ def rendered_discovery(
     )
 
 
+def rendered_kv_store(
+    allocation: ServeProcessAllocationKvStore,
+    command: ProcessSpec,
+) -> RenderedServeProcess:
+    """Preserve a KV store allocation identity in an adapter render result."""
+    return RenderedServeProcess(
+        root=RenderedServeProcessKvStore(
+            process=allocation.process,
+            process_role=allocation.process_role,
+            command=command,
+            launch_files=[],
+        )
+    )
+
+
 def append_option(argv: list[str], name: str, value: str | int | float | None) -> None:
     if value is not None:
         argv.extend([name, str(value)])
@@ -450,6 +479,40 @@ class AdapterOperationError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def fill_outer_tensor_parallel(
+    declared: Parallelism, devices: int | None, divisor: int, divisor_description: str
+) -> Parallelism:
+    """Fill an omitted `outer.tensor_parallel_size` from a declared `devices`
+    count, which is the role's sole device-count authority
+    ([[RFC-0003:C-SERVE-PARALLELISM]]). `divisor` is the factor the
+    integration's own reading multiplies outer tensor parallelism by to reach
+    its device count; a declaration without `devices`, or with an explicit
+    outer tensor parallelism, is returned unchanged."""
+    outer = declared.outer or ParallelismOuter()
+    if devices is None or outer.tensor_parallel_size is not None:
+        return declared
+    if devices % divisor != 0:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"devices ({devices}) is not divisible by {divisor_description} ({divisor})",
+        )
+    return declared.model_copy(
+        update={"outer": outer.model_copy(update={"tensor_parallel_size": devices // divisor})}
+    )
+
+
+def require_declared_devices(device_count: int, devices: int | None, reading: str) -> None:
+    """Reject a parallelism shape whose device count under the integration's
+    reading differs from the role's declared `devices`
+    ([[RFC-0003:C-SERVE-PARALLELISM]])."""
+    if devices is not None and device_count != devices:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"the declared parallelism places {device_count} devices under {reading}, "
+            f"but the role declares devices = {devices}",
+        )
 
 
 def resolve_golden_acceptance_length(
@@ -621,11 +684,28 @@ def error_response(code: AdapterErrorCode, message: str) -> AdapterResponse:
 SUPPORTED_PROTOCOL_VERSION: str = CURRENT_PROTOCOL_VERSION.root
 
 
+def _effective_stack_settings(
+    declared: dict[str, SettingValue], stack_settings: StackSettingsHandler | None
+) -> dict[str, SettingValue]:
+    if stack_settings is not None:
+        return stack_settings(declared)
+    if declared:
+        # An integration that defines no stack setting rejects every declared
+        # one ([[RFC-0006:C-INTEGRATIONS]]).
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"this integration defines no stack settings; the stack declares {sorted(declared)}",
+        )
+    return {}
+
+
 def handle_request(
     payload: str,
     plan_serve: PlanServeHandler | None = None,
     *,
     render_serve: RenderServeHandler | None = None,
+    probe_serve: ProbeServeHandler | None = None,
+    stack_settings: StackSettingsHandler | None = None,
 ) -> AdapterResponse:
     # Validate the request protocol version before request-shape validation
     # ([[RFC-0006:C-INTEGRATIONS]]): a cross-version request also fails shape
@@ -652,11 +732,17 @@ def handle_request(
 
     try:
         root = request.root
-        result: AdapterResultPlanServe | AdapterResultRenderServe
+        result: AdapterResultPlanServe | AdapterResultRenderServe | AdapterResultProbeServe
         if isinstance(root, AdapterRequestPlanServe) and plan_serve is not None:
-            result = AdapterResultPlanServe(output=plan_serve(root.input))
+            effective = _effective_stack_settings(root.input.stack_settings or {}, stack_settings)
+            planned = plan_serve(root.input)
+            result = AdapterResultPlanServe(
+                output=planned.model_copy(update={"stack_settings": effective})
+            )
         elif isinstance(root, AdapterRequestRenderServe) and render_serve is not None:
             result = AdapterResultRenderServe(output=render_serve(root.input))
+        elif isinstance(root, AdapterRequestProbeServe) and probe_serve is not None:
+            result = AdapterResultProbeServe(output=probe_serve(root.input))
         else:
             return error_response(
                 AdapterErrorCode.unsupported_operation,
@@ -679,6 +765,8 @@ def run_adapter(
     plan_serve: PlanServeHandler | None = None,
     *,
     render_serve: RenderServeHandler | None = None,
+    probe_serve: ProbeServeHandler | None = None,
+    stack_settings: StackSettingsHandler | None = None,
     input_stream: TextIO | None = None,
     output_stream: TextIO | None = None,
     diagnostics_stream: TextIO | None = None,
@@ -691,6 +779,8 @@ def run_adapter(
             source.read(),
             plan_serve,
             render_serve=render_serve,
+            probe_serve=probe_serve,
+            stack_settings=stack_settings,
         )
     except Exception:
         traceback.print_exc(file=diagnostics)

@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `13` (serialized as the
-/// string `"13"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `14` (serialized as the
+/// string `"14"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 13.
-    #[serde(rename = "13")]
-    V13,
+    /// Protocol version 14.
+    #[serde(rename = "14")]
+    V14,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V13;
+    pub const CURRENT: Self = Self::V14;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V13 => "13",
+            Self::V14 => "14",
         }
     }
 }
@@ -169,6 +169,12 @@ pub enum AdapterRequest {
         protocol_version: ProtocolVersion,
         input: RenderServeInput,
     },
+    /// Read the declared serve state of every model-serving rank-zero
+    /// process of a running server ([[RFC-0006:C-INTEGRATIONS]]).
+    ProbeServe {
+        protocol_version: ProtocolVersion,
+        input: ProbeServeInput,
+    },
 }
 
 impl AdapterRequest {
@@ -181,9 +187,59 @@ impl AdapterRequest {
             }
             | Self::RenderServe {
                 protocol_version, ..
+            }
+            | Self::ProbeServe {
+                protocol_version, ..
             } => *protocol_version,
         }
     }
+}
+
+/// What a `ProbeServe` request reads: the running server's model-serving
+/// rank-zero processes and the bound of one read
+/// ([[RFC-0006:C-INTEGRATIONS]]).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeServeInput {
+    pub model: ServeModelInput,
+    pub topology: ServeTopology,
+    pub attempt_bound_seconds: u64,
+    pub processes: Vec<ProbeServeTarget>,
+    /// The KV store endpoint the Engines were rendered with, when the server
+    /// declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<EndpointAssignment>,
+}
+
+/// One model-serving rank-zero process to probe.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeServeTarget {
+    pub process: String,
+    pub role: String,
+    pub replica: u32,
+    pub endpoint: EndpointAssignment,
+}
+
+/// The integration's reading of every probed process.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeServeResult {
+    pub integration: IntegrationIdentity,
+    pub processes: Vec<ProbeServeProcessState>,
+}
+
+/// One process's serve state: engaged or not, the framework values that
+/// decided it, or why it could not be read.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeServeProcessState {
+    pub process: String,
+    pub engaged: bool,
+    #[serde(default)]
+    pub state: BTreeMap<String, SettingValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The requested serve shape a `PlanServe` operation lowers into a topology.
@@ -204,6 +260,23 @@ pub struct PlanServeInput {
     pub pd_router_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
+    /// The resolved Gateway settings; every entry MUST reappear unchanged in
+    /// the Gateway plan's effective settings ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gateway_settings: BTreeMap<String, SettingValue>,
+    /// The resolved P/D Router settings; every entry MUST reappear unchanged
+    /// in the P/D Router plan's effective settings
+    /// ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pd_router_settings: BTreeMap<String, SettingValue>,
+    /// The server's external KV store declaration
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<KvStoreInput>,
+    /// The stack's declared settings, typed by its integration
+    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]); empty when none are declared.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_settings: BTreeMap<String, SettingValue>,
     pub roles: Vec<ServeRoleInput>,
     /// The effective capture mechanism when profiling is requested; absent
     /// means no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).
@@ -237,6 +310,10 @@ pub struct RenderServeInput {
     pub pd_router_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer: Option<KvTransferMechanism>,
+    /// The effective stack settings the plan returned
+    /// ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_settings: BTreeMap<String, SettingValue>,
     pub allocations: Vec<ServeProcessAllocation>,
     /// The effective capture mechanism when profiling is requested; absent
     /// means no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).
@@ -292,6 +369,8 @@ pub enum AdapterResult {
     PlanServe { output: Box<PlanServeResult> },
     /// The rendered process invocations from a `RenderServe` request.
     RenderServe { output: Box<RenderServeResult> },
+    /// The serve state of every probed process from a `ProbeServe` request.
+    ProbeServe { output: Box<ProbeServeResult> },
 }
 
 /// A structured rejection an integration returns in an [`AdapterResponse::Error`].
@@ -606,6 +685,12 @@ pub struct ServeRoleInput {
     pub id: String,
     pub kind: ServeRoleKind,
     pub replica_count: u32,
+    /// The operator-declared whole-replica device count; when present it is
+    /// the sole device-count authority and every returned replica of this
+    /// role MUST require exactly this many devices
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<u32>,
     pub parallelism: Parallelism,
     pub settings: BTreeMap<String, SettingValue>,
 }
@@ -643,6 +728,11 @@ pub struct ServeRoleResult {
 #[serde(deny_unknown_fields)]
 pub struct PlanServeResult {
     pub integration: IntegrationIdentity,
+    /// The complete effective stack settings: every declared entry
+    /// unchanged plus the integration's defaults
+    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_settings: BTreeMap<String, SettingValue>,
     /// The resolved synthetic acceptance outcome; required in the accepted
     /// plan whenever the request carried the declaration, and forbidden
     /// otherwise ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
@@ -655,6 +745,66 @@ pub struct PlanServeResult {
     pub gateway: Option<GatewayPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pd_router: Option<PdRouterPlan>,
+    /// Returned exactly when the request declares a KV store
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<KvStorePlan>,
+    /// The integration answers `ProbeServe` for this server, so readiness
+    /// waits for every model-serving process to be engaged and Bench cases
+    /// record its state ([[RFC-0003:C-SERVE-KV-STORE]]); declared only with a
+    /// KV store plan.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serve_state_probe: bool,
+}
+
+/// How one model-serving role uses the server's KV store
+/// ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvStoreAccess {
+    /// Each process reads matching prefixes from the store and writes the
+    /// prefixes it computes to it before the request completes.
+    ReadWrite,
+    /// Each process only writes to the store.
+    Write,
+}
+
+/// A declared external KV store: its backend identity and backend-typed
+/// settings ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvStoreInput {
+    pub backend: String,
+    #[serde(default)]
+    pub settings: BTreeMap<String, SettingValue>,
+}
+
+/// The integration's plan for the declared KV store; the control plane
+/// derives, places, and launches its one process
+/// ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KvStorePlan {
+    pub backend: String,
+    pub implementation: String,
+    pub implementation_version: String,
+    pub effective_settings: BTreeMap<String, SettingValue>,
+    /// How each model-serving role whose processes use the store uses it; a
+    /// role absent makes no claim and is treated as not using the store
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_access: BTreeMap<String, KvStoreAccess>,
+    /// How long after a request completes a prefix a `read_write` role wrote
+    /// may take to become readable from the store; zero when absent
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub publication_bound_ms: u64,
+    /// Logical ports beyond the endpoint that consumers connect to.
+    #[serde(default)]
+    pub ports: Vec<String>,
+    pub readiness: ReadinessProbe,
+    #[serde(default)]
+    pub render_inputs: Vec<RenderInputDeclaration>,
 }
 
 /// A whole-replica resource and readiness requirement the integration declares
@@ -782,8 +932,13 @@ pub struct ServerMetricsEndpointRequirement {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadinessProbe {
-    /// Ready when an HTTP GET of `path` succeeds.
-    Http { path: String },
+    /// Ready when an HTTP GET of `path` succeeds, on the process endpoint or
+    /// on the named logical `port` when given.
+    Http {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<String>,
+    },
     /// Ready when the public endpoint succeeds and its HTTP target registry
     /// contains every control-plane-derived serving target.
     HttpTargetRegistry(Box<HttpTargetRegistryReadiness>),
@@ -852,12 +1007,14 @@ pub struct JsonValueMatch {
     pub value: String,
 }
 
-/// The JSON scalar an HTTP action success predicate expects: a string, or
-/// from protocol version 13 a boolean ([[RFC-0006:C-INTEGRATIONS]]).
+/// The JSON scalar an HTTP action success predicate expects: a string, from
+/// protocol version 13 a boolean, or from protocol version 14 an integer
+/// ([[RFC-0006:C-INTEGRATIONS]]).
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum JsonScalar {
     Boolean(bool),
+    Integer(i64),
     String(String),
 }
 
@@ -868,6 +1025,9 @@ impl JsonScalar {
     pub fn matches(&self, observed: &serde_json::Value) -> bool {
         match (self, observed) {
             (Self::Boolean(expected), serde_json::Value::Bool(value)) => expected == value,
+            (Self::Integer(expected), serde_json::Value::Number(value)) => {
+                value.as_i64() == Some(*expected)
+            }
             (Self::String(expected), serde_json::Value::String(value)) => expected == value,
             _ => false,
         }
@@ -879,6 +1039,7 @@ impl std::fmt::Display for JsonScalar {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Boolean(value) => write!(formatter, "{value}"),
+            Self::Integer(value) => write!(formatter, "{value}"),
             Self::String(value) => write!(formatter, "{}", serde_json::Value::from(value.as_str())),
         }
     }
@@ -905,9 +1066,17 @@ pub struct HttpTargetRegistryReadiness {
     pub target_role_field: String,
     pub target_healthy_field: String,
     pub target_bootstrap_port_field: String,
-    pub prefill_role_value: String,
-    pub decode_role_value: String,
-    pub prefill_bootstrap_port: String,
+    /// Each role value is the registry's spelling for that canonical role
+    /// kind; a kind without one contributes no expected targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_role_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_role_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_role_value: Option<String>,
+    /// The logical port whose value each prefill target registers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_bootstrap_port: Option<String>,
 }
 
 /// An HTTP action invoked against a logical serving endpoint.
@@ -1012,6 +1181,10 @@ pub enum ServeProcessAllocation {
         /// topology has one ([[RFC-0003:C-SERVE-TOPOLOGY]]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discovery: Option<String>,
+        /// The endpoint of the server's KV store, when it declares one
+        /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kv_store: Option<Box<EndpointAssignment>>,
         #[serde(default)]
         render_inputs: Vec<SuppliedRenderInput>,
     },
@@ -1056,6 +1229,22 @@ pub enum ServeProcessAllocation {
         data_directory: String,
         launch: AllocationLaunch,
         discovery: Box<DiscoveryRequirement>,
+        #[serde(default)]
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
+    /// The server's external KV store ([[RFC-0003:C-SERVE-KV-STORE]]):
+    /// process-only, zero devices, placed beside the Gateway or the first
+    /// serve replica's rank zero.
+    KvStore {
+        process: String,
+        process_role: KvStoreProcessRole,
+        machine: String,
+        devices: Vec<u32>,
+        endpoint: EndpointAssignment,
+        ports: BTreeMap<String, EndpointAssignment>,
+        cache: String,
+        launch: AllocationLaunch,
+        kv_store: Box<KvStorePlan>,
         #[serde(default)]
         render_inputs: Vec<SuppliedRenderInput>,
     },
@@ -1106,6 +1295,12 @@ pub enum RenderedServeProcess {
         launch_files: Vec<LaunchFileDeclaration>,
         command: ProcessSpec,
     },
+    KvStore {
+        process: String,
+        process_role: KvStoreProcessRole,
+        launch_files: Vec<LaunchFileDeclaration>,
+        command: ProcessSpec,
+    },
 }
 
 /// One immutable text input a rendered process requires before it can launch.
@@ -1149,6 +1344,13 @@ pub enum FrontendProcessRole {
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryProcessRole {
     Discovery,
+}
+
+/// The canonical process role of the KV store process.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvStoreProcessRole {
+    KvStore,
 }
 
 /// The only member of the closed discovery component binding.
@@ -1804,8 +2006,23 @@ pub enum BenchTokenDistributionKindInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum BenchPrefixSharingInput {
-    Tokens { shared_prefix_tokens: u32 },
-    Ratio { shared_prefix_ratio: f64 },
+    Tokens {
+        shared_prefix_tokens: u32,
+        /// Independent prefix groups; absent means one
+        /// ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        groups: Option<u32>,
+        /// The Zipf exponent groups are drawn with; absent means uniform.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zipf_exponent: Option<f64>,
+    },
+    Ratio {
+        shared_prefix_ratio: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        groups: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zipf_exponent: Option<f64>,
+    },
 }
 
 /// One pre-template shared system-content declaration for server-rendered
@@ -2180,6 +2397,10 @@ pub struct BenchPrefixGeometrySummary {
     pub maximum_shared_prefix_tokens: u32,
     pub canonical_prefix_sha256: String,
     pub full_prompt_entries: u32,
+    /// Population entries drawn for each prefix group, in group order; empty
+    /// for an ungrouped population ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_entries: Vec<u64>,
 }
 
 /// File-bound exact canonical prefix used to condition a primed cache start.
@@ -2189,6 +2410,9 @@ pub struct BenchPrefixConditioningInput {
     pub path: PathBuf,
     pub sha256: String,
     pub prompt_tokens: u32,
+    /// The prefix group this canonical prefix conditions; zero for the first.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub group: u32,
 }
 
 /// Resolved pre-template shared system-content shape across one frozen
@@ -2223,6 +2447,10 @@ pub struct BenchPopulationPreparationResult {
     pub prefix_geometry: Option<BenchPrefixGeometrySummary>,
     #[serde(default)]
     pub prefix_conditioning: Option<BenchPrefixConditioningInput>,
+    /// The canonical prefixes of every further prefix group, which a primed
+    /// start conditions after the first ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_prefix_conditioning: Vec<BenchPrefixConditioningInput>,
     #[serde(default)]
     pub shared_system_content: Option<BenchSharedSystemContentSummary>,
     pub evidence_path: Option<PathBuf>,
@@ -2283,6 +2511,20 @@ pub struct BenchPromptCacheObservation {
     pub cache_read_tokens: u64,
     pub uncached_prompt_tokens: u64,
     pub cache_read_ratio: f64,
+    /// The planned shared-prefix tokens of the request's generated population
+    /// entry ([[RFC-0004:C-BENCH-CACHE-STATE]]); absent for other sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_prefix_tokens: Option<u64>,
+    /// The entry's prefix group in a grouped population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_group: Option<u32>,
+    /// When the client sent the request, in Unix nanoseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_unix_ns: Option<u64>,
+    /// When the client received the request's first output token, in Unix
+    /// nanoseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_unix_ns: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -2534,4 +2776,14 @@ pub struct MeasurementProtocol {
     pub data_asset_preparation_request: Option<MeasurementDataAssetPreparationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_asset_preparation_result: Option<MeasurementDataAssetPreparationResult>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }

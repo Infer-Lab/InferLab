@@ -1,3 +1,4 @@
+import inferlab_kvstore
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
@@ -11,6 +12,7 @@ from inferlab_adapter_sdk import (
     HttpActionSpec,
     HttpMethod,
     IntegrationIdentity,
+    KvStorePlan,
     Parallelism,
     ParallelismAttention,
     ParallelismExperts,
@@ -39,14 +41,17 @@ from inferlab_adapter_sdk import (
     TargetEndpointScheme,
     consistent_acceptance_outcome,
     effective_settings,
+    fill_outer_tensor_parallel,
     fused_pd_frontend_plans,
     integration_identity,
     replica_id,
+    require_declared_devices,
     require_role,
+    validate_extra_args,
 )
 
 from .auxiliary import validate_auxiliary_models
-from .settings import _settings
+from .settings import _KV_STORE_OWNED_OPTIONS, SglangServeSettings, _settings
 from .synthetic import resolve_synthetic_acceptance
 
 
@@ -234,7 +239,20 @@ def _plan_role(
     outcome: SyntheticAcceptanceOutcome | None = None
     if input.synthetic_acceptance is not None:
         outcome = resolve_synthetic_acceptance(settings, input.synthetic_acceptance, role.id)
-    parallelism = _effective_parallelism(role.parallelism, role.kind)
+    parallelism = _effective_parallelism(
+        fill_outer_tensor_parallel(
+            role.parallelism,
+            role.devices,
+            (role.parallelism.outer or ParallelismOuter()).pipeline_parallel_size or 1,
+            "SGLang pipeline parallelism",
+        ),
+        role.kind,
+    )
+    require_declared_devices(
+        _device_count(parallelism),
+        role.devices,
+        "SGLang's reading (outer tensor x pipeline parallelism)",
+    )
     replicas = [
         ServeReplicaRequirement(
             id=replica_id(role, replica_index),
@@ -268,13 +286,18 @@ def _endpoint_declaration(
     include_server_metrics: bool,
     include_cache_reporting: bool,
     include_conditioning_fanout: bool = False,
+    clears_prefix_cache: bool = True,
 ) -> EndpointDeclaration:
     return EndpointDeclaration(
         protocol=EndpointProtocol(),
         server_metrics=(
             ServerMetricsEndpointRequirement(path="/metrics") if include_server_metrics else None
         ),
-        prefix_cache_reset=HttpActionSpec(method=HttpMethod(), path="/flush_cache"),
+        prefix_cache_reset=(
+            HttpActionSpec(method=HttpMethod(), path="/flush_cache")
+            if clears_prefix_cache
+            else None
+        ),
         prefix_cache_conditioning=(
             HttpActionSpec(method=HttpMethod(), path="/prime_prefix_cache")
             if include_conditioning_fanout
@@ -300,9 +323,13 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     role = require_role(input, ServeRoleKind.serve)
     role_result, replicas, outcome = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
+    kv_store = _kv_store_plan(input, settings)
     role_result.public_endpoint = _endpoint_declaration(
         include_server_metrics=settings.enable_metrics,
         include_cache_reporting=settings.enable_cache_report,
+        # `/flush_cache` leaves HiCache's storage backend intact, so a
+        # store-backed server declares no reset ([[RFC-0003:C-SERVE-KV-STORE]]).
+        clears_prefix_cache=kv_store is None,
     )
     return PlanServeResult(
         integration=_identity(),
@@ -310,10 +337,35 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         replicas=replicas,
         links=[],
         synthetic_acceptance=outcome,
+        kv_store=kv_store,
     )
 
 
+def _kv_store_plan(input: PlanServeInput, settings: SglangServeSettings) -> KvStorePlan | None:
+    """SGLang consumes a Mooncake Store through HiCache's storage backend
+    ([[RFC-0003:C-SERVE-KV-STORE]])."""
+    store_settings = (
+        settings.kv_store_global_segment_size,
+        settings.kv_store_protocol,
+        settings.kv_store_device_name,
+    )
+    if input.kv_store is None:
+        if any(value is not None for value in store_settings):
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                "kv_store_* settings apply only when the server declares a kv_store",
+            )
+        return None
+    validate_extra_args(settings.extra_args or [], _KV_STORE_OWNED_OPTIONS)
+    return inferlab_kvstore.plan(input.kv_store)
+
+
 def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
+    if input.kv_store is not None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the SGLang integration does not support a KV store on a prefill/decode server",
+        )
     transport = input.kv_transfer
     if transport is None:
         raise AdapterOperationError(
@@ -438,4 +490,9 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
     validate_auxiliary_models(input)
     if input.topology == ServeTopology.single:
         return _plan_single(input)
+    if input.kv_store is not None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "SGLang consumes a KV store only in a single topology",
+        )
     return _plan_prefill_decode(input)

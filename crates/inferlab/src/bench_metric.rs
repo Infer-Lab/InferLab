@@ -13,6 +13,11 @@ pub(crate) enum BenchMetric {
     PromptCacheReadRatio,
     AcceptanceLength,
     AcceptanceRate,
+    /// Speculative draft acceptance observed in per-request usage
+    /// ([[RFC-0004:C-MEASUREMENTS]]): accepted over drafted tokens.
+    DraftAcceptanceRate,
+    DraftAcceptedTokens,
+    DraftTokens,
     GoodRequestRatio,
     Goodput,
 }
@@ -62,6 +67,9 @@ impl BenchMetric {
             "prompt_cache_read_ratio" => Some(Self::PromptCacheReadRatio),
             "acceptance_length" => Some(Self::AcceptanceLength),
             "acceptance_rate" => Some(Self::AcceptanceRate),
+            "draft_acceptance_rate" => Some(Self::DraftAcceptanceRate),
+            "draft_accepted_tokens" => Some(Self::DraftAcceptedTokens),
+            "draft_tokens" => Some(Self::DraftTokens),
             "good_request_ratio" => Some(Self::GoodRequestRatio),
             "goodput" => Some(Self::Goodput),
             _ => None,
@@ -90,6 +98,9 @@ impl BenchMetric {
             Self::PromptCacheReadRatio => "prompt_cache_read_ratio".to_owned(),
             Self::AcceptanceLength => "acceptance_length".to_owned(),
             Self::AcceptanceRate => "acceptance_rate".to_owned(),
+            Self::DraftAcceptanceRate => "draft_acceptance_rate".to_owned(),
+            Self::DraftAcceptedTokens => "draft_accepted_tokens".to_owned(),
+            Self::DraftTokens => "draft_tokens".to_owned(),
             Self::GoodRequestRatio => "good_request_ratio".to_owned(),
             Self::Goodput => "goodput".to_owned(),
         }
@@ -114,8 +125,13 @@ impl BenchMetric {
     }
 
     pub(crate) const fn missing_is_unavailable(self, completed_requests: u64) -> bool {
-        matches!(self, Self::PromptCacheReadRatio)
-            || (completed_requests == 0 && matches!(self, Self::Distribution { .. }))
+        matches!(
+            self,
+            Self::PromptCacheReadRatio
+                | Self::DraftAcceptanceRate
+                | Self::DraftAcceptedTokens
+                | Self::DraftTokens
+        ) || (completed_requests == 0 && matches!(self, Self::Distribution { .. }))
     }
 
     pub(crate) fn required_result_metrics(tpot_applicable: bool) -> Vec<Self> {

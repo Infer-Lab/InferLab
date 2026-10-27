@@ -3,6 +3,7 @@ mod numa;
 mod preflight;
 mod record;
 mod residual;
+pub(crate) mod serve_state;
 
 use crate::InferlabError;
 use crate::controller::Controller;
@@ -15,7 +16,7 @@ use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::server::{
     CleanupEvent, CleanupEvidence, CleanupTrigger, DeviceResidualEvidence, ProcessCleanup,
     ProcessHandle, ProcessObserver, ProcessSpec, ProcessStatus, REMOTE_LOG_SYNC_DEADLINE,
-    ReadinessFailureKind, ServerRuntime, SystemProcessRuntime,
+    ReadinessFailureKind, ServerRuntime, SystemProcessRuntime, WatchedProcess,
 };
 use preflight::{HardwareProbeError, PreflightObserver, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
@@ -332,7 +333,9 @@ pub(crate) fn resolve_network(
     })
 }
 
-fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
+fn start_with_runtime<
+    R: ServerRuntime + PreflightObserver + ResidualProbe + serve_state::ServeStateProbe,
+>(
     root: &Path,
     resolved: ResolvedExecution,
     requested_id: Option<&str>,
@@ -360,13 +363,15 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
         handles: Vec::new(),
     };
     let process_total = spawned.contexts.len();
-    if resolved.server.discovery.is_some() {
-        // The discovery process is first in process order: it spawns alone
-        // and must be ready before any model rank spawns, within the same
-        // readiness budget the later waits continue
-        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
-        spawn_processes(&mut session, runtime, progress, &mut spawned, 0..1)?;
-        let readiness_bound = readiness_bound(&resolved);
+    // The KV store and the discovery process lead the process order: they
+    // spawn alone and must be ready before any model rank spawns, within the
+    // same readiness budget the later waits continue
+    // ([[RFC-0003:C-RUNTIME-WORKFLOWS]], [[RFC-0003:C-SERVE-KV-STORE]]).
+    let readiness_bound = readiness_bound(&resolved);
+    let leading = usize::from(resolved.server.kv_store.is_some())
+        + usize::from(resolved.server.discovery.is_some());
+    if leading > 0 {
+        spawn_processes(&mut session, runtime, progress, &mut spawned, 0..leading)?;
         wait_until_ready(
             &resolved,
             &mut session,
@@ -374,14 +379,14 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             progress,
             &spawned,
             &readiness_bound,
-            0..1,
+            0..leading,
         )?;
         spawn_processes(
             &mut session,
             runtime,
             progress,
             &mut spawned,
-            1..process_total,
+            leading..process_total,
         )?;
         wait_until_ready(
             &resolved,
@@ -390,7 +395,7 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             progress,
             &spawned,
             &readiness_bound,
-            1..process_total,
+            leading..process_total,
         )?;
     } else {
         spawn_processes(
@@ -400,7 +405,6 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             &mut spawned,
             0..process_total,
         )?;
-        let readiness_bound = readiness_bound(&resolved);
         wait_until_ready(
             &resolved,
             &mut session,
@@ -412,6 +416,39 @@ fn start_with_runtime<R: ServerRuntime + PreflightObserver + ResidualProbe>(
         )?;
     }
 
+    // Readiness alone does not show that each Engine engaged its store; the
+    // integration's serve-state probe does, within the same readiness budget
+    // ([[RFC-0003:C-SERVE-KV-STORE]]).
+    if let Some(plan) = resolved.server.serve_state_probe.clone() {
+        progress.phase(Phase::named("serve-state probe"))?;
+        let outcome = serve_state::wait_until_engaged(
+            root,
+            &resolved,
+            &plan,
+            runtime,
+            &readiness_bound,
+            &|| spawned.exited_process(runtime),
+            &mut |attempt| {
+                session.record_mut().serve_state_probes.push(attempt);
+                session
+                    .rewrite()
+                    .map_err(|error| InferlabError::InvalidConfig {
+                        message: format!("failed to persist the serve-state probe: {error}"),
+                    })
+            },
+        )?;
+        if let Err(failure) = outcome {
+            return Err(fail_with(
+                &mut session,
+                runtime,
+                &spawned.started,
+                FailurePhase::Readiness,
+                failure.process.as_deref(),
+                failure.message,
+                true,
+            )?);
+        }
+    }
     fail_if_startup_interrupted(&mut session, runtime, &spawned.started, None)?;
     session.record_mut().status = ServerStatus::Running;
     if let Err(error) = session.rewrite() {
@@ -433,6 +470,16 @@ struct SpawnedProcesses<'a> {
     contexts: Vec<ProcessContext<'a>>,
     started: Vec<String>,
     handles: Vec<ProcessHandle>,
+}
+
+impl SpawnedProcesses<'_> {
+    /// The first started process whose process group has exited.
+    fn exited_process<R: ProcessObserver>(&self, runtime: &R) -> Option<String> {
+        self.handles.iter().enumerate().find_map(|(index, handle)| {
+            let status = runtime.status(handle);
+            (status.queried && !status.alive).then(|| self.contexts[index].process.id.clone())
+        })
+    }
 }
 
 /// Record a startup failure, roll back the started processes, persist the
@@ -790,7 +837,8 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
                         Some(*rank_count)
                     }
                     crate::execution::ProcessIdentityPlan::Frontend { .. }
-                    | crate::execution::ProcessIdentityPlan::Discovery { .. } => None,
+                    | crate::execution::ProcessIdentityPlan::Discovery { .. }
+                    | crate::execution::ProcessIdentityPlan::KvStore { .. } => None,
                 },
                 command: &process.command,
                 launch: &process.launch,
@@ -948,9 +996,23 @@ fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
                 .item(&process.id, process_index + 1, process_total)
                 .log(&stderr),
         )?;
+        // Every other started process stays watched, so one that exits while
+        // this one starts fails the start at once
+        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+        let watched = spawned
+            .handles
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != process_index)
+            .map(|(index, handle)| WatchedProcess {
+                id: &spawned.contexts[index].process.id,
+                handle,
+            })
+            .collect::<Vec<_>>();
         let mut on_probe_failure = |failure: &str| progress.readiness_failure(failure);
         match runtime.wait_ready(
             handle,
+            &watched,
             &process.endpoint,
             &process.readiness,
             readiness_bound,
@@ -982,12 +1044,19 @@ fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
                         FailurePhase::Readiness
                     }
                 };
+                // A watched process that exited is the failing process, not
+                // the one whose wait it ended.
+                let exited = if failure.kind == ReadinessFailureKind::Exited {
+                    spawned.exited_process(runtime)
+                } else {
+                    None
+                };
                 return Err(fail_with(
                     session,
                     runtime,
                     &spawned.started,
                     phase,
-                    Some(&process.id),
+                    Some(exited.as_deref().unwrap_or(&process.id)),
                     failure.message,
                     true,
                 )?);
@@ -1534,6 +1603,42 @@ mod tests {
         /// `spawn` and `ready` in call order.
         events: RefCell<Vec<&'static str>>,
         fail_first_readiness: bool,
+        /// Scripted serve-state answers, one per probe: whether every
+        /// process is engaged.
+        probe_answers: RefCell<VecDeque<bool>>,
+        /// Process groups whose status reports them exited.
+        exited: RefCell<Vec<u32>>,
+    }
+
+    impl serve_state::ServeStateProbe for FakeRuntime {
+        fn probe_serve(
+            &self,
+            _root: &std::path::Path,
+            _stack: &crate::execution::StackPlan,
+            _adapter_timeout: Duration,
+            input: inferlab_protocol::ProbeServeInput,
+        ) -> Result<inferlab_protocol::ProbeServeResult, InferlabError> {
+            self.events.borrow_mut().push("probe");
+            let engaged = self.probe_answers.borrow_mut().pop_front().unwrap_or(false);
+            Ok(inferlab_protocol::ProbeServeResult {
+                integration: inferlab_protocol::IntegrationIdentity {
+                    adapter_id: "fixture".to_owned(),
+                    adapter_version: "1".to_owned(),
+                    framework: "fixture".to_owned(),
+                    framework_version: "1".to_owned(),
+                },
+                processes: input
+                    .processes
+                    .iter()
+                    .map(|target| inferlab_protocol::ProbeServeProcessState {
+                        process: target.process.clone(),
+                        engaged,
+                        state: BTreeMap::new(),
+                        error: None,
+                    })
+                    .collect(),
+            })
+        }
     }
 
     impl ProcessLauncher for FakeRuntime {
@@ -1596,11 +1701,17 @@ mod tests {
     }
 
     impl ProcessObserver for FakeRuntime {
-        fn status(&self, _handle: &ProcessHandle) -> ProcessStatus {
+        fn status(&self, handle: &ProcessHandle) -> ProcessStatus {
             self.status_calls.set(self.status_calls.get() + 1);
+            let exited = match handle {
+                ProcessHandle::Local(handle) => {
+                    self.exited.borrow().contains(&handle.process_group)
+                }
+                _ => false,
+            };
             ProcessStatus {
                 queried: true,
-                alive: true,
+                alive: !exited,
                 error: None,
             }
         }
@@ -1634,6 +1745,7 @@ mod tests {
         fn wait_ready(
             &self,
             _handle: &ProcessHandle,
+            _watched: &[WatchedProcess<'_>],
             _endpoint: &ProcessEndpointPlan,
             _readiness: &ReadinessPlan,
             bound: &inferlab_runtime::operation_bound::OperationBound,
@@ -1797,6 +1909,8 @@ mod tests {
             residuals: BTreeMap::new(),
             events: RefCell::new(Vec::new()),
             fail_first_readiness: false,
+            probe_answers: RefCell::new(VecDeque::new()),
+            exited: RefCell::new(Vec::new()),
         };
 
         let result = start_with_runtime(
@@ -1853,6 +1967,8 @@ mod tests {
             residuals: BTreeMap::new(),
             events: RefCell::new(Vec::new()),
             fail_first_readiness: false,
+            probe_answers: RefCell::new(VecDeque::new()),
+            exited: RefCell::new(Vec::new()),
         };
         let record = start_with_runtime(
             root.path(),
@@ -1893,6 +2009,8 @@ mod tests {
             residuals: BTreeMap::new(),
             events: RefCell::new(Vec::new()),
             fail_first_readiness: false,
+            probe_answers: RefCell::new(VecDeque::new()),
+            exited: RefCell::new(Vec::new()),
         };
 
         start_with_runtime(
@@ -1939,6 +2057,8 @@ mod tests {
             residuals: BTreeMap::new(),
             events: RefCell::new(Vec::new()),
             fail_first_readiness,
+            probe_answers: RefCell::new(VecDeque::new()),
+            exited: RefCell::new(Vec::new()),
         }
     }
 
@@ -1966,6 +2086,181 @@ mod tests {
         );
         let bounds = runtime.readiness_bounds.borrow();
         assert!(bounds.windows(2).all(|pair| pair[0] == pair[1]));
+        Ok(())
+    }
+
+    /// The KV store leads the process order with the discovery process: both
+    /// spawn and are ready before any model rank spawns
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[test]
+    fn a_kv_store_is_ready_before_model_ranks_spawn() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(false);
+        runtime
+            .spawn_results
+            .borrow_mut()
+            .push_back(Ok(fake_handle(73)));
+        let mut resolved = resolved_with_discovery();
+        let mut store = process(8);
+        store.id = "kv-store".to_owned();
+        store.identity = ProcessIdentityPlan::KvStore {
+            process_role: inferlab_protocol::KvStoreProcessRole::KvStore,
+        };
+        store.allocation.devices = Vec::new();
+        store.allocation.model_locator = None;
+        store.allocation.model_locator_source = None;
+        resolved.server.kv_store = Some(crate::execution::KvStoreComponentPlan {
+            plan: inferlab_protocol::KvStorePlan {
+                publication_bound_ms: 0,
+                role_access: BTreeMap::new(),
+                backend: "mooncake".to_owned(),
+                implementation: "mooncake".to_owned(),
+                implementation_version: "1".to_owned(),
+                effective_settings: BTreeMap::new(),
+                ports: Vec::new(),
+                readiness: inferlab_protocol::ReadinessProbe::ProcessAlive,
+                render_inputs: Vec::new(),
+            },
+            process: store,
+        });
+
+        start_with_runtime(
+            root.path(),
+            resolved,
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
+
+        assert_eq!(
+            *runtime.events.borrow(),
+            [
+                "spawn", "spawn", "ready", "ready", "spawn", "spawn", "ready", "ready"
+            ]
+        );
+        Ok(())
+    }
+
+    fn resolved_with_serve_state_probe(readiness_timeout_seconds: u64) -> ResolvedExecution {
+        let mut resolved = resolved();
+        resolved.server.readiness_timeout_seconds = readiness_timeout_seconds;
+        resolved.server.serve_state_probe = Some(crate::execution::ServeStateProbePlan {
+            processes: vec![inferlab_protocol::ProbeServeTarget {
+                process: "worker".to_owned(),
+                role: "serve".to_owned(),
+                replica: 0,
+                endpoint: inferlab_protocol::EndpointAssignment {
+                    host: "engine.example".to_owned(),
+                    port: 50051,
+                },
+            }],
+            kv_store: None,
+            attempt_bound_seconds: 1,
+            adapter_timeout_seconds: 1,
+        });
+        resolved
+    }
+
+    /// Readiness waits until the integration reports every Engine engaged
+    /// with its store, and records every attempt
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[test]
+    fn readiness_waits_for_the_serve_state_probe_to_report_engaged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(false);
+        runtime.probe_answers.borrow_mut().extend([false, true]);
+
+        let record = start_with_runtime(
+            root.path(),
+            resolved_with_serve_state_probe(60),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
+
+        let events = runtime.events.borrow();
+        assert_eq!(events.iter().filter(|event| **event == "probe").count(), 2);
+        assert_eq!(events.last(), Some(&"probe"));
+        assert_eq!(
+            record
+                .serve_state_probes
+                .iter()
+                .map(|attempt| attempt.engaged)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+        Ok(())
+    }
+
+    /// A process that exits while the serve-state gate polls fails the start
+    /// at once, and the failure names that process
+    /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[test]
+    fn a_process_exit_during_the_serve_state_gate_fails_the_start_naming_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(false);
+        runtime.exited.borrow_mut().push(70);
+        let resolved = resolved_with_serve_state_probe(60);
+        let first = resolved
+            .server
+            .process_contexts()
+            .next()
+            .ok_or("the fixture has a process")?
+            .process
+            .id
+            .clone();
+        let started = std::time::Instant::now();
+
+        let error = start_with_runtime(
+            root.path(),
+            resolved,
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )
+        .err()
+        .ok_or("the start must fail")?
+        .to_string();
+
+        assert!(
+            error.contains(&format!(
+                "process {first:?} exited before the server became ready"
+            )),
+            "{error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            !runtime.events.borrow().contains(&"probe"),
+            "the gate stops before probing an exited server"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_that_never_engages_fails_readiness_and_rolls_back()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(false);
+
+        let result = start_with_runtime(
+            root.path(),
+            resolved_with_serve_state_probe(1),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        );
+
+        assert!(result.is_err());
+        assert!(
+            !runtime.terminated.borrow().is_empty(),
+            "started processes were cleaned up"
+        );
         Ok(())
     }
 
@@ -2114,6 +2409,8 @@ mod tests {
                 checks: Vec::new(),
             },
             server: ServerPlan {
+                prefix_publication_ms: 0,
+                stack_settings: BTreeMap::new(),
                 wait_for_devices: false,
                 id: "server".to_owned(),
                 case: Some(CasePlan {
@@ -2246,6 +2543,9 @@ mod tests {
                     prompt_cache_read_zero_representation: None,
                     replica_prefix_cache_resets: Vec::new(),
                 },
+                serve_state_probe: None,
+                shared_prefix_cache: false,
+                kv_store: None,
                 discovery: None,
             },
             measurements: None,

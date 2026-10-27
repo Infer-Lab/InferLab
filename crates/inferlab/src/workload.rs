@@ -27,7 +27,7 @@ pub(crate) use plan::{
     BenchCasePlan, BenchExecutionPlan, BenchPlan, BenchPrefixCacheConditioningPlan,
     BenchPreparationStep, ClientCommandPlan, ConditioningServingShape, EvalExecutionPlan, EvalPlan,
     LoadShape, MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan,
-    WorkloadServerAccess,
+    WorkloadServeStateProbe, WorkloadServerAccess,
 };
 pub(crate) use planning::{resolve_manual_bench, resolve_measurements, resolved_request_count};
 

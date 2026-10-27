@@ -24,6 +24,7 @@ inferlab-bench-runner = { path = "python/inferlab-bench-runner", editable = true
 inferlab-eval-runner = { path = "python/inferlab-eval-runner", editable = true }
 inferlab-gateway-dynamo = { path = "python/inferlab-gateway-dynamo", editable = true }
 inferlab-gateway-smg = { path = "python/inferlab-gateway-smg", editable = true }
+inferlab-kvstore = { path = "python/inferlab-kvstore", editable = true }
 inferlab-measurement-sdk = { path = "python/inferlab-measurement-sdk", editable = true }
 inferlab-integration-sglang = { path = "python/inferlab-integration-sglang", editable = true }
 inferlab-integration-specialized-engine = { path = "python/inferlab-integration-specialized-engine", editable = true }

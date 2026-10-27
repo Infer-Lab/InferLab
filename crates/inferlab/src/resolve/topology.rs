@@ -179,7 +179,7 @@ fn validate_discovery_and_registry_members(
                 });
             }
             match &discovery.readiness {
-                ReadinessProbe::Http { path } if is_absolute_origin_path(path) => {}
+                ReadinessProbe::Http { path, port: None } if is_absolute_origin_path(path) => {}
                 ReadinessProbe::ProcessAlive => {}
                 _ => {
                     return Err(InferlabError::AdapterSemantics {
@@ -264,7 +264,8 @@ fn validate_builtin_proxy_declaration(
         });
     }
     match readiness {
-        inferlab_protocol::ReadinessProbe::Http { path } if path == spec.healthcheck_path => {}
+        inferlab_protocol::ReadinessProbe::Http { path, port: None }
+            if path == spec.healthcheck_path => {}
         _ => {
             return Err(InferlabError::AdapterSemantics {
                 message: format!(
@@ -462,12 +463,21 @@ pub(super) fn links_for_node(links: &[ServeRoleLink], node: &str) -> Vec<ServeRo
         .collect()
 }
 
+/// The parenthesized declared-device origin of a role, or empty when the
+/// role derives its device count ([[RFC-0003:C-SERVE-PARALLELISM]]).
+pub(super) fn devices_origin_note(origins: &BTreeMap<String, String>, role_id: &str) -> String {
+    origins
+        .get(role_id)
+        .map_or_else(String::new, |origin| format!(" ({origin})"))
+}
+
 pub(super) fn expand_replica_requirements(
     integration: &str,
     plan: &PlanServeResult,
     placement: &PlacementBinding,
     server: &ServerDefinition,
     role_render_inputs: &BTreeMap<String, Vec<SuppliedRenderInput>>,
+    devices_origins: &BTreeMap<String, String>,
 ) -> Result<Vec<ProcessRequirement>, InferlabError> {
     let uses_explicit_replicas = uses_explicit_replica_placement(placement);
     let role_replica_counts = plan
@@ -564,8 +574,10 @@ pub(super) fn expand_replica_requirements(
         if uses_explicit_replicas && assigned_devices != replica.device_count as usize {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
-                    "placement assigns {assigned_devices} devices to replica {:?}, which requires {}",
-                    replica.id, replica.device_count
+                    "placement assigns {assigned_devices} devices to replica {:?}, which requires {}{}",
+                    replica.id,
+                    replica.device_count,
+                    devices_origin_note(devices_origins, &replica.role_id)
                 ),
             });
         }
@@ -702,13 +714,20 @@ pub(super) fn public_endpoint_requirement(
     })
 }
 
-fn public_endpoint_ports<'a>(
+/// The named ports of the process that serves the public endpoint. A fused
+/// Gateway/P/D Router is one process, so it serves both component plans'
+/// ports ([[RFC-0006:C-INTEGRATIONS]]).
+fn public_endpoint_ports(
     integration: &str,
     topology: ServeTopology,
-    plan: &'a PlanServeResult,
-) -> Result<&'a [String], InferlabError> {
+    plan: &PlanServeResult,
+) -> Result<Vec<String>, InferlabError> {
     if let Some(gateway) = &plan.gateway {
-        return Ok(&gateway.ports);
+        let mut ports = gateway.ports.clone();
+        if let Some(pd_router) = &plan.pd_router {
+            ports.extend(pd_router.ports.iter().cloned());
+        }
+        return Ok(ports);
     }
     if topology == ServeTopology::Single {
         let role = plan
@@ -724,7 +743,7 @@ fn public_endpoint_ports<'a>(
             .replicas
             .iter()
             .find(|replica| replica.role_id == role.id && replica.replica_index == 0)
-            .map(|replica| replica.ports.as_slice())
+            .map(|replica| replica.ports.clone())
             .ok_or_else(|| InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {integration:?} did not declare the public Engine replica"
@@ -933,7 +952,7 @@ pub(super) fn validate_serve_graph(
     validate_workload_endpoint(
         integration,
         public_endpoint_declaration(integration, topology, plan)?,
-        public_endpoint_ports(integration, topology, plan)?,
+        &public_endpoint_ports(integration, topology, plan)?,
     )?;
     validate_discovery_and_registry_members(
         integration,
@@ -1385,6 +1404,7 @@ mod tests {
         };
         let readiness = ReadinessProbe::Http {
             path: "/healthcheck".to_owned(),
+            port: None,
         };
         // The matching declaration passes.
         assert!(
@@ -1534,6 +1554,7 @@ mod tests {
             id: id.to_owned(),
             kind,
             replica_count: 1,
+            devices: None,
             parallelism: Parallelism::default(),
             settings: BTreeMap::new(),
         };
@@ -1570,6 +1591,7 @@ mod tests {
                 primary_ports: vec!["master".to_owned()],
                 primary_readiness: ReadinessProbe::Http {
                     path: "/v1/models".to_owned(),
+                    port: None,
                 },
                 worker_readiness: ReadinessProbe::ProcessAlive,
                 capture_target: None,
@@ -1590,8 +1612,10 @@ mod tests {
         };
         let readiness = ReadinessProbe::Http {
             path: "/healthcheck".to_owned(),
+            port: None,
         };
         let plan = PlanServeResult {
+            stack_settings: BTreeMap::new(),
             integration: IntegrationIdentity {
                 adapter_id: format!("inferlab-{framework}"),
                 adapter_version: "1".to_owned(),
@@ -1660,6 +1684,8 @@ mod tests {
                 render_source: RenderSource::ControlPlane,
                 co_rendering,
             }),
+            kv_store: None,
+            serve_state_probe: false,
         };
         (requested_roles, plan)
     }

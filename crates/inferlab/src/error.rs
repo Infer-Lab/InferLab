@@ -270,7 +270,7 @@ pub enum InferlabError {
     AdapterProtocolVersion { message: String },
 
     #[error(
-        "machine binding {machine:?} provides {available} devices but the server requires {required}{held}"
+        "machine binding {machine:?} provides {available} devices but the server requires {required}{declared}{held}"
     )]
     InsufficientDevices {
         machine: String,
@@ -279,6 +279,9 @@ pub enum InferlabError {
         /// The pool devices resolution skipped as held, with their holders,
         /// or empty ([[RFC-0002:C-LOCAL-PLACEMENT]]).
         held: String,
+        /// The role's declared `devices` and its declaration layer, or empty
+        /// when the count was derived ([[RFC-0003:C-SERVE-PARALLELISM]]).
+        declared: String,
     },
 
     #[error("closed-loop recipe failed; record {record_id}")]

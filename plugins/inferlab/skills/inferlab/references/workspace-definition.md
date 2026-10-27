@@ -25,8 +25,8 @@ readiness_timeout_seconds = 900
 [servers.example.settings]
 max_model_len = 8192
 
-[servers.example.cases.tp2.parallelism.outer]
-tensor_parallel_size = 2
+[servers.example.cases.tp2]
+devices = 2
 
 [evals.smoke]
 kind = "openai-smoke"
@@ -180,6 +180,23 @@ Postprocess steps run only during image assembly, after installation and
 before the checks. Use [Workspaces and stacks](workspaces-and-stacks.md) for
 installation, confirmation, and lock operations.
 
+A stack may also declare `settings`: facts of the framework or Engine
+implementation it realizes, shared by every server and role that uses the
+stack. Its integration defines and validates them, fills its own defaults, and
+returns the effective values, which dry-run output and the server record keep.
+An integration that defines no stack setting rejects any declared one; today
+only the [Specialized Engine](https://github.com/Infer-Lab/InferLab/blob/main/docs/specialized-engine.md) defines one,
+`engine_command`:
+
+```toml
+[stacks.engine]
+integration = "specialized-engine"
+pixi_environment = "serving"
+
+[stacks.engine.settings]
+engine_command = ["example-token-engine", "serve"]
+```
+
 ## Prefill/decode servers
 
 A P/D server uses the canonical Engine roles `prefill` and `decode`. It selects
@@ -241,13 +258,25 @@ direct `single` server cannot acquire a Gateway from a case or invocation
 patch, while a routed `single` server declares `gateway_backend` on its base
 and may replace only that identity later.
 
+A routed `single` server may declare `replicas` greater than 1 on its `serve`
+role when its integration supports it, and a server with a Gateway may declare
+`gateway_settings`, a table its integration types and validates; a declared
+entry the integration does not recognize fails planning. A server with a P/D
+Router may likewise declare `pd_router_settings`, where SMG-backed
+integrations take `prefill_policy` and `decode_policy`; on a `prefill_decode`
+server, routing policies belong there rather than in `gateway_settings`.
+Cases and `--set` patch both tables like other settings.
+
 Selecting `dynamo` — `gateway_backend = "dynamo"` on a vLLM routed `single`
 server, or both backend fields on a vLLM `prefill_decode` server with
 `kv_transfer = "nixl"` — runs the Dynamo frontend and `dynamo.vllm` workers,
 and InferLab also starts one etcd discovery process beside the Gateway for that
 server. The stack environment must provide the `ai-dynamo` distribution and an
-`etcd` executable. Dynamo and etcd listen only on IP addresses, so bind the
-machines that run Dynamo processes by IP. Dynamo parses a worker's control port
+`etcd` executable. Dynamo and etcd listen only on IP addresses and advertise
+them to processes on other machines, so a machine bound by hostname renders as
+the first address that hostname resolves to other than loopback; a hostname
+that does not resolve, or resolves only to loopback, is rejected before launch.
+Dynamo parses a worker's control port
 as a signed 16-bit value, so those machines must offer ports no higher than
 32767. The vLLM `reasoning_parser` setting renders as Dynamo's reasoning
 parser. The vLLM API-server settings `tool_call_parser`,
@@ -255,6 +284,82 @@ parser. The vLLM API-server settings `tool_call_parser`,
 the Dynamo frontend answers requests and reports cache-read usage itself — and
 so are their options, and Dynamo's own discovery and listener options and
 variables, anywhere in `extra_args` or `extra_env`.
+
+## Devices and parallelism
+
+`devices` is the whole-replica device count of each model-serving role. It
+may be declared on the server, a canonical role, a case, a case role, or
+with `--set`, and a role value at any layer wins over a common value. When
+`devices` is declared it is the only placement authority:
+
+- with no parallelism declared, the integration renders pure tensor
+  parallelism of that width;
+- with a declared layout, the integration fills omitted outer tensor
+  parallelism to match `devices` and rejects a layout that its framework
+  would place on a different number of devices.
+
+```toml
+[servers.example]
+devices = 8
+
+[servers.example.parallelism.attention]
+data_parallel_size = 8
+```
+
+Without `devices`, the integration derives the count from `parallelism`.
+
+The `parallelism` components map onto framework options, and each integration
+reads them its own way. For example, vLLM multiplies outer tensor parallelism
+by attention data parallelism, while SGLang treats outer tensor parallelism as
+the whole world. The [backend support matrix](backend-support.md) states each
+reading. The components are deprecated in favor of `devices` plus framework
+layout settings and remain accepted. Keep attention data parallelism in
+`parallelism.attention.data_parallel_size` rather than in `extra_args`: it
+is the only source InferLab uses to prime and route every data-parallel rank.
+
+## External KV store
+
+A `single` server may run one external KV store that its model-serving
+processes share. Declare it on the server base; a case or `--set` may patch
+its settings but cannot add it or change its backend:
+
+```toml
+[servers.example.kv_store]
+backend = "mooncake"
+
+[servers.example.kv_store.settings]
+eviction_high_watermark_ratio = 0.9
+default_kv_lease_ttl_ms = 10000
+```
+
+InferLab runs the store as its own process beside the Gateway, or beside the
+first replica on a direct server, with no devices. It starts the store first,
+waits for its readiness, gives every Engine its address, stops it last, and
+fails the server if it exits. The `mooncake` backend runs `mooncake_master`
+from the stack environment and exchanges transfer metadata peer to peer, so no
+metadata service runs. Other master flags pass through `settings.extra_args`.
+
+Controlled cache starts stay honest with a store: a cold reset must also clear
+the store, so vLLM resets with `reset_external=true`, which wipes the store,
+while SGLang declares no reset with a store, because `/flush_cache` leaves its
+HiCache storage backend intact, so its cold and primed starts are rejected at
+planning. Each integration declares how each role uses the store: `read_write`
+when its processes read matching prefixes and write the ones they compute
+before the request completes, or `write` when they only write. When every
+cache-owning role — `serve`, or `prefill` on a prefill/decode server — reads
+and writes, the server shares one prefix cache, and a primed start sends one
+conditioning request for the whole server. The Specialized Engine declares
+`serve` or `prefill` as `read_write` and `decode` as `write`; vLLM and SGLang
+declare none and keep their per-rank conditioning. A store applies to `single`
+and `prefill_decode` servers; only the Specialized Engine consumes it on
+`prefill_decode` so far, and the others reject it there.
+
+How much memory each Engine contributes stays an Engine setting, because the
+frameworks size it differently: vLLM's `kv_store_global_segment_size` is per
+worker rank, SGLang's is per instance and split across its ranks, and a
+Specialized Engine sizes its own tier. The
+[backend support matrix](backend-support.md) lists which integrations consume
+a store.
 
 ## Context parallelism
 
@@ -268,7 +373,8 @@ context_parallel_size = 2
 
 The integration lowers the declared value; it is not an engine flag spelling.
 Context parallelism on a `single` server never adds devices; only a
-`prefill_decode` prefill role may grow its device count. Each backend's
+`prefill_decode` prefill role without `devices` may grow its device count.
+With `devices` declared, context parallelism must fit within it. Each backend's
 lowering and qualification live in the [backend support matrix](backend-support.md).
 
 Model- and hardware-dependent applicability (MLA-only prefill CP, attention
@@ -311,9 +417,18 @@ Published workspaces should provide this shape as
 `.inferlab/local.example.toml`; operators copy it to the ignored local file and
 replace the generic values.
 
-A workflow selects its placement from an explicit `--placement`, then the
-local `default_placement`, then the sole declared placement; more than one
-remaining candidate is ambiguous and fails naming them.
+A workflow selects its placement from an explicit `--placement`, then, for a
+recipe run, the recipe's entry in the local `recipe_placements`, then the local
+`default_placement`, then the sole declared placement; more than one remaining
+candidate is ambiguous and fails naming them. `recipe_placements` keeps a
+recipe's placement a machine-local fact while letting the recipe reproduce its
+run without flags. Each entry must name a declared recipe and placement;
+otherwise loading the workspace fails naming the entry:
+
+```toml
+[recipe_placements]
+qualify-two-replicas = "two-replicas"
+```
 
 A `model_weights` binding may declare a fallback `locator`, per-machine
 `machine_locators`, or both; each model-serving rank uses its machine's
@@ -561,6 +676,19 @@ stay git-ignored and untracked.
 A workload suite lists named Evals and Benches and may select one Eval as its
 gate. A recipe selects one server and one workload suite; it does not duplicate
 their definitions. Recipe execution preserves the declared workload order.
+
+A recipe may also pin one of its server's cases, so the run does not depend on
+`--case` or the server's `default_case`; an explicit `--case` still takes
+precedence, and the record names which one selected the case. Its placement is
+chosen in local bindings through `recipe_placements`
+([Local bindings](#local-bindings)).
+
+```toml
+[recipes.qualify-two-replicas]
+server = "engine"
+workload_suite = "qualify"
+case = "two-replicas"
+```
 
 Invocation patches may address only the selected server and measurements in
 that suite. Read [Invocation patches](execution-authoring.md#invocation-patches)

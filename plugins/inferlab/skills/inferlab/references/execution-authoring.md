@@ -189,7 +189,7 @@ later assignments win.
 inferlab serve start example \
   --set server.readiness_timeout_seconds=1800 \
   --set server.settings.max_model_len=32768 \
-  --set server.roles.serve.parallelism.outer.tensor_parallel_size=4 \
+  --set server.devices=4 \
   --dry-run
 
 inferlab recipe run qualify \

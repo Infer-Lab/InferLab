@@ -1,8 +1,8 @@
 use super::super::FactSection;
 use crate::workspace::{
     BenchCacheStart, BenchDefinition, BenchImageSampling, BenchImagesDeclaration, BenchOutputStop,
-    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
-    BenchSharedSystemContent, BenchTokenSelector, RequestRate,
+    BenchPrefixLength, BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRequestSource,
+    BenchSessionSource, BenchSharedSystemContent, BenchTokenSelector, RequestRate,
 };
 
 pub(crate) struct DefinitionDetail {
@@ -403,11 +403,11 @@ pub(crate) fn token_selector(selector: &BenchTokenSelector) -> String {
     }
 }
 pub(crate) fn prefix_summary(prefix: Option<&BenchPrefixSharing>) -> String {
-    match prefix {
-        Some(BenchPrefixSharing::Tokens {
+    match prefix.map(BenchPrefixSharing::length) {
+        Some(BenchPrefixLength::Tokens {
             shared_prefix_tokens,
         }) => format!("{shared_prefix_tokens} tok"),
-        Some(BenchPrefixSharing::Ratio {
+        Some(BenchPrefixLength::Ratio {
             shared_prefix_ratio,
         }) => format!("{}%", shared_prefix_ratio * 100.0),
         None => "none".to_owned(),

@@ -81,8 +81,10 @@ impl RecipeRecord {
     /// hard cut: version-3 records (products 0.10 and 0.11) embed a
     /// pre-cut resolved execution and record references. Version 5 names
     /// the local workspace definition files composed into the run
-    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
-    pub(crate) const SCHEMA_VERSION: u32 = 5;
+    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). Version 6 carries each role's
+    /// declared `devices` in the embedded resolved execution
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]).
+    pub(crate) const SCHEMA_VERSION: u32 = 6;
 }
 
 pub(crate) fn run(

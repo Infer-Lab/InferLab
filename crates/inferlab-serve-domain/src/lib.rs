@@ -6,9 +6,9 @@ use inferlab_profiler::plan::{
 use inferlab_protocol::{
     AuxiliaryModelKind, CaptureMechanism, DiscoveryBinding, DiscoveryProcessRole,
     DiscoveryRequirement, EndpointAssignment, EndpointProtocol, FrontendComponents,
-    FrontendProcessRole, GatewayPlan, Parallelism, PdRouterPlan, PlanServeResult, ReadinessProbe,
-    RenderedServeProcess, ServeProcessAllocation, ServeRoleKind, ServeRoleLink, SettingValue,
-    SuppliedRenderInput,
+    FrontendProcessRole, GatewayPlan, KvStorePlan, KvStoreProcessRole, Parallelism, PdRouterPlan,
+    PlanServeResult, ReadinessProbe, RenderedServeProcess, ServeProcessAllocation, ServeRoleKind,
+    ServeRoleLink, SettingValue, SuppliedRenderInput,
 };
 use inferlab_runtime::operation_bound::OperationTimingEvidence;
 use inferlab_runtime::plan::{
@@ -111,6 +111,10 @@ pub enum ProcessIdentityPlan {
         process_role: DiscoveryProcessRole,
         components: DiscoveryBinding,
     },
+    /// The server's external KV store ([[RFC-0003:C-SERVE-KV-STORE]]).
+    KvStore {
+        process_role: KvStoreProcessRole,
+    },
 }
 
 impl ProcessPlan {
@@ -118,7 +122,9 @@ impl ProcessPlan {
     pub const fn rank(&self) -> Option<u32> {
         match &self.identity {
             ProcessIdentityPlan::ModelRank { rank, .. } => Some(*rank),
-            ProcessIdentityPlan::Frontend { .. } | ProcessIdentityPlan::Discovery { .. } => None,
+            ProcessIdentityPlan::Frontend { .. }
+            | ProcessIdentityPlan::Discovery { .. }
+            | ProcessIdentityPlan::KvStore { .. } => None,
         }
     }
 }
@@ -303,6 +309,12 @@ pub enum ProcessRequirementIdentity {
         requirement: Box<DiscoveryRequirement>,
         render_inputs: Vec<SuppliedRenderInput>,
     },
+    /// The server's external KV store; placed beside the Gateway or the first
+    /// serve replica's rank zero ([[RFC-0003:C-SERVE-KV-STORE]]).
+    KvStore {
+        plan: Box<KvStorePlan>,
+        render_inputs: Vec<SuppliedRenderInput>,
+    },
 }
 
 #[derive(Clone)]
@@ -399,7 +411,8 @@ impl ProcessRequirement {
         match &self.identity {
             ProcessRequirementIdentity::ModelRank { role_id, .. } => role_id,
             ProcessRequirementIdentity::Frontend { .. }
-            | ProcessRequirementIdentity::Discovery { .. } => "gateway",
+            | ProcessRequirementIdentity::Discovery { .. }
+            | ProcessRequirementIdentity::KvStore { .. } => "gateway",
         }
     }
 }
@@ -518,6 +531,13 @@ impl ResolvedProcessAllocation {
     pub fn wire(&self) -> &ServeProcessAllocation {
         &self.wire
     }
+    /// Hands every model rank the KV store's endpoint once the store is
+    /// placed ([[RFC-0003:C-SERVE-KV-STORE]]).
+    pub fn bind_kv_store(&mut self, store: &EndpointAssignment) {
+        if let ServeProcessAllocation::ModelRank { kv_store, .. } = &mut self.wire {
+            *kv_store = Some(Box::new(store.clone()));
+        }
+    }
     pub fn runtime_cache(&self) -> &RuntimeCachePlan {
         &self.runtime_cache
     }
@@ -553,43 +573,48 @@ impl ResolvedProcessAllocation {
         match &self.wire {
             ServeProcessAllocation::ModelRank { process, .. }
             | ServeProcessAllocation::Frontend { process, .. }
-            | ServeProcessAllocation::Discovery { process, .. } => process,
+            | ServeProcessAllocation::Discovery { process, .. }
+            | ServeProcessAllocation::KvStore { process, .. } => process,
         }
     }
     pub fn machine(&self) -> &str {
         match &self.wire {
             ServeProcessAllocation::ModelRank { machine, .. }
             | ServeProcessAllocation::Frontend { machine, .. }
-            | ServeProcessAllocation::Discovery { machine, .. } => machine,
+            | ServeProcessAllocation::Discovery { machine, .. }
+            | ServeProcessAllocation::KvStore { machine, .. } => machine,
         }
     }
     pub fn devices(&self) -> &[u32] {
         match &self.wire {
             ServeProcessAllocation::ModelRank { devices, .. }
             | ServeProcessAllocation::Frontend { devices, .. }
-            | ServeProcessAllocation::Discovery { devices, .. } => devices,
+            | ServeProcessAllocation::Discovery { devices, .. }
+            | ServeProcessAllocation::KvStore { devices, .. } => devices,
         }
     }
     pub fn endpoint(&self) -> Option<&EndpointAssignment> {
         match &self.wire {
             ServeProcessAllocation::ModelRank { endpoint, .. } => endpoint.as_ref(),
             ServeProcessAllocation::Frontend { endpoint, .. }
-            | ServeProcessAllocation::Discovery { endpoint, .. } => Some(endpoint),
+            | ServeProcessAllocation::Discovery { endpoint, .. }
+            | ServeProcessAllocation::KvStore { endpoint, .. } => Some(endpoint),
         }
     }
     pub fn ports(&self) -> &BTreeMap<String, EndpointAssignment> {
         match &self.wire {
             ServeProcessAllocation::ModelRank { ports, .. }
             | ServeProcessAllocation::Frontend { ports, .. }
-            | ServeProcessAllocation::Discovery { ports, .. } => ports,
+            | ServeProcessAllocation::Discovery { ports, .. }
+            | ServeProcessAllocation::KvStore { ports, .. } => ports,
         }
     }
     pub fn model_locator(&self) -> Option<&str> {
         match &self.wire {
             ServeProcessAllocation::ModelRank { model_locator, .. } => Some(model_locator),
-            ServeProcessAllocation::Frontend { .. } | ServeProcessAllocation::Discovery { .. } => {
-                None
-            }
+            ServeProcessAllocation::Frontend { .. }
+            | ServeProcessAllocation::Discovery { .. }
+            | ServeProcessAllocation::KvStore { .. } => None,
         }
     }
 }

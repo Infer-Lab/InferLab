@@ -56,8 +56,23 @@ class SglangServeSettings(BaseModel):
     trust_remote_code: bool = False
     enable_cache_report: bool = False
     enable_metrics: bool = False
+    # The memory each SGLang instance contributes to a declared KV store,
+    # split across its ranks by SGLang ([[RFC-0003:C-SERVE-KV-STORE]]).
+    kv_store_global_segment_size: str | int | None = None
+    kv_store_protocol: str | None = None
+    kv_store_device_name: str | None = None
     extra_args: list[str] | None = None
     extra_env: dict[str, str] | None = None
+
+
+# Flags the managed argv owns once the server declares a KV store; without
+# one, an operator may still run HiCache through `extra_args`.
+_KV_STORE_OWNED_OPTIONS: set[str] = {
+    "--enable-hierarchical-cache",
+    "--enable-hicache",
+    "--hicache-storage-backend",
+    "--hicache-storage-backend-extra-config",
+}
 
 
 def _settings(values: dict[str, SettingValue]) -> SglangServeSettings:

@@ -62,7 +62,10 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
         if let Some(backend) = &server.pd_router_backend {
             require_nonempty("server P/D Router backend", id, backend)?;
         }
-        validate_parallelism("server", id, &server.parallelism)?;
+        if let Some(kv_store) = &server.kv_store {
+            require_nonempty("server KV store backend", id, &kv_store.backend)?;
+        }
+        validate_parallelism("server", id, &server.parallelism, server.devices)?;
         crate::workspace::auxiliary_models::validate_auxiliary_models(
             &format!("server {id:?}"),
             &server.model,
@@ -84,7 +87,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
                     "serve role {role_id:?} replica count must be nonzero"
                 ));
             }
-            validate_parallelism("serve role", role_id, &role.parallelism)?;
+            validate_parallelism("serve role", role_id, &role.parallelism, role.devices)?;
             validate_profiler_escapes(&format!("server {id:?} role {role_id:?}"), &role.profiler)?;
             validate_settings(&format!("server {id:?} role {role_id:?}"), &role.settings)?;
         }
@@ -143,6 +146,11 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
                     "server case {case_id:?} cannot add gateway_backend because the server base does not declare a Gateway"
                 ));
             }
+            if case.kv_store.is_some() && server.kv_store.is_none() {
+                return invalid(format!(
+                    "server case {case_id:?} cannot add kv_store because the server base does not declare one"
+                ));
+            }
             if case.pd_router_backend.is_some() && server.pd_router_backend.is_none() {
                 return invalid(format!(
                     "server case {case_id:?} cannot add pd_router_backend because the server base does not declare a P/D Router"
@@ -154,7 +162,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
             if let Some(backend) = &case.pd_router_backend {
                 require_nonempty("server case P/D Router backend", case_id, backend)?;
             }
-            validate_parallelism("server case", case_id, &case.parallelism)?;
+            validate_parallelism("server case", case_id, &case.parallelism, case.devices)?;
             validate_synthetic_acceptance(
                 root,
                 &format!("server case {case_id:?}"),
@@ -169,7 +177,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
                         "server case {case_id:?} role {role_id:?} replica count must be nonzero"
                     ));
                 }
-                validate_parallelism("server case role", role_id, &role.parallelism)?;
+                validate_parallelism("server case role", role_id, &role.parallelism, role.devices)?;
                 validate_settings(
                     &format!("server case {case_id:?} role {role_id:?}"),
                     &role.settings,
@@ -309,7 +317,11 @@ fn validate_parallelism(
     owner: &str,
     id: &str,
     parallelism: &Parallelism,
+    devices: Option<u32>,
 ) -> Result<(), InferlabError> {
+    if devices == Some(0) {
+        return invalid(format!("{owner} {id:?} devices must be nonzero"));
+    }
     let values = parallelism.field_values();
     if let Some((field, _)) = values.into_iter().find(|(_, value)| *value == Some(0)) {
         return invalid(format!(

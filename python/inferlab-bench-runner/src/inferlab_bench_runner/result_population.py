@@ -167,3 +167,45 @@ def population_identity_error(
                     f"conversation_id {conversation_id!r}, expected {expected_id!r}"
                 )
     return None
+
+
+def shared_prefix_by_session(
+    request: BenchClientRequest,
+) -> tuple[dict[int, tuple[int, int | None]] | None, str | None]:
+    """Each profiling request's planned shared-prefix tokens and prefix group,
+    by AIPerf session number, for a generated population with prefix geometry,
+    or why the population evidence they come from could not be read."""
+    population = request.population
+    source_input = request.definition.request_source
+    if population is None or source_input is None:
+        return None, None
+    source = source_input.root
+    if (
+        not isinstance(
+            source, (BenchRequestSourceInputRandom, BenchRequestSourceInputRandomMixture)
+        )
+        or source.prefix_sharing is None
+    ):
+        return None, None
+    evidence_path = Path(population.evidence_path)
+    try:
+        rows = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as error:
+        return None, f"population evidence {evidence_path} is unreadable: {error}"
+    shared: dict[int, tuple[int, int | None]] = {}
+    offset = request.case.warmup_request_count
+    for population_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        value = row.get("resolved_shared_prefix_tokens")
+        group = row.get("prefix_group")
+        if population_index >= offset and isinstance(value, int) and not isinstance(value, bool):
+            shared[population_index - offset] = (
+                value,
+                group if isinstance(group, int) and not isinstance(group, bool) else None,
+            )
+    return shared or None, None

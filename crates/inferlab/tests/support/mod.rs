@@ -379,6 +379,16 @@ fn shared_lease_dir() -> PathBuf {
     shared_dir("port-leases")
 }
 
+/// A signalled process that InferLab does not parent is reaped by init on
+/// its own schedule, so a zombie has exited even while `/proc` lists it.
+pub(crate) fn has_exited(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(") ")
+            .and_then(|(_, rest)| rest.chars().next())
+            .is_some_and(|state| matches!(state, 'Z' | 'X'))
+    })
+}
+
 fn pid_is_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }

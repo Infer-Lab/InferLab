@@ -107,7 +107,9 @@ cache = { start = "cold" }   # warmup drains, then reset, then profiling
 - `cold` requires the selected integration/topology to expose a prefix-cache
   reset. `primed` additionally requires an exact flat or rendered-chat
   `prefix_sharing` source; after reset, InferLab sends the maximum canonical
-  shared prefix once with one output token, then releases profiling. A rendered
+  shared prefix once with one output token, then releases profiling. With
+  `groups`, every group's canonical prefix is sent, the first group first, and
+  any store publication wait follows the last. A rendered
   prefix that cannot tokenize exactly as an independent conditioning prompt
   fails preparation.
 - Under attention data parallelism, conditioning fans out one recorded request
@@ -160,6 +162,21 @@ profiling request, and reports:
   distribution statistics;
 - `prompt_cache_read_ratio = sum(cache_read_tokens) / sum(prompt_tokens)`.
 
+A `cold` or `primed` case over a generated population with `prefix_sharing`
+also records each measured request's reuse opportunity: how many of its
+shared-prefix tokens an earlier request of its prefix group sent after the
+reset (conditioning included), and whether, when it was sent, that prefix was `first` (nobody had
+sent it), `in_flight` (sent, but not yet published), or `available` (an earlier
+request's first output token plus the store's declared publication bound had
+passed). From these come `available_miss_ratio`, the share of `available`
+requests that read no cached tokens, and `available_reuse_efficiency`, cached
+tokens read by `available` requests over their reusable tokens; both are
+omitted when no request is `available`. On a server whose prefix cache is
+shared, an `available` miss means the cache did not serve what it could; with
+several cache-owning targets it can also mean routing sent the request to a
+target that never saw the prefix. Engine-specific ceilings such as block
+rounding are left to whoever reads the per-request evidence.
+
 The endpoint must declare the backend cache-read capability; the
 [backend support matrix](backend-support.md) names the server setting each
 backend needs, and a prefill/decode frontend declares it only when both roles
@@ -189,6 +206,14 @@ metrics export and the setting or port each needs. A successful
 first of AIPerf's per-request records, run summary, and scraped server metrics
 that yields one and recording which; other request sources retain the raw
 server metrics but do not publish those two SPEED-specific scalars.
+
+Any serving Bench whose backend reports accepted and rejected prediction tokens
+in each response's `usage.completion_tokens_details` — SMG does for a
+speculatively decoding Specialized Engine — also publishes
+`draft_accepted_tokens`, `draft_tokens`, and `draft_acceptance_rate`, the
+token-weighted share of drafted tokens the target model accepted across the
+profiling window. They are omitted when no request reports drafts. Usage
+carries no verify-step count, so no acceptance length is derived from it.
 
 Set `artifact_level = "performance"` to skip AIPerf's full raw
 request/response export while keeping the normalized per-request records and
@@ -278,6 +303,24 @@ population. All entries use nested prefixes of one canonical stream, including
 distributed ISL. Both `0.0` (independent flat prompts) and `1.0` (full-prompt
 sharing) are valid. This is prompt geometry, not a requested or observed cache
 hit percentage; backend cache-read metrics remain separate evidence.
+
+Production reuse usually comes from many distinct prefixes — system prompts,
+tool definitions, few-shot blocks — a few of them hot and most rarely used.
+`groups` splits the population over that many independent canonical prefixes,
+and `popularity` sets how often each is drawn:
+
+```toml
+prefix_sharing = { shared_prefix_tokens = 4096, groups = 32, popularity = { zipf = 1.1 } }
+```
+
+Each entry draws its group under the Bench seed, independently of its input
+length; the group of rank `k` (counting from one) is drawn with probability
+proportional to `1 / k^s`. `popularity` defaults to `uniform`; a Zipf exponent
+must be positive and needs at least two groups. Entries of different groups
+share no controlled prefix, and one group reproduces the ungrouped population.
+Population evidence records each entry's `prefix_group`, and the prefix
+geometry summary records `group_entries`, the entries drawn for each group. A
+replayed population brings its own prefixes and cannot declare either key.
 
 Use `random_mixture` when one Bench should sample several exact ISL/OSL pairs:
 

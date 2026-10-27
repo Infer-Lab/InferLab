@@ -66,6 +66,7 @@ fn compose_measurements(
     synthetic_acceptance: bool,
     public_endpoint: &EndpointPlan,
     conditioning_serving: ConditioningServingShape,
+    serve_state_probe: Option<crate::workload::WorkloadServeStateProbe>,
     allocations: &[ResolvedProcessAllocation],
 ) -> Result<Option<MeasurementPlan>, InferlabError> {
     if matches!(request.workflow, Workflow::ServeStart) {
@@ -156,6 +157,7 @@ fn compose_measurements(
                 .as_ref()
                 .map(crate::workload::WorkloadHttpAction::from_wire),
             conditioning_serving,
+            serve_state_probe,
             synthetic_acceptance,
             capture_ids: request.captures,
             command_env: &command_env,
@@ -230,6 +232,26 @@ pub(crate) fn resolve<C: AdapterClient>(
         &planned_stage,
         &rendered_stage,
     )?;
+    let serve_state_probe = serve_state_probe_plan(
+        workspace.local.adapter.process_timeout().as_secs(),
+        &stack.integration,
+        planned,
+        rendered_stage.allocations(),
+        effective.readiness_attempt_timeout_seconds,
+        request.image.is_some() || request.external.is_some(),
+    )?;
+    let workload_serve_state_probe = serve_state_probe.as_ref().map(|plan| {
+        crate::workload::WorkloadServeStateProbe::new(
+            &stack.integration,
+            &stack.pixi_environment,
+            inferlab_protocol::ServeModelInput {
+                id: server.model.clone(),
+                served_name: selection.model.served_name.clone(),
+            },
+            effective.topology,
+            plan,
+        )
+    });
     let conditioning_serving = ConditioningServingShape::resolve(
         planned.gateway.is_some(),
         planned.roles.iter().map(|role| {
@@ -244,6 +266,10 @@ pub(crate) fn resolve<C: AdapterClient>(
                     .unwrap_or(1),
             )
         }),
+    )
+    .shared(
+        integration::shared_prefix_cache(planned),
+        integration::prefix_publication_ms(planned),
     );
     let measurements = compose_measurements(
         workspace,
@@ -253,12 +279,14 @@ pub(crate) fn resolve<C: AdapterClient>(
         effective.synthetic_acceptance.is_some(),
         &public_endpoint,
         conditioning_serving,
+        workload_serve_state_probe,
         rendered_stage.allocations(),
     )?;
     let ProcessHierarchy {
         roles: role_plans,
         frontend,
         discovery,
+        kv_store,
     } = assemble_process_hierarchy(&stack.integration, &effective, &planned_stage, processes)?;
     let mut execution = ResolvedExecution {
         workflow: request.workflow,
@@ -314,8 +342,13 @@ pub(crate) fn resolve<C: AdapterClient>(
                     },
                 })
                 .collect(),
+            serve_state_probe,
+            shared_prefix_cache: integration::shared_prefix_cache(planned),
+            prefix_publication_ms: integration::prefix_publication_ms(planned),
+            stack_settings: planned.stack_settings.clone(),
             frontend,
             discovery,
+            kv_store,
             profiler_escapes: profiler_escapes_plan(server),
             model: ModelPlan {
                 id: server.model.clone(),
@@ -388,4 +421,122 @@ pub(crate) fn current_environment() -> Result<BTreeMap<String, String>, Inferlab
             Ok((key, value))
         })
         .collect()
+}
+
+/// Freeze the serve-state probe the integration declared: every model-serving
+/// rank-zero process and the store endpoint it was rendered with
+/// ([[RFC-0003:C-SERVE-KV-STORE]]). The probe runs through the workspace
+/// adapter environment, so an image-launched server cannot declare one yet.
+fn serve_state_probe_plan(
+    adapter_timeout_seconds: u64,
+    integration: &str,
+    planned: &inferlab_protocol::PlanServeResult,
+    allocations: &[inferlab_serve_domain::ResolvedProcessAllocation],
+    attempt_bound_seconds: u64,
+    image_launched: bool,
+) -> Result<Option<crate::execution::ServeStateProbePlan>, InferlabError> {
+    if !planned.serve_state_probe {
+        return Ok(None);
+    }
+    let Some(store_plan) = planned
+        .kv_store
+        .as_ref()
+        .filter(|store| !store.role_access.is_empty())
+    else {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {integration:?} declared a serve-state probe without a KV store that a role uses"
+            ),
+        });
+    };
+    if image_launched {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "integration {integration:?} declares a serve-state probe, which image-launched servers do not support yet"
+            ),
+        });
+    }
+    let mut processes = Vec::new();
+    let mut kv_store = None;
+    for allocation in allocations {
+        if let inferlab_protocol::ServeProcessAllocation::ModelRank {
+            process,
+            role,
+            replica,
+            rank: 0,
+            endpoint: Some(endpoint),
+            kv_store: store,
+            ..
+        } = allocation.wire()
+            && store_plan.role_access.contains_key(role)
+        {
+            processes.push(inferlab_protocol::ProbeServeTarget {
+                process: process.clone(),
+                role: role.clone(),
+                replica: *replica,
+                endpoint: endpoint.clone(),
+            });
+            if let Some(store) = store {
+                kv_store = Some((**store).clone());
+            }
+        }
+    }
+    if processes.is_empty() {
+        return Err(InferlabError::AdapterSemantics {
+            message: format!(
+                "integration {integration:?} declared a serve-state probe, but no model-serving rank-zero process of a role that uses the KV store has an endpoint to probe"
+            ),
+        });
+    }
+    Ok(Some(crate::execution::ServeStateProbePlan {
+        processes,
+        kv_store,
+        attempt_bound_seconds,
+        adapter_timeout_seconds,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serve_state_probe_plan;
+
+    /// A probe with nothing to read would report every process engaged, so
+    /// it is rejected while resolving ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[test]
+    fn a_serve_state_probe_without_a_probeable_process_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let planned: inferlab_protocol::PlanServeResult =
+            serde_json::from_value(serde_json::json!({
+                "integration": {
+                    "adapter_id": "fixture",
+                    "adapter_version": "1",
+                    "framework": "fixture",
+                    "framework_version": "1"
+                },
+                "roles": [],
+                "replicas": [],
+                "links": [],
+                "kv_store": {
+                    "backend": "mooncake",
+                    "implementation": "mooncake",
+                    "implementation_version": "1",
+                    "effective_settings": {},
+                    "role_access": { "serve": "read_write" },
+                    "readiness": { "kind": "process_alive" }
+                },
+                "serve_state_probe": true
+            }))?;
+
+        let error = serve_state_probe_plan(30, "fixture", &planned, &[], 5, false)
+            .err()
+            .ok_or("a probe without targets resolved")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("no model-serving rank-zero process"),
+            "{error}"
+        );
+        Ok(())
+    }
 }

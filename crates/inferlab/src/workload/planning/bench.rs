@@ -21,8 +21,8 @@ use crate::workload::plan::{
     ConditioningServingShape, MeasurementOverridePlan, MeasurementResolveContext,
 };
 use crate::workspace::{
-    AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchPrefixSharing,
-    BenchPrompt, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
+    AggregateSlo, BenchAgenticSource, BenchCacheStart, BenchDefinition, BenchPrefixLength,
+    BenchPrefixSharing, BenchPrompt, BenchRequestSource, BenchSessionSource, BenchTokenSelector,
     BenchTpotApplicability, validate_bench,
 };
 use sha2::{Digest, Sha256};
@@ -206,7 +206,9 @@ pub(super) fn build_bench_plan(
             },
             prefix_cache_reset,
             replica_prefix_cache_resets,
+            serve_state_probe: context.serve_state_probe.clone(),
             prefix_cache_conditioning,
+            prefix_publication_ms: context.conditioning_serving.publication_wait_ms,
         },
     })
 }
@@ -225,15 +227,20 @@ fn prefix_cache_conditioning_plan(
     let Some(request_source) = definition.source.request_source() else {
         return Ok(None);
     };
+    // Conditioning runs through the maximum shared prefix the frozen
+    // population drew ([[RFC-0004:C-BENCH-CACHE-STATE]]). A ratio over
+    // variable input lengths may draw short of the longest allowed input, so
+    // it stays unresolved until preparation, as for a replayed population.
     let maximum_shared_prefix_tokens = match request_source {
         ResolvedBenchRequestSource::Random {
             input_tokens,
             prefix_sharing: Some(sharing),
             ..
-        } => Some(maximum_shared_prefix(
+        } => drawn_shared_prefix(
             token_selector_maximum(input_tokens),
+            matches!(input_tokens, BenchTokenSelector::InclusiveUniform { min, max } if min != max),
             sharing,
-        )),
+        ),
         ResolvedBenchRequestSource::RandomMixture {
             shapes,
             prefix_sharing: Some(sharing),
@@ -242,7 +249,8 @@ fn prefix_cache_conditioning_plan(
             let Some(maximum) = shapes.iter().map(|shape| shape.input_tokens).max() else {
                 return Ok(None);
             };
-            Some(maximum_shared_prefix(maximum, sharing))
+            let variable = shapes.iter().any(|shape| shape.input_tokens != maximum);
+            drawn_shared_prefix(maximum, variable, sharing)
         }
         // Replay geometry is resolved from the file entries during
         // preparation; an exact token declaration is already concrete, while
@@ -250,11 +258,11 @@ fn prefix_cache_conditioning_plan(
         ResolvedBenchRequestSource::Replay {
             prefix_sharing: Some(sharing),
             ..
-        } => match sharing {
-            BenchPrefixSharing::Tokens {
+        } => match sharing.length() {
+            BenchPrefixLength::Tokens {
                 shared_prefix_tokens,
-            } => Some(*shared_prefix_tokens),
-            BenchPrefixSharing::Ratio { .. } => None,
+            } => Some(shared_prefix_tokens),
+            BenchPrefixLength::Ratio { .. } => None,
         },
         ResolvedBenchRequestSource::Random { .. }
         | ResolvedBenchRequestSource::RandomMixture { .. }
@@ -283,17 +291,23 @@ fn prefix_cache_conditioning_plan(
         consumes_population_entry: false,
         attention_data_parallel_size: serving.attention_data_parallel_size,
         frontend_fanout,
+        publication_wait_ms: serving.publication_wait_ms,
     }))
 }
 
-fn maximum_shared_prefix(maximum_input_tokens: u32, sharing: &BenchPrefixSharing) -> u32 {
-    match sharing {
-        BenchPrefixSharing::Tokens {
+fn drawn_shared_prefix(
+    maximum_input_tokens: u32,
+    variable_input: bool,
+    sharing: &BenchPrefixSharing,
+) -> Option<u32> {
+    match sharing.length() {
+        BenchPrefixLength::Tokens {
             shared_prefix_tokens,
-        } => *shared_prefix_tokens,
-        BenchPrefixSharing::Ratio {
+        } => Some(shared_prefix_tokens),
+        BenchPrefixLength::Ratio { .. } if variable_input => None,
+        BenchPrefixLength::Ratio {
             shared_prefix_ratio,
-        } => (f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32,
+        } => Some((f64::from(maximum_input_tokens) * shared_prefix_ratio).floor() as u32),
     }
 }
 
@@ -1039,7 +1053,7 @@ mod tests {
         ResolvedBenchImageSource, ResolvedBenchImages, ResolvedBenchSource,
     };
     use crate::workspace::{
-        BenchDefinition, BenchOutputStop, BenchPrefixSharing, BenchPrompt, BenchPromptSelection,
+        BenchDefinition, BenchOutputStop, BenchPrefixLength, BenchPrompt, BenchPromptSelection,
         BenchRandomShape, BenchRequestSource, BenchTokenSelector, BenchTpotApplicability,
         validate_bench,
     };
@@ -1055,9 +1069,12 @@ mod tests {
                 input_tokens: BenchTokenSelector::Fixed(8000),
                 output_tokens: BenchTokenSelector::Fixed(1000),
                 output_stop: BenchOutputStop::Length,
-                prefix_sharing: Some(BenchPrefixSharing::Ratio {
-                    shared_prefix_ratio: 0.75,
-                }),
+                prefix_sharing: Some(
+                    BenchPrefixLength::Ratio {
+                        shared_prefix_ratio: 0.75,
+                    }
+                    .into(),
+                ),
                 shared_system_content: None,
                 corpus: None,
                 images: None,
@@ -1100,11 +1117,9 @@ mod tests {
         assert!(matches!(
             prefix,
             ResolvedBenchRequestSource::Random {
-                prefix_sharing: Some(BenchPrefixSharing::Ratio {
-                    shared_prefix_ratio: 0.75,
-                }),
+                prefix_sharing: Some(sharing),
                 ..
-            }
+            } if sharing.shared_prefix_ratio == Some(0.75)
         ));
         assert!(matches!(
             mixture,
@@ -1372,10 +1387,7 @@ timeout_seconds = 60
         let BenchDefinition::Serving {
             request_source:
                 Some(BenchRequestSource::Replay {
-                    prefix_sharing:
-                        Some(BenchPrefixSharing::Tokens {
-                            shared_prefix_tokens: 4,
-                        }),
+                    prefix_sharing: Some(sharing),
                     ..
                 }),
             ..
@@ -1383,6 +1395,9 @@ timeout_seconds = 60
         else {
             return Err(std::io::Error::other("replay prefix override did not apply").into());
         };
+        if sharing.shared_prefix_tokens != Some(4) {
+            return Err(std::io::Error::other("replay prefix override did not apply").into());
+        }
         Ok(())
     }
 

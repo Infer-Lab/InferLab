@@ -77,6 +77,9 @@ pub(crate) struct CasePlan {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CaseSelectionSource {
     Explicit,
+    /// Chosen for the selected recipe ([[RFC-0003:C-RECIPE-COMPOSITION]],
+    /// [[RFC-0002:C-LOCAL-PLACEMENT]]).
+    Recipe,
     Default,
     Sole,
 }
@@ -133,6 +136,30 @@ pub(crate) struct ServerPlan {
     /// stopped last ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<ProcessPlan>,
+    /// The server's external KV store: its plan and its one process, spawned
+    /// before every other process and stopped after them
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<KvStoreComponentPlan>,
+    /// The frozen inputs of the integration's serve-state probe: readiness
+    /// waits for every listed process to be engaged and Bench cases record
+    /// its answers ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_state_probe: Option<ServeStateProbePlan>,
+    /// The integration declared one prefix cache shared across the server,
+    /// so conditioning has one target ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_prefix_cache: bool,
+    /// The store's declared publication bound a primed start on the shared
+    /// prefix cache waits after conditioning; zero otherwise
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "crate::execution::is_zero_u64")]
+    pub prefix_publication_ms: u64,
+    /// The effective stack settings the integration returned: the stack's
+    /// declared values plus the integration's defaults
+    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_settings: BTreeMap<String, SettingValue>,
     /// The raw profiler escape declaration as written on the server and
     /// its roles ([[RFC-0004:C-WORKLOAD-PROFILING]]); the merged, effective
     /// inputs ride each capture target.
@@ -223,8 +250,46 @@ pub(crate) struct CommonDeclarationPlan {
     pub capture_control_deadline_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_finalization_deadline_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<u32>,
     #[serde(default, skip_serializing_if = "parallelism_is_empty")]
     pub parallelism: Parallelism,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, SettingValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gateway_settings: BTreeMap<String, SettingValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pd_router_settings: BTreeMap<String, SettingValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<KvStoreDeclarationPlan>,
+}
+
+/// What one serve-state probe sends: every model-serving rank-zero process,
+/// the store address the Engines were rendered with, the bound of one read,
+/// and the adapter invocation deadline frozen from local bindings
+/// ([[RFC-0006:C-INTEGRATIONS]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ServeStateProbePlan {
+    pub processes: Vec<inferlab_protocol::ProbeServeTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<inferlab_protocol::EndpointAssignment>,
+    pub attempt_bound_seconds: u64,
+    pub adapter_timeout_seconds: u64,
+}
+
+/// The resolved KV store component ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct KvStoreComponentPlan {
+    pub plan: inferlab_protocol::KvStorePlan,
+    pub process: ProcessPlan,
+}
+
+/// One layer's KV store declaration; only the server base names the backend
+/// ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct KvStoreDeclarationPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, SettingValue>,
 }
@@ -233,6 +298,8 @@ pub(crate) struct CommonDeclarationPlan {
 pub(crate) struct RoleDeclarationPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<u32>,
     #[serde(default, skip_serializing_if = "parallelism_is_empty")]
     pub parallelism: Parallelism,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -269,7 +336,8 @@ pub(crate) struct SyntheticAcceptancePlan {
 
 impl ServerPlan {
     pub(crate) fn processes(&self) -> impl Iterator<Item = &ProcessPlan> {
-        self.discovery.iter().chain(
+        let kv_store = self.kv_store.iter().map(|kv_store| &kv_store.process);
+        kv_store.chain(self.discovery.iter()).chain(
             self.roles
                 .iter()
                 .flat_map(|role| &role.replicas)
@@ -290,7 +358,11 @@ impl ServerPlan {
         let roles = &mut self.roles;
         let frontend = &mut self.frontend;
         let discovery = &mut self.discovery;
-        discovery.iter_mut().chain(
+        let kv_store = self
+            .kv_store
+            .iter_mut()
+            .map(|kv_store| &mut kv_store.process);
+        kv_store.chain(discovery.iter_mut()).chain(
             roles
                 .iter_mut()
                 .flat_map(|role| &mut role.replicas)
@@ -328,7 +400,13 @@ impl ServerPlan {
             replica_index: 0,
             process,
         });
-        discovery.chain(model_ranks).chain(frontend)
+        let kv_store = self.kv_store.iter().map(|kv_store| ProcessContext {
+            role_id: kv_store.process.id.as_str(),
+            replica_id: kv_store.process.id.as_str(),
+            replica_index: 0,
+            process: &kv_store.process,
+        });
+        kv_store.chain(discovery).chain(model_ranks).chain(frontend)
     }
 }
 
@@ -439,8 +517,16 @@ pub(crate) struct PlacementPlan {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PlacementSelectionSource {
     Explicit,
+    /// Chosen for the selected recipe ([[RFC-0003:C-RECIPE-COMPOSITION]],
+    /// [[RFC-0002:C-LOCAL-PLACEMENT]]).
+    Recipe,
     Default,
     Sole,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

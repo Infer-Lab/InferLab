@@ -6,8 +6,8 @@ use super::{
 };
 use crate::InferlabError;
 use crate::workspace::definitions::{
-    AggregateSlo, BenchCacheStart, BenchDefinition, BenchImagesDeclaration, BenchPrefixSharing,
-    BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
+    AggregateSlo, BenchCacheStart, BenchDefinition, BenchImagesDeclaration, BenchPrefixLength,
+    BenchPrefixSharing, BenchPrompt, BenchPromptSelection, BenchRequestSource, BenchSessionSource,
     BenchSharedSystemContent, BenchTokenSelector, BenchTpotApplicability, JsonValue, RequestRate,
     RequestSlo,
 };
@@ -265,11 +265,11 @@ fn validate_cache_policy(
             BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
         ) =>
         {
-            match sharing {
-                BenchPrefixSharing::Tokens {
+            match sharing.length() {
+                BenchPrefixLength::Tokens {
                     shared_prefix_tokens,
-                } => *shared_prefix_tokens > 0,
-                BenchPrefixSharing::Ratio {
+                } => shared_prefix_tokens > 0,
+                BenchPrefixLength::Ratio {
                     shared_prefix_ratio,
                 } => (f64::from(input_tokens.minimum()) * shared_prefix_ratio).floor() >= 1.0,
             }
@@ -289,11 +289,11 @@ fn validate_cache_policy(
                 .map(|shape| shape.input_tokens)
                 .min()
                 .unwrap_or_default();
-            match sharing {
-                BenchPrefixSharing::Tokens {
+            match sharing.length() {
+                BenchPrefixLength::Tokens {
                     shared_prefix_tokens,
-                } => *shared_prefix_tokens > 0,
-                BenchPrefixSharing::Ratio {
+                } => shared_prefix_tokens > 0,
+                BenchPrefixLength::Ratio {
                     shared_prefix_ratio,
                 } => (f64::from(minimum_input) * shared_prefix_ratio).floor() >= 1.0,
             }
@@ -310,13 +310,13 @@ fn validate_cache_policy(
             BenchPrompt::Flat | BenchPrompt::RenderedChat { .. }
         ) =>
         {
-            match sharing {
-                BenchPrefixSharing::Tokens {
+            match sharing.length() {
+                BenchPrefixLength::Tokens {
                     shared_prefix_tokens,
-                } => *shared_prefix_tokens > 0,
-                BenchPrefixSharing::Ratio {
+                } => shared_prefix_tokens > 0,
+                BenchPrefixLength::Ratio {
                     shared_prefix_ratio,
-                } => *shared_prefix_ratio > 0.0,
+                } => shared_prefix_ratio > 0.0,
             }
         }
         _ => false,
@@ -674,19 +674,19 @@ fn validate_bench_common(
                             "bench {id:?} replay request_source.prefix_sharing requires prompt.kind = \"flat\" or \"rendered_chat\""
                         ));
                     }
-                    match sharing {
-                        BenchPrefixSharing::Tokens {
-                            shared_prefix_tokens,
-                        } if *shared_prefix_tokens == 0 => {
+                    validate_prefix_sharing_shape(id, sharing, false)?;
+                    match sharing.length() {
+                        BenchPrefixLength::Tokens {
+                            shared_prefix_tokens: 0,
+                        } => {
                             return invalid(format!(
                                 "bench {id:?} request_source.prefix_sharing.shared_prefix_tokens must be positive"
                             ));
                         }
-                        BenchPrefixSharing::Ratio {
+                        BenchPrefixLength::Ratio {
                             shared_prefix_ratio,
                         } if !shared_prefix_ratio.is_finite()
-                            || *shared_prefix_ratio < 0.0
-                            || *shared_prefix_ratio > 1.0 =>
+                            || !(0.0..=1.0).contains(&shared_prefix_ratio) =>
                         {
                             return invalid(format!(
                                 "bench {id:?} request_source.prefix_sharing.shared_prefix_ratio must be finite and in [0, 1]"
@@ -783,6 +783,43 @@ fn reject_images_declaration(
     Ok(())
 }
 
+/// One length form, and grouping only where InferLab generates the
+/// population ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).
+fn validate_prefix_sharing_shape(
+    id: &str,
+    sharing: &BenchPrefixSharing,
+    generated: bool,
+) -> Result<(), InferlabError> {
+    if sharing.shared_prefix_tokens.is_some() == sharing.shared_prefix_ratio.is_some() {
+        return invalid(format!(
+            "bench {id:?} request_source.prefix_sharing must declare exactly one of shared_prefix_tokens or shared_prefix_ratio"
+        ));
+    }
+    if !generated && (sharing.groups.is_some() || sharing.popularity.is_some()) {
+        return invalid(format!(
+            "bench {id:?} replay request_source.prefix_sharing cannot declare groups or popularity; a replayed population brings its own prefixes"
+        ));
+    }
+    if sharing.groups == Some(0) {
+        return invalid(format!(
+            "bench {id:?} request_source.prefix_sharing.groups must be positive"
+        ));
+    }
+    if let Some(crate::workspace::BenchPrefixPopularity::Zipf(exponent)) = sharing.popularity {
+        if !exponent.is_finite() || exponent <= 0.0 {
+            return invalid(format!(
+                "bench {id:?} request_source.prefix_sharing.popularity.zipf must be a finite exponent greater than zero"
+            ));
+        }
+        if sharing.group_count() < 2 {
+            return invalid(format!(
+                "bench {id:?} request_source.prefix_sharing.popularity.zipf requires more than one group"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_synthetic_prompt(
     id: &str,
     prompt: &BenchPrompt,
@@ -812,19 +849,19 @@ fn validate_synthetic_prompt(
     }
 
     if let Some(sharing) = prefix_sharing {
-        match sharing {
-            BenchPrefixSharing::Tokens {
+        validate_prefix_sharing_shape(id, sharing, true)?;
+        match sharing.length() {
+            BenchPrefixLength::Tokens {
                 shared_prefix_tokens,
-            } if *shared_prefix_tokens > minimum_input_tokens => {
+            } if shared_prefix_tokens > minimum_input_tokens => {
                 return invalid(format!(
                     "bench {id:?} request_source.prefix_sharing.shared_prefix_tokens must not exceed the minimum input-token target {minimum_input_tokens}"
                 ));
             }
-            BenchPrefixSharing::Ratio {
+            BenchPrefixLength::Ratio {
                 shared_prefix_ratio,
             } if !shared_prefix_ratio.is_finite()
-                || *shared_prefix_ratio < 0.0
-                || *shared_prefix_ratio > 1.0 =>
+                || !(0.0..=1.0).contains(&shared_prefix_ratio) =>
             {
                 return invalid(format!(
                     "bench {id:?} request_source.prefix_sharing.shared_prefix_ratio must be finite and in [0, 1]"
@@ -1223,14 +1260,44 @@ timeout_seconds = 60
                 input_tokens: BenchTokenSelector::Fixed(8000),
                 output_tokens: BenchTokenSelector::Fixed(1000),
                 output_stop: BenchOutputStop::Length,
-                prefix_sharing: Some(BenchPrefixSharing::Ratio {
-                    shared_prefix_ratio: 0.75,
-                }),
+                prefix_sharing: Some(sharing),
                 shared_system_content: None,
                 corpus: None,
                 images: None,
             }) if prompt.effective() == &BenchPrompt::Flat
+                && sharing.shared_prefix_ratio == Some(0.75)
         ));
+        Ok(())
+    }
+
+    /// Groups and a Zipf popularity parse; a skew over one group has nothing
+    /// to skew and is rejected ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).
+    #[test]
+    fn grouped_prefix_sharing_requires_several_groups_for_zipf_popularity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bench = |sharing: &str| {
+            toml::from_str::<BenchDefinition>(&format!(
+                r#"
+kind = "serving"
+request_source = {{ kind = "random", prompt = {{ kind = "flat" }}, input_tokens = 8000, output_tokens = 1000, prefix_sharing = {sharing} }}
+concurrency = [1]
+prompts_per_concurrency = 2
+timeout_seconds = 60
+"#
+            ))
+        };
+
+        validate_bench(
+            "grouped",
+            &bench("{ shared_prefix_tokens = 4000, groups = 8, popularity = { zipf = 1.1 } }")?,
+        )?;
+        let error = validate_bench(
+            "one-group",
+            &bench("{ shared_prefix_tokens = 4000, popularity = { zipf = 1.1 } }")?,
+        )
+        .err()
+        .ok_or("a Zipf popularity over one group validated")?;
+        assert!(error.to_string().contains("requires more than one group"));
         Ok(())
     }
 
@@ -1519,11 +1586,11 @@ timeout_seconds = 60
             Some(BenchRequestSource::Replay {
                 ref path,
                 prompt,
-                prefix_sharing: Some(BenchPrefixSharing::Ratio {
-                    shared_prefix_ratio: 1.0,
-                }),
+                prefix_sharing: Some(sharing),
                 ..
-            }) if path == "populations/x.jsonl" && prompt.declared() == Some(&BenchPrompt::Flat)
+            }) if path == "populations/x.jsonl"
+                && prompt.declared() == Some(&BenchPrompt::Flat)
+                && sharing.shared_prefix_ratio == Some(1.0)
         ));
         Ok(())
     }

@@ -239,23 +239,49 @@ class BenchPrefixConditioningInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    group: Annotated[
+        int | None,
+        Field(
+            description='The prefix group this canonical prefix conditions; zero for the first.',
+            ge=0,
+        ),
+    ] = None
     path: str
     prompt_tokens: Annotated[int, Field(ge=0)]
     sha256: str
+
+
+class GroupEntry(RootModel[int]):
+    root: Annotated[int, Field(ge=0)]
 
 
 class BenchPrefixSharingInput1(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    groups: Annotated[
+        int | None,
+        Field(
+            description='Independent prefix groups; absent means one\n([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).',
+            ge=0,
+        ),
+    ] = None
     shared_prefix_tokens: Annotated[int, Field(ge=0)]
+    zipf_exponent: Annotated[
+        float | None,
+        Field(
+            description='The Zipf exponent groups are drawn with; absent means uniform.'
+        ),
+    ] = None
 
 
 class BenchPrefixSharingInput2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    groups: Annotated[int | None, Field(ge=0)] = None
     shared_prefix_ratio: float
+    zipf_exponent: float | None = None
 
 
 class BenchPrefixSharingInput(
@@ -273,8 +299,32 @@ class BenchPromptCacheObservation(BaseModel):
     )
     cache_read_ratio: float
     cache_read_tokens: Annotated[int, Field(ge=0)]
+    first_token_unix_ns: Annotated[
+        int | None,
+        Field(
+            description="When the client received the request's first output token, in Unix\nnanoseconds.",
+            ge=0,
+        ),
+    ] = None
+    prefix_group: Annotated[
+        int | None,
+        Field(description="The entry's prefix group in a grouped population.", ge=0),
+    ] = None
     prompt_tokens: Annotated[int, Field(ge=0)]
     request_id: Annotated[int, Field(ge=0)]
+    sent_unix_ns: Annotated[
+        int | None,
+        Field(
+            description='When the client sent the request, in Unix nanoseconds.', ge=0
+        ),
+    ] = None
+    shared_prefix_tokens: Annotated[
+        int | None,
+        Field(
+            description="The planned shared-prefix tokens of the request's generated population\nentry ([[RFC-0004:C-BENCH-CACHE-STATE]]); absent for other sources.",
+            ge=0,
+        ),
+    ] = None
     uncached_prompt_tokens: Annotated[int, Field(ge=0)]
 
 
@@ -805,13 +855,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['13']]):
+class ProtocolVersion(RootModel[Literal['14']]):
     root: Annotated[
-        Literal['13'],
+        Literal['14'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `13` (serialized as the\nstring `"13"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `14` (serialized as the\nstring `"14"`); a mismatch is rejected before lowering.'
         ),
-    ] = '13'
+    ] = '14'
 
 
 class RawArtifact(BaseModel):
@@ -993,6 +1043,12 @@ class BenchPrefixGeometrySummary(BaseModel):
     )
     canonical_prefix_sha256: str
     full_prompt_entries: Annotated[int, Field(ge=0)]
+    group_entries: Annotated[
+        list[GroupEntry] | None,
+        Field(
+            description='Population entries drawn for each prefix group, in group order; empty\nfor an ungrouped population ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).'
+        ),
+    ] = None
     maximum_shared_prefix_tokens: Annotated[int, Field(ge=0)]
     shared_prefix_tokens: BenchTokenCountSummary
     unique_suffix_tokens: BenchTokenCountSummary
@@ -1405,6 +1461,12 @@ class BenchPopulationPreparationResult(BaseModel):
     candidate_entries: Annotated[int, Field(ge=0)]
     error: str | None = None
     evidence_path: str | None = None
+    group_prefix_conditioning: Annotated[
+        list[BenchPrefixConditioningInput] | None,
+        Field(
+            description='The canonical prefixes of every further prefix group, which a primed\nstart conditions after the first ([[RFC-0004:C-BENCH-CACHE-STATE]]).'
+        ),
+    ] = None
     ineligible_entries: Annotated[int, Field(ge=0)]
     ineligible_reasons: dict[str, int] = {}
     input_tokens: BenchTokenCountSummary | None = None

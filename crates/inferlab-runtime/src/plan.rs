@@ -10,6 +10,10 @@ pub enum ReadinessPlan {
     /// probe shape.
     Http {
         path: String,
+        /// The process's named-port value probed instead of its endpoint
+        /// port, when the probe names one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
     },
     HttpTargetRegistry {
         readiness_path: String,

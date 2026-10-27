@@ -187,7 +187,9 @@ if operation == "plan_serve":
     pp = outer.get("pipeline_parallel_size") or 1
     dp = attention.get("data_parallel_size") or 1
     ep = experts.get("expert_parallel_size") or 1
-    world_size = tp * pp * dp
+    world_size = role.get("devices") or tp * pp * dp
+    if os.environ.get("FIXTURE_DEVICES_DRIFT"):
+        world_size += 1
     effective_settings = dict(settings)
     effective_settings.setdefault("trust_remote_code", False)
     effective_settings["trust_remote_code"] = False
@@ -206,6 +208,10 @@ if operation == "plan_serve":
         },
     }
     output = {
+        "stack_settings": (
+            {} if os.environ.get("FIXTURE_DROP_STACK_SETTINGS")
+            else dict(input.get("stack_settings") or {})
+        ),
         "integration": {
             "adapter_id": "inferlab-vllm",
             "adapter_version": "0.1.0",
@@ -232,9 +238,9 @@ if operation == "plan_serve":
             ),
         }],
         "replicas": [{
-            "id": "server",
+            "id": "server" if role["replica_count"] == 1 else f"server-{replica_index}",
             "role_id": role["id"],
-            "replica_index": 0,
+            "replica_index": replica_index,
             "device_count": world_size,
             "ports": ["dup", "dup"] if settings.get("fixture_duplicate_named_port") else [],
             "primary_ports": ["master"],
@@ -269,7 +275,7 @@ if operation == "plan_serve":
                     }
                 }
             } if mechanism else {}),
-        }],
+        } for replica_index in range(role["replica_count"])],
         "links": (
             [{"kind": "request_routing", "source": "gateway", "targets": [role["id"]]}]
             if gateway_backend else []
@@ -279,7 +285,10 @@ if operation == "plan_serve":
                 "backend": gateway_backend,
                 "implementation": "fixture-gateway",
                 "implementation_version": "1",
-                "effective_settings": {},
+                "effective_settings": (
+                    {} if os.environ.get("FIXTURE_DROP_GATEWAY_SETTINGS")
+                    else dict(input.get("gateway_settings") or {})
+                ),
                 "endpoint": {
                     "protocol": "http",
                     "prefix_cache_reset": {"method": "post", "path": "/reset_prefix_cache"},
@@ -293,6 +302,19 @@ if operation == "plan_serve":
             }
         } if gateway_backend else {}),
     }
+    kv_store = input.get("kv_store")
+    if kv_store and not os.environ.get("FIXTURE_OMIT_KV_STORE_PLAN"):
+        output["kv_store"] = {
+            "backend": kv_store["backend"],
+            "implementation": "fixture-store",
+            "implementation_version": "1",
+            "effective_settings": dict(kv_store.get("settings") or {}),
+            "role_access": json.loads(os.environ.get("FIXTURE_KV_STORE_ROLE_ACCESS", "{}")),
+            "publication_bound_ms": int(os.environ.get("FIXTURE_KV_STORE_PUBLICATION_MS", "0")),
+            "ports": ["admin"],
+            "readiness": {"kind": "http", "path": "/health", "port": "admin"},
+            "render_inputs": [],
+        }
     synthetic = input.get("synthetic_acceptance")
     if synthetic:
         # Echo a deterministic valid outcome: the declared length for the
@@ -308,6 +330,22 @@ elif operation == "render_serve":
     master = allocations[0]["ports"].get("master")
     processes = []
     for allocation in allocations:
+        if allocation["kind"] == "kv_store":
+            processes.append({
+                "kind": "kv_store",
+                "process": allocation["process"],
+                "process_role": allocation["process_role"],
+                "launch_files": [],
+                "command": {
+                    "argv": [
+                        "fixture-store",
+                        allocation["endpoint"]["host"],
+                        str(allocation["endpoint"]["port"]),
+                    ],
+                    "env": {},
+                },
+            })
+            continue
         if allocation["kind"] == "frontend":
             processes.append({
                 "kind": "frontend",
@@ -338,6 +376,9 @@ elif operation == "render_serve":
             "--port", str(allocation["endpoint"]["port"]),
             "--tensor-parallel-size", str(tp),
         ]
+        if allocation.get("kv_store"):
+            store = allocation["kv_store"]
+            argv.extend(["--kv-store", f'{store["host"]}:{store["port"]}'])
         if settings.get("fixture_render_empty_argv"):
             argv = []
         if dp > 1:
@@ -600,6 +641,7 @@ pub(crate) fn write_executable(path: &Path, content: &str) -> Result<(), Box<dyn
 
 pub(crate) const PD_ADAPTER: &str = r#"#!/usr/bin/env python3
 import json
+import os
 import sys
 
 request = json.load(sys.stdin)
@@ -677,6 +719,8 @@ if operation == "plan_serve":
             "effective_settings": {},
             "endpoint": {
                 "protocol": "http",
+                **({"server_metrics": {"path": "/metrics", "port": "prometheus"}}
+                   if os.environ.get("FIXTURE_PD_ROUTER_METRICS") else {}),
             },
             "readiness": readiness,
             "ports": [],
@@ -689,12 +733,15 @@ if operation == "plan_serve":
             "backend": input["pd_router_backend"],
             "implementation": implementation,
             "implementation_version": implementation_version,
-            "effective_settings": {},
+            "effective_settings": (
+                {} if os.environ.get("FIXTURE_DROP_PD_ROUTER_SETTINGS")
+                else dict(input.get("pd_router_settings") or {})
+            ),
             "policies": {"prefill": "round_robin", "decode": "round_robin"},
             "prefill_role": "prefill",
             "decode_role": "decode",
             "target_scheme": "http",
-            "ports": [],
+            "ports": ["prometheus"] if os.environ.get("FIXTURE_PD_ROUTER_METRICS") else [],
             "readiness": readiness,
             "handoff": "in_process",
             "render_inputs": [],

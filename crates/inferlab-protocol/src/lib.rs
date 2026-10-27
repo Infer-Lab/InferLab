@@ -43,19 +43,21 @@ pub use wire::{
     FrontendComponents, FrontendGatewayComponent, FrontendHandoff, FrontendPdRouterComponent,
     FrontendProcessRole, GatewayFrontendBinding, GatewayPdRouterFrontendBinding, GatewayPlan,
     GatewayTarget, HttpActionSpec, HttpMethod, HttpTargetRegistryReadiness, IntegrationIdentity,
-    JsonScalar, JsonValueMatch, KvTransferMechanism, LaunchFileDeclaration, MeasurementModelInput,
-    MeasurementProtocol, ModelListRequirement, Parallelism, ParallelismAttention,
-    ParallelismExperts, ParallelismOuter, PdRouterPlan, PdRoutingPolicies, PlanServeInput,
-    PlanServeResult, ProcessSpec, PromptCacheReadZeroRepresentation, ProtocolVersion, RawArtifact,
-    ReadinessProbe, RegistryMembershipReadiness, RegistryRoleValues, RenderInputDeclaration,
-    RenderServeInput, RenderServeResult, RenderSource, RenderedServeProcess, ServeModelInput,
-    ServeProcessAllocation, ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink,
-    ServeRoleResult, ServeTopology, ServerMetricsEndpointInput, ServerMetricsEndpointRequirement,
-    SettingValue, SuccessMatch, SuppliedRenderInput, SyntheticAcceptanceCurveInput,
-    SyntheticAcceptanceInput, SyntheticAcceptanceOutcome, TargetEndpointScheme,
+    JsonScalar, JsonValueMatch, KvStoreAccess, KvStoreInput, KvStorePlan, KvStoreProcessRole,
+    KvTransferMechanism, LaunchFileDeclaration, MeasurementModelInput, MeasurementProtocol,
+    ModelListRequirement, Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter,
+    PdRouterPlan, PdRoutingPolicies, PlanServeInput, PlanServeResult, ProbeServeInput,
+    ProbeServeProcessState, ProbeServeResult, ProbeServeTarget, ProcessSpec,
+    PromptCacheReadZeroRepresentation, ProtocolVersion, RawArtifact, ReadinessProbe,
+    RegistryMembershipReadiness, RegistryRoleValues, RenderInputDeclaration, RenderServeInput,
+    RenderServeResult, RenderSource, RenderedServeProcess, ServeModelInput, ServeProcessAllocation,
+    ServeReplicaRequirement, ServeRoleInput, ServeRoleKind, ServeRoleLink, ServeRoleResult,
+    ServeTopology, ServerMetricsEndpointInput, ServerMetricsEndpointRequirement, SettingValue,
+    SuccessMatch, SuppliedRenderInput, SyntheticAcceptanceCurveInput, SyntheticAcceptanceInput,
+    SyntheticAcceptanceOutcome, TargetEndpointScheme,
 };
 
-pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v13";
+pub const PROTOCOL_SCHEMA_ID: &str = "https://inferlab.dev/schema/adapter-protocol/v14";
 pub const MEASUREMENT_SCHEMA_ID: &str = "https://inferlab.dev/schema/measurement-protocol/v1";
 pub const PROTOCOL_WIRE_SOURCE: &str = "crates/inferlab-protocol/src/wire.rs";
 pub const MEASUREMENT_WIRE_SOURCE: &str =

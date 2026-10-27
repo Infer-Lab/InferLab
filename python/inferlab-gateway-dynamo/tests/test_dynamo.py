@@ -1,10 +1,12 @@
 import json
+import socket
 from pathlib import Path
 from typing import cast
 
 import inferlab_gateway_dynamo
 import pytest
 from inferlab_adapter_sdk import (
+    AdapterErrorCode,
     AdapterOperationError,
     AdapterRequest,
     AdapterRequestRenderServe,
@@ -88,10 +90,56 @@ def test_escape_hatches_cannot_rewire_discovery_even_after_the_sentinel() -> Non
         )
 
 
-def test_a_machine_bound_by_hostname_is_rejected_before_launch() -> None:
+def _resolve_only(monkeypatch: pytest.MonkeyPatch, answers: dict[str, list[str]]) -> None:
+    def getaddrinfo(
+        host: str, port: object, *args: object, **kwargs: object
+    ) -> list[tuple[object, ...]]:
+        if host not in answers:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0)) for address in answers[host]
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+
+def test_a_machine_bound_by_hostname_binds_and_advertises_its_resolved_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _resolve_only(monkeypatch, {"node-b.example": ["127.0.1.1", "192.0.2.9"]})
     allocations = dynamo_allocations()
     worker = next(item for item in allocations if isinstance(item, ServeProcessAllocationModelRank))
-    worker.ports["request"].host = "node-a.example"
+    assert worker.endpoint is not None
+    worker.endpoint.host = "node-b.example"
+    worker.ports["request"].host = "node-b.example"
+    discovery = next(
+        item for item in allocations if isinstance(item, ServeProcessAllocationDiscovery)
+    )
+    discovery.endpoint.host = "node-b.example"
+    discovery.ports["peer"].host = "node-b.example"
 
-    with pytest.raises(AdapterOperationError, match="IP addresses"):
+    env = inferlab_gateway_dynamo.worker_env(worker, allocations)
+    argv = inferlab_gateway_dynamo.render_discovery(discovery).root.command.argv
+
+    assert env["DYN_SYSTEM_HOST"] == env["DYN_TCP_RPC_HOST"] == "192.0.2.9"
+    assert argv[argv.index("--advertise-client-urls") + 1] == "http://192.0.2.9:2379"
+    assert argv[argv.index("--initial-advertise-peer-urls") + 1] == "http://192.0.2.9:2380"
+
+
+@pytest.mark.parametrize(
+    ("answers", "reason"),
+    [({}, "does not resolve"), ({"node-b.example": ["127.0.1.1"]}, "loopback")],
+)
+def test_a_hostname_peers_cannot_reach_is_rejected_before_launch(
+    monkeypatch: pytest.MonkeyPatch, answers: dict[str, list[str]], reason: str
+) -> None:
+    _resolve_only(monkeypatch, answers)
+    allocations = dynamo_allocations()
+    worker = next(item for item in allocations if isinstance(item, ServeProcessAllocationModelRank))
+    worker.ports["request"].host = "node-b.example"
+
+    with pytest.raises(AdapterOperationError) as failure:
         inferlab_gateway_dynamo.worker_env(worker, allocations)
+    assert failure.value.code == AdapterErrorCode.invalid_settings
+    assert "node-b.example" in failure.value.message
+    assert reason in failure.value.message

@@ -10,6 +10,8 @@ from inferlab_adapter_sdk import (
     AdapterRequestPlanServe,
     AdapterRequestRenderServe,
     CaptureMechanism,
+    EndpointAssignment,
+    KvStoreInput,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -24,6 +26,7 @@ from inferlab_adapter_sdk import (
     RenderSource,
     ServeModelInput,
     ServeProcessAllocation,
+    ServeProcessAllocationModelRank,
     ServeRoleInput,
     ServeRoleKind,
     ServeRoleLinkKvTransfer,
@@ -312,6 +315,7 @@ def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
         "target_healthy_field": "is_healthy",
         "target_bootstrap_port_field": "bootstrap_port",
         "prefill_role_value": "prefill",
+        "serve_role_value": None,
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
     }
@@ -1473,3 +1477,44 @@ def test_render_rejects_a_declaration_without_an_allocation_locator() -> None:
         render_serve(request.root.input)
     assert caught.value.code == AdapterErrorCode.invalid_request
     assert "draft-model" in caught.value.message
+
+
+def test_declared_devices_fills_outer_tensor_parallelism_over_pipeline_parallelism() -> None:
+    input = _plan_input(parallelism=Parallelism(outer=ParallelismOuter(pipeline_parallel_size=2)))
+    input.roles[0].devices = 8
+
+    result = plan_serve(input)
+
+    outer = result.roles[0].effective_parallelism.outer
+    assert outer is not None
+    assert outer.tensor_parallel_size == 4
+    assert result.replicas[0].device_count == 8
+
+
+def test_a_declared_kv_store_renders_hicache_with_the_mooncake_backend() -> None:
+    render_input = _render_input()
+    engine = render_input.allocations[0].root
+    assert isinstance(engine, ServeProcessAllocationModelRank)
+    engine.kv_store = EndpointAssignment(host="store.example", port=50051)
+
+    argv = render_serve(render_input).processes[0].root.command.argv
+
+    assert "--enable-hierarchical-cache" in argv
+    assert argv[argv.index("--hicache-storage-backend") + 1] == "mooncake"
+    config = json.loads(argv[argv.index("--hicache-storage-backend-extra-config") + 1])
+    assert config == {
+        "master_server_address": "store.example:50051",
+        "metadata_server": "P2PHANDSHAKE",
+    }
+
+
+def test_a_kv_store_leaves_sglang_without_a_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from inferlab_kvstore import mooncake
+
+    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
+
+    plan = plan_serve(_plan_input(kv_store=KvStoreInput(backend="mooncake", settings={})))
+
+    endpoint = plan.roles[0].public_endpoint
+    assert endpoint is not None
+    assert endpoint.prefix_cache_reset is None

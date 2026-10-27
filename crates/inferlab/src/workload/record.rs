@@ -154,6 +154,48 @@ pub(crate) struct PrefixCacheConditioningEvidence {
     pub succeeded: bool,
     pub elapsed_ms: u64,
     pub error: Option<String>,
+    /// When the conditioning completed, in Unix nanoseconds; with one output
+    /// token this is also its first-token time ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_unix_ns: Option<u64>,
+    /// The prefix group this conditioning primed; zero for the first.
+    #[serde(default, skip_serializing_if = "crate::workload::record::is_zero_u32")]
+    pub group: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+/// A measured request's reuse opportunity ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReuseOpportunity {
+    /// No earlier request after the reset sent its shared prefix.
+    First,
+    /// An earlier request sent it, but none had published it when this one
+    /// was sent.
+    InFlight,
+    /// An earlier request had published it when this one was sent.
+    Available,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptReuseObservation {
+    pub request_id: u64,
+    pub reusable_tokens: u64,
+    pub opportunity: ReuseOpportunity,
+}
+
+/// Per-request reuse opportunity of a controlled-start case over a generated
+/// population ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromptReuseEvidence {
+    pub publication_bound_ms: u64,
+    pub requests: Vec<PromptReuseObservation>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -162,6 +204,8 @@ pub(crate) enum BenchCachePreparationPhase {
     WarmupDrained,
     CacheReset,
     CacheConditioned,
+    /// The store's declared publication bound elapsed after conditioning.
+    PublicationWaited,
     ProfilingReleased,
 }
 
@@ -180,6 +224,19 @@ pub(crate) struct BenchCachePreparationEvidence {
     pub reset: PrefixCacheResetOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditioning: Option<PrefixCacheConditioningEvidence>,
+    /// Conditioning of every further prefix group, in group order
+    /// ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_conditioning: Vec<PrefixCacheConditioningEvidence>,
+}
+
+impl BenchCachePreparationEvidence {
+    /// Every group's conditioning, the first group's included.
+    pub(crate) fn all_conditioning(
+        &self,
+    ) -> impl Iterator<Item = &PrefixCacheConditioningEvidence> {
+        self.conditioning.iter().chain(&self.group_conditioning)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -489,6 +546,17 @@ pub(crate) struct EvalCaseEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct BenchServeStateEvidence {
+    pub start: crate::server::serve_state::ServeStateProbeEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<crate::server::serve_state::ServeStateProbeEvidence>,
+    /// Some process was not engaged at a boundary, so the case lost its
+    /// store ([[RFC-0003:C-SERVE-KV-STORE]]).
+    pub lost: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BenchCaseEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preparation_attempt_id: Option<String>,
@@ -498,6 +566,10 @@ pub(crate) struct BenchCaseEvidence {
     pub data_asset_materialization_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_preparation: Option<BenchCachePreparationEvidence>,
+    /// The bound server's serve state at the profiling window's start and
+    /// end ([[RFC-0005:C-EVIDENCE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_state: Option<BenchServeStateEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<BTreeMap<String, f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,6 +590,8 @@ pub(crate) struct BenchCaseEvidence {
     pub prompt_token_reconciliation: Vec<BenchPromptTokenReconciliation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_cache_observations: Vec<inferlab_protocol::BenchPromptCacheObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_reuse: Option<PromptReuseEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_invocations: Vec<BenchNativeInvocation>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -574,6 +648,10 @@ pub(super) struct WorkloadRecordSession {
 }
 
 impl WorkloadRecordSession {
+    pub(crate) fn workspace_root(&self) -> &Path {
+        &self.root
+    }
+
     pub(super) fn begin(
         root: &Path,
         id: &str,

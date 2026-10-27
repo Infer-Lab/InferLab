@@ -1,4 +1,5 @@
 import inferlab_gateway_dynamo
+import inferlab_kvstore
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
@@ -12,6 +13,7 @@ from inferlab_adapter_sdk import (
     HttpMethod,
     IntegrationIdentity,
     JsonScalar,
+    KvStorePlan,
     KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
@@ -41,9 +43,11 @@ from inferlab_adapter_sdk import (
     TargetEndpointScheme,
     consistent_acceptance_outcome,
     effective_settings,
+    fill_outer_tensor_parallel,
     fused_pd_frontend_plans,
     integration_identity,
     replica_id,
+    require_declared_devices,
     require_role,
 )
 
@@ -55,10 +59,13 @@ from .synthetic import apply_synthetic_acceptance
 # vLLM answers a reset it cannot perform yet — KV blocks still held — with
 # HTTP 200 and `success: false`; the built-in P/D Router reports the same
 # member for its fan-out ([[RFC-0003:C-GATEWAY-PD-ROUTER]]).
-def _reset_prefix_cache() -> HttpActionSpec:
+# With a KV store the reset also wipes the connector's store
+# (`reset_external=true`), so a cold start reads nothing from it
+# ([[RFC-0003:C-SERVE-KV-STORE]]).
+def _reset_prefix_cache(*, clear_kv_store: bool = False) -> HttpActionSpec:
     return HttpActionSpec(
         method=HttpMethod(),
-        path="/reset_prefix_cache",
+        path="/reset_prefix_cache?reset_external=true" if clear_kv_store else "/reset_prefix_cache",
         success=SuccessMatch(pointer="/success", value=JsonScalar(True)),
     )
 
@@ -175,6 +182,25 @@ def _effective_parallelism(declared: Parallelism, role_kind: ServeRoleKind) -> P
     )
 
 
+def _fill_from_devices(role: ServeRoleInput) -> Parallelism:
+    """vLLM multiplies outer tensor parallelism by pipeline, attention data,
+    and (for the `prefill` role) context parallelism, so a declared `devices`
+    fills an omitted outer tensor parallelism by that product."""
+    declared = role.parallelism
+    outer = declared.outer or ParallelismOuter()
+    attention = declared.attention or ParallelismAttention()
+    context = (attention.context_parallel_size or 1) if role.kind == ServeRoleKind.prefill else 1
+    divisor = (outer.pipeline_parallel_size or 1) * (attention.data_parallel_size or 1) * context
+    return fill_outer_tensor_parallel(
+        declared,
+        role.devices,
+        divisor,
+        "vLLM pipeline x attention data"
+        + (" x context" if role.kind == ServeRoleKind.prefill else "")
+        + " parallelism",
+    )
+
+
 def _device_count(parallelism: Parallelism, role_kind: ServeRoleKind) -> int:
     outer = parallelism.outer or ParallelismOuter()
     attention = parallelism.attention or ParallelismAttention()
@@ -240,8 +266,13 @@ def _plan_role(
     outcome: SyntheticAcceptanceOutcome | None = None
     if input.synthetic_acceptance is not None:
         outcome = apply_synthetic_acceptance(settings, input.synthetic_acceptance, role.id)
-    parallelism = _effective_parallelism(role.parallelism, role.kind)
+    parallelism = _effective_parallelism(_fill_from_devices(role), role.kind)
     device_count = _device_count(parallelism, role.kind)
+    require_declared_devices(
+        device_count,
+        role.devices,
+        "vLLM's reading (tensor x pipeline x data x prefill context parallelism)",
+    )
     replicas = []
     mechanism = input.profiling
     for replica_index in range(role.replica_count):
@@ -310,13 +341,19 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
     role = require_role(input, ServeRoleKind.serve)
     if input.gateway_backend is not None:
         inferlab_gateway_dynamo.require_backend(input.gateway_backend, component="Gateway")
+        if input.kv_store is not None:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                "vLLM consumes a KV store only on a direct single server",
+            )
         return _plan_dynamo_single(input, role)
     role_result, replicas, outcome = _plan_role(input, role, [])
     settings = _settings(role_result.effective_settings)
+    kv_store = _kv_store_plan(input, settings)
     role_result.public_endpoint = EndpointDeclaration(
         protocol=EndpointProtocol(),
         server_metrics=ServerMetricsEndpointRequirement(path="/metrics"),
-        prefix_cache_reset=_reset_prefix_cache(),
+        prefix_cache_reset=_reset_prefix_cache(clear_kv_store=kv_store is not None),
         prompt_cache_read_zero_representation=(
             PromptCacheReadZeroRepresentation.explicit
             if settings.enable_prompt_tokens_details
@@ -329,7 +366,33 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
         replicas=replicas,
         links=[],
         synthetic_acceptance=outcome,
+        kv_store=kv_store,
     )
+
+
+def _kv_store_plan(input: PlanServeInput, settings: VllmServeSettings) -> KvStorePlan | None:
+    """vLLM consumes a Mooncake Store through `MooncakeStoreConnector`
+    ([[RFC-0003:C-SERVE-KV-STORE]])."""
+    store_settings = (
+        settings.kv_store_global_segment_size,
+        settings.kv_store_local_buffer_size,
+        settings.kv_store_protocol,
+        settings.kv_store_device_name,
+    )
+    if input.kv_store is None:
+        if any(value is not None for value in store_settings):
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                "kv_store_* settings apply only when the server declares a kv_store",
+            )
+        return None
+    if "MOONCAKE_CONFIG_PATH" in (settings.extra_env or {}):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "MOONCAKE_CONFIG_PATH is rendered from the declared kv_store; "
+            "set kv_store_* settings instead",
+        )
+    return inferlab_kvstore.plan(input.kv_store)
 
 
 def _plan_dynamo_single(input: PlanServeInput, role: ServeRoleInput) -> PlanServeResult:
@@ -504,6 +567,11 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
 
 
 def plan_serve(input: PlanServeInput) -> PlanServeResult:
+    if input.topology != ServeTopology.single and input.kv_store is not None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "vLLM consumes a KV store only on a direct single server",
+        )
     validate_auxiliary_models(input)
     if input.topology == ServeTopology.single:
         return _plan_single(input)

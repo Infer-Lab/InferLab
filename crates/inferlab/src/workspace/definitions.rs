@@ -125,6 +125,10 @@ pub(crate) struct StackDefinition {
     pub checks: Vec<EnvironmentCheckDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_postprocess: Vec<EnvironmentScriptDefinition>,
+    /// Facts of the realized framework or Engine implementation, typed by
+    /// the stack's integration ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -172,10 +176,27 @@ pub(crate) struct ServerDefinition {
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(default, skip_serializing_if = "ProfilerEscapes::is_empty")]
     pub profiler: ProfilerEscapes,
+    /// The whole-replica device count of each model-serving role; when
+    /// declared it is the sole placement authority
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]).
+    #[serde(default)]
+    pub devices: Option<u32>,
     #[serde(default)]
     pub parallelism: Parallelism,
     #[serde(default)]
     pub settings: BTreeMap<String, JsonValue>,
+    /// Gateway settings, typed by the integration; only a topology with a
+    /// Gateway may declare them ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gateway_settings: BTreeMap<String, JsonValue>,
+    /// P/D Router settings, typed by the integration; only a topology with
+    /// a P/D Router may declare them ([[RFC-0006:C-INTEGRATIONS]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pd_router_settings: BTreeMap<String, JsonValue>,
+    /// The external KV store the server's model-serving processes share
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<KvStoreDefinition>,
     #[serde(default)]
     pub roles: BTreeMap<String, ServeRoleDefinition>,
     #[serde(default)]
@@ -227,9 +248,26 @@ pub(crate) const DEFAULT_ENGINE_TRACE_CAPTURE_FINALIZATION_DEADLINE_SECONDS: u64
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct KvStoreDefinition {
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct KvStorePatch {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ServeRoleDefinition {
     #[serde(default)]
     pub replicas: Option<u32>,
+    #[serde(default)]
+    pub devices: Option<u32>,
     #[serde(default)]
     pub parallelism: Parallelism,
     /// Role escapes merge into the server's common inputs
@@ -276,6 +314,7 @@ impl ProfilerEscapes {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ServeRoleOverride {
     pub replicas: Option<u32>,
+    pub devices: Option<u32>,
     pub parallelism: Parallelism,
     pub settings: BTreeMap<String, JsonValue>,
 }
@@ -1005,11 +1044,78 @@ impl BenchTokenSelector {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// The length form of a declared prefix geometry: exactly one of the two
+/// keys ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
-pub(crate) enum BenchPrefixSharing {
+pub(crate) enum BenchPrefixLength {
     Tokens { shared_prefix_tokens: u32 },
     Ratio { shared_prefix_ratio: f64 },
+}
+
+/// How a grouped population draws each entry's group
+/// ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum BenchPrefixPopularity {
+    #[default]
+    Uniform,
+    /// Rank k is drawn with probability proportional to `1 / k^exponent`.
+    Zipf(f64),
+}
+
+/// A declared exact final-prompt prefix geometry: its length, and how many
+/// independent prefix groups the population draws from
+/// ([[RFC-0004:C-BENCH-PREFIX-GEOMETRY]]).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BenchPrefixSharing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_prefix_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_prefix_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<BenchPrefixPopularity>,
+}
+
+impl BenchPrefixSharing {
+    /// The declared length form; definition validation guarantees exactly
+    /// one is present, and the token form wins otherwise.
+    pub(crate) fn length(&self) -> BenchPrefixLength {
+        match (self.shared_prefix_tokens, self.shared_prefix_ratio) {
+            (None, Some(shared_prefix_ratio)) => BenchPrefixLength::Ratio {
+                shared_prefix_ratio,
+            },
+            (tokens, _) => BenchPrefixLength::Tokens {
+                shared_prefix_tokens: tokens.unwrap_or(0),
+            },
+        }
+    }
+
+    pub(crate) fn group_count(&self) -> u32 {
+        self.groups.unwrap_or(1)
+    }
+}
+
+impl From<BenchPrefixLength> for BenchPrefixSharing {
+    fn from(length: BenchPrefixLength) -> Self {
+        let (shared_prefix_tokens, shared_prefix_ratio) = match length {
+            BenchPrefixLength::Tokens {
+                shared_prefix_tokens,
+            } => (Some(shared_prefix_tokens), None),
+            BenchPrefixLength::Ratio {
+                shared_prefix_ratio,
+            } => (None, Some(shared_prefix_ratio)),
+        };
+        Self {
+            shared_prefix_tokens,
+            shared_prefix_ratio,
+            groups: None,
+            popularity: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1269,6 +1375,10 @@ pub(crate) struct WorkloadSuiteDefinition {
 pub(crate) struct RecipeDefinition {
     pub server: String,
     pub workload_suite: String,
+    /// The server case a run of this recipe selects unless `--case` names
+    /// one ([[RFC-0003:C-RECIPE-COMPOSITION]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1291,8 +1401,17 @@ pub(crate) struct ServerCaseDefinition {
     /// profiler field a case may carry ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     #[serde(skip_serializing_if = "ProfilerEscapes::is_empty")]
     pub profiler: ProfilerEscapes,
+    pub devices: Option<u32>,
     pub parallelism: Parallelism,
     pub settings: BTreeMap<String, JsonValue>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gateway_settings: BTreeMap<String, JsonValue>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub pd_router_settings: BTreeMap<String, JsonValue>,
+    /// A case patches only the store's settings; it cannot add the store or
+    /// change its backend ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_store: Option<KvStorePatch>,
     pub roles: BTreeMap<String, ServeRoleOverride>,
 }
 

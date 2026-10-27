@@ -1,3 +1,4 @@
+import inferlab_gateway_smg
 from inferlab_adapter_sdk import (
     SettingValue,
     validate_extra_args,
@@ -81,3 +82,14 @@ def _settings(values: dict[str, SettingValue]) -> TokenspeedServeSettings:
     settings = validate_settings(TokenspeedServeSettings, values)
     validate_extra_args(settings.extra_args or [], _INFERLAB_OWNED_OPTIONS)
     return settings
+
+
+class PdRouterSettings(BaseModel):
+    """The SMG P/D Router policies a TokenSpeed prefill/decode server may
+    declare ([[RFC-0003:C-TOKENSPEED-PREFILL-DECODE]]); the defaults are the
+    qualified pairing's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prefill_policy: inferlab_gateway_smg.Policy = "round_robin"
+    decode_policy: inferlab_gateway_smg.Policy = "round_robin"

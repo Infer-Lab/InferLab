@@ -268,6 +268,12 @@ pub enum DeviceResidualEvidence {
 
 pub use crate::container::ContainerRemovalEvidence;
 
+/// The readiness probe cadence, shared by every readiness wait the control
+/// plane drives, including the serve-state probe ([[RFC-0009:C-TIME-CONTROL-OWNERSHIP]]).
+pub mod readiness_cadence {
+    pub use super::readiness::{POLL_INTERVAL, next_probe_interval, sleep_within_readiness};
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessStatus {
@@ -535,10 +541,23 @@ pub trait ProcessObserver {
     ) -> Result<(), LogSyncError>;
 }
 
+/// An already-started process that a readiness wait keeps watching: its exit
+/// fails the wait ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+#[derive(Clone, Copy, Debug)]
+pub struct WatchedProcess<'a> {
+    pub id: &'a str,
+    pub handle: &'a ProcessHandle,
+}
+
 pub trait ReadinessObserver {
+    /// Waits for `handle` to become ready. The wait fails as `Exited` when
+    /// `handle` or any `watched` process exits; the failure message names
+    /// the process that exited.
+    #[allow(clippy::too_many_arguments)]
     fn wait_ready(
         &self,
         handle: &ProcessHandle,
+        watched: &[WatchedProcess<'_>],
         endpoint: &ProcessEndpointPlan,
         readiness: &ReadinessPlan,
         bound: &OperationBound,
@@ -1891,11 +1910,7 @@ mod tests {
         assert!(cleanup.verified, "{cleanup:?}");
         assert!(!cleanup.already_exited, "{cleanup:?}");
         assert!(!cleanup.signals.is_empty(), "{cleanup:?}");
-        assert_eq!(
-            process_start_time(orphan.member_pid).map_err(|error| error.to_string())?,
-            None,
-            "the orphaned member was reaped"
-        );
+        assert!(has_exited(orphan.member_pid), "the orphaned member exited");
         Ok(())
     }
 
@@ -1960,11 +1975,7 @@ mod tests {
                 .is_some_and(|line| line.starts_with("cleanup\t")),
             "{stdout}"
         );
-        assert_eq!(
-            process_start_time(orphan.member_pid).map_err(|error| error.to_string())?,
-            None,
-            "the orphaned member was reaped"
-        );
+        assert!(has_exited(orphan.member_pid), "the orphaned member exited");
         Ok(())
     }
 
@@ -1999,6 +2010,93 @@ mod tests {
         assert!(
             line.contains(&orphan.member_pid.to_string()),
             "the detail names the offending member: {line}"
+        );
+        Ok(())
+    }
+
+    /// A process InferLab signalled but does not parent is reaped by init on
+    /// its own schedule, so a zombie has exited even while `/proc` still
+    /// lists it.
+    fn has_exited(pid: u32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+            stat.rsplit_once(") ")
+                .and_then(|(_, rest)| rest.chars().next())
+                .is_some_and(|state| matches!(state, 'Z' | 'X'))
+        })
+    }
+
+    fn spawn_shell(root: &Path, name: &str, script: &str) -> Result<HostProcessHandle, String> {
+        let command = CommandPlan {
+            argv: vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            explicit_env: Vec::new(),
+            pass_env: Vec::new(),
+            cwd: root.to_path_buf(),
+        };
+        spawn_local(ProcessSpec {
+            launch: &LaunchPlan::Local,
+            command: &command,
+            launch_files: &[],
+            cache_root: &root.join(name).join("cache"),
+            data_directory: None,
+            stdout: &root.join(format!("{name}.stdout.log")),
+            stderr: &root.join(format!("{name}.stderr.log")),
+            remote_dir: &root.join(name).join("remote"),
+            container: None,
+            owner_marker: &format!("record-fixture-{}/{name}", std::process::id()),
+        })
+        .map_err(|failure| failure.message())
+    }
+
+    /// A process that exits while another is still starting fails that
+    /// wait at once, named, instead of the wait running out its budget
+    /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    #[test]
+    fn a_watched_process_exit_ends_another_process_readiness_wait() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let waited = spawn_shell(root.path(), "gateway", "exec sleep 300")?;
+        let exiting = spawn_shell(root.path(), "server-000", "sleep 0.3; exit 1")?;
+        // A port nothing listens on: the waited process never becomes ready.
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .map_err(|error| error.to_string())?
+            .port();
+        let waited_handle = ProcessHandle::Local(waited.clone());
+        let exiting_handle = ProcessHandle::Local(exiting.clone());
+        let started = Instant::now();
+
+        let outcome = SystemProcessRuntime.wait_ready(
+            &waited_handle,
+            &[WatchedProcess {
+                id: "server-000",
+                handle: &exiting_handle,
+            }],
+            &ProcessEndpointPlan {
+                host: "127.0.0.1".to_owned(),
+                port,
+            },
+            &ReadinessPlan::Http {
+                path: "/health".to_owned(),
+                port: None,
+            },
+            &OperationBound::finite(Duration::from_secs(60)),
+            5,
+            &mut |_| {},
+        );
+        force_kill_group(waited.process_group);
+        force_kill_group(exiting.process_group);
+
+        let failure = outcome.err().ok_or("the wait must fail")?;
+        assert_eq!(failure.kind, ReadinessFailureKind::Exited);
+        assert!(
+            failure.message.contains("\"server-000\" exited"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the wait ran {:?}",
+            started.elapsed()
         );
         Ok(())
     }
@@ -2058,15 +2156,15 @@ mod tests {
             CleanupTrigger::StartupRollback,
             &mut |_| {},
         );
-        let survived = process_start_time(escaped).map_err(|error| error.to_string())?;
-        if survived.is_some() {
+        let survived = !has_exited(escaped);
+        if survived {
             let _ = Command::new("kill")
                 .args(["-KILL", &escaped.to_string()])
                 .status();
         }
 
         assert_eq!(handle.owner_marker.as_deref(), Some(marker.as_str()));
-        assert_eq!(survived, None, "the escaped process was terminated");
+        assert!(!survived, "the escaped process was terminated");
         assert!(cleanup.verified, "{cleanup:?}");
         let sweep = cleanup
             .marked_process_sweep

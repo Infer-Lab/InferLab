@@ -114,7 +114,23 @@ pub(crate) fn resolve_manual_bench(
                     .unwrap_or(1),
             )
         }),
+    )
+    .shared(
+        recorded.server.shared_prefix_cache,
+        recorded.server.prefix_publication_ms,
     );
+    let serve_state_probe = recorded.server.serve_state_probe.as_ref().map(|plan| {
+        crate::workload::WorkloadServeStateProbe::new(
+            &recorded.stack.integration,
+            &recorded.stack.pixi_environment,
+            inferlab_protocol::ServeModelInput {
+                id: recorded.server.model.id.clone(),
+                served_name: recorded.server.model.served_name.clone(),
+            },
+            recorded.server.topology,
+            plan,
+        )
+    });
     let context = MeasurementResolveContext {
         workspace_root: root,
         workspace_source_exclusions: &snapshot.source_exclusions,
@@ -166,6 +182,7 @@ pub(crate) fn resolve_manual_bench(
             .as_ref()
             .map(WorkloadHttpAction::from_wire),
         conditioning_serving,
+        serve_state_probe,
         synthetic_acceptance: recorded.server.synthetic_acceptance.is_some(),
         capture_ids: &capture_ids,
         command_env: &command_env,

@@ -262,12 +262,22 @@ pub struct PlanServeInput {
     pub kv_transfer: Option<KvTransferMechanism>,
     /// The resolved Gateway settings; every entry MUST reappear unchanged in
     /// the Gateway plan's effective settings ([[RFC-0006:C-INTEGRATIONS]]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<BTreeMap<String, SettingValue>>")]
     pub gateway_settings: BTreeMap<String, SettingValue>,
     /// The resolved P/D Router settings; every entry MUST reappear unchanged
     /// in the P/D Router plan's effective settings
     /// ([[RFC-0006:C-INTEGRATIONS]]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<BTreeMap<String, SettingValue>>")]
     pub pd_router_settings: BTreeMap<String, SettingValue>,
     /// The server's external KV store declaration
     /// ([[RFC-0003:C-SERVE-KV-STORE]]).
@@ -275,7 +285,12 @@ pub struct PlanServeInput {
     pub kv_store: Option<KvStoreInput>,
     /// The stack's declared settings, typed by its integration
     /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]); empty when none are declared.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<BTreeMap<String, SettingValue>>")]
     pub stack_settings: BTreeMap<String, SettingValue>,
     pub roles: Vec<ServeRoleInput>,
     /// The effective capture mechanism when profiling is requested; absent
@@ -288,7 +303,12 @@ pub struct PlanServeInput {
     pub synthetic_acceptance: Option<SyntheticAcceptanceInput>,
     /// The auxiliary model declaration when the serve declaration carries
     /// one ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<AuxiliaryModelInput>>")]
     pub auxiliary_models: Vec<AuxiliaryModelInput>,
 }
 
@@ -312,7 +332,12 @@ pub struct RenderServeInput {
     pub kv_transfer: Option<KvTransferMechanism>,
     /// The effective stack settings the plan returned
     /// ([[RFC-0006:C-INTEGRATIONS]]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<BTreeMap<String, SettingValue>>")]
     pub stack_settings: BTreeMap<String, SettingValue>,
     pub allocations: Vec<ServeProcessAllocation>,
     /// The effective capture mechanism when profiling is requested; absent
@@ -325,7 +350,12 @@ pub struct RenderServeInput {
     pub synthetic_acceptance: Option<SyntheticAcceptanceInput>,
     /// The auxiliary model declaration when the serve declaration carries
     /// one ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<AuxiliaryModelInput>>")]
     pub auxiliary_models: Vec<AuxiliaryModelInput>,
 }
 
@@ -731,7 +761,12 @@ pub struct PlanServeResult {
     /// The complete effective stack settings: every declared entry
     /// unchanged plus the integration's defaults
     /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<BTreeMap<String, SettingValue>>")]
     pub stack_settings: BTreeMap<String, SettingValue>,
     /// The resolved synthetic acceptance outcome; required in the accepted
     /// plan whenever the request carried the declaration, and forbidden
@@ -753,7 +788,12 @@ pub struct PlanServeResult {
     /// waits for every model-serving process to be engaged and Bench cases
     /// record its state ([[RFC-0003:C-SERVE-KV-STORE]]); declared only with a
     /// KV store plan.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    #[schemars(with = "Option<bool>")]
     pub serve_state_probe: bool,
 }
 
@@ -792,12 +832,22 @@ pub struct KvStorePlan {
     /// How each model-serving role whose processes use the store uses it; a
     /// role absent makes no claim and is treated as not using the store
     /// ([[RFC-0003:C-SERVE-KV-STORE]]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<BTreeMap<String, KvStoreAccess>>")]
     pub role_access: BTreeMap<String, KvStoreAccess>,
     /// How long after a request completes a prefix a `read_write` role wrote
     /// may take to become readable from the store; zero when absent
     /// ([[RFC-0003:C-SERVE-KV-STORE]]).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "is_zero"
+    )]
+    #[schemars(with = "Option<u64>")]
     pub publication_bound_ms: u64,
     /// Logical ports beyond the endpoint that consumers connect to.
     #[serde(default)]
@@ -1159,7 +1209,12 @@ pub enum ServeProcessAllocation {
         model_locator: String,
         /// The machine-resolved auxiliary weight locators for each declared
         /// kind ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(
+            default,
+            deserialize_with = "null_as_default",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        #[schemars(schema_with = "nullable::<Vec<AuxiliaryModelLocator>>")]
         auxiliary_model_locators: Vec<AuxiliaryModelLocator>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<EndpointAssignment>,
@@ -2399,7 +2454,12 @@ pub struct BenchPrefixGeometrySummary {
     pub full_prompt_entries: u32,
     /// Population entries drawn for each prefix group, in group order; empty
     /// for an ungrouped population ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<u64>>")]
     pub group_entries: Vec<u64>,
 }
 
@@ -2411,7 +2471,12 @@ pub struct BenchPrefixConditioningInput {
     pub sha256: String,
     pub prompt_tokens: u32,
     /// The prefix group this canonical prefix conditions; zero for the first.
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "is_zero_u32"
+    )]
+    #[schemars(with = "Option<u32>")]
     pub group: u32,
 }
 
@@ -2449,7 +2514,12 @@ pub struct BenchPopulationPreparationResult {
     pub prefix_conditioning: Option<BenchPrefixConditioningInput>,
     /// The canonical prefixes of every further prefix group, which a primed
     /// start conditions after the first ([[RFC-0004:C-BENCH-CACHE-STATE]]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<BenchPrefixConditioningInput>>")]
     pub group_prefix_conditioning: Vec<BenchPrefixConditioningInput>,
     #[serde(default)]
     pub shared_system_content: Option<BenchSharedSystemContentSummary>,
@@ -2776,6 +2846,23 @@ pub struct MeasurementProtocol {
     pub data_asset_preparation_request: Option<MeasurementDataAssetPreparationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_asset_preparation_result: Option<MeasurementDataAssetPreparationResult>,
+}
+
+/// Reads an explicit `null` as the field's default: generated client models
+/// write an unset defaulted field as `null`.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// The schema of a [`null_as_default`] field: its value schema or `null`.
+fn nullable<T: JsonSchema>(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [generator.subschema_for::<T>(), { "type": "null" }]
+    })
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

@@ -1,13 +1,14 @@
 use inferlab_protocol::{
     AdapterRequest, AdapterResponse, AdapterResult, BenchArtifactLevelInput, BenchClientRequest,
-    BenchClientResult, BenchPopulationPreparationRequest, BenchPrefixSharingInput,
-    BenchRequestSourceInput, BenchTokenSelectorInput, EvalClientRequest, EvalClientResult,
-    EvalDefinitionInput, EvalFailureKind, EvalMetricComparison, EvalMetricGateConclusion,
-    EvalTaskSourceInput, JsonScalar, MEASUREMENT_SCHEMA_ID, MeasurementDataAssetPreparationRequest,
-    MeasurementDataAssetPreparationResult, MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID,
-    Parallelism, ParallelismAttention, ParallelismExperts, ParallelismOuter, ProtocolVersion,
-    ReadinessProbe, RenderInputDeclaration, ServeProcessAllocation, SettingValue,
-    SuppliedRenderInput, TargetEndpointScheme, measurement_schema, protocol_schema,
+    BenchClientResult, BenchPopulationPreparationRequest, BenchPopulationPreparationResult,
+    BenchPrefixSharingInput, BenchRequestSourceInput, BenchTokenSelectorInput, EvalClientRequest,
+    EvalClientResult, EvalDefinitionInput, EvalFailureKind, EvalMetricComparison,
+    EvalMetricGateConclusion, EvalTaskSourceInput, JsonScalar, MEASUREMENT_SCHEMA_ID,
+    MeasurementDataAssetPreparationRequest, MeasurementDataAssetPreparationResult,
+    MeasurementDataAssetReadiness, PROTOCOL_SCHEMA_ID, Parallelism, ParallelismAttention,
+    ParallelismExperts, ParallelismOuter, ProtocolVersion, ReadinessProbe, RenderInputDeclaration,
+    ServeProcessAllocation, SettingValue, SuppliedRenderInput, TargetEndpointScheme,
+    measurement_schema, protocol_schema,
 };
 use std::error::Error;
 use std::path::Path;
@@ -152,6 +153,14 @@ const VALID_DATA_ASSET_PREPARATION_REQUEST_EVAL: &str = include_str!(concat!(
 const VALID_DATA_ASSET_PREPARATION_RESULT_OPAQUE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../protocol/fixtures/valid/data-asset-preparation-result-opaque.json"
+));
+const VALID_PLAN_RESPONSE_NULL_DEFAULTS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/plan-serve-response-null-defaults.json"
+));
+const VALID_BENCH_POPULATION_PREPARATION_RESULT_REPLAY_PRIMED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../protocol/fixtures/valid/bench-population-preparation-result-replay-primed.json"
 ));
 const GENERATED_ADAPTER_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1063,6 +1072,104 @@ fn plan_response_rejects_legacy_endpoint_path_fields() -> Result<(), Box<dyn Err
         .ok_or("a plan response with legacy path fields was accepted")?;
 
     assert!(error.to_string().contains("unknown field"), "{error}");
+    Ok(())
+}
+
+/// Released Python clients write an unset defaulted field as `null`; the
+/// runtime reads it as the field's default.
+#[test]
+fn python_written_null_defaults_are_accepted() -> Result<(), Box<dyn Error>> {
+    let AdapterResponse::Ok { result, .. } =
+        serde_json::from_str::<AdapterResponse>(VALID_PLAN_RESPONSE_NULL_DEFAULTS)?
+    else {
+        return Err("the null-defaults plan fixture is not an ok response".into());
+    };
+    let AdapterResult::PlanServe { output } = *result else {
+        return Err("the null-defaults plan fixture is not a plan result".into());
+    };
+    assert!(!output.serve_state_probe);
+    let store = output
+        .kv_store
+        .ok_or("the null-defaults plan fixture has no store")?;
+    assert!(store.role_access.is_empty());
+    assert_eq!(store.publication_bound_ms, 0);
+
+    let preparation = serde_json::from_str::<BenchPopulationPreparationResult>(
+        VALID_BENCH_POPULATION_PREPARATION_RESULT_REPLAY_PRIMED,
+    )?;
+    assert!(preparation.group_prefix_conditioning.is_empty());
+    let conditioning = preparation
+        .prefix_conditioning
+        .ok_or("the replay preparation fixture has no prefix conditioning")?;
+    assert_eq!(conditioning.group, 0);
+    let geometry = preparation
+        .prefix_geometry
+        .ok_or("the replay preparation fixture has no prefix geometry")?;
+    assert!(geometry.group_entries.is_empty());
+    Ok(())
+}
+
+/// A property that may be omitted must admit `null` or declare its default,
+/// or a generated client model writes `null` the runtime rejects.
+#[test]
+fn every_optional_schema_property_admits_null_or_declares_a_default() -> Result<(), Box<dyn Error>>
+{
+    fn admits_null(schema: &serde_json::Value) -> bool {
+        let type_admits = match &schema["type"] {
+            serde_json::Value::String(kind) => kind == "null",
+            serde_json::Value::Array(kinds) => kinds.iter().any(|kind| kind == "null"),
+            _ => false,
+        };
+        type_admits
+            || ["anyOf", "oneOf"].iter().any(|keyword| {
+                schema[*keyword]
+                    .as_array()
+                    .is_some_and(|branches| branches.iter().any(admits_null))
+            })
+    }
+    fn collect(path: &str, schema: &serde_json::Value, offenders: &mut Vec<String>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                if let Some(properties) = map.get("properties").and_then(|value| value.as_object())
+                {
+                    let required: Vec<&str> = map
+                        .get("required")
+                        .and_then(|value| value.as_array())
+                        .map(|names| names.iter().filter_map(|name| name.as_str()).collect())
+                        .unwrap_or_default();
+                    for (name, property) in properties {
+                        if !required.contains(&name.as_str())
+                            && property.get("default").is_none()
+                            && !admits_null(property)
+                        {
+                            offenders.push(format!("{path}.{name}"));
+                        }
+                    }
+                }
+                for (key, value) in map {
+                    collect(&format!("{path}/{key}"), value, offenders);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    collect(&format!("{path}[{index}]"), item, offenders);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut offenders = Vec::new();
+    collect(
+        "adapter",
+        &serde_json::from_str(GENERATED_ADAPTER_SCHEMA)?,
+        &mut offenders,
+    );
+    collect(
+        "measurement",
+        &serde_json::from_str(GENERATED_MEASUREMENT_SCHEMA)?,
+        &mut offenders,
+    );
+    assert!(offenders.is_empty(), "{offenders:#?}");
     Ok(())
 }
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-10-27
+
+### Fixed
+
+- The runtime accepts the `null` that the released adapter and measurement
+  clients write for an unset defaulted protocol field, reading it as the
+  field's default. In 0.23.0 every serving Bench over a dataset, replay, or
+  speed request source failed at population preparation before its first
+  request, a replay with prefix sharing or a primed start failed the same
+  way, and vLLM, SGLang, TensorRT-LLM, and TokenSpeed serve plans were
+  rejected because the plan left the serve-state probe unset. The protocol
+  version and the published integration packages are unchanged; upgrading
+  InferLab alone fixes these runs.
+
 ## [0.23.0] - 2026-10-27
 
 ### Added

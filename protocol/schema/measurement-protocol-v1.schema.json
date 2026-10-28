@@ -1509,10 +1509,17 @@
         },
         "group_prefix_conditioning": {
           "description": "The canonical prefixes of every further prefix group, which a primed\nstart conditions after the first ([[RFC-0004:C-BENCH-CACHE-STATE]]).",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/BenchPrefixConditioningInput"
-          }
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BenchPrefixConditioningInput"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "ineligible_entries": {
           "type": "integer",
@@ -1636,7 +1643,10 @@
       "properties": {
         "group": {
           "description": "The prefix group this canonical prefix conditions; zero for the first.",
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         },
@@ -1673,12 +1683,19 @@
         },
         "group_entries": {
           "description": "Population entries drawn for each prefix group, in group order; empty\nfor an ungrouped population ([[RFC-0005:C-BENCH-PROMPT-CACHE-EVIDENCE]]).",
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          }
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maximum_shared_prefix_tokens": {
           "type": "integer",

@@ -10,6 +10,7 @@ from inferlab_measurement_sdk import (
     BenchClientRequest,
     BenchImageSamplingInput,
     BenchPopulationPreparationRequest,
+    BenchPopulationPreparationResult,
     BenchPrefixSharingInput2,
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
@@ -287,6 +288,20 @@ def test_generated_schema_classifies_measurement_fixtures() -> None:
     validator.validate({"eval_client_request": vision_smoke_request})
     validator.validate({"data_asset_preparation_request": data_asset_request})
     validator.validate({"data_asset_preparation_result": data_asset_result})
+
+
+def test_schema_admits_the_null_the_sdk_writes_for_unset_defaulted_fields() -> None:
+    result = load_json(
+        FIXTURES / "valid" / "bench-population-preparation-result-replay-primed.json"
+    )
+
+    Draft202012Validator(load_json(SCHEMA)).validate(
+        {"bench_population_preparation_result": result}
+    )
+    assert (
+        json.loads(BenchPopulationPreparationResult.model_validate(result).model_dump_json())
+        == result
+    )
 
 
 def test_generated_models_preserve_opaque_data_asset_readiness() -> None:

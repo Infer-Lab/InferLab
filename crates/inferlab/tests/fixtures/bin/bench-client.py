@@ -545,7 +545,9 @@ if args.prepare:
         "prompt_token_targeting": prompt_token_targeting,
         "prefix_geometry": prefix_geometry,
         "prefix_conditioning": prefix_conditioning,
-        "group_prefix_conditioning": group_prefix_conditioning,
+        # The bench runner writes an unset list as null, as the generated
+        # client model serializes it.
+        "group_prefix_conditioning": group_prefix_conditioning or None,
         "evidence_path": str(evidence_path),
         "error": None,
     }

@@ -441,6 +441,14 @@ def test_generated_schema_classifies_shared_fixtures() -> None:
         )
 
 
+def test_schema_admits_the_null_the_sdk_writes_for_unset_defaulted_fields() -> None:
+    request = load_json(FIXTURES / "valid" / "plan-serve-request.json")
+    response = load_json(FIXTURES / "valid" / "plan-serve-response-null-defaults.json")
+
+    Draft202012Validator(load_json(SCHEMA)).validate({"request": request, "response": response})
+    assert json.loads(AdapterResponse.model_validate(response).model_dump_json()) == response
+
+
 def test_runtime_returns_typed_success_and_error_responses() -> None:
     valid = (FIXTURES / "valid" / "plan-serve-request.json").read_text()
 

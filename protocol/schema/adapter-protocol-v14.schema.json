@@ -911,7 +911,10 @@
         },
         "publication_bound_ms": {
           "description": "How long after a request completes a prefix a `read_write` role wrote\nmay take to become readable from the store; zero when absent\n([[RFC-0003:C-SERVE-KV-STORE]]).",
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
@@ -927,10 +930,17 @@
         },
         "role_access": {
           "description": "How each model-serving role whose processes use the store uses it; a\nrole absent makes no claim and is treated as not using the store\n([[RFC-0003:C-SERVE-KV-STORE]]).",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/KvStoreAccess"
-          }
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/KvStoreAccess"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -1239,10 +1249,17 @@
       "properties": {
         "auxiliary_models": {
           "description": "The auxiliary model declaration when the serve declaration carries\none ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AuxiliaryModelInput"
-          }
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AuxiliaryModelInput"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "gateway_backend": {
           "type": [
@@ -1252,10 +1269,17 @@
         },
         "gateway_settings": {
           "description": "The resolved Gateway settings; every entry MUST reappear unchanged in\nthe Gateway plan's effective settings ([[RFC-0006:C-INTEGRATIONS]]).",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SettingValue"
-          }
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "kv_store": {
           "description": "The server's external KV store declaration\n([[RFC-0003:C-SERVE-KV-STORE]]).",
@@ -1289,10 +1313,17 @@
         },
         "pd_router_settings": {
           "description": "The resolved P/D Router settings; every entry MUST reappear unchanged\nin the P/D Router plan's effective settings\n([[RFC-0006:C-INTEGRATIONS]]).",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SettingValue"
-          }
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "profiling": {
           "description": "The effective capture mechanism when profiling is requested; absent\nmeans no profiling ([[RFC-0004:C-WORKLOAD-PROFILING]]).",
@@ -1313,10 +1344,17 @@
         },
         "stack_settings": {
           "description": "The stack's declared settings, typed by its integration\n([[RFC-0002:C-WORKSPACE-AUTHORITY]]); empty when none are declared.",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SettingValue"
-          }
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "state_dir": {
           "description": "The control-plane-owned state directory spelling,\nworkspace-root-relative, that the integration resolves operator-declared\nrelative paths against when reading them through the workspace\nfilesystem and when declaring the supplied render-input source paths\nthose reads produce.",
@@ -1403,14 +1441,24 @@
         },
         "serve_state_probe": {
           "description": "The integration answers `ProbeServe` for this server, so readiness\nwaits for every model-serving process to be engaged and Bench cases\nrecord its state ([[RFC-0003:C-SERVE-KV-STORE]]); declared only with a\nKV store plan.",
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "stack_settings": {
           "description": "The complete effective stack settings: every declared entry\nunchanged plus the integration's defaults\n([[RFC-0002:C-WORKSPACE-AUTHORITY]]).",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SettingValue"
-          }
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "synthetic_acceptance": {
           "description": "The resolved synthetic acceptance outcome; required in the accepted\nplan whenever the request carried the declaration, and forbidden\notherwise ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).",
@@ -1818,10 +1866,17 @@
         },
         "auxiliary_models": {
           "description": "The auxiliary model declaration when the serve declaration carries\none ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AuxiliaryModelInput"
-          }
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AuxiliaryModelInput"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "gateway_backend": {
           "type": [
@@ -1861,10 +1916,17 @@
         },
         "stack_settings": {
           "description": "The effective stack settings the plan returned\n([[RFC-0006:C-INTEGRATIONS]]).",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SettingValue"
-          }
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/SettingValue"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "state_dir": {
           "description": "The control-plane-owned state directory spelling,\nworkspace-root-relative, that the integration resolves operator-declared\nrelative paths against when matching them to supplied render-input\nsource paths.",
@@ -2105,10 +2167,17 @@
           "properties": {
             "auxiliary_model_locators": {
               "description": "The machine-resolved auxiliary weight locators for each declared\nkind ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/AuxiliaryModelLocator"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/AuxiliaryModelLocator"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "cache": {
               "type": "string"

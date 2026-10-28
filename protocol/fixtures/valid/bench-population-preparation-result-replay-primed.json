@@ -1,0 +1,55 @@
+{
+  "admitted_entries": 2,
+  "candidate_entries": 2,
+  "error": null,
+  "evidence_path": "/workspace/.inferlab/bench/preparation/population-evidence.jsonl",
+  "group_prefix_conditioning": null,
+  "ineligible_entries": 0,
+  "ineligible_reasons": {},
+  "input_tokens": {
+    "maximum": 4,
+    "mean": 4.0,
+    "minimum": 4
+  },
+  "materialization_identity": "inferlab-replay-population-v1",
+  "output_tokens": {
+    "maximum": 16,
+    "mean": 16.0,
+    "minimum": 16
+  },
+  "population": {
+    "entries": 2,
+    "evidence_path": "/workspace/.inferlab/bench/preparation/population-evidence.jsonl",
+    "path": "/workspace/.inferlab/bench/preparation/population.jsonl",
+    "session_templates": [],
+    "sha256": "d1ea39075cd2df49c77917dab3279a451699bcf91cee10ed9f969cb8e9113648",
+    "tpot_applicable": true
+  },
+  "prefix_conditioning": {
+    "group": null,
+    "path": "/workspace/.inferlab/bench/preparation/canonical-prefix.txt",
+    "prompt_tokens": 2,
+    "sha256": "c67a08a698739782679c1e16107d73584e785e2ecd807cbbc4fbc238f9e95746"
+  },
+  "prefix_geometry": {
+    "canonical_prefix_sha256": "463f2998327eb3a694145e6014444480b2235be84aa6cfd57871cc64f1cd816c",
+    "full_prompt_entries": 0,
+    "group_entries": null,
+    "maximum_shared_prefix_tokens": 2,
+    "shared_prefix_tokens": {
+      "maximum": 2,
+      "mean": 2.0,
+      "minimum": 2
+    },
+    "unique_suffix_tokens": {
+      "maximum": 2,
+      "mean": 2.0,
+      "minimum": 2
+    }
+  },
+  "prompt_token_targeting": null,
+  "requested_entries": 2,
+  "schema_version": 1,
+  "shared_system_content": null,
+  "status": "succeeded"
+}

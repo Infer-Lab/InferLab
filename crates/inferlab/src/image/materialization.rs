@@ -1,7 +1,7 @@
 //! Filesystem materialization for generated runtime-only image build contexts
 //! ([[RFC-0007:C-IMAGE-BUILD]]).
 
-use super::entrypoint::{ENTRYPOINT_PATH, ENV_PREFIX};
+use super::entrypoint::{ACTIVATION_SCRIPT_DIR, ENTRYPOINT_PATH, ENV_PREFIX};
 use super::package_closure::{PackageKind, PackageSpec, normalize_package_name};
 use crate::InferlabError;
 use std::collections::BTreeMap;
@@ -22,7 +22,9 @@ pub(super) const GENERATOR_IDENTITY: &str =
 /// checks ran and how they exited.
 /// Epoch 4: built wheels install from a build-time bind mount of the
 /// wheelhouse, so no layer carries the wheel payload.
-pub(super) const IMAGE_CONTEXT_EPOCH: u32 = 4;
+/// Epoch 5: projected activation scripts are copied into the image and the
+/// entrypoint activation is exercised once during assembly.
+pub(super) const IMAGE_CONTEXT_EPOCH: u32 = 5;
 
 /// The framing prefix the generated check runner emits per check; the
 /// builder log is scanned for it to reconstruct per-check evidence.
@@ -30,6 +32,7 @@ pub(super) const CHECK_MARKER: &str = "INFERLAB-CHECK";
 
 const CHECKS_CONTEXT_DIR: &str = "environment-checks";
 const POSTPROCESS_CONTEXT_DIR: &str = "environment-postprocess";
+const ACTIVATION_CONTEXT_DIR: &str = "activation-scripts";
 const CHECKS_IMAGE_DIR: &str = "/opt/inferlab-checks";
 const POSTPROCESS_IMAGE_DIR: &str = "/opt/inferlab-postprocess";
 const CHECKS_RUNNER_FILE: &str = "inferlab-environment-checks.sh";
@@ -49,6 +52,9 @@ pub(super) struct ContextInputs<'a> {
     /// Declared image-realization postprocess steps, executed before the
     /// checks.
     pub postprocess: &'a [ContextScript],
+    /// Projected activation scripts in composition order, keyed by their
+    /// in-image file name ([[RFC-0007:C-IMAGE-BUILD]]).
+    pub activation: &'a [ContextScript],
 }
 
 /// A committed workspace script copied into the frozen context. Committed
@@ -198,9 +204,10 @@ pub(super) fn prepare_context(
     // Declared scripts are committed workspace content copied by bytes; they
     // stay outside `rendered` because the generated-text portability guard
     // does not govern committed content ([[RFC-0007:C-IMAGE-BUILD]]).
-    for (directory, scripts) in [
-        (POSTPROCESS_CONTEXT_DIR, inputs.postprocess),
-        (CHECKS_CONTEXT_DIR, inputs.checks),
+    for (directory, scripts, suffix) in [
+        (POSTPROCESS_CONTEXT_DIR, inputs.postprocess, ".py"),
+        (CHECKS_CONTEXT_DIR, inputs.checks, ".py"),
+        (ACTIVATION_CONTEXT_DIR, inputs.activation, ""),
     ] {
         if scripts.is_empty() {
             continue;
@@ -212,7 +219,7 @@ pub(super) fn prepare_context(
             source,
         })?;
         for script in scripts {
-            let target = script_dir.join(format!("{}.py", script.id));
+            let target = script_dir.join(format!("{}{suffix}", script.id));
             fs::write(&target, &script.bytes).map_err(|source| InferlabError::EnvironmentIo {
                 path: target,
                 operation: "write environment script",
@@ -277,6 +284,18 @@ fn render_dockerfile(inputs: &ContextInputs<'_>) -> String {
          COPY inferlab-entrypoint.sh {ENTRYPOINT_PATH}\n\
          RUN chmod 0755 {ENTRYPOINT_PATH}\n"
     );
+    // Projected activation runs once here so a failing script or a missing
+    // bash fails assembly with the reason in the builder log; RUN-scoped
+    // exports never reach the image configuration ([[RFC-0007:C-IMAGE-BUILD]]).
+    if !inputs.activation.is_empty() {
+        dockerfile.push_str(&format!(
+            "COPY {ACTIVATION_CONTEXT_DIR}/ {ACTIVATION_SCRIPT_DIR}/\n\
+             RUN if [ ! -x /bin/bash ]; then \\\n\
+             \x20   echo 'inferlab: the image projects activation scripts but has no /bin/bash' >&2; \\\n\
+             \x20   exit 1; fi; \\\n\
+             \x20   {ENTRYPOINT_PATH} true\n"
+        ));
+    }
     // Postprocess finishes the realization, then the checks gate it, both
     // through the entrypoint so the examined environment equals the runtime
     // activation ([[RFC-0002:C-ENVIRONMENT-CHECKS]]); failure framing per
@@ -329,6 +348,7 @@ mod tests {
             built_wheels: &[],
             checks: &[],
             postprocess: &[],
+            activation: &[],
         };
 
         let dockerfile = render_dockerfile(&inputs);
@@ -362,6 +382,7 @@ mod tests {
             built_wheels: &[],
             checks: &checks,
             postprocess: &postprocess,
+            activation: &[],
         };
 
         let dockerfile = render_dockerfile(&inputs);
@@ -420,5 +441,37 @@ mod tests {
             !bare.contains("/opt/inferlab-checks") && !bare.contains("/opt/inferlab-postprocess"),
             "environments without declarations render no script layers"
         );
+        assert!(
+            !dockerfile.contains("/opt/inferlab-activation"),
+            "environments without activation scripts render no activation layer"
+        );
+    }
+
+    #[test]
+    fn dockerfile_self_checks_projected_activation_before_postprocess() {
+        let script = |id: &str| ContextScript {
+            id: id.to_owned(),
+            bytes: b"export X=1\n".to_vec(),
+        };
+        let activation = [script("01.sh")];
+        let postprocess = [script("finish")];
+        let dockerfile = render_dockerfile(&ContextInputs {
+            context_dir: Path::new("unused"),
+            base_image: "example.com/base:1",
+            base_image_digest: "sha256:0000",
+            entrypoint: "#!/bin/bash\n",
+            built_wheels: &[],
+            checks: &[],
+            postprocess: &postprocess,
+            activation: &activation,
+        });
+        let copy = dockerfile.find("COPY activation-scripts/ /opt/inferlab-activation/");
+        let self_check = dockerfile.find("    /usr/local/bin/inferlab-entrypoint true\n");
+        let finish = dockerfile.find("RUN /usr/local/bin/inferlab-entrypoint python");
+        assert!(
+            copy.is_some() && self_check > copy && finish > self_check,
+            "activation scripts are copied and exercised before postprocess: {dockerfile}"
+        );
+        assert!(dockerfile.contains("has no /bin/bash"), "{dockerfile}");
     }
 }

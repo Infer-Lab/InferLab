@@ -106,8 +106,20 @@ pub(crate) struct AssemblyPlan {
     pub base_image_digest: String,
     pub content_closure: BTreeMap<String, String>,
     pub closure_digest: String,
+    /// Projected activation scripts in composition order
+    /// ([[RFC-0007:C-IMAGE-BUILD]]); composition is per platform because
+    /// target selectors choose the script list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activation_scripts: Vec<PlannedActivationScript>,
     /// Indexes into `ResolvedImageBuild::validations` consuming this assembly.
     pub validations: Vec<usize>,
+}
+
+/// One projected activation script resolved to its content identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PlannedActivationScript {
+    pub script: PathBuf,
+    pub sha256: String,
 }
 
 /// One requested (platform, validation coordinate) pair.
@@ -291,20 +303,24 @@ pub(crate) fn resolve_image<T: BuilderTool, C: AdapterClient>(
         });
         let base_image_digest = observed_digest.value;
         let pixi_platform = package_closure::pixi_platform(platform)?;
-        entrypoint::guard_unmodeled_activation(
+        let activation = entrypoint::compose_activation(
             &workspace.root,
             pixi_platform,
             &image.pixi_environment,
         )?;
-        let activation =
-            entrypoint::activation_env(&workspace.root, pixi_platform, &image.pixi_environment)?;
-        let entrypoint = entrypoint::render_entrypoint(&activation)?;
+        let activation_scripts = plan_activation_scripts(
+            &workspace.root,
+            &workspace.snapshot.revision,
+            &activation.scripts,
+        )?;
+        let entrypoint = entrypoint::render_entrypoint(&activation.env, &activation.scripts)?;
         let entrypoint_contract = entrypoint::entrypoint_contract_digest(&entrypoint.text);
         let content_closure = content_closure(
             &workspace.snapshot,
             &image,
             &base_image_digest,
             &entrypoint_contract,
+            &activation_scripts,
         );
         let closure_digest = closure_digest(&content_closure)?;
         let key = (closure_digest.clone(), platform.clone());
@@ -315,6 +331,7 @@ pub(crate) fn resolve_image<T: BuilderTool, C: AdapterClient>(
                 base_image_digest,
                 content_closure,
                 closure_digest,
+                activation_scripts,
                 validations: Vec::new(),
             });
         }
@@ -410,6 +427,7 @@ fn content_closure(
     image: &ImagePlan,
     base_image_digest: &str,
     entrypoint_contract: &str,
+    activation_scripts: &[PlannedActivationScript],
 ) -> BTreeMap<String, String> {
     let mut closure = BTreeMap::new();
     closure.insert(
@@ -481,7 +499,103 @@ fn content_closure(
             .collect::<Vec<_>>()
             .join("\u{1e}"),
     );
+    // Projected activation script content and order key the closure; the
+    // key is absent without scripts so script-free closures keep their shape.
+    if !activation_scripts.is_empty() {
+        closure.insert(
+            "activation_scripts".to_owned(),
+            activation_scripts
+                .iter()
+                .map(|script| format!("{}\u{1f}{}", script.script.display(), script.sha256))
+                .collect::<Vec<_>>()
+                .join("\u{1e}"),
+        );
+    }
     closure
+}
+
+/// Resolve composed activation scripts to content identities, rejecting any
+/// the image cannot faithfully carry ([[RFC-0007:C-IMAGE-BUILD]]): each must
+/// be a workspace-relative regular file tracked at the resolved revision,
+/// and its text must not name `PIXI_PROJECT_ROOT` or the absolute workspace
+/// root, which have no in-image meaning. Runs at resolution, so dry-run
+/// rejects too.
+fn plan_activation_scripts(
+    root: &Path,
+    revision: &str,
+    declared: &[String],
+) -> Result<Vec<PlannedActivationScript>, InferlabError> {
+    let root_text = root.display().to_string();
+    let mut planned = Vec::with_capacity(declared.len());
+    for script in declared {
+        let mut path = PathBuf::new();
+        let mut relative = true;
+        for component in Path::new(script).components() {
+            match component {
+                std::path::Component::Normal(part) => path.push(part),
+                std::path::Component::CurDir => {}
+                _ => relative = false,
+            }
+        }
+        if !relative || path.as_os_str().is_empty() {
+            return Err(InferlabError::ImageBuild {
+                message: format!(
+                    "activation script {script:?} must be a workspace-relative path to project                      into the image"
+                ),
+            });
+        }
+        let tracked = path.display().to_string();
+        let operation = format!("git ls-tree -z {revision} -- {tracked}");
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["ls-tree", "-z", revision, "--", &tracked])
+            .output()
+            .map_err(|source| InferlabError::Git {
+                root: root.to_path_buf(),
+                source: crate::error::GitError::Launch {
+                    operation: operation.clone(),
+                    source,
+                },
+            })?;
+        if !output.status.success() {
+            return Err(InferlabError::Git {
+                root: root.to_path_buf(),
+                source: crate::error::GitError::Exit {
+                    operation,
+                    status: output.status,
+                    diagnostics: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                },
+            });
+        }
+        let entry = String::from_utf8_lossy(&output.stdout);
+        let mode = entry.split(' ').next().unwrap_or_default();
+        if !matches!(mode, "100644" | "100755") {
+            return Err(InferlabError::ImageBuild {
+                message: format!(
+                    "activation script {script:?} must be a regular file committed at the                      workspace revision to project into the image"
+                ),
+            });
+        }
+        let absolute = root.join(&path);
+        let bytes = std::fs::read(&absolute).map_err(|source| InferlabError::Read {
+            path: absolute.clone(),
+            source,
+        })?;
+        let text = String::from_utf8_lossy(&bytes);
+        if text.contains("PIXI_PROJECT_ROOT") || text.contains(&root_text) {
+            return Err(InferlabError::ImageBuild {
+                message: format!(
+                    "activation script {script:?} references PIXI_PROJECT_ROOT or the workspace \
+                     root, which have no equivalent inside the image"
+                ),
+            });
+        }
+        planned.push(PlannedActivationScript {
+            script: path,
+            sha256: base16ct::lower::encode_string(&Sha256::digest(&bytes)),
+        });
+    }
+    Ok(planned)
 }
 
 fn closure_digest(closure: &BTreeMap<String, String>) -> Result<String, InferlabError> {

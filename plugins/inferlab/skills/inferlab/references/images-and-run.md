@@ -45,6 +45,34 @@ it.
 Built images remain in local builder storage; this workflow does not push to a
 registry.
 
+## Activation In Built Images
+
+A built image's entrypoint reproduces the stack environment's `pixi.toml`
+activation, so host and image runs share one authority; no image-specific
+declaration exists. Activation declared on the environment, its features, and
+the default feature compose as Pixi composes them, including `target.<platform>`,
+`target.linux`, and `target.unix` tables. Activation scripts are sourced by
+bash in Pixi's order before every process the image starts, so host-dependent
+logic such as a driver-conditional `LD_LIBRARY_PATH` prepend runs on the host
+that starts the container. While a script runs, `CONDA_PREFIX` is the image
+environment and `PIXI_PROJECT_ROOT` is unset. Then `[activation.env]` values
+apply: a self-referencing value (`LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"`)
+composes onto what the scripts left, and any other value applies unless the
+variable was already non-empty at container start (`docker run --env` wins).
+`CONDA_PREFIX`, `CUDA_VISIBLE_DEVICES`, `HOME`, `USER`, and `LOGNAME` keep
+InferLab's values. Package-provided `etc/conda/activate.d` scripts do not run
+in the image.
+
+A script must be committed, workspace-relative, and must not mention
+`PIXI_PROJECT_ROOT` or the absolute workspace path — anything it sources is
+not copied into the image. Resolution rejects other scripts, dry-run
+included, and lists the accepted ones with content digests. Assembly runs the
+activation once inside the image, so a script that exits non-zero, or a base
+image without `/bin/bash`, fails the build and names the cause in the builder
+log. At container start, a script that exits non-zero stops the start before
+the command and is named on stderr. Each fresh package build records the
+environment it received as `activation_environment` in the image record.
+
 ## Built And External Image Selection
 
 `serve start`, `recipe run`, and `run` may select a successful

@@ -63,6 +63,11 @@ pub(crate) struct PackageEvidence {
     /// ([[RFC-0007:C-IMAGE-BUILD]]); absent in records that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neutrality: Option<super::neutrality::PackageNeutrality>,
+    /// Record-relative path of the environment the package build received,
+    /// activation included ([[RFC-0007:C-IMAGE-BUILD]]); absent for reused
+    /// packages and in records that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_environment: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

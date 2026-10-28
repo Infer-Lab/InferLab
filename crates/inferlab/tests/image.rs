@@ -612,6 +612,20 @@ fn closed_loop_builds_validates_and_scopes_platforms() -> Result<(), Box<dyn Err
                 .as_u64()
                 .is_some_and(|count| count > 0)
         );
+        let environment = package["activation_environment"]
+            .as_str()
+            .ok_or("fresh package builds record the environment they received")?;
+        let captured = fs::read_to_string(
+            workspace
+                .root
+                .path()
+                .join(format!(".inferlab/records/{record_id}"))
+                .join(environment),
+        )?;
+        assert!(
+            captured.lines().any(|line| line.starts_with("PATH=")),
+            "the captured environment is the one the build ran with: {captured}"
+        );
     }
     let commands = assembly["native_commands"].as_array().ok_or("commands")?;
     assert!(
@@ -1205,6 +1219,122 @@ fn native_only_image_succeeds() -> Result<(), Box<dyn Error>> {
     for validation in validations {
         assert_eq!(validation["outcome"], "validated");
     }
+    Ok(())
+}
+
+/// Commit `script` at `path` and compose it as the default feature's
+/// activation script.
+fn declare_activation_script(
+    workspace: &TestWorkspace,
+    path: &str,
+    script: &str,
+) -> Result<(), Box<dyn Error>> {
+    let root = workspace.root.path();
+    fs::write(root.join(path), script)?;
+    let manifest = fs::read_to_string(root.join("pixi.toml"))?.replace(
+        "[activation.env]\n",
+        &format!("[activation]\nscripts = [\"{path}\"]\n\n[activation.env]\n"),
+    );
+    fs::write(root.join("pixi.toml"), manifest)?;
+    git(root, &["add", "-A"])?;
+    git(root, &["commit", "-qm", "activation script"])
+}
+
+#[test]
+fn activation_scripts_project_into_the_image_entrypoint() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let script = "if [ -r /sys/module/nvidia/version ]; then :; fi\n\
+                  export LD_LIBRARY_PATH=\"$CONDA_PREFIX/cuda-compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n";
+    declare_activation_script(&workspace, "tools/cuda_compat.sh", script)?;
+    let dry_run = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
+    assert!(
+        dry_run.status.success(),
+        "dry-run failed: {}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let plan = stdout_json(&dry_run)?;
+    let assembly = &plan["assemblies"][0];
+    let digest = assembly["activation_scripts"][0]["sha256"]
+        .as_str()
+        .ok_or("dry-run lists the projected script digest")?;
+    assert_eq!(
+        assembly["activation_scripts"][0]["script"],
+        "tools/cuda_compat.sh"
+    );
+    assert!(
+        assembly["content_closure"]["activation_scripts"]
+            .as_str()
+            .is_some_and(|entry| entry.contains(digest)),
+        "script content keys the closure: {assembly}"
+    );
+
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native"])?;
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record_id = stdout_json(&output)?["record_id"]
+        .as_str()
+        .ok_or("record id")?
+        .to_owned();
+    let context = workspace
+        .root
+        .path()
+        .join(format!(".inferlab/records/{record_id}/context-linux-amd64"));
+    assert_eq!(
+        fs::read_to_string(context.join("activation-scripts/01.sh"))?,
+        script
+    );
+    let entrypoint = fs::read_to_string(context.join("inferlab-entrypoint.sh"))?;
+    assert!(entrypoint.starts_with("#!/bin/bash\n"), "{entrypoint}");
+    assert!(
+        entrypoint.contains("__inferlab_script='tools/cuda_compat.sh'")
+            && entrypoint.contains(". '/opt/inferlab-activation/01.sh'"),
+        "{entrypoint}"
+    );
+    let dockerfile = fs::read_to_string(context.join("Dockerfile"))?;
+    let self_check = dockerfile.find("/usr/local/bin/inferlab-entrypoint true");
+    let postprocess = dockerfile.find("RUN /usr/local/bin/inferlab-entrypoint python");
+    assert!(
+        dockerfile.contains("COPY activation-scripts/ /opt/inferlab-activation/")
+            && self_check.is_some()
+            && self_check < postprocess,
+        "assembly exercises activation before postprocess: {dockerfile}"
+    );
+    Ok(())
+}
+
+#[test]
+fn unprojectable_activation_scripts_fail_resolution() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    declare_activation_script(
+        &workspace,
+        "tools/root-bound.sh",
+        "export DATA=\"$PIXI_PROJECT_ROOT/data\"\n",
+    )?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("tools/root-bound.sh"),
+        "a root-bound script is rejected in dry-run: {stderr}"
+    );
+
+    let workspace = TestWorkspace::new()?;
+    let root = workspace.root.path();
+    fs::write(
+        root.join(".gitignore"),
+        fs::read_to_string(root.join(".gitignore"))? + "tools/local.sh\n",
+    )?;
+    declare_activation_script(&workspace, "tools/local.sh", "export X=1\n")?;
+    let output = workspace.build(&["deepseek-v4-flash-runtime-native", "--dry-run"])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr.contains("tools/local.sh")
+            && stderr.contains("committed"),
+        "an untracked script is rejected in dry-run: {stderr}"
+    );
     Ok(())
 }
 

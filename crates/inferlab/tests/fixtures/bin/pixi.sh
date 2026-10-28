@@ -132,6 +132,11 @@ if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
   printf '%s\n' "$5" > "${FIXTURE_PATH_MAPS:-/dev/null}"
   shift 8
 fi
+# The third stage captures the build environment: `sh -c SCRIPT sh FILE`.
+if [ "$1" = /bin/sh ] && [ "$2" = -c ]; then
+  env > "$5"
+  shift 5
+fi
 if [ "$1" = python ] && [ "$3" = pip ] && [ "$4" = wheel ] && [ "$7" = --wheel-dir ]; then
   case "${FIXTURE_PIXI_BUILD:-}" in
     mutate|fail) printf 'stray\n' > vendor/vllm/stray-build-artifact.txt ;;

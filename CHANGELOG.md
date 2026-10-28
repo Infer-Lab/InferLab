@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-10-28
+
+### Added
+
+- Image builds project the activation scripts the stack's Pixi environment
+  composes ([[ADR-0070]]): the image entrypoint sources them with bash in
+  Pixi's order before every process it starts, so host-dependent activation
+  such as a driver-conditional CUDA compatibility library path now works in
+  built images. Scripts must be committed workspace files that do not
+  reference `PIXI_PROJECT_ROOT` or the workspace root; resolution rejects
+  other scripts, dry-run included. Dry-run output and image records list the
+  scripts with content digests; their content enters the image content
+  closure and package reuse. Assembly runs the activation once and fails when
+  it fails or the base image has no bash. A script that exits non-zero at
+  container start stops the command and is named on stderr. Each fresh package
+  build records the environment it received.
+
+### Fixed
+
+- Image activation now composes activation declared directly on an
+  environment and under the `linux` and `unix` target selectors, which image
+  projection previously dropped silently. Projected `[activation.env]` values
+  now expand against the environment the activation scripts leave, not against
+  other projected values.
+
 ## [0.23.1] - 2026-10-27
 
 ### Fixed

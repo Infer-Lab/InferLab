@@ -197,11 +197,13 @@ fn assemble<T: BuilderTool>(
     let build_dir = store
         .dir()
         .join(format!("build-{}", platform.replace('/', "-")));
-    let activation = entrypoint::activation_env(
+    let composed = entrypoint::compose_activation(
         &workspace.root,
         pixi_platform,
         &resolved.image.pixi_environment,
     )?;
+    let activation_scripts = load_activation_scripts(&workspace.root, &composed, assembly)?;
+    let activation = &composed.env;
     let packages =
         package_closure::locked_packages(&workspace.root, &resolved.image.pixi_environment)?;
     // Derived cache-key facts: the selected environment's package closure
@@ -213,9 +215,23 @@ fn assemble<T: BuilderTool>(
         &packages,
         &resolved.image.source_paths,
     )?;
+    // Projected script content and order join the activation identity; a
+    // script-free projection keeps its former digest so existing package
+    // reuse stays valid.
     let activation_digest = {
-        let canonical = serde_json::to_string(&activation)
-            .map_err(|source| InferlabError::EncodeOutput { source })?;
+        let canonical = if assembly.activation_scripts.is_empty() {
+            serde_json::to_string(activation)
+        } else {
+            serde_json::to_string(&serde_json::json!({
+                "env": activation,
+                "scripts": assembly
+                    .activation_scripts
+                    .iter()
+                    .map(|script| (script.script.display().to_string(), &script.sha256))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        .map_err(|source| InferlabError::EncodeOutput { source })?;
         base16ct::lower::encode_string(&sha2::Sha256::digest(canonical.as_bytes()))
     };
 
@@ -226,7 +242,7 @@ fn assemble<T: BuilderTool>(
     // workspace mutation an external build backend still causes is detected
     // afterwards and fails the assembly.
     let copy_root = build_dir.join("wheel-build").join("sources");
-    let redirects = build_env_redirects(&activation, &resolved.image.source_paths, &copy_root)?;
+    let redirects = build_env_redirects(activation, &resolved.image.source_paths, &copy_root)?;
     let wheel_cache_root = workspace.root.join(CACHE_DIR).join("wheels");
     let mut copied: std::collections::BTreeMap<PathBuf, PathBuf> =
         std::collections::BTreeMap::new();
@@ -234,7 +250,7 @@ fn assemble<T: BuilderTool>(
     let mut source_packages = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let build_paths = neutrality::BuildPaths {
-        cargo_home: neutrality::cargo_home(&activation, &workspace.root, home.as_deref()),
+        cargo_home: neutrality::cargo_home(activation, &workspace.root, home.as_deref()),
         workspace_root: workspace.root.clone(),
         env_prefix: workspace
             .root
@@ -278,7 +294,7 @@ fn assemble<T: BuilderTool>(
             let tools = tools.as_ref().ok_or_else(|| InferlabError::ImageBuild {
                 message: "image-packaging runtime missing for a selected package".to_owned(),
             })?;
-            let (wheel, cached, neutral) = match cached_wheel(&cache_dir)? {
+            let (wheel, cached, neutral, activation_environment) = match cached_wheel(&cache_dir)? {
                 Some(wheel) => {
                     progress.phase(Phase::named("package-build").item(
                         wheel_source.display().to_string(),
@@ -294,7 +310,7 @@ fn assemble<T: BuilderTool>(
                         &neutral_work,
                         false,
                     )?;
-                    (wheel, true, neutral)
+                    (wheel, true, neutral, None)
                 }
                 None => {
                     if copied.is_empty() {
@@ -357,15 +373,15 @@ fn assemble<T: BuilderTool>(
                     // Path-neutral before it is cached: rewrite search paths,
                     // repack, and verify ([[RFC-0007:C-IMAGE-BUILD]]).
                     let neutral = neutrality::make_neutral(
-                        &built.source_path,
+                        &built.wheel.source_path,
                         tools,
                         &build_paths,
                         &neutral_work,
                         true,
                     )?;
-                    let wheel = wheel_from_path(built.source_path)
+                    let wheel = wheel_from_path(built.wheel.source_path)
                         .and_then(|wheel| adopt_into_cache(wheel, &cache_dir))?;
-                    (wheel, false, neutral)
+                    (wheel, false, neutral, Some(built.activation_environment))
                 }
             };
             source_packages.push(wheel.package.clone());
@@ -377,6 +393,7 @@ fn assemble<T: BuilderTool>(
                     sha256: wheel.sha256.clone(),
                     cached,
                     neutrality: Some(neutral),
+                    activation_environment,
                 });
             wheels.push(wheel);
         }
@@ -458,7 +475,7 @@ fn assemble<T: BuilderTool>(
         });
     }
 
-    let entrypoint = entrypoint::render_entrypoint(&activation)?;
+    let entrypoint = entrypoint::render_entrypoint(activation, &composed.scripts)?;
     store.record_mut().assemblies[index].excluded_activation = entrypoint.skipped.clone();
     let check_scripts = load_environment_scripts(
         &workspace.root,
@@ -485,6 +502,7 @@ fn assemble<T: BuilderTool>(
             built_wheels: &wheels,
             checks: &check_scripts,
             postprocess: &postprocess_scripts,
+            activation: &activation_scripts,
         },
         &packages,
         &source_packages,
@@ -661,6 +679,55 @@ fn image_check_evidence_from_log(
 /// keyed on ([[RFC-0002:C-ENVIRONMENT-CHECKS]]): a script edited after
 /// resolution must fail the assembly rather than build an image the closure
 /// does not describe.
+/// Load the projected activation scripts for the context, failing when the
+/// composition or any script content moved after resolution: the content
+/// closure was derived from the planned list.
+fn load_activation_scripts(
+    root: &Path,
+    composed: &entrypoint::ComposedActivation,
+    assembly: &super::AssemblyPlan,
+) -> Result<Vec<materialization::ContextScript>, InferlabError> {
+    let planned: Vec<PathBuf> = assembly
+        .activation_scripts
+        .iter()
+        .map(|script| script.script.clone())
+        .collect();
+    let composed_paths: Vec<PathBuf> = composed
+        .scripts
+        .iter()
+        .map(|script| package_closure::without_current_dir(Path::new(script)))
+        .collect();
+    if planned != composed_paths {
+        return Err(InferlabError::ImageBuild {
+            message: "the composed activation scripts changed after resolution; the content \
+                      closure no longer describes this build"
+                .to_owned(),
+        });
+    }
+    let mut loaded = Vec::with_capacity(planned.len());
+    for (index, script) in assembly.activation_scripts.iter().enumerate() {
+        let path = root.join(&script.script);
+        let bytes = std::fs::read(&path).map_err(|source| InferlabError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if base16ct::lower::encode_string(&sha2::Sha256::digest(&bytes)) != script.sha256 {
+            return Err(InferlabError::ImageBuild {
+                message: format!(
+                    "activation script {} changed after resolution; the content closure no \
+                     longer describes this build",
+                    script.script.display()
+                ),
+            });
+        }
+        loaded.push(materialization::ContextScript {
+            id: entrypoint::activation_script_name(index),
+            bytes,
+        });
+    }
+    Ok(loaded)
+}
+
 fn load_environment_scripts<'a>(
     root: &Path,
     scripts: impl Iterator<Item = (&'a String, &'a PathBuf, &'a String)>,
@@ -1167,6 +1234,9 @@ fn path_map_stage(path_maps: &[neutrality::PathMap]) -> [String; 8] {
     ]
 }
 
+/// The captured package-build environment, beside the build log.
+const ACTIVATION_ENVIRONMENT_FILE: &str = "activation.env";
+
 fn build_wheel(
     root: &Path,
     pixi_environment: &str,
@@ -1175,7 +1245,7 @@ fn build_wheel(
     build_dir: &Path,
     environment: &BuildEnvironment<'_>,
     sink: &mut CommandRecorder<'_>,
-) -> Result<materialization::BuiltWheel, InferlabError> {
+) -> Result<BuiltPackage, InferlabError> {
     let BuildEnvironment {
         overrides: env_overrides,
         path_maps,
@@ -1216,6 +1286,18 @@ fn build_wheel(
             .map(|(name, value)| format!("{name}={value}")),
     );
     argv.extend(path_map_stage(path_maps));
+    // Package evidence keeps the environment the build actually received,
+    // including what activation scripts exported ([[RFC-0007:C-IMAGE-BUILD]]).
+    argv.extend([
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        r#"env > "$1"; shift; exec "$@""#.to_owned(),
+        "sh".to_owned(),
+        wheel_dir
+            .join(ACTIVATION_ENVIRONMENT_FILE)
+            .display()
+            .to_string(),
+    ]);
     argv.extend([
         "python".to_owned(),
         "-m".to_owned(),
@@ -1232,11 +1314,10 @@ fn build_wheel(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "build".to_owned());
     let sanitized = wheel_source.display().to_string().replace(['/', '\\'], "-");
+    let evidence_dir = format!("{build_name}/wheel-build/out/{sanitized}");
     sink(NativeCommand {
         argv: argv.clone(),
-        log: Some(format!(
-            "{build_name}/wheel-build/out/{sanitized}/build.log"
-        )),
+        log: Some(format!("{evidence_dir}/build.log")),
     })?;
     super::tool::run_streamed(&argv, Some(root), &wheel_dir.join("build.log"))?;
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(&wheel_dir)
@@ -1257,7 +1338,19 @@ fn build_wheel(
             ),
         });
     };
-    wheel_from_path(wheel_path)
+    Ok(BuiltPackage {
+        wheel: wheel_from_path(wheel_path)?,
+        activation_environment: PathBuf::from(format!(
+            "{evidence_dir}/{ACTIVATION_ENVIRONMENT_FILE}"
+        )),
+    })
+}
+
+/// A freshly built wheel with the record-relative path of the environment
+/// its build received.
+struct BuiltPackage {
+    wheel: materialization::BuiltWheel,
+    activation_environment: PathBuf,
 }
 
 /// Archive names carry the image content identity and the producing record

@@ -35,6 +35,48 @@ struct CaseRunFailure {
     cache_preparation: Option<BenchCachePreparationEvidence>,
 }
 
+/// Run one case only against a server whose every process is alive, and
+/// fail it if a process exited while it ran: a measurement against a server
+/// that lost a process is not a measurement of that server
+/// ([[RFC-0004:C-MEASUREMENTS]]). `observed_alive` says the caller's
+/// previous case already observed the server alive after it ran, so only
+/// the first case checks before running. The flag reports that the server
+/// lost a process, so the caller stops its remaining cases.
+pub(super) fn run_case_on_live_server(
+    server_record_id: &str,
+    observed_alive: bool,
+    plan: &BenchPlan,
+    case: &BenchCasePlan,
+    session: &mut WorkloadRecordSession,
+    capture: Option<&mut inferlab_profiler::session::CaptureSession>,
+) -> Result<(BenchCaseRecord, bool), InferlabError> {
+    let root = session.workspace_root().to_path_buf();
+    let lost_before = if observed_alive {
+        None
+    } else {
+        crate::server::lost_process_error(&root, server_record_id)?
+    };
+    if let Some(error) = lost_before {
+        let paths = session.case_paths(&case.id)?;
+        let timing = OperationBound::unbounded()
+            .timing("before_prefix_cache_reset", OperationTerminalCause::Failed);
+        return Ok((
+            failed_case_record(plan, case, session, paths, None, timing, &error),
+            true,
+        ));
+    }
+    let mut record = run_bench_case(plan, case, session, capture)?;
+    if let Some(error) = crate::server::lost_process_error(&root, server_record_id)? {
+        record.status = WorkloadStatus::Failed;
+        record.error = Some(match record.error.take() {
+            Some(earlier) => format!("{error}; {earlier}"),
+            None => error,
+        });
+        return Ok((record, true));
+    }
+    Ok((record, false))
+}
+
 pub(super) fn run_bench_case(
     plan: &BenchPlan,
     case: &BenchCasePlan,
@@ -47,30 +89,9 @@ pub(super) fn run_bench_case(
     let requires_warmup_barrier = case
         .preparation_order
         .contains(&BenchPreparationStep::WarmupDrain);
-    let controlled_cache = case
-        .preparation_order
-        .contains(&BenchPreparationStep::CacheReset);
-    let pre_client_preparation = if controlled_cache && !requires_warmup_barrier {
-        ResetCapability::of(
-            plan.client.prefix_cache_reset.as_ref(),
-            &plan.client.replica_prefix_cache_resets,
-        )
-        .map(|reset| {
-            prepare_prefix_cache(
-                CachePreparationInput {
-                    endpoint: &plan.client.endpoint,
-                    reset,
-                    start: plan.client.effective_definition.cache_start,
-                    conditioning: plan.client.prefix_cache_conditioning.as_ref(),
-                    population: plan.client.population.as_ref(),
-                    warmup_drained: false,
-                },
-                &bound,
-            )
-        })
-    } else {
-        None
-    };
+    let controlled_cache = prepares_cache(case);
+    let pre_client_preparation = (controlled_cache && !requires_warmup_barrier)
+        .then(|| prepare_case_cache(plan, case, false, &bound));
     if let Some(preparation) = pre_client_preparation.as_ref()
         && let Some(message) = cache_preparation_error(preparation)
     {
@@ -357,23 +378,8 @@ fn run_after_setup_barrier(
         };
         let mut client = Some(client);
         let mut release = Some(release);
-        let mut cache_preparation = ResetCapability::of(
-            plan.client.prefix_cache_reset.as_ref(),
-            &plan.client.replica_prefix_cache_resets,
-        )
-        .map(|reset| {
-            prepare_prefix_cache(
-                CachePreparationInput {
-                    endpoint: &plan.client.endpoint,
-                    reset,
-                    start: plan.client.effective_definition.cache_start,
-                    conditioning: plan.client.prefix_cache_conditioning.as_ref(),
-                    population: plan.client.population.as_ref(),
-                    warmup_drained: requires_warmup,
-                },
-                bound,
-            )
-        });
+        let mut cache_preparation =
+            prepares_cache(case).then(|| prepare_case_cache(plan, case, requires_warmup, bound));
         let preparation_error = cache_preparation.as_ref().and_then(cache_preparation_error);
         if let Some(message) = preparation_error {
             drop(release.take());
@@ -531,8 +537,56 @@ fn finish_after_barrier_failure(
     })
 }
 
+/// Whether the case prepares the cache before profiling: a reset, a
+/// conditioning, or both ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+fn prepares_cache(case: &BenchCasePlan) -> bool {
+    case.preparation_order.iter().any(|step| {
+        matches!(
+            step,
+            BenchPreparationStep::CacheReset | BenchPreparationStep::CacheConditioning
+        )
+    })
+}
+
+/// The reset the case issues; none when it separates reuse by namespace.
+/// Prepare the case's prefix cache: reset it when the case resets, then
+/// condition it for a primed start ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+fn prepare_case_cache(
+    plan: &BenchPlan,
+    case: &BenchCasePlan,
+    warmup_drained: bool,
+    bound: &OperationBound,
+) -> BenchCachePreparationEvidence {
+    let reset = if case
+        .preparation_order
+        .contains(&BenchPreparationStep::CacheReset)
+    {
+        ResetCapability::of(
+            plan.client.prefix_cache_reset.as_ref(),
+            &plan.client.replica_prefix_cache_resets,
+        )
+    } else {
+        None
+    };
+    prepare_prefix_cache(
+        CachePreparationInput {
+            endpoint: &plan.client.endpoint,
+            reset,
+            start: plan.client.effective_definition.cache_start,
+            conditioning: plan.client.prefix_cache_conditioning.as_ref(),
+            population: plan.client.population_for(&case.id),
+            warmup_drained,
+        },
+        bound,
+    )
+}
+
 fn cache_preparation_error(preparation: &BenchCachePreparationEvidence) -> Option<&'static str> {
-    if !preparation.reset.succeeded {
+    if preparation
+        .reset
+        .as_ref()
+        .is_some_and(|reset| !reset.succeeded)
+    {
         Some("prefix-cache reset failed")
     } else if preparation.start == crate::workspace::BenchCacheStart::Primed
         && (preparation.conditioning.is_none()
@@ -710,7 +764,7 @@ fn bench_population_slice(
     plan: &BenchPlan,
     case: &BenchCasePlan,
 ) -> Option<BenchPopulationSliceEvidence> {
-    let population = plan.client.population.as_ref()?;
+    let population = plan.client.population_for(&case.id)?;
     match &plan.client.effective_definition.source {
         ResolvedBenchSource::Requests { .. } => Some(BenchPopulationSliceEvidence::Requests {
             population_sha256: population.sha256.clone(),

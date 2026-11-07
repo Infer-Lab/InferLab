@@ -275,6 +275,47 @@ pub(crate) struct ServeStateProbePlan {
     pub kv_store: Option<inferlab_protocol::EndpointAssignment>,
     pub attempt_bound_seconds: u64,
     pub adapter_timeout_seconds: u64,
+    /// Each process reports its store access and publication bound, which an
+    /// engaged answer must carry and agree on within a role
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub access_observed: bool,
+}
+
+/// The server shares one prefix cache when it has a cache-owning role —
+/// `serve`, or `prefill` on a prefill/decode server — and every one reads and
+/// writes its KV store: each role is given with the store access its
+/// processes declare or report ([[RFC-0003:C-SERVE-KV-STORE]]).
+pub(crate) fn store_cache_is_shared<R, A>(roles: R) -> bool
+where
+    R: IntoIterator<Item = (inferlab_protocol::ServeRoleKind, A)>,
+    A: IntoIterator<Item = Option<inferlab_protocol::KvStoreAccess>>,
+{
+    let mut owners = roles
+        .into_iter()
+        .filter(|(kind, _)| {
+            matches!(
+                kind,
+                inferlab_protocol::ServeRoleKind::Serve | inferlab_protocol::ServeRoleKind::Prefill
+            )
+        })
+        .peekable();
+    owners.peek().is_some()
+        && owners.all(|(_, access)| {
+            let mut access = access.into_iter().peekable();
+            access.peek().is_some()
+                && access.all(|access| access == Some(inferlab_protocol::KvStoreAccess::ReadWrite))
+        })
+}
+
+impl ServeStateProbePlan {
+    /// The role of a probed process.
+    pub(crate) fn role_of(&self, process: &str) -> Option<&str> {
+        self.processes
+            .iter()
+            .find(|target| target.process == process)
+            .map(|target| target.role.as_str())
+    }
 }
 
 /// The resolved KV store component ([[RFC-0003:C-SERVE-KV-STORE]]).

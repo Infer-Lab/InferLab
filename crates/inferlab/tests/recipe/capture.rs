@@ -1325,3 +1325,45 @@ fn failed_window_stop_with_missing_report_fails_with_both_evidences() -> Result<
     );
     Ok(())
 }
+
+/// A server set up for profiling is run to capture, so a run without
+/// `--capture` warns at start and at the end; a run that captures
+/// does not.
+#[test]
+fn a_profiling_server_run_without_capture_warns_that_nothing_is_captured()
+-> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replacen(
+        "[servers.deepseek-v4-flash-qualify]\n",
+        "[servers.deepseek-v4-flash-qualify]\nprofiling = true\n",
+        1,
+    );
+    fs::write(&manifest, text)?;
+    let uncaptured = workspace
+        .command()
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+    assert!(
+        uncaptured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uncaptured.stderr)
+    );
+    let stderr = String::from_utf8(uncaptured.stderr)?;
+    assert_eq!(stderr.matches("no capture taken").count(), 2, "{stderr}");
+    assert!(stderr.contains("--capture <WORKLOAD>"), "{stderr}");
+
+    let captured = workspace
+        .command()
+        .args([
+            "recipe",
+            "run",
+            "deepseek-v4-flash-qualify",
+            "--capture",
+            "c8k1k",
+        ])
+        .output()?;
+    assert!(captured.status.success());
+    assert!(!String::from_utf8(captured.stderr)?.contains("no capture taken"));
+    Ok(())
+}

@@ -290,6 +290,13 @@ pub struct TargetRegistryMatchEvidence {
     pub healthy: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
+    /// The target's reported data-parallel rank count, when the probe reads
+    /// one ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_parallel_size: Option<u32>,
+    /// The model-serving process the target is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -850,6 +857,7 @@ mod tests {
             url: "http://decode:30001".to_owned(),
             role: "decode".to_owned(),
             bootstrap_port: None,
+            process: None,
         }];
         let response = serde_json::json!({
             "workers": [{
@@ -869,6 +877,51 @@ mod tests {
         .unwrap_or_default();
 
         assert_eq!(error, "readiness operation deadline expired");
+    }
+
+    /// SMG reports a worker's data-parallel rank count as its `dp_size`
+    /// label, a decimal string; a target is ready only once it reports one
+    /// ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    #[test]
+    fn target_registry_records_each_target_data_parallel_size() -> Result<(), String> {
+        let expected = [TargetRegistryExpectedTarget {
+            url: "grpc://engine:30000".to_owned(),
+            role: "regular".to_owned(),
+            bootstrap_port: None,
+            process: None,
+        }];
+        let probe = HttpTargetRegistryProbe {
+            target_data_parallel_size_pointer: Some("/labels/dp_size"),
+            ..target_registry_probe(&expected)
+        };
+        let entry = |labels: serde_json::Value| {
+            serde_json::json!({ "workers": [{
+                "url": "grpc://engine:30000",
+                "worker_type": "regular",
+                "is_healthy": true,
+                "labels": labels
+            }]})
+        };
+
+        let matched = match_target_registry(
+            &entry(serde_json::json!({ "dp_size": "8" })),
+            &probe,
+            &OperationBound::unbounded(),
+        )
+        .map_err(|error| error.to_string())?;
+        let unreported = match_target_registry(
+            &entry(serde_json::json!({})),
+            &probe,
+            &OperationBound::unbounded(),
+        );
+
+        assert_eq!(matched[0].data_parallel_size, Some(8));
+        assert!(
+            unreported
+                .err()
+                .is_some_and(|error| error.to_string().contains("no positive data-parallel size"))
+        );
+        Ok(())
     }
 
     #[test]
@@ -1051,6 +1104,7 @@ mod tests {
             target_role_field: "worker_type",
             target_healthy_field: "is_healthy",
             target_bootstrap_port_field: "bootstrap_port",
+            target_data_parallel_size_pointer: None,
             expected_targets,
         }
     }
@@ -1330,11 +1384,13 @@ mod tests {
                 url: "http://prefill:30000".to_owned(),
                 role: "prefill".to_owned(),
                 bootstrap_port: Some(8998),
+                process: None,
             },
             TargetRegistryExpectedTarget {
                 url: "http://decode:30001".to_owned(),
                 role: "decode".to_owned(),
                 bootstrap_port: None,
+                process: None,
             },
         ];
 
@@ -1399,12 +1455,16 @@ mod tests {
                     role: "prefill".to_owned(),
                     healthy: true,
                     bootstrap_port: Some(8998),
+                    data_parallel_size: None,
+                    process: None,
                 },
                 TargetRegistryMatchEvidence {
                     url: "http://decode:30001".to_owned(),
                     role: "decode".to_owned(),
                     healthy: true,
                     bootstrap_port: None,
+                    data_parallel_size: None,
+                    process: None,
                 },
             ]
         );
@@ -1427,6 +1487,7 @@ mod tests {
             url: "http://decode:30001".to_owned(),
             role: "decode".to_owned(),
             bootstrap_port: None,
+            process: None,
         }];
 
         let bound = OperationBound::finite(Duration::from_secs(2));
@@ -1765,11 +1826,13 @@ mod tests {
                 url: "http://prefill:30000".to_owned(),
                 role: "prefill".to_owned(),
                 bootstrap_port: Some(8998),
+                process: None,
             },
             TargetRegistryExpectedTarget {
                 url: "http://decode:30001".to_owned(),
                 role: "decode".to_owned(),
                 bootstrap_port: None,
+                process: None,
             },
         ];
 

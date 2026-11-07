@@ -1306,3 +1306,16 @@ def test_a_kv_store_reset_also_clears_the_store(monkeypatch: pytest.MonkeyPatch)
     # vLLM claims no store access, so its replicas keep their own cache-owning
     # targets ([[RFC-0003:C-SERVE-KV-STORE]]).
     assert plan.kv_store is not None and not plan.kv_store.role_access
+
+
+def test_a_filesystem_kv_store_is_rejected_naming_mooncake() -> None:
+    payload = single_plan_payload({"outer": {"tensor_parallel_size": 1}})
+    cast(dict[str, object], payload["input"])["kv_store"] = {
+        "backend": "filesystem",
+        "settings": {},
+    }
+    request = AdapterRequest.model_validate(payload)
+    assert isinstance(request.root, AdapterRequestPlanServe)
+
+    with pytest.raises(AdapterOperationError, match='select "mooncake"'):
+        plan_serve(request.root.input)

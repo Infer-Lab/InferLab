@@ -180,6 +180,16 @@ pub(crate) struct BenchClientPlan {
     pub required_population_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub population: Option<BenchPopulation>,
+    /// The nonce drawn when the execution was resolved, from which each
+    /// case's warmup and profiling namespaces derive; present exactly when the
+    /// Bench separates reuse by namespace instead of resetting the server
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population_namespace_nonce: Option<String>,
+    /// Each case's own population, keyed by case id, when the Bench
+    /// namespaces its population.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub case_populations: BTreeMap<String, BenchPopulation>,
     pub command: ClientCommandPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_reset: Option<WorkloadHttpAction>,
@@ -194,10 +204,49 @@ pub(crate) struct BenchClientPlan {
     /// available to later requests ([[RFC-0004:C-BENCH-CACHE-STATE]]).
     #[serde(default, skip_serializing_if = "crate::execution::is_zero_u64")]
     pub prefix_publication_ms: u64,
+    /// The server reports a cache-owning rank count or its store sharing only
+    /// at readiness: preparation applies the reported facts to this plan and
+    /// verifies a primed start's targets first ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serving_facts_observed: bool,
     /// Probed at every profiling window's start and end; a case whose store
     /// is not engaged at either boundary fails ([[RFC-0003:C-SERVE-KV-STORE]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve_state_probe: Option<WorkloadServeStateProbe>,
+}
+
+impl BenchClientPlan {
+    /// The population a case reads: its own when the Bench namespaces its
+    /// population, else the one every case shares.
+    pub(crate) fn population_for(&self, case_id: &str) -> Option<&BenchPopulation> {
+        self.case_populations
+            .get(case_id)
+            .or(self.population.as_ref())
+    }
+}
+
+/// A namespace from which one case phase draws its population content:
+/// distinct for every Bench execution, case, and phase, and shared with
+/// nothing else in the run ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+pub(crate) fn population_namespace(nonce: &str, seed: u64, case_id: &str, phase: &str) -> String {
+    format!("{nonce}:{seed}:{case_id}:{phase}")
+}
+
+/// A nonce for one Bench execution. It only has to differ between
+/// executions; nothing relies on it being unpredictable.
+pub(crate) fn draw_population_namespace_nonce() -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DRAWN: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let digest = Sha256::digest(format!(
+        "{nanos}:{}:{}",
+        std::process::id(),
+        DRAWN.fetch_add(1, Ordering::Relaxed)
+    ));
+    base16ct::lower::encode_string(&digest[..8])
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,6 +297,64 @@ pub(crate) struct ConditioningServingShape {
     /// How long a primed start waits after conditioning a shared prefix
     /// cache for the store to publish it ([[RFC-0004:C-BENCH-CACHE-STATE]]).
     pub publication_wait_ms: u64,
+    /// A cache-owning role's data-parallel rank count is observed only once
+    /// the server is ready, so the target count above assumes one rank for
+    /// it and a primed start must verify the observed count before
+    /// preparation ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub data_parallel_pending: bool,
+    /// Whether the store's roles share one prefix cache, and its publication
+    /// bound, are reported only at readiness; until then the target count
+    /// above may be one shared target ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub sharing_pending: bool,
+}
+
+/// Where a role's attention data-parallel rank count comes from
+/// ([[RFC-0003:C-SERVE-PARALLELISM]]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RoleDataParallel {
+    /// The role's effective parallelism shape declares it.
+    Declared(u32),
+    /// Each replica's Engine reported it at readiness.
+    Observed(Vec<u32>),
+    /// The role returned no shape and the server has not reported yet.
+    Pending,
+}
+
+impl RoleDataParallel {
+    /// The data-parallel source a role's effective shape states: declared by
+    /// the shape, or pending when the role returned none.
+    pub(crate) fn from_shape(shape: &inferlab_protocol::Parallelism) -> Self {
+        if *shape == inferlab_protocol::Parallelism::default() {
+            return Self::Pending;
+        }
+        Self::Declared(
+            shape
+                .attention
+                .as_ref()
+                .and_then(|attention| attention.data_parallel_size)
+                .unwrap_or(1),
+        )
+    }
+
+    /// A role's data-parallel source: its declared shape, else the counts its
+    /// replicas' Engines reported at readiness, else pending.
+    pub(crate) fn of(
+        role: &crate::execution::RolePlan,
+        observed: Option<&BTreeMap<String, u32>>,
+    ) -> Self {
+        let declared = Self::from_shape(&role.effective_parallelism);
+        if !matches!(declared, Self::Pending) {
+            return declared;
+        }
+        observed
+            .and_then(|observed| {
+                role.replicas
+                    .iter()
+                    .map(|replica| observed.get(&replica.entry_process).copied())
+                    .collect::<Option<Vec<_>>>()
+            })
+            .map_or(Self::Pending, Self::Observed)
+    }
 }
 
 impl ConditioningServingShape {
@@ -258,25 +365,60 @@ impl ConditioningServingShape {
     /// conditions the role that serves it.
     pub(crate) fn resolve(
         gateway_frontend: bool,
-        roles: impl IntoIterator<Item = (bool, inferlab_protocol::ServeRoleKind, u32, u32)>,
+        roles: impl IntoIterator<
+            Item = (
+                bool,
+                inferlab_protocol::ServeRoleKind,
+                u32,
+                RoleDataParallel,
+            ),
+        >,
     ) -> Self {
         let mut attention_data_parallel_size = 1u32;
         let mut conditioning_targets = 0u32;
-        for (serves_public, kind, replicas, data_parallel_size) in roles {
+        let mut data_parallel_pending = false;
+        for (serves_public, kind, replicas, data_parallel) in roles {
             if !gateway_frontend && !serves_public {
                 continue;
             }
             if gateway_frontend && kind == inferlab_protocol::ServeRoleKind::Decode {
                 continue;
             }
-            attention_data_parallel_size = attention_data_parallel_size.max(data_parallel_size);
-            conditioning_targets += replicas * data_parallel_size;
+            match data_parallel {
+                RoleDataParallel::Declared(size) => {
+                    attention_data_parallel_size = attention_data_parallel_size.max(size);
+                    conditioning_targets += replicas * size;
+                }
+                RoleDataParallel::Observed(sizes) => {
+                    attention_data_parallel_size = sizes
+                        .iter()
+                        .copied()
+                        .fold(attention_data_parallel_size, u32::max);
+                    conditioning_targets += sizes.iter().sum::<u32>();
+                }
+                RoleDataParallel::Pending => {
+                    data_parallel_pending = true;
+                    conditioning_targets += replicas;
+                }
+            }
         }
         Self {
             gateway_frontend,
             attention_data_parallel_size,
             conditioning_targets,
             publication_wait_ms: 0,
+            data_parallel_pending,
+            sharing_pending: false,
+        }
+    }
+
+    /// The store's sharing is observed at readiness rather than declared
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[must_use]
+    pub(crate) const fn with_sharing_pending(self) -> Self {
+        Self {
+            sharing_pending: true,
+            ..self
         }
     }
 
@@ -289,6 +431,8 @@ impl ConditioningServingShape {
                 attention_data_parallel_size: 1,
                 conditioning_targets: 1,
                 publication_wait_ms: publication_ms,
+                data_parallel_pending: false,
+                sharing_pending: false,
                 ..self
             }
         } else {
@@ -445,8 +589,12 @@ pub(crate) struct MeasurementResolveContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConditioningServingShape, SessionPopulationLayout, session_population_layout};
+    use super::{
+        ConditioningServingShape, RoleDataParallel, SessionPopulationLayout,
+        session_population_layout,
+    };
     use inferlab_protocol::ServeRoleKind;
+    use std::collections::BTreeMap;
 
     #[test]
     fn positive_warmup_reserves_the_native_terminal_prefetch_entry() {
@@ -471,9 +619,72 @@ mod tests {
     // sits behind the Gateway; decode roles are incidental and never count.
     /// A shared prefix cache collapses every replica and rank into one
     /// unpinned target ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    /// An Engine that owns its layout reports its rank count only at
+    /// readiness: planning counts one target per replica and marks the shape
+    /// pending, and the reported counts then decide the target set
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[test]
+    fn an_observed_rank_count_decides_the_targets_a_pending_one_defers() {
+        let pending = ConditioningServingShape::resolve(
+            true,
+            [(false, ServeRoleKind::Serve, 1, RoleDataParallel::Pending)],
+        );
+        assert_eq!(pending.conditioning_targets, 1);
+        assert!(pending.data_parallel_pending);
+        assert!(!pending.shared(true, 0).data_parallel_pending);
+
+        let observed = ConditioningServingShape::resolve(
+            true,
+            [(
+                false,
+                ServeRoleKind::Serve,
+                2,
+                RoleDataParallel::Observed(vec![4, 4]),
+            )],
+        );
+        assert_eq!(observed.conditioning_targets, 8);
+        assert_eq!(observed.attention_data_parallel_size, 4);
+        assert!(!observed.data_parallel_pending);
+    }
+
+    /// Each replica's entry process carries its reported count; a replica
+    /// that reported none leaves the role pending.
+    #[test]
+    fn a_shapeless_role_takes_each_replica_reported_count() -> Result<(), serde_json::Error> {
+        let replica = |id: &str| {
+            serde_json::json!({
+                "id": id, "index": 0, "device_count": 4, "ports": [], "primary_ports": [],
+                "primary_readiness": {"kind": "process_alive"},
+                "worker_readiness": {"kind": "process_alive"},
+                "entry_process": id, "ranks": []
+            })
+        };
+        let role: crate::execution::RolePlan = serde_json::from_value(serde_json::json!({
+            "id": "serve", "kind": "serve", "declared_replica_count": 2,
+            "effective_replica_count": 2, "declared_parallelism": {},
+            "effective_parallelism": {}, "declared_settings": {}, "effective_settings": {},
+            "replicas": [replica("server-0"), replica("server-1")]
+        }))?;
+        let reported = BTreeMap::from([("server-0".to_owned(), 4), ("server-1".to_owned(), 4)]);
+        let partial = BTreeMap::from([("server-0".to_owned(), 4)]);
+
+        assert_eq!(
+            RoleDataParallel::of(&role, Some(&reported)),
+            RoleDataParallel::Observed(vec![4, 4])
+        );
+        assert_eq!(
+            RoleDataParallel::of(&role, Some(&partial)),
+            RoleDataParallel::Pending
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_shared_prefix_cache_is_one_unpinned_target() {
-        let shape = ConditioningServingShape::resolve(true, [(true, ServeRoleKind::Serve, 2, 8)]);
+        let shape = ConditioningServingShape::resolve(
+            true,
+            [(true, ServeRoleKind::Serve, 2, RoleDataParallel::Declared(8))],
+        );
         assert_eq!(shape.conditioning_targets, 16);
 
         let shared = shape.shared(true, 0);
@@ -484,7 +695,8 @@ mod tests {
 
     #[test]
     fn conditioning_targets_count_prefill_side_replicas_times_attention_dp() {
-        let serve = |public, kind, replicas, dp| (public, kind, replicas, dp);
+        let serve =
+            |public, kind, replicas, dp| (public, kind, replicas, RoleDataParallel::Declared(dp));
 
         // Direct single endpoint: only the public role is relevant.
         let shape =

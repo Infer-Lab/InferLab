@@ -3,13 +3,14 @@
 ## Record-First Reading
 
 Managed workflows write `.inferlab/records/<ID>/record.json` plus referenced
-logs and artifacts. `recipe run` and `bench` print the record as one JSON
-report carrying its `id`, and `image build` prints a report keyed `record_id`;
-all three print it even when the workflow fails and then exit with `E4001`. A
-failed `serve start` prints no report and names its record in the stderr
-error. With `--detach`, `serve start`, `recipe run`, and `bench` instead print
-the job's `job_id`, `job_dir`, `stdout`, `stderr`, `record_id`, and
-`record_dir` once the record exists; read the record from there. Do not scrape
+logs and artifacts. A successful `serve start`, `recipe run`, and `bench` print
+the record as one JSON report carrying its `id`, and `image build` prints a
+report keyed `record_id`. `recipe run`, `bench`, and `image build` print it even
+when the workflow fails and then exit with `E4001`; a failed `serve start`
+prints no report and names its record in the stderr error. With `--detach`,
+`serve start`, `recipe run`, and `bench` instead print the job's identity and
+`record_id` once the record exists (see
+[Detached runs](serving-and-recipes.md#detached-runs)). Do not scrape
 diagnostic progress for results.
 
 - Eval records reference `cases/eval/result.json` and `cases/eval/artifacts/`.
@@ -24,10 +25,16 @@ diagnostic progress for results.
   frontend and role/rank bindings, effective settings, readiness, profiler
   targets, image selection, process state, and cleanup, including the
   marked-process sweep and device-residual evidence described under
-  [Failure And Cleanup](#failure-and-cleanup). A pool placement lists what it
-  skipped under `resolved.server.placement.unavailable_ports` and
-  `unavailable_devices`, each with its holder; a launch that waited for its
-  devices keeps `device_wait` (`waited_ms` and the first `occupants`).
+  [Failure and cleanup](#failure-and-cleanup). Facts an Engine reports rather
+  than InferLab allocates are observations: a Specialized Engine's
+  data-parallel rank count under
+  `process_evidence.<process>.readiness.matched_targets[].data_parallel_size`,
+  and, with a KV tier, each process's reported `access` and
+  `publication_bound_ms` under `serve_state_probes[].processes[]`. A pool
+  placement lists what it skipped under
+  `resolved.server.placement.unavailable_ports` and `unavailable_devices`, each
+  with its holder; a launch that waited for its devices keeps `device_wait`
+  (`waited_ms` and the first `occupants`).
 - Recipe and image records preserve child references and partial outcomes rather
   than flattening or discarding a failed branch.
 
@@ -63,6 +70,19 @@ Concurrent CLI operations publish ephemeral observations under
 `.inferlab/runtime/observations/`. Normal completion removes them. Abrupt
 residue can appear stale in the TUI, but it is not execution evidence and must
 not be reconstructed into a record.
+
+## Web Console
+
+`inferlab web` serves a token-protected browser console over one or more
+registered workspaces. It shows the TUI's views, compares Bench records across
+workspaces, and launches `serve start`, `serve stop`, `recipe run`, `bench`, and
+`scratchpad note` as detached jobs by invoking the CLI after a `--dry-run`
+preview. It writes no record; launched jobs and their records are the same as
+the CLI's [detached runs](serving-and-recipes.md#detached-runs). It listens on
+loopback by default and prints one access URL; anyone holding that URL can
+launch work under your account. Access, the workspace registry, and job states
+are in the
+[web console guide](https://infer-lab.github.io/InferLab/docs/guides/web/).
 
 ## Scratchpad
 

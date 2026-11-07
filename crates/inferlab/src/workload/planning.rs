@@ -29,6 +29,42 @@ use eval::{definitions_are_lm_eval, resolve_eval};
 use overrides::{recipe_measurement_overrides, validate_recipe_measurement_overrides};
 use std::path::Path;
 
+/// The cache-owning shape of a recorded server, with each role's
+/// data-parallel rank count as declared or as its Engines reported it at
+/// readiness ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+pub(crate) fn conditioning_shape_of(server: &ServerRecord) -> ConditioningServingShape {
+    let recorded = &server.resolved;
+    let observed = server.observed_data_parallel_sizes();
+    let shape = ConditioningServingShape::resolve(
+        recorded.server.frontend.is_some(),
+        recorded.server.roles.iter().map(|role| {
+            (
+                role.public_endpoint.is_some(),
+                role.kind,
+                role.effective_replica_count,
+                crate::workload::RoleDataParallel::of(role, Some(&observed)),
+            )
+        }),
+    );
+    // Observed store access decides sharing from the engaged readiness
+    // probe; without one the sharing stays pending.
+    if !recorded
+        .server
+        .serve_state_probe
+        .as_ref()
+        .is_some_and(|probe| probe.access_observed)
+    {
+        return shape.shared(
+            recorded.server.shared_prefix_cache,
+            recorded.server.prefix_publication_ms,
+        );
+    }
+    match server.observed_store_sharing() {
+        Some((shared, publication_ms)) => shape.shared(shared, publication_ms),
+        None => shape.with_sharing_pending(),
+    }
+}
+
 pub(crate) fn resolve_manual_bench(
     root: &Path,
     config: &WorkspaceConfig,
@@ -100,25 +136,7 @@ pub(crate) fn resolve_manual_bench(
     } else {
         Vec::new()
     };
-    let conditioning_serving = ConditioningServingShape::resolve(
-        recorded.server.frontend.is_some(),
-        recorded.server.roles.iter().map(|role| {
-            (
-                role.public_endpoint.is_some(),
-                role.kind,
-                role.effective_replica_count,
-                role.effective_parallelism
-                    .attention
-                    .as_ref()
-                    .and_then(|attention| attention.data_parallel_size)
-                    .unwrap_or(1),
-            )
-        }),
-    )
-    .shared(
-        recorded.server.shared_prefix_cache,
-        recorded.server.prefix_publication_ms,
-    );
+    let conditioning_serving = conditioning_shape_of(server);
     let serve_state_probe = recorded.server.serve_state_probe.as_ref().map(|plan| {
         crate::workload::WorkloadServeStateProbe::new(
             &recorded.stack.integration,

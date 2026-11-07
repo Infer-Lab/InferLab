@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import contextvars
 import fcntl
+import hashlib
 import importlib
 import json
 import sys
+import threading
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MethodType
 from typing import Protocol, cast
@@ -69,7 +71,7 @@ class RepeatedTrialState:
     ) -> None:
         self._pending.set(PendingPayload(client, family, defaults, effective, fragment, evidence))
 
-    def release(self, request: JsonObject) -> None:
+    def release(self, request: JsonObject) -> RepeatedTrialState:
         pending = self._pending.get()
         if pending is None:
             raise RuntimeError("lm-eval released a repeated request without its payload")
@@ -81,6 +83,23 @@ class RepeatedTrialState:
                 pending.effective,
                 pending.fragment,
             )
+        return self
+
+    def deadline_seconds(self) -> float:
+        return self.remaining()
+
+    def failed(self, status: int, text: str) -> None:
+        self.evidence.fail(self.current(), f"endpoint returned HTTP {status}: {text}", status)
+
+    def completed(self, status: int, response: JsonObject) -> None:
+        trial_id = self.current()
+        text, _ = generated_response(response)
+        self.evidence.complete(trial_id, response, self.tokenizer_count(trial_id, text), status)
+
+    def transport_failed(self, error: BaseException) -> None:
+        # A transport failure surfaces through lm-eval's retry and the
+        # attempt's terminal error, which the trial evidence already keeps.
+        del error
 
     def current(self) -> str:
         if self._client is None:
@@ -165,6 +184,11 @@ def replaced_defaults(
 @dataclass
 class PayloadEvidenceWriter:
     path: Path
+    # Concurrent trial processes append to one file, so the next index is
+    # counted from the bytes other writers appended since this one last
+    # looked, not by re-reading the whole file for every request.
+    _counted_offset: int = field(default=0, init=False)
+    _counted_records: int = field(default=0, init=False)
 
     def record(
         self,
@@ -176,10 +200,14 @@ class PayloadEvidenceWriter:
         lock_path = self.path.with_name(f".{self.path.name}.lock")
         with lock_path.open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            request_index = 0
             if self.path.exists():
-                with self.path.open(encoding="utf-8") as existing:
-                    request_index = sum(1 for line in existing if line.strip())
+                with self.path.open("rb") as existing:
+                    existing.seek(self._counted_offset)
+                    for line in existing:
+                        if line.strip():
+                            self._counted_records += 1
+                    self._counted_offset = existing.tell()
+            request_index = self._counted_records
             record = {
                 "schema_version": 1,
                 "request_index": request_index,
@@ -191,8 +219,11 @@ class PayloadEvidenceWriter:
                     nonstructural_request_body(defaults), fragment
                 ),
             }
-            with self.path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(record, sort_keys=True) + "\n")
+            line = (json.dumps(record, sort_keys=True) + "\n").encode()
+            with self.path.open("ab") as stream:
+                stream.write(line)
+                self._counted_offset = stream.tell()
+            self._counted_records += 1
 
 
 def merge_request_body(defaults: JsonObject, fragment: JsonObject) -> JsonObject:
@@ -337,6 +368,24 @@ def install_repeated_task_loading(trials: int, metric_filter: str | None) -> Non
     manager.load = load
 
 
+class ExchangeAttempt(Protocol):
+    """One HTTP attempt's outcome, reported by the transport wrappers."""
+
+    def failed(self, status: int, text: str) -> None: ...
+
+    def completed(self, status: int, response: JsonObject) -> None: ...
+
+    def transport_failed(self, error: BaseException) -> None: ...
+
+
+class ExchangeObserver(Protocol):
+    """What one capture mode does with lm-eval's endpoint exchanges."""
+
+    def deadline_seconds(self) -> float | None: ...
+
+    def release(self, request: JsonObject) -> ExchangeAttempt | None: ...
+
+
 class SyncResponse(Protocol):
     @property
     def ok(self) -> bool: ...
@@ -353,9 +402,9 @@ class SyncResponse(Protocol):
 
 
 class CapturedSyncResponse:
-    def __init__(self, response: SyncResponse, repeated: RepeatedTrialState) -> None:
+    def __init__(self, response: SyncResponse, attempt: ExchangeAttempt) -> None:
         self._response = response
-        self._repeated = repeated
+        self._attempt = attempt
 
     @property
     def ok(self) -> bool:
@@ -365,11 +414,7 @@ class CapturedSyncResponse:
     def text(self) -> str:
         text = self._response.text
         if not self._response.ok:
-            self._repeated.evidence.fail(
-                self._repeated.current(),
-                f"endpoint returned HTTP {self._response.status_code}: {text}",
-                self._response.status_code,
-            )
+            self._attempt.failed(self._response.status_code, text)
         return text
 
     def raise_for_status(self) -> None:
@@ -378,15 +423,7 @@ class CapturedSyncResponse:
     def json(self) -> object:
         value = self._response.json()
         if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-            response = cast(JsonObject, value)
-            trial_id = self._repeated.current()
-            text, _ = generated_response(response)
-            self._repeated.evidence.complete(
-                trial_id,
-                response,
-                self._repeated.tokenizer_count(trial_id, text),
-                self._response.status_code,
-            )
+            self._attempt.completed(self._response.status_code, cast(JsonObject, value))
         return value
 
 
@@ -405,9 +442,9 @@ class AsyncResponse(Protocol):
 
 
 class CapturedAsyncResponse:
-    def __init__(self, response: AsyncResponse, repeated: RepeatedTrialState) -> None:
+    def __init__(self, response: AsyncResponse, attempt: ExchangeAttempt) -> None:
         self._response = response
-        self._repeated = repeated
+        self._attempt = attempt
 
     @property
     def ok(self) -> bool:
@@ -416,11 +453,7 @@ class CapturedAsyncResponse:
     async def text(self) -> str:
         text = await self._response.text()
         if not self._response.ok:
-            self._repeated.evidence.fail(
-                self._repeated.current(),
-                f"endpoint returned HTTP {self._response.status}: {text}",
-                self._response.status,
-            )
+            self._attempt.failed(self._response.status, text)
         return text
 
     def raise_for_status(self) -> None:
@@ -429,15 +462,7 @@ class CapturedAsyncResponse:
     async def json(self) -> object:
         value = await self._response.json()
         if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-            response = cast(JsonObject, value)
-            trial_id = self._repeated.current()
-            text, _ = generated_response(response)
-            self._repeated.evidence.complete(
-                trial_id,
-                response,
-                self._repeated.tokenizer_count(trial_id, text),
-                self._response.status,
-            )
+            self._attempt.completed(self._response.status, cast(JsonObject, value))
         return value
 
 
@@ -458,17 +483,22 @@ class AsyncSession(Protocol):
         *,
         json: JsonObject,
         headers: object,
-        timeout: object,
+        timeout: object = None,
     ) -> AsyncRequestContext: ...
 
 
 class CapturedAsyncRequestContext:
-    def __init__(self, context: AsyncRequestContext, repeated: RepeatedTrialState) -> None:
+    def __init__(self, context: AsyncRequestContext, attempt: ExchangeAttempt) -> None:
         self._context = context
-        self._repeated = repeated
+        self._attempt = attempt
 
     async def __aenter__(self) -> CapturedAsyncResponse:
-        return CapturedAsyncResponse(await self._context.__aenter__(), self._repeated)
+        try:
+            response = await self._context.__aenter__()
+        except BaseException as error:
+            self._attempt.transport_failed(error)
+            raise
+        return CapturedAsyncResponse(response, self._attempt)
 
     async def __aexit__(self, error_type: object, error: object, traceback: object) -> object:
         return await self._context.__aexit__(error_type, error, traceback)
@@ -477,13 +507,13 @@ class CapturedAsyncRequestContext:
 class CapturedClientSession:
     factory: Callable[..., AsyncSession]
     timeout_factory: Callable[..., object]
-    repeated: RepeatedTrialState
+    observer: ExchangeObserver
 
     def __init__(self, connector: object = None, timeout: object = None) -> None:
-        del timeout
+        deadline = self.observer.deadline_seconds()
         self._session: AsyncSession = self.factory(
             connector=connector,
-            timeout=self.timeout_factory(total=self.repeated.remaining()),
+            timeout=timeout if deadline is None else self.timeout_factory(total=deadline),
         )
 
     async def __aenter__(self) -> CapturedClientSession:
@@ -499,19 +529,22 @@ class CapturedClientSession:
         *,
         json: JsonObject,
         headers: object,
-    ) -> CapturedAsyncRequestContext:
-        timeout = self.timeout_factory(total=self.repeated.remaining())
-        self.repeated.release(json)
-        context = self._session.post(
-            url,
-            json=json,
-            headers=headers,
-            timeout=timeout,
-        )
-        return CapturedAsyncRequestContext(context, self.repeated)
+    ) -> AsyncRequestContext | CapturedAsyncRequestContext:
+        deadline = self.observer.deadline_seconds()
+        attempt = self.observer.release(json)
+        if deadline is None:
+            context = self._session.post(url, json=json, headers=headers)
+        else:
+            context = self._session.post(
+                url, json=json, headers=headers, timeout=self.timeout_factory(total=deadline)
+            )
+        if attempt is None:
+            return context
+        return CapturedAsyncRequestContext(context, attempt)
 
 
-def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
+def install_response_capture(observer: ExchangeObserver) -> None:
+    """Report every endpoint exchange of lm-eval's API clients to one observer."""
     api_models = importlib.import_module("lm_eval.models.api_models")
     requests_module = api_models.requests
     original_post = requests_module.post
@@ -523,22 +556,29 @@ def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
         headers: object,
         verify: object,
         timeout: object = None,
-    ) -> CapturedSyncResponse:
-        # The case deadline replaces lm-eval's client timeout, as on the async path.
-        del timeout
-        remaining = repeated.remaining()
-        repeated.release(json)
-        response = cast(
-            SyncResponse,
-            original_post(
-                url,
-                json=json,
-                headers=headers,
-                verify=verify,
-                timeout=remaining,
-            ),
-        )
-        return CapturedSyncResponse(response, repeated)
+    ) -> SyncResponse | CapturedSyncResponse:
+        # A repeated trial's case deadline replaces lm-eval's client timeout,
+        # as on the async path.
+        deadline = observer.deadline_seconds()
+        attempt = observer.release(json)
+        try:
+            response = cast(
+                SyncResponse,
+                original_post(
+                    url,
+                    json=json,
+                    headers=headers,
+                    verify=verify,
+                    timeout=timeout if deadline is None else deadline,
+                ),
+            )
+        except BaseException as error:
+            if attempt is not None:
+                attempt.transport_failed(error)
+            raise
+        if attempt is None:
+            return response
+        return CapturedSyncResponse(response, attempt)
 
     requests_module.post = post
     CapturedClientSession.factory = cast(
@@ -547,10 +587,13 @@ def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
     CapturedClientSession.timeout_factory = cast(
         Callable[..., object], vars(api_models)["ClientTimeout"]
     )
-    CapturedClientSession.repeated = repeated
+    CapturedClientSession.observer = observer
     vars(api_models)["ClientSession"] = CapturedClientSession
 
-    template_api = api_models.TemplateAPI
+
+def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
+    install_response_capture(repeated)
+    template_api = importlib.import_module("lm_eval.models.api_models").TemplateAPI
     original_model_call = template_api.model_call
     original_async_model_call = template_api.amodel_call
 
@@ -566,6 +609,162 @@ def install_repeated_response_capture(repeated: RepeatedTrialState) -> None:
 
     template_api.model_call = model_call
     template_api.amodel_call = async_model_call
+
+
+def context_digest(context: object) -> str:
+    """SHA-256 of one request context as lm-eval holds it: a completion
+    prompt, or the serialized chat messages of a ``JsonChatStr``."""
+    prompt = getattr(context, "prompt", context)
+    text = prompt if isinstance(prompt, str) else json.dumps(prompt, sort_keys=True)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+class GenerationAttempt:
+    def __init__(self, log: GenerationOutcomeLog, contexts: list[str]) -> None:
+        self._log = log
+        self._contexts = contexts
+        self._sent_unix_ns = time.time_ns()
+
+    def _write(self, fields: JsonObject) -> None:
+        self._log.write(
+            {
+                "entry": "attempt",
+                "context_sha256": list(self._contexts),
+                "sent_unix_ns": self._sent_unix_ns,
+                "completed_unix_ns": time.time_ns(),
+                **fields,
+            }
+        )
+
+    def failed(self, status: int, text: str) -> None:
+        self._write({"http_status": status, "error": text, "choices": [], "usage": None})
+
+    def completed(self, status: int, response: JsonObject) -> None:
+        raw_choices = response.get("choices")
+        choices = [
+            {key: value for key, value in choice.items() if key != "logprobs"}
+            for choice in (raw_choices if isinstance(raw_choices, list) else [])
+            if isinstance(choice, dict)
+        ]
+        self._write(
+            {
+                "http_status": status,
+                "error": None,
+                "choices": choices,
+                "usage": response.get("usage"),
+            }
+        )
+
+    def transport_failed(self, error: BaseException) -> None:
+        self._write({"http_status": None, "error": repr(error), "choices": [], "usage": None})
+
+
+class GenerationOutcomeLog:
+    """Single-trial generation outcomes, appended as they happen because
+    lm-eval writes its sample log only when evaluation completes
+    ([[RFC-0005:C-LM-EVAL-EVIDENCE]])."""
+
+    def __init__(self, path: Path) -> None:
+        self._stream = path.open("a", encoding="utf-8")
+        self._lock = threading.Lock()
+        self._contexts: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+            "inferlab_generation_contexts", default=None
+        )
+
+    def write(self, entry: JsonObject) -> None:
+        line = json.dumps(entry, sort_keys=True) + "\n"
+        with self._lock:
+            self._stream.write(line)
+            self._stream.flush()
+
+    def record_instances(self, requests: Sequence[object]) -> None:
+        for request in requests:
+            arguments = getattr(request, "arguments", ())
+            self.write(
+                {
+                    "entry": "instance",
+                    "task_name": getattr(request, "task_name", None),
+                    "doc_id": getattr(request, "doc_id", None),
+                    "request_index": getattr(request, "idx", None),
+                    "context_sha256": context_digest(arguments[0]) if arguments else None,
+                }
+            )
+
+    def generating(self, messages: object) -> contextvars.Token[list[str] | None]:
+        # lm-eval passes a batch as a list on its concurrent path and as the
+        # tuple ``zip`` builds on its synchronous one.
+        contexts = messages if isinstance(messages, (list, tuple)) else [messages]
+        return self._contexts.set([context_digest(context) for context in contexts])
+
+    def done(self, token: contextvars.Token[list[str] | None]) -> None:
+        self._contexts.reset(token)
+
+    def deadline_seconds(self) -> float | None:
+        return None
+
+    def release(self, request: JsonObject) -> GenerationAttempt | None:
+        del request
+        contexts = self._contexts.get()
+        return None if contexts is None else GenerationAttempt(self, contexts)
+
+
+def install_generation_capture(log: GenerationOutcomeLog) -> None:
+    install_response_capture(log)
+    template_api = importlib.import_module("lm_eval.models.api_models").TemplateAPI
+    original_generate_until = template_api.generate_until
+    original_model_call = template_api.model_call
+    original_async_model_call = template_api.amodel_call
+
+    def generate_until(
+        client: object, requests: list[object], *args: object, **kwargs: object
+    ) -> object:
+        log.record_instances(requests)
+        return original_generate_until(client, requests, *args, **kwargs)
+
+    def model_call(client: object, *args: object, **kwargs: object) -> object:
+        if not kwargs.get("generate", True):
+            return original_model_call(client, *args, **kwargs)
+        token = log.generating(kwargs["messages"] if "messages" in kwargs else args[0])
+        try:
+            return original_model_call(client, *args, **kwargs)
+        finally:
+            log.done(token)
+
+    async def async_model_call(client: object, *args: object, **kwargs: object) -> object:
+        if not kwargs.get("generate", True):
+            return await cast(Awaitable[object], original_async_model_call(client, *args, **kwargs))
+        token = log.generating(kwargs["messages"] if "messages" in kwargs else args[2])
+        try:
+            return await cast(Awaitable[object], original_async_model_call(client, *args, **kwargs))
+        finally:
+            log.done(token)
+
+    template_api.generate_until = generate_until
+    template_api.model_call = model_call
+    template_api.amodel_call = async_model_call
+
+
+def install_sample_projection() -> None:
+    """Write lm-eval's per-sample log without each sample's document and
+    request contexts, which the task identity reproduces and which can
+    dominate the record; their hashes stay ([[RFC-0005:C-LM-EVAL-EVIDENCE]])."""
+    tracker = importlib.import_module("lm_eval.loggers.evaluation_tracker").EvaluationTracker
+    original_save = tracker.save_results_samples
+
+    def save_results_samples(
+        tracker_self: object, task_name: str, samples: list[JsonObject]
+    ) -> None:
+        for sample in samples:
+            sample.pop("doc", None)
+            arguments = sample.get("arguments")
+            if isinstance(arguments, list):
+                sample["arguments"] = [
+                    (None, *request[1:]) if isinstance(request, (list, tuple)) else request
+                    for request in arguments
+                ]
+        original_save(tracker_self, task_name, samples)
+
+    tracker.save_results_samples = save_results_samples
 
 
 def initialize_payload_evidence(path: Path, repeated: bool) -> None:
@@ -635,6 +834,12 @@ def main() -> None:
         )
         install_repeated_task_loading(raw_trials, metric_filter)
         install_repeated_response_capture(repeated)
+    else:
+        outcome_path = config.get("generation_outcome_path")
+        if not isinstance(outcome_path, str):
+            raise ValueError("inference request config has no generation_outcome_path")
+        install_generation_capture(GenerationOutcomeLog(Path(outcome_path)))
+    install_sample_projection()
     install_request_body(
         cast(JsonObject, raw_fragment), PayloadEvidenceWriter(evidence_path), repeated
     )

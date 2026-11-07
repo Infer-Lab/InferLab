@@ -221,7 +221,10 @@ pub(crate) struct BenchCachePreparationTransition {
 pub(crate) struct BenchCachePreparationEvidence {
     pub start: BenchCacheStart,
     pub transitions: Vec<BenchCachePreparationTransition>,
-    pub reset: PrefixCacheResetOutcome,
+    /// Absent when the case separates reuse by namespace and issues no
+    /// reset ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<PrefixCacheResetOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditioning: Option<PrefixCacheConditioningEvidence>,
     /// Conditioning of every further prefix group, in group order

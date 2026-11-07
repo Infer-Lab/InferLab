@@ -105,6 +105,17 @@ class BenchCacheStartInput(StrEnum):
     primed = 'primed'
 
 
+class BenchCaseNamespaceInput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    case_id: str
+    profiling_entries: Annotated[int, Field(ge=0)]
+    profiling_namespace: str
+    warmup_entries: Annotated[int, Field(ge=0)]
+    warmup_namespace: str
+
+
 class BenchCorpusInput(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -855,13 +866,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['14']]):
+class ProtocolVersion(RootModel[Literal['15']]):
     root: Annotated[
-        Literal['14'],
+        Literal['15'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `14` (serialized as the\nstring `"14"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `"15"`); a mismatch is rejected before lowering.'
         ),
-    ] = '14'
+    ] = '15'
 
 
 class RawArtifact(BaseModel):
@@ -1413,6 +1424,16 @@ class BenchAgenticResultEvidence(BaseModel):
     source: BenchAgenticSourceVerification
 
 
+class BenchCasePopulationOutput(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    case_id: str
+    group_prefix_conditioning: list[BenchPrefixConditioningInput] | None = None
+    population: BenchPopulationInput
+    prefix_conditioning: BenchPrefixConditioningInput | None = None
+
+
 class BenchClientResult(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -1459,6 +1480,12 @@ class BenchPopulationPreparationResult(BaseModel):
     )
     admitted_entries: Annotated[int, Field(ge=0)]
     candidate_entries: Annotated[int, Field(ge=0)]
+    case_populations: Annotated[
+        list[BenchCasePopulationOutput] | None,
+        Field(
+            description="Each case's population when the request named case namespaces\n([[RFC-0004:C-BENCH-CACHE-STATE]])."
+        ),
+    ] = None
     error: str | None = None
     evidence_path: str | None = None
     group_prefix_conditioning: Annotated[
@@ -1600,6 +1627,12 @@ class BenchPopulationPreparationRequest(BaseModel):
     )
     artifact_dir: str
     cache_start: BenchCacheStartInput
+    case_namespaces: Annotated[
+        list[BenchCaseNamespaceInput] | None,
+        Field(
+            description="One population per case, each drawing its content from the case's\nwarmup and profiling namespaces while the seed keeps every selection\ndraw; absent, one seed-keyed population serves every case\n([[RFC-0004:C-BENCH-CACHE-STATE]])."
+        ),
+    ] = None
     model: MeasurementModelInput
     prompt: BenchPromptInput
     protocol_version: ProtocolVersion

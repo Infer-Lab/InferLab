@@ -47,6 +47,7 @@ ROOT = Path(__file__).parents[3]
 
 def _plan_input(
     parallelism: Parallelism | None = None,
+    devices: int | None = 1,
     **overrides: object,
 ) -> PlanServeInput:
     base: dict[str, object] = {
@@ -61,11 +62,9 @@ def _plan_input(
                 id="serve",
                 kind=ServeRoleKind.serve,
                 replica_count=1,
+                devices=devices,
                 parallelism=parallelism or Parallelism(),
-                settings={
-                    "default_max_output_tokens": SettingValue(root=3),
-                    "max_num_batched_tokens": SettingValue(root=12_000),
-                },
+                settings={},
             )
         ],
         "profiling": None,
@@ -113,6 +112,13 @@ def test_plan_models_one_smg_gateway_in_front_of_one_token_engine() -> None:
     assert target.role == "serve"
     assert result.roles[0].public_endpoint is None
     assert result.replicas[0].device_count == 1
+    # The Engine owns its layout: no shape is claimed, and readiness records
+    # each Engine's reported data-parallel rank count
+    # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    assert result.roles[0].effective_parallelism == Parallelism()
+    readiness = result.gateway.readiness.root
+    assert isinstance(readiness, ReadinessProbeHttpTargetRegistry)
+    assert readiness.target_data_parallel_size_pointer == "/labels/dp_size"
     link = result.links[0].root
     assert isinstance(link, ServeRoleLinkRequestRouting)
     assert link.source == "gateway"
@@ -156,49 +162,21 @@ def test_plan_profiles_the_engine_through_the_smg_gateway_window() -> None:
     }
 
 
-@pytest.mark.parametrize("tensor_parallel_size", [2, 4])
-def test_plan_resolves_one_process_pure_tp_as_one_device_set(
-    tensor_parallel_size: int,
-) -> None:
-    result = plan_serve(
-        _plan_input(
-            Parallelism.model_validate({"outer": {"tensor_parallel_size": tensor_parallel_size}})
-        )
-    )
+@pytest.mark.parametrize("devices", [2, 8])
+def test_plan_places_the_declared_devices_and_claims_no_layout(devices: int) -> None:
+    result = plan_serve(_plan_input(devices=devices))
 
-    effective = result.roles[0].effective_parallelism
-    assert effective.outer is not None
-    assert effective.outer.tensor_parallel_size == tensor_parallel_size
-    assert effective.outer.pipeline_parallel_size == 1
-    assert effective.attention is not None
-    assert effective.attention.tensor_parallel_size == tensor_parallel_size
-    assert effective.attention.data_parallel_size == 1
-    assert effective.attention.context_parallel_size == 1
-    assert effective.experts is not None
-    assert effective.experts.tensor_parallel_size == tensor_parallel_size
-    assert effective.experts.data_parallel_size == 1
-    assert effective.experts.expert_parallel_size == 1
-    assert effective.experts.dense_tensor_parallel_size == tensor_parallel_size
-    assert result.replicas[0].device_count == tensor_parallel_size
+    assert result.replicas[0].device_count == devices
+    assert result.roles[0].effective_parallelism == Parallelism()
 
 
-def test_plan_rejects_non_tp_parallelism_and_conflicting_component_tp() -> None:
-    with pytest.raises(AdapterOperationError, match="no pipeline or expert data parallelism"):
+def test_plan_rejects_parallelism_components_and_a_missing_device_count() -> None:
+    with pytest.raises(AdapterOperationError, match="declare only devices"):
         plan_serve(
-            _plan_input(Parallelism.model_validate({"outer": {"pipeline_parallel_size": 2}}))
+            _plan_input(Parallelism.model_validate({"attention": {"data_parallel_size": 8}}))
         )
-
-    with pytest.raises(AdapterOperationError, match="attention tensor x data x context"):
-        plan_serve(
-            _plan_input(
-                Parallelism.model_validate(
-                    {
-                        "outer": {"tensor_parallel_size": 2},
-                        "attention": {"tensor_parallel_size": 1},
-                    }
-                )
-            )
-        )
+    with pytest.raises(AdapterOperationError, match="must declare devices"):
+        plan_serve(_plan_input(devices=None))
 
 
 def test_plan_reads_the_tokenspeed_smg_distribution_version(
@@ -239,19 +217,10 @@ ENGINE_STACK_SETTINGS = {
 
 
 def _render_input(
-    tensor_parallel_size: int = 1,
+    devices: int = 1,
     engine_settings: dict[str, object] | None = None,
-    omit_engine_defaults: bool = False,
-    layout: dict[str, object] | None = None,
 ) -> RenderServeInput:
-    plan_input = _plan_input(
-        Parallelism.model_validate(
-            {"outer": {"tensor_parallel_size": tensor_parallel_size}, **(layout or {})}
-        )
-    )
-    if omit_engine_defaults:
-        del plan_input.roles[0].settings["default_max_output_tokens"]
-        del plan_input.roles[0].settings["max_num_batched_tokens"]
+    plan_input = _plan_input(devices=devices)
     for name, value in (engine_settings or {}).items():
         plan_input.roles[0].settings[name] = SettingValue.model_validate(value)
     plan = plan_serve(plan_input)
@@ -268,7 +237,7 @@ def _render_input(
                 "rank": 0,
                 "rank_count": 1,
                 "machine": "engine-node",
-                "devices": list(range(tensor_parallel_size)),
+                "devices": list(range(devices)),
                 "model_locator": "/models/fixture-model",
                 "endpoint": {"host": "engine.example", "port": 50051},
                 "ports": {},
@@ -314,8 +283,8 @@ def _render_input(
     )
 
 
-def test_render_uses_only_the_canonical_tp2_worker_contract_and_smg() -> None:
-    render_input = _render_input(tensor_parallel_size=2)
+def test_render_uses_only_the_contract_arguments_and_smg() -> None:
+    render_input = _render_input(devices=2)
     result = render_serve(render_input)
 
     assert [process.root.process for process in result.processes] == ["server", "gateway"]
@@ -329,12 +298,6 @@ def test_render_uses_only_the_canonical_tp2_worker_contract_and_smg() -> None:
         "/models/fixture-model",
         "--served-model-name",
         "fixture-model",
-        "--tensor-parallel-size",
-        "2",
-        "--default-max-output-tokens",
-        "3",
-        "--max-num-batched-tokens",
-        "12000",
     ]
     gateway = result.processes[1].root.command.argv
     assert gateway[:4] == ["smg", "launch", "--host", "192.0.2.10"]
@@ -343,110 +306,31 @@ def test_render_uses_only_the_canonical_tp2_worker_contract_and_smg() -> None:
     assert gateway[gateway.index("--tokenizer-path") + 1] == "/models/fixture-model"
     assert gateway[gateway.index("--policy") + 1] == "least_load"
     assert "--pd-disaggregation" not in gateway
-    assert all("grout" not in argument and "sm120" not in argument for argument in engine)
 
 
-def test_render_defers_omitted_engine_defaults_to_the_worker() -> None:
-    engine = render_serve(_render_input(tensor_parallel_size=2, omit_engine_defaults=True))
-    argv = engine.processes[0].root.command.argv
+@pytest.mark.parametrize(
+    "retired",
+    ["max_num_batched_tokens", "gpu_memory_utilization_percent", "kv_tier_capacity_bytes"],
+)
+def test_a_retired_typed_setting_points_to_engine_arguments(retired: str) -> None:
+    plan_input = _plan_input()
+    plan_input.roles[0].settings[retired] = SettingValue(root=1)
 
-    # The worker's own defaults govern; InferLab does not restate them.
-    assert "--default-max-output-tokens" not in argv
-    assert "--max-num-batched-tokens" not in argv
-
-
-def test_plan_records_declared_engine_settings_without_inventing_omitted_ones() -> None:
-    plan_input = _plan_input(Parallelism.model_validate({"outer": {"tensor_parallel_size": 2}}))
-    plan_input.roles[0].settings["gpu_memory_utilization_percent"] = SettingValue.model_validate(90)
-    plan_input.roles[0].settings["prefix_cache_ranks"] = SettingValue.model_validate(
-        [{"cpu_bytes": 100, "numa_node": 3}, {"cpu_bytes": 200, "numa_node": 4}]
-    )
-
-    effective = plan_serve(plan_input).roles[0].effective_settings
-
-    assert effective["gpu_memory_utilization_percent"].root == 90
-    ranks = effective["prefix_cache_ranks"].root
-    assert isinstance(ranks, list)
-    declared: list[tuple[object, object]] = []
-    for entry in ranks:
-        fields = entry.root
-        assert isinstance(fields, dict)
-        declared.append((fields["cpu_bytes"].root, fields["numa_node"].root))
-    assert declared == [(100, 3), (200, 4)]
-    # An omitted setting renders no argument, so the record must not claim one.
-    assert "workspace_reserve_mib" not in effective
-    assert "prefix_cache_host_memory_percent" not in effective
-
-
-def test_render_passes_every_declared_memory_and_prefix_cache_option() -> None:
-    render_input = _render_input(
-        tensor_parallel_size=2,
-        engine_settings={
-            "gpu_memory_utilization_percent": 90,
-            "workspace_reserve_mib": 2048,
-            "prefix_cache_gpu_entries": 16,
-            "prefix_cache_ranks": [
-                {"cpu_bytes": 100, "numa_node": 3},
-                {"cpu_bytes": 200, "numa_node": 4},
-            ],
-        },
-    )
-
-    engine = render_serve(render_input).processes[0].root.command.argv
-
-    # The worker pairs the per-rank lists by occurrence, so rank 0 is (100, 3).
-    assert engine[engine.index("--max-num-batched-tokens") + 2 :] == [
-        "--gpu-memory-utilization-percent",
-        "90",
-        "--workspace-reserve-mib",
-        "2048",
-        "--prefix-cache-gpu-entries",
-        "16",
-        "--prefix-cache-cpu-bytes-per-rank",
-        "100",
-        "--prefix-cache-cpu-bytes-per-rank",
-        "200",
-        "--prefix-cache-numa-node-per-rank",
-        "3",
-        "--prefix-cache-numa-node-per-rank",
-        "4",
-    ]
-
-
-def test_render_rejects_per_rank_prefix_cache_that_does_not_cover_every_rank() -> None:
-    render_input = _render_input(
-        tensor_parallel_size=2,
-        engine_settings={"prefix_cache_ranks": [{"cpu_bytes": 100, "numa_node": 3}]},
-    )
-
-    with pytest.raises(AdapterOperationError, match="declares 1 ranks"):
-        render_serve(render_input)
-
-
-def test_plan_rejects_two_host_prefix_cache_sizing_authorities() -> None:
-    # Settings validation runs while planning, so the contradiction never
-    # reaches a rendered command.
-    with pytest.raises(AdapterOperationError, match="exactly one host sizing authority"):
-        _render_input(
-            tensor_parallel_size=1,
-            engine_settings={
-                "prefix_cache_host_memory_percent": 50,
-                "prefix_cache_ranks": [{"cpu_bytes": 100, "numa_node": 3}],
-            },
-        )
+    with pytest.raises(AdapterOperationError, match=f"{retired}.*extra_args"):
+        plan_serve(plan_input)
 
 
 def test_render_splices_extra_args_around_the_managed_worker_argv() -> None:
     render_input = _render_input(
-        tensor_parallel_size=2,
+        devices=2,
         engine_settings={
             "extra_args": [
                 "--speculative=dspark",
                 "--speculative-block-size",
                 "4",
                 "--",
-                "--listen",
-                "0.0.0.0:1",
+                "--speculative-block-size",
+                "8",
             ],
             "extra_env": {"INFERLAB_FORM_D": "1"},
         },
@@ -454,9 +338,9 @@ def test_render_splices_extra_args_around_the_managed_worker_argv() -> None:
 
     command = render_serve(render_input).processes[0].root.command
 
-    # Pre-sentinel extras precede the managed tail; post-sentinel tokens pass
-    # through verbatim after it, where engine last-wins parsing applies the
-    # deliberate override. The sentinel itself is never rendered.
+    # Pre-sentinel Engine arguments precede the contract arguments;
+    # post-sentinel tokens follow them verbatim as a deliberate override of an
+    # Engine option. The sentinel itself is never rendered.
     assert command.argv == [
         "example-token-engine",
         "serve",
@@ -469,23 +353,38 @@ def test_render_splices_extra_args_around_the_managed_worker_argv() -> None:
         "/models/fixture-model",
         "--served-model-name",
         "fixture-model",
-        "--tensor-parallel-size",
-        "2",
-        "--default-max-output-tokens",
-        "3",
-        "--max-num-batched-tokens",
-        "12000",
-        "--listen",
-        "0.0.0.0:1",
+        "--speculative-block-size",
+        "8",
     ]
     assert command.env == {"INFERLAB_FORM_D": "1"}
 
 
-def test_plan_rejects_extra_args_naming_inferlab_owned_options() -> None:
-    # Settings validation runs while planning, so the restated managed flag
-    # never reaches a rendered command.
-    with pytest.raises(AdapterOperationError, match="InferLab-owned option"):
-        _render_input(engine_settings={"extra_args": ["--tensor-parallel-size", "8"]})
+@pytest.mark.parametrize(
+    "extra_args",
+    [["--listen", "0.0.0.0:1"], ["--", "--kv-tier-store=/elsewhere"]],
+)
+def test_no_engine_argument_redirects_an_allocation(extra_args: list[str]) -> None:
+    # A contract argument carries an allocation, so it is rejected before or
+    # after the sentinel ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    with pytest.raises(AdapterOperationError, match="contract argument"):
+        _render_input(engine_settings={"extra_args": extra_args})
+    for name in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"):
+        with pytest.raises(AdapterOperationError, match=name):
+            _render_input(engine_settings={"extra_env": {name: "0"}})
+
+
+def test_the_engine_layout_is_an_engine_argument() -> None:
+    render_input = _render_input(
+        devices=8,
+        engine_settings={
+            "extra_args": ["--data-parallel-size", "8", "--expert-parallel-size", "8"]
+        },
+    )
+
+    argv = render_serve(render_input).processes[0].root.command.argv
+
+    assert argv[2:6] == ["--data-parallel-size", "8", "--expert-parallel-size", "8"]
+    assert "--tensor-parallel-size" not in argv
 
 
 def test_plan_returns_the_exact_escape_hatch_contents_in_effective_settings() -> None:
@@ -511,23 +410,95 @@ def test_plan_returns_the_exact_escape_hatch_contents_in_effective_settings() ->
     assert env["INFERLAB_FORM_D"].root == "1"
 
 
-def test_render_rejects_multi_process_rank_decomposition() -> None:
-    render_input = _render_input(tensor_parallel_size=2)
-    engine = render_input.allocations[0].root
-    assert isinstance(engine, ServeProcessAllocationModelRank)
-    engine.rank_count = 2
+def _two_host_render_input(
+    devices: tuple[int, int] = (2, 2), profiling: CaptureMechanism | None = None
+) -> RenderServeInput:
+    """One serve replica placed as two rank bindings, one per machine."""
+    render_input = _render_input(devices=devices[0])
+    host_zero = render_input.allocations[0].root
+    assert isinstance(host_zero, ServeProcessAllocationModelRank)
+    host_zero.rank_count = 2
+    host_zero.process = "server-rank-000"
+    host_zero.machine = "host-a"
+    host_zero.ports = {"rendezvous": EndpointAssignment(host="host-a.example", port=50060)}
+    member = host_zero.model_copy(
+        update={
+            "process": "server-rank-001",
+            "rank": 1,
+            "machine": "host-b",
+            "devices": list(range(devices[1])),
+            "model_locator": "/models/fixture-model-on-host-b",
+            "endpoint": EndpointAssignment(host="host-b.example", port=50051),
+            "ports": {},
+        }
+    )
+    render_input.allocations.insert(1, ServeProcessAllocation(root=member))
+    return render_input.model_copy(update={"profiling": profiling})
 
-    with pytest.raises(AdapterOperationError, match="one rank process"):
+
+def test_a_serve_replica_declares_its_rendezvous_as_a_rank_zero_port() -> None:
+    plan = plan_serve(_plan_input())
+
+    assert plan.replicas[0].primary_ports == ["rendezvous"]
+
+
+def test_a_replica_spanning_machines_renders_one_engine_per_host() -> None:
+    rendered = render_serve(_two_host_render_input())
+
+    argv = {process.root.process: process.root.command.argv for process in rendered.processes}
+    host_zero = " ".join(argv["server-rank-000"])
+    member = argv["server-rank-001"]
+    assert "--listen engine.example:50051" in host_zero
+    assert "--host-count 2 --rendezvous-listen host-a.example:50060" in host_zero
+    assert "--host-index" not in host_zero
+    assert "--listen" not in member
+    assert member[member.index("--model") + 1] == "/models/fixture-model-on-host-b"
+    assert member[member.index("--served-model-name") + 1] == "fixture-model"
+    assert " ".join(member).endswith(
+        "--host-count 2 --host-index 1 --rendezvous host-a.example:50060"
+    )
+    # The Gateway routes only to host 0.
+    assert "grpc://host-b.example" not in " ".join(argv["gateway"])
+    assert "grpc://engine.example:50051" in " ".join(argv["gateway"])
+
+
+@pytest.mark.parametrize(
+    ("render_input", "message"),
+    [
+        (lambda: _two_host_render_input(devices=(2, 1)), "unequal device counts"),
+        (
+            lambda: _two_host_render_input(profiling=CaptureMechanism.managed_collection),
+            "cannot profile a replica that spans machines",
+        ),
+    ],
+)
+def test_a_replica_spanning_machines_rejects_what_host_zero_cannot_speak_for(
+    render_input: Callable[[], RenderServeInput], message: str
+) -> None:
+    with pytest.raises(AdapterOperationError, match=message):
+        render_serve(render_input())
+
+
+def test_a_prefill_replica_cannot_span_machines() -> None:
+    plan_input = _pd_plan_input()
+    render_input = _pd_render_input(plan_input, plan_serve(plan_input))
+    prefill = render_input.allocations[0].root
+    assert isinstance(prefill, ServeProcessAllocationModelRank)
+    prefill.rank_count = 2
+    member = prefill.model_copy(update={"process": "prefill-000-rank-001", "rank": 1})
+    render_input.allocations.insert(1, ServeProcessAllocation(root=member))
+
+    with pytest.raises(AdapterOperationError, match="cannot span machines"):
         render_serve(render_input)
 
 
-def test_render_rejects_an_incomplete_tp_device_set() -> None:
-    render_input = _render_input(tensor_parallel_size=2)
+def test_render_rejects_an_engine_without_devices() -> None:
+    render_input = _render_input(devices=2)
     engine = render_input.allocations[0].root
     assert isinstance(engine, ServeProcessAllocationModelRank)
-    engine.devices = engine.devices[:1]
+    engine.devices = []
 
-    with pytest.raises(AdapterOperationError, match="one device per rank of its world"):
+    with pytest.raises(AdapterOperationError, match="own its allocated devices"):
         render_serve(render_input)
 
 
@@ -590,53 +561,6 @@ def test_render_rejects_an_allocation_carrying_a_draft_model_locator() -> None:
     assert error.value.code == AdapterErrorCode.invalid_request
 
 
-def test_declared_devices_sets_the_pure_tensor_parallel_width() -> None:
-    input = _plan_input()
-    input.roles[0].devices = 4
-
-    result = plan_serve(input)
-
-    assert result.replicas[0].device_count == 4
-    outer = result.roles[0].effective_parallelism.outer
-    assert outer is not None
-    assert outer.tensor_parallel_size == 4
-
-
-def test_render_passes_a_data_and_expert_parallel_layout_as_separate_arguments() -> None:
-    render_input = _render_input(
-        tensor_parallel_size=8,
-        layout={"attention": {"data_parallel_size": 8}, "experts": {"expert_parallel_size": 8}},
-    )
-    engine_allocation = render_input.allocations[0].root
-    assert isinstance(engine_allocation, ServeProcessAllocationModelRank)
-    engine_parallelism = engine_allocation.effective_parallelism
-    assert engine_parallelism.attention is not None
-    assert engine_parallelism.attention.tensor_parallel_size == 1
-    assert engine_parallelism.experts is not None
-    assert engine_parallelism.experts.tensor_parallel_size == 1
-
-    argv = render_serve(render_input).processes[0].root.command.argv
-
-    assert argv[argv.index("--tensor-parallel-size") + 1] == "1"
-    assert argv[argv.index("--data-parallel-size") + 1] == "8"
-    assert argv[argv.index("--expert-parallel-size") + 1] == "8"
-    assert "--context-parallel-size" not in argv
-
-
-def test_plan_rejects_attention_parallelism_that_does_not_divide_the_device_count() -> None:
-    with pytest.raises(AdapterOperationError, match="must divide the device count"):
-        plan_serve(
-            _plan_input(
-                Parallelism.model_validate(
-                    {
-                        "outer": {"tensor_parallel_size": 8},
-                        "attention": {"data_parallel_size": 3},
-                    }
-                )
-            )
-        )
-
-
 def test_several_replicas_share_one_gateway_with_the_declared_policy() -> None:
     plan_input = _plan_input(gateway_settings={"policy": SettingValue(root="cache_aware")})
     plan_input.roles[0].replica_count = 2
@@ -682,7 +606,33 @@ def test_an_unknown_gateway_setting_is_rejected() -> None:
         plan_serve(_plan_input(gateway_settings={"retries": SettingValue(root=3)}))
 
 
-def test_a_declared_kv_store_reaches_the_engine_as_its_tier_store(
+FILESYSTEM_TIER = KvStoreInput(backend="filesystem", settings={})
+
+
+def test_a_filesystem_tier_reaches_the_engine_as_its_bound_directory() -> None:
+    plan = plan_serve(_plan_input(kv_store=FILESYSTEM_TIER))
+    assert plan.kv_store is not None
+    assert plan.kv_store.externally_operated
+
+    render_input = _render_input()
+    engine = render_input.allocations[0].root
+    assert isinstance(engine, ServeProcessAllocationModelRank)
+    engine.kv_tier_directory = "/fixture/kv-tier"
+
+    argv = render_serve(render_input).processes[0].root.command.argv
+
+    assert argv[argv.index("--kv-tier-backend") + 1] == "filesystem"
+    assert argv[argv.index("--kv-tier-store") + 1] == "/fixture/kv-tier"
+
+
+def test_a_filesystem_tier_leaves_access_to_the_engine_report() -> None:
+    plan = plan_serve(_plan_input(kv_store=FILESYSTEM_TIER))
+    assert plan.kv_store is not None
+    assert plan.kv_store.access_observed
+    assert not plan.kv_store.role_access
+
+
+def test_a_mooncake_tier_runs_its_store_and_reaches_the_engine_at_its_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from inferlab_kvstore import mooncake
@@ -690,57 +640,69 @@ def test_a_declared_kv_store_reaches_the_engine_as_its_tier_store(
     monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
     plan = plan_serve(_plan_input(kv_store=KvStoreInput(backend="mooncake", settings={})))
     assert plan.kv_store is not None
-    assert plan.kv_store.backend == "mooncake"
+    assert not plan.kv_store.externally_operated
+    assert plan.kv_store.access_observed
+    assert not plan.kv_store.role_access
 
     render_input = _render_input()
     engine = render_input.allocations[0].root
     assert isinstance(engine, ServeProcessAllocationModelRank)
-    engine.kv_store = EndpointAssignment(host="store.example", port=50051)
+    engine.kv_store = EndpointAssignment(host="store.example", port=50100)
 
     argv = render_serve(render_input).processes[0].root.command.argv
 
-    assert argv[argv.index("--kv-tier-store") + 1] == "store.example:50051"
+    assert argv[argv.index("--kv-tier-backend") + 1] == "mooncake"
+    assert argv[argv.index("--kv-tier-store") + 1] == "store.example:50100"
 
 
-def test_a_kv_store_shares_one_prefix_cache_and_renders_declared_tier_settings(
+def test_probe_serve_engages_a_mooncake_tier_only_at_the_store_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from inferlab_kvstore import mooncake
+    import inferlab_gateway_smg
 
-    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
-    plan = plan_serve(_plan_input(kv_store=KvStoreInput(backend="mooncake", settings={})))
-    assert plan.kv_store is not None
-    assert plan.kv_store.role_access == {"serve": KvStoreAccess.read_write}
+    def report(store: str) -> tuple[dict[str, object], None]:
+        return (
+            {
+                "scheduler_info": {
+                    "kv_tier_state": "available",
+                    "kv_tier_store": store,
+                    "kv_tier_access": "read_write",
+                    "kv_tier_publication_ms": 0,
+                }
+            },
+            None,
+        )
 
-    render_input = _render_input()
-    engine = render_input.allocations[0].root
-    assert isinstance(engine, ServeProcessAllocationModelRank)
-    engine.kv_store = EndpointAssignment(host="store.example", port=50051)
-    engine.effective_settings["kv_tier_capacity_bytes"] = SettingValue(root=68719476736)
-    engine.effective_settings["kv_tier_snapshot_interval"] = SettingValue(root=32)
+    readings = {50051: report("store.example:50100"), 50052: report("other.example:1")}
+    monkeypatch.setattr(
+        inferlab_gateway_smg,
+        "worker_server_info",
+        lambda endpoint, timeout: readings[endpoint.port],
+    )
+    result = probe_serve(
+        ProbeServeInput(
+            model=ServeModelInput(id="fixture-model", served_name="fixture-model"),
+            topology=ServeTopology.single,
+            attempt_bound_seconds=5,
+            kv_store=EndpointAssignment(host="store.example", port=50100),
+            processes=[
+                ProbeServeTarget(
+                    process=f"server-{port}",
+                    role="serve",
+                    replica=index,
+                    endpoint=EndpointAssignment(host="engine.example", port=port),
+                )
+                for index, port in enumerate(readings)
+            ],
+        )
+    )
 
-    argv = render_serve(render_input).processes[0].root.command.argv
-
-    assert argv[argv.index("--kv-tier-capacity") + 1] == "68719476736"
-    assert argv[argv.index("--kv-tier-snapshot-interval") + 1] == "32"
-    assert "--kv-tier-timeout" not in argv
+    assert [state.engaged for state in result.processes] == [True, False]
+    assert result.processes[0].access == KvStoreAccess.read_write
 
 
-def test_tier_settings_without_a_kv_store_are_rejected() -> None:
-    plan_input = _plan_input()
-    plan_input.roles[0].settings["kv_tier_capacity_bytes"] = SettingValue(root=1024)
-
-    with pytest.raises(AdapterOperationError, match="only when the server declares a kv_store"):
-        plan_serve(plan_input)
-
-
-def test_a_kv_store_declares_the_serve_state_probe_and_a_counted_flush(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inferlab_kvstore import mooncake
-
-    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
-    plan_input = _plan_input(kv_store=KvStoreInput(backend="mooncake", settings={}))
+def test_a_kv_tier_declares_the_serve_state_probe_and_a_counted_flush() -> None:
+    plan_input = _plan_input(kv_store=FILESYSTEM_TIER)
     plan_input.roles[0].replica_count = 2
 
     plan = plan_serve(plan_input)
@@ -752,25 +714,30 @@ def test_a_kv_store_declares_the_serve_state_probe_and_a_counted_flush(
     assert reset.success.value.root == 2
 
 
-def test_probe_serve_engages_only_an_available_tier_at_the_rendered_store(
+def test_probe_serve_engages_only_an_available_tier_at_the_rendered_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import inferlab_gateway_smg
 
+    def report(
+        state: str, store: str, access: str = "read_write", publication_ms: int = 1000
+    ) -> dict[str, object]:
+        return {
+            "scheduler_info": {
+                "kv_tier_state": state,
+                "kv_tier_store": store,
+                "kv_tier_access": access,
+                "kv_tier_publication_ms": publication_ms,
+            }
+        }
+
     readings: dict[int, tuple[dict[str, object] | None, str | None]] = {
-        50051: (
-            {"scheduler_info": {"kv_tier_state": "available", "kv_tier_store": "store:1"}},
-            None,
-        ),
-        50052: (
-            {"scheduler_info": {"kv_tier_state": "unavailable", "kv_tier_store": "store:1"}},
-            None,
-        ),
-        50053: (
-            {"scheduler_info": {"kv_tier_state": "available", "kv_tier_store": "other:9"}},
-            None,
-        ),
+        50051: (report("available", "/fixture/kv-tier"), None),
+        50052: (report("unavailable", "/fixture/kv-tier"), None),
+        50053: (report("available", "/fixture/other-tier"), None),
         50054: (None, "GetServerInfo failed"),
+        # An unreadable access or bound is left for the control plane to reject.
+        50055: (report("available", "/fixture/kv-tier", "read", -1), None),
     }
     monkeypatch.setattr(
         inferlab_gateway_smg,
@@ -781,13 +748,13 @@ def test_probe_serve_engages_only_an_available_tier_at_the_rendered_store(
         model=ServeModelInput(id="fixture-model", served_name="fixture-model"),
         topology=ServeTopology.single,
         attempt_bound_seconds=5,
-        kv_store=EndpointAssignment(host="store", port=1),
         processes=[
             ProbeServeTarget(
                 process=f"server-{port}",
                 role="serve",
                 replica=index,
                 endpoint=EndpointAssignment(host="engine.example", port=port),
+                kv_tier_directory="/fixture/kv-tier",
             )
             for index, port in enumerate(readings)
         ],
@@ -795,9 +762,14 @@ def test_probe_serve_engages_only_an_available_tier_at_the_rendered_store(
 
     result = probe_serve(probe_input)
 
-    assert [state.engaged for state in result.processes] == [True, False, False, False]
+    assert [state.engaged for state in result.processes] == [True, False, False, False, True]
+    assert result.processes[0].access == KvStoreAccess.read_write
+    assert result.processes[0].publication_bound_ms == 1000
     assert result.processes[1].state["kv_tier_state"].root == "unavailable"
     assert result.processes[3].error == "GetServerInfo failed"
+    assert result.processes[3].access is None
+    assert result.processes[4].access is None
+    assert result.processes[4].publication_bound_ms is None
 
 
 def _plan_payload(stack_settings: dict[str, object]) -> str:
@@ -821,10 +793,7 @@ def test_plan_returns_the_declared_engine_command_as_an_effective_stack_setting(
     assert response.root.status == "ok"
     planned = response.root.result.root.output
     assert isinstance(planned, PlanServeResult)
-    assert planned.stack_settings == {
-        **ENGINE_STACK_SETTINGS,
-        "kv_tier_publication_seconds": SettingValue(root=0.0),
-    }
+    assert planned.stack_settings == ENGINE_STACK_SETTINGS
 
 
 def test_an_undeclared_engine_command_defaults_to_the_former_fixed_command() -> None:
@@ -836,7 +805,6 @@ def test_an_undeclared_engine_command_defaults_to_the_former_fixed_command() -> 
     default = ["inferlab-token-engine", "smg-worker"]
     assert planned.stack_settings == {
         "engine_command": SettingValue.model_validate(default),
-        "kv_tier_publication_seconds": SettingValue(root=0.0),
     }
     render_input = _render_input().model_copy(update={"stack_settings": planned.stack_settings})
     assert render_serve(render_input).processes[0].root.command.argv[:2] == default
@@ -863,7 +831,7 @@ def test_plan_rejects_an_empty_path_or_contract_owned_engine_command(
 
 
 def _pd_plan_input(**overrides: object) -> PlanServeInput:
-    role_settings = {"max_num_batched_tokens": SettingValue(root=12_000)}
+    role_settings: dict[str, SettingValue] = {}
     base: dict[str, object] = {
         "model": ServeModelInput(id="fixture-model", served_name="fixture-model"),
         "topology": ServeTopology.prefill_decode,
@@ -878,7 +846,7 @@ def _pd_plan_input(**overrides: object) -> PlanServeInput:
                 kind=ServeRoleKind.prefill,
                 replica_count=2,
                 devices=2,
-                parallelism=Parallelism.model_validate({"attention": {"data_parallel_size": 2}}),
+                parallelism=Parallelism(),
                 settings=dict(role_settings),
             ),
             ServeRoleInput(
@@ -933,7 +901,7 @@ def test_prefill_decode_rejects_profiling_and_gateway_routing_settings(
 
 
 def _pd_render_input(
-    plan_input: PlanServeInput, plan: PlanServeResult, store: EndpointAssignment | None = None
+    plan_input: PlanServeInput, plan: PlanServeResult, tier_directory: str | None = None
 ) -> RenderServeInput:
     assert plan.gateway is not None and plan.pd_router is not None
     roles = {role.id: role for role in plan.roles}
@@ -956,7 +924,7 @@ def _pd_render_input(
                 if bootstrap is not None
                 else {}
             ),
-            "kv_store": store,
+            "kv_tier_directory": tier_directory,
             "cache": f"/cache/{process}",
             "launch": {"kind": "local"},
             "effective_settings": roles[role].effective_settings,
@@ -988,25 +956,6 @@ def _pd_render_input(
             "render_inputs": [],
         },
     ]
-    if store is not None and plan.kv_store is not None:
-        items.append(
-            {
-                "kind": "kv_store",
-                "process": "kv-store",
-                "process_role": "kv_store",
-                "machine": "gateway-node",
-                "devices": [],
-                "endpoint": store,
-                "ports": {
-                    name: {"host": store.host, "port": store.port + offset + 1}
-                    for offset, name in enumerate(plan.kv_store.ports)
-                },
-                "cache": "/cache/kv-store",
-                "launch": {"kind": "local"},
-                "kv_store": plan.kv_store,
-                "render_inputs": [],
-            }
-        )
     return RenderServeInput(
         model=plan_input.model,
         topology=plan_input.topology,
@@ -1041,37 +990,25 @@ def test_prefill_decode_renders_role_mode_transfer_and_bootstrap_arguments() -> 
     assert "--prefill-policy cache_aware --decode-policy round_robin" in gateway
 
 
-def test_prefill_decode_with_a_kv_store_probes_both_roles_and_shares_prefill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inferlab_kvstore import mooncake
-
-    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
-    plan = plan_serve(_pd_plan_input(kv_store=KvStoreInput(backend="mooncake", settings={})))
+def test_prefill_decode_with_a_kv_tier_probes_both_roles_for_their_access() -> None:
+    plan = plan_serve(_pd_plan_input(kv_store=FILESYSTEM_TIER))
 
     assert plan.kv_store is not None
-    assert plan.kv_store.role_access == {
-        "prefill": KvStoreAccess.read_write,
-        "decode": KvStoreAccess.write,
-    }
+    assert plan.kv_store.access_observed
+    assert not plan.kv_store.role_access
     assert plan.serve_state_probe
 
 
-def test_prefill_decode_with_a_kv_store_renders_the_store_to_both_roles(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inferlab_kvstore import mooncake
-
-    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
-    plan_input = _pd_plan_input(kv_store=KvStoreInput(backend="mooncake", settings={}))
-    store = EndpointAssignment(host="gateway.example", port=50100)
-    rendered = render_serve(_pd_render_input(plan_input, plan_serve(plan_input), store))
+def test_prefill_decode_with_a_kv_tier_renders_the_directory_to_both_roles() -> None:
+    plan_input = _pd_plan_input(kv_store=FILESYSTEM_TIER)
+    rendered = render_serve(
+        _pd_render_input(plan_input, plan_serve(plan_input), "/fixture/kv-tier")
+    )
 
     argv = {process.root.process: process.root.command.argv for process in rendered.processes}
-    assert "kv-store" in argv
+    assert set(argv) == {"prefill-000", "prefill-001", "decode", "gateway"}
     for process in ("prefill-000", "prefill-001", "decode"):
-        tier = argv[process][argv[process].index("--kv-tier-store") + 1]
-        assert tier == mooncake.client_address(store)
+        assert argv[process][argv[process].index("--kv-tier-store") + 1] == "/fixture/kv-tier"
 
 
 @pytest.mark.parametrize(
@@ -1098,16 +1035,48 @@ def test_power_of_two_over_one_worker_is_rejected_during_planning(
         plan_serve(plan_input())
 
 
-def test_a_declared_publication_bound_reaches_the_store_plan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inferlab_kvstore import mooncake
+def test_the_retired_publication_setting_points_to_the_engine_report() -> None:
+    with pytest.raises(AdapterOperationError, match="kv_tier_publication_ms"):
+        stack_settings({"kv_tier_publication_seconds": SettingValue(root=1.0)})
 
-    monkeypatch.setattr(mooncake, "installed_version", lambda: "9.9.9")
-    plan_input = _pd_plan_input(kv_store=KvStoreInput(backend="mooncake", settings={}))
-    plan_input.stack_settings = {"kv_tier_publication_seconds": SettingValue(root=1.0)}
 
+def test_gateway_extra_args_follow_the_managed_smg_options() -> None:
+    plan_input = _plan_input(
+        gateway_settings={
+            "extra_args": SettingValue.model_validate(["--worker-startup-check-interval", "1"])
+        }
+    )
     plan = plan_serve(plan_input)
+    assert plan.gateway is not None
+    assert plan.gateway.effective_settings["extra_args"] == SettingValue.model_validate(
+        ["--worker-startup-check-interval", "1"]
+    )
+    render_input = _render_input()
+    gateway = render_input.allocations[1].root
+    assert isinstance(gateway, ServeProcessAllocationFrontend)
+    gateway.gateway = plan.gateway
 
-    assert plan.kv_store is not None
-    assert plan.kv_store.publication_bound_ms == 1000
+    argv = render_serve(render_input).processes[1].root.command.argv
+
+    assert argv[-2:] == ["--worker-startup-check-interval", "1"]
+    assert argv.index("--disable-circuit-breaker") < argv.index("--worker-startup-check-interval")
+
+
+def test_pd_router_extra_args_reach_the_fused_smg_command() -> None:
+    plan_input = _pd_plan_input(
+        pd_router_settings={
+            "extra_args": SettingValue.model_validate(["--health-check-interval-secs", "5"])
+        }
+    )
+    rendered = render_serve(_pd_render_input(plan_input, plan_serve(plan_input)))
+
+    gateway = next(p.root for p in rendered.processes if p.root.process == "gateway")
+    assert gateway.command.argv[-2:] == ["--health-check-interval-secs", "5"]
+
+
+@pytest.mark.parametrize("argument", ["--policy", "--worker-startup-timeout-secs=1", "--"])
+def test_smg_extra_args_may_not_name_a_rendered_option(argument: str) -> None:
+    with pytest.raises(AdapterOperationError, match="extra_args"):
+        plan_serve(
+            _plan_input(gateway_settings={"extra_args": SettingValue.model_validate([argument])})
+        )

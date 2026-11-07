@@ -813,7 +813,7 @@ fn corpus_bench_draws_entry_content_from_the_corpus_and_records_provenance()
     let preparation = &source["preparation"]["result"];
     assert_eq!(
         preparation["materialization_identity"],
-        "inferlab-corpus-slice-v1"
+        "inferlab-corpus-slice-v2"
     );
     // Every entry is one recorded corpus slice drawn from the corpus words.
     let artifact_dir = workspace.root().join(format!(
@@ -1654,6 +1654,14 @@ fn synthetic_population_requires_prompt_targeting_evidence() -> Result<(), Box<d
 #[test]
 fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
+    // An adaptive search keeps resetting the cache before every probe
+    // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replace(
+        "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+        "benches = [\"adaptive-c8k1k\"]",
+    );
+    fs::write(manifest, text)?;
     let output = workspace
         .command()
         .env("FIXTURE_RESET_STATUS", "206")
@@ -1685,6 +1693,51 @@ fn partial_prefix_cache_reset_fails_the_bench_with_http_evidence() -> Result<(),
     assert!(bench["cases"][0].get("native_exit_code").is_none());
     assert!(bench["cases"][0].get("raw_artifacts").is_none());
     assert_eq!(recipe["cleanup"]["verified"], true);
+    Ok(())
+}
+
+/// A generated cold population is namespaced: its cases issue no reset, so a
+/// server whose reset would fail serves the Bench anyway
+/// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[test]
+fn a_generated_cold_bench_issues_no_prefix_cache_reset() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replace(
+        "benches = [\"c8k1k\", \"adaptive-c8k1k\"]",
+        "benches = [\"c8k1k\"]",
+    );
+    fs::write(manifest, text)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_RESET_STATUS", "206")
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench = workspace.load_record(
+        recipe["benches"][0]["id"]
+            .as_str()
+            .ok_or("matrix bench has no record id")?,
+    )?;
+    assert!(
+        output.status.success(),
+        "bench error: {}; stderr: {}",
+        bench["error"],
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases = bench["cases"].as_array().ok_or("bench has no cases")?;
+    assert!(cases.len() >= 2);
+    for case in cases {
+        assert_eq!(case["status"], "succeeded");
+        assert!(case["cache_preparation"].get("reset").is_none(), "{case}");
+    }
+    // Each case read its own population.
+    let shas = cases
+        .iter()
+        .map(|case| case["population_slice"]["population_sha256"].clone())
+        .collect::<Vec<_>>();
+    assert!(shas.iter().all(Value::is_string), "{shas:?}");
     Ok(())
 }
 
@@ -1813,7 +1866,7 @@ fn primed_dry_run_projects_order_and_conditioning_values() -> Result<(), Box<dyn
     let bench = &recipe["measurements"]["benches"][0];
     assert_eq!(
         bench["execution"]["cases"][0]["preparation_order"],
-        serde_json::json!(["cache_reset", "cache_conditioning", "profiling_release"])
+        serde_json::json!(["cache_conditioning", "profiling_release"])
     );
     assert_eq!(
         bench["client"]["prefix_cache_conditioning"],
@@ -1912,10 +1965,9 @@ fn primed_prefix_preparation_precedes_profiling_and_records_exact_request()
 
     let events = fs::read_to_string(workspace.capture_events())?;
     let events = events.lines().collect::<Vec<_>>();
-    assert_eq!(
-        &events[..3],
-        ["cache_reset", "cache_conditioning", "client_started",]
-    );
+    // A generated population is namespaced, so conditioning needs no reset.
+    assert_eq!(&events[..2], ["cache_conditioning", "client_started"]);
+    assert!(!events.contains(&"cache_reset"));
     assert_eq!(recipe["cleanup"]["verified"], true);
     Ok(())
 }
@@ -1961,14 +2013,46 @@ fn primed_grouped_prefixes_condition_every_group() -> Result<(), Box<dyn Error>>
     let events = fs::read_to_string(workspace.capture_events())?;
     let events = events.lines().collect::<Vec<_>>();
     assert_eq!(
-        &events[..4],
-        [
-            "cache_reset",
-            "cache_conditioning",
-            "cache_conditioning",
-            "client_started",
-        ]
+        &events[..3],
+        ["cache_conditioning", "cache_conditioning", "client_started"]
     );
+    assert!(!events.contains(&"cache_reset"));
+    Ok(())
+}
+
+/// Each case's own group conditioning is reconciled with the prefix
+/// geometry, not the shared result's ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+#[test]
+fn misnumbered_case_group_conditioning_fails_preparation() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_primed_prefix_bench()?;
+    let manifest = workspace.root().join(".inferlab/workspace.toml");
+    let text = fs::read_to_string(&manifest)?.replacen(
+        "prefix_sharing = { shared_prefix_ratio = 1.0 }",
+        "prefix_sharing = { shared_prefix_ratio = 1.0, groups = 2 }",
+        1,
+    );
+    fs::write(manifest, text)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_CASE_GROUP_MISNUMBERED", "1")
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: Value = serde_json::from_slice(&output.stdout)?;
+    let bench_id = recipe["benches"][0]["id"]
+        .as_str()
+        .ok_or("matrix bench has no record id")?;
+    let bench = workspace.load_record(bench_id)?;
+    assert!(
+        bench["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("disagree with prefix geometry")),
+        "bench error: {}",
+        bench["error"]
+    );
+    assert!(bench["cases"].as_array().is_none_or(Vec::is_empty));
     Ok(())
 }
 

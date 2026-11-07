@@ -628,7 +628,21 @@ fn definitions_split_across_fragments_resolve_identically() -> Result<(), Box<dy
         strip_source_derived(single_plan["server"].clone()),
         strip_source_derived(split_plan["server"].clone()),
     );
-    assert_eq!(split_plan["measurements"], single_plan["measurements"]);
+    // Each execution draws its own population namespace nonce, by design.
+    let without_nonce = |mut measurements: serde_json::Value| {
+        if let Some(benches) = measurements["benches"].as_array_mut() {
+            for bench in benches {
+                if let Some(client) = bench["client"].as_object_mut() {
+                    client.remove("population_namespace_nonce");
+                }
+            }
+        }
+        measurements
+    };
+    assert_eq!(
+        without_nonce(split_plan["measurements"].clone()),
+        without_nonce(single_plan["measurements"].clone())
+    );
     assert_eq!(split_plan["recipe"], single_plan["recipe"]);
     // The full serving definition the adapter plans against (its request and
     // response digest) is identical, so the composed definitions match byte for

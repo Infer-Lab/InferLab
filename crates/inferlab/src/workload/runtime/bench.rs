@@ -109,10 +109,12 @@ pub(crate) fn run_bench(
                     return Ok(session.into_record());
                 }
             };
-            let admission =
-                server::status(root, record_id).and_then(|report| server::require_running(&report));
-            if let Err(error) = admission {
-                finish_failed_bench(&mut session, error.to_string())?;
+            let admission = match server::lost_process_error(root, record_id) {
+                Ok(lost) => lost,
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(error) = admission {
+                finish_failed_bench(&mut session, error)?;
                 return Ok(session.into_record());
             }
             execute_bench(root, &server_record_id, plan, &mut session, progress)?;
@@ -120,6 +122,46 @@ pub(crate) fn run_bench(
         }
     }
     Ok(session.into_record())
+}
+
+/// Facts the server reports only at readiness — a cache-owning Engine's
+/// data-parallel rank count, and whether its store is shared with what
+/// publication bound — are applied to this run's plan before preparation; a
+/// primed start whose reported targets the frontend cannot condition fails
+/// before any reset or conditioning request ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+fn apply_observed_serving_facts(
+    root: &Path,
+    server_record_id: &str,
+    plan: &mut BenchPlan,
+) -> Result<(), InferlabError> {
+    if !plan.client.serving_facts_observed {
+        return Ok(());
+    }
+    let shape =
+        crate::workload::conditioning_shape_of(&server::load_record(root, server_record_id)?);
+    if shape.data_parallel_pending || shape.sharing_pending {
+        return Err(InferlabError::InvalidConfig {
+            message: format!(
+                "bench {:?} needs the cache-owning serving facts server {server_record_id:?} reports at readiness, but its record holds none",
+                plan.id
+            ),
+        });
+    }
+    plan.client.prefix_publication_ms = shape.publication_wait_ms;
+    if let Some(conditioning) = plan.client.prefix_cache_conditioning.as_mut() {
+        if shape.gateway_frontend && shape.conditioning_targets > 1 && !conditioning.frontend_fanout
+        {
+            return Err(InferlabError::InvalidConfig {
+                message: format!(
+                    "bench {:?} selects cache.start = \"primed\", but server {server_record_id:?} reported {} cache-owning targets at readiness (attention data-parallel size {}): frontend routing cannot address an individual replica or data-parallel rank, so conditioning cannot cover every cache-owning rank",
+                    plan.id, shape.conditioning_targets, shape.attention_data_parallel_size
+                ),
+            });
+        }
+        conditioning.attention_data_parallel_size = shape.attention_data_parallel_size;
+        conditioning.publication_wait_ms = shape.publication_wait_ms;
+    }
+    Ok(())
 }
 
 fn execute_bench(
@@ -130,6 +172,11 @@ fn execute_bench(
     progress: &Progress,
 ) -> Result<(), InferlabError> {
     let mut plan = plan.clone();
+    if let Err(error) = apply_observed_serving_facts(root, server_record_id, &mut plan) {
+        session.record_mut().error = Some(error.to_string());
+        session.record_mut().passed = Some(false);
+        return session.finish(WorkloadStatus::Failed);
+    }
     if let Err(error) = prepare_bench_request_source(&mut plan, session, progress) {
         session.record_mut().error = Some(error.to_string());
         session.record_mut().passed = Some(false);
@@ -188,9 +235,14 @@ fn execute_bench(
         None
     };
     let outcome = match &plan.execution {
-        BenchExecutionPlan::Matrix { cases } => {
-            run_matrix_cases(&plan, cases, session, capture.as_mut(), progress)
-        }
+        BenchExecutionPlan::Matrix { cases } => run_matrix_cases(
+            server_record_id,
+            &plan,
+            cases,
+            session,
+            capture.as_mut(),
+            progress,
+        ),
         BenchExecutionPlan::Adaptive {
             policy,
             preparation_order,
@@ -200,6 +252,7 @@ fn execute_bench(
             request_count,
             duration_seconds,
         } => run_adaptive(
+            server_record_id,
             &plan,
             policy,
             preparation_order,

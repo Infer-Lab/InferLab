@@ -55,7 +55,7 @@ def preparation_request(
                     "license": "Apache-2.0",
                     "cache_path": str(source_path),
                     "cache_state": "present",
-                    "materialization_identity": "sharegpt-single-request-v1",
+                    "materialization_identity": "sharegpt-single-request-v2",
                     "provides_output_targets": True,
                 },
             },

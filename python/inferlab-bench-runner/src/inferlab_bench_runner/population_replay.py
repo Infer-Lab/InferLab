@@ -15,6 +15,7 @@ from pathlib import Path
 from inferlab_measurement_sdk import (
     SCHEMA_VERSION,
     BenchCacheStartInput,
+    BenchOutputStopInput,
     BenchPopulationInput,
     BenchPopulationPreparationRequest,
     BenchPopulationPreparationResult,
@@ -48,6 +49,18 @@ class ReplayEntry:
     text_input: str | None
     messages: list[dict[str, str]] | None
     output_length: int
+    output_stop: BenchOutputStopInput
+
+
+def _output_stop(extra: dict[str, object]) -> BenchOutputStopInput:
+    """The output stop an entry's request resolves to: the endpoint suppresses
+    end of sequence for every replayed request, and an entry's own
+    ``ignore_eos`` overrides it ([[RFC-0004:C-BENCH-REQUEST-SOURCES]])."""
+    return (
+        BenchOutputStopInput.eos
+        if extra.get("ignore_eos") is False
+        else BenchOutputStopInput.length
+    )
 
 
 def _parse_entry(value: object, line_number: int, flat_prompt: bool) -> ReplayEntry:
@@ -64,6 +77,10 @@ def _parse_entry(value: object, line_number: int, flat_prompt: bool) -> ReplayEn
         raise malformed("entry output_length must be an integer")
     if output_length < 1:
         raise malformed("entry output_length must be positive")
+    extra = value.get("extra", {})
+    if not isinstance(extra, dict):
+        raise malformed("entry extra must be a JSON object")
+    output_stop = _output_stop(extra)
     text_input = value.get("text_input")
     messages = value.get("messages")
     if flat_prompt:
@@ -71,7 +88,7 @@ def _parse_entry(value: object, line_number: int, flat_prompt: bool) -> ReplayEn
             raise malformed("flat prompt entries require a non-empty text_input string")
         if messages is not None:
             raise malformed("flat prompt entries must not declare messages")
-        return ReplayEntry(line_number, session_id, text_input, None, output_length)
+        return ReplayEntry(line_number, session_id, text_input, None, output_length, output_stop)
     if text_input is not None:
         raise malformed("server_chat prompt entries must not declare text_input")
     if not isinstance(messages, list) or not messages:
@@ -85,7 +102,7 @@ def _parse_entry(value: object, line_number: int, flat_prompt: bool) -> ReplayEn
         if not isinstance(role, str) or not isinstance(content, str):
             raise malformed("server_chat messages require string role and content")
         normalized.append({"role": role, "content": content})
-    return ReplayEntry(line_number, session_id, None, normalized, output_length)
+    return ReplayEntry(line_number, session_id, None, normalized, output_length, output_stop)
 
 
 def _resolved_prefix_tokens(source: BenchRequestSourceInputReplay, input_tokens: int) -> int | None:
@@ -236,6 +253,7 @@ def prepare_replay_population(
                 "prompt_kind": prompt.kind,
                 "input_tokens": input_counts[index],
                 "output_tokens": entry.output_length,
+                "output_stop": entry.output_stop.value,
                 "resolved_shared_prefix_tokens": resolved_shared,
                 "resolved_unique_suffix_tokens": (
                     input_counts[index] - resolved_shared if resolved_shared is not None else None

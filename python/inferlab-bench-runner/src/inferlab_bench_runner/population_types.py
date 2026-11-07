@@ -66,7 +66,13 @@ def common_prefix_length(left: list[int], right: list[int]) -> int:
     return min(len(left), len(right))
 
 
-def unbiased_index(seed: int, population_index: int, label: str, size: int) -> int:
+ContentKey = int | str
+"""The key a content draw is made under: the Bench seed, or one case phase's
+namespace when the Bench separates reuse by namespace
+([[RFC-0004:C-BENCH-CACHE-STATE]])."""
+
+
+def unbiased_index(seed: ContentKey, population_index: int, label: str, size: int) -> int:
     """Select an index without modulo bias from a stable population identity."""
     if size <= 0:
         raise ValueError("deterministic selection requires a positive range")
@@ -85,9 +91,12 @@ def stop_controls(output_stop: BenchOutputStopInput, output_tokens: int) -> Json
     """The stop members a request carries for its output-token limit.
 
     Under ``length`` the limit is exact: the request sets a matching minimum
-    and suppresses end of sequence. Under ``eos`` the limit is a cap and the
-    request carries no stop members (RFC-0004:C-BENCH-REQUEST-SOURCES).
+    and suppresses end of sequence. Under ``eos`` the limit is a cap: the
+    request sets no minimum and explicitly allows end of sequence
+    (RFC-0004:C-BENCH-REQUEST-SOURCES).
     """
     if output_stop is BenchOutputStopInput.eos:
-        return {}
+        # Explicit, so a replayed entry overrides the length default every
+        # replayed request starts from (RFC-0004:C-BENCH-REQUEST-SOURCES).
+        return {"ignore_eos": False}
     return {"ignore_eos": True, "min_tokens": output_tokens}

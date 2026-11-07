@@ -16,11 +16,11 @@ from inferlab_adapter_sdk import (
     ServeProcessAllocationKvStore,
 )
 
-from . import mooncake
+from . import filesystem, mooncake
 
-__all__ = ["BACKENDS", "mooncake", "plan", "render"]
+__all__ = ["BACKENDS", "filesystem", "mooncake", "plan", "render"]
 
-BACKENDS = (mooncake.BACKEND,)
+BACKENDS = (mooncake.BACKEND, filesystem.BACKEND)
 """Every KV store backend a server may declare."""
 
 
@@ -28,6 +28,8 @@ def plan(store: KvStoreInput) -> KvStorePlan:
     """The KV store plan for the declared backend."""
     if store.backend == mooncake.BACKEND:
         return mooncake.plan(store)
+    if store.backend == filesystem.BACKEND:
+        return filesystem.plan(store)
     raise AdapterOperationError(
         AdapterErrorCode.invalid_settings,
         f"KV store backend {store.backend!r} is not supported; select one of "
@@ -36,7 +38,8 @@ def plan(store: KvStoreInput) -> KvStorePlan:
 
 
 def render(allocation: ServeProcessAllocationKvStore) -> RenderedServeProcess:
-    """Render the store process for the backend its plan names."""
+    """Render the store process for the backend its plan names; an externally
+    operated store has no process to render."""
     if allocation.kv_store.backend == mooncake.BACKEND:
         return mooncake.render(allocation)
     raise AdapterOperationError(

@@ -23,6 +23,11 @@ pub enum ReadinessPlan {
         target_role_field: String,
         target_healthy_field: String,
         target_bootstrap_port_field: String,
+        /// A JSON Pointer within each target entry to its data-parallel rank
+        /// count; a target is ready only once it reports a positive count
+        /// ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_data_parallel_size_pointer: Option<String>,
         expected_targets: Vec<TargetRegistryExpectedTarget>,
     },
     /// A framework-neutral registry whose entries must list every expected
@@ -73,6 +78,10 @@ pub struct TargetRegistryExpectedTarget {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
+    /// The model-serving process this target is, so a reported fact maps back
+    /// to it ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

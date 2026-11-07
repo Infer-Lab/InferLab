@@ -334,6 +334,7 @@ pub(super) fn run_population_preparation(
         seed: plan.client.effective_definition.seed,
         request_body: wire::bench_request_body_input(&plan.client.effective_definition)?,
         artifact_dir: paths.artifact_dir.clone(),
+        case_namespaces: case_namespaces(plan),
     };
     let mut command = plan.client.command.clone();
     command.argv.push("--prepare".to_owned());
@@ -386,6 +387,27 @@ pub(super) fn finish_population_preparation(
             .as_ref()
             .map(|geometry| geometry.maximum_shared_prefix_tokens);
     }
+    // A namespaced Bench reads one population per case, each with its own
+    // canonical prefixes; the plan, not the result, decides which layout
+    // applies ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    if plan.client.population_namespace_nonce.is_some() {
+        plan.client.case_populations = result
+            .case_populations
+            .iter()
+            .map(|case| {
+                (
+                    case.case_id.clone(),
+                    bench_population(
+                        &case.population,
+                        &case.population.evidence_path,
+                        case.prefix_conditioning.as_ref(),
+                        &case.group_prefix_conditioning,
+                    ),
+                )
+            })
+            .collect();
+        return Ok(());
+    }
     let evidence_path =
         result
             .evidence_path
@@ -393,28 +415,52 @@ pub(super) fn finish_population_preparation(
             .ok_or_else(|| InferlabError::DatasetPreparation {
                 message: "successful population preparation omitted its evidence path".to_owned(),
             })?;
-    plan.client.population = result
-        .population
-        .as_ref()
-        .map(|population| BenchPopulation {
-            path: population.path.clone(),
-            evidence_path: evidence_path.clone(),
-            sha256: population.sha256.clone(),
-            entries: population.entries,
-            tpot_applicable: population.tpot_applicable,
-            prefix_conditioning: result.prefix_conditioning.clone(),
-            group_prefix_conditioning: result.group_prefix_conditioning.clone(),
-            session_templates: population
-                .session_templates
-                .iter()
-                .map(|template| BenchSessionTemplate {
-                    template_identity: template.template_identity.clone(),
-                    turn_count: template.turn_count,
-                })
-                .collect(),
-        });
+    plan.client.population = result.population.as_ref().map(|population| {
+        bench_population(
+            population,
+            evidence_path,
+            result.prefix_conditioning.as_ref(),
+            &result.group_prefix_conditioning,
+        )
+    });
     resolve_session_case_request_counts(plan)?;
     Ok(())
+}
+
+/// The replayed request source, when the Bench replays a file.
+fn replay_source(plan: &BenchPlan) -> Option<&ResolvedBenchRequestSource> {
+    match &plan.client.effective_definition.source {
+        ResolvedBenchSource::Requests {
+            request_source: replay @ ResolvedBenchRequestSource::Replay { .. },
+        } => Some(replay),
+        _ => None,
+    }
+}
+
+/// The plan's view of one materialized population.
+fn bench_population(
+    population: &inferlab_protocol::BenchPopulationInput,
+    evidence_path: &std::path::Path,
+    prefix_conditioning: Option<&inferlab_protocol::BenchPrefixConditioningInput>,
+    group_prefix_conditioning: &[inferlab_protocol::BenchPrefixConditioningInput],
+) -> BenchPopulation {
+    BenchPopulation {
+        path: population.path.clone(),
+        evidence_path: evidence_path.to_path_buf(),
+        sha256: population.sha256.clone(),
+        entries: population.entries,
+        tpot_applicable: population.tpot_applicable,
+        prefix_conditioning: prefix_conditioning.cloned(),
+        group_prefix_conditioning: group_prefix_conditioning.to_vec(),
+        session_templates: population
+            .session_templates
+            .iter()
+            .map(|template| BenchSessionTemplate {
+                template_identity: template.template_identity.clone(),
+                turn_count: template.turn_count,
+            })
+            .collect(),
+    }
 }
 
 fn resolve_session_case_request_counts(plan: &mut BenchPlan) -> Result<(), InferlabError> {
@@ -807,46 +853,20 @@ pub(super) fn validate_population_preparation(
             ),
         });
     }
-    if result.requested_entries != plan.client.required_population_count {
-        return Err(InferlabError::DatasetPreparation {
-            message: format!(
-                "population preparation returned {} requested entries, expected {}",
-                result.requested_entries, plan.client.required_population_count
-            ),
-        });
-    }
-    let population =
-        result
-            .population
-            .as_ref()
-            .ok_or_else(|| InferlabError::DatasetPreparation {
-                message: "successful population preparation omitted its population".to_owned(),
-            })?;
-    let replay_source = match &plan.client.effective_definition.source {
-        ResolvedBenchSource::Requests {
-            request_source: replay @ ResolvedBenchRequestSource::Replay { .. },
-        } => Some(replay),
-        _ => None,
-    };
-    if replay_source.is_some() {
-        // A replayed population is the whole file; cases consume its prefix,
-        // so the file must cover the required count without repeating entries.
-        if population.entries < plan.client.required_population_count {
+    let case_namespaces = case_namespaces(plan);
+    let population_entries = if case_namespaces.is_empty() {
+        if result.requested_entries != plan.client.required_population_count {
             return Err(InferlabError::DatasetPreparation {
                 message: format!(
-                    "replay population has {} entries, bench requires {}",
-                    population.entries, plan.client.required_population_count
+                    "population preparation returned {} requested entries, expected {}",
+                    result.requested_entries, plan.client.required_population_count
                 ),
             });
         }
-    } else if population.entries != plan.client.required_population_count {
-        return Err(InferlabError::DatasetPreparation {
-            message: format!(
-                "request population has {} entries, expected {}",
-                population.entries, plan.client.required_population_count
-            ),
-        });
-    }
+        shared_population_entries(plan, result)?
+    } else {
+        namespaced_population_entries(&case_namespaces, result)?
+    };
     let (synthetic, prefix_sharing, shared_system_declared) =
         match &plan.client.effective_definition.source {
             ResolvedBenchSource::Requests {
@@ -906,12 +926,12 @@ pub(super) fn validate_population_preparation(
                     });
             let template_policy_valid = match synthetic_prompt {
                 Some(BenchPrompt::Flat) => {
-                    targeting.exact_entries == population.entries
+                    targeting.exact_entries == population_entries
                         && targeting.fallback_entries == 0
                         && targeting.projection_template.is_none()
                 }
                 Some(BenchPrompt::RenderedChat { .. }) => {
-                    targeting.exact_entries == population.entries
+                    targeting.exact_entries == population_entries
                         && targeting.fallback_entries == 0
                         && targeting.projection_template.is_some()
                 }
@@ -920,7 +940,7 @@ pub(super) fn validate_population_preparation(
                 }
                 None => false,
             };
-            if total_entries != population.entries
+            if total_entries != population_entries
                 || fallback_reason_entries != Some(targeting.fallback_entries)
                 || !valid_token_summary(&targeting.selected_prompt_tokens)
                 || !valid_token_summary(&targeting.pre_template_content_tokens)
@@ -951,12 +971,12 @@ pub(super) fn validate_population_preparation(
             if valid_token_summary_allow_zero(&summary.shared_prefix_tokens)
                 && valid_token_summary_allow_zero(&summary.unique_suffix_tokens)
                 && summary.maximum_shared_prefix_tokens == summary.shared_prefix_tokens.maximum
-                && summary.full_prompt_entries <= population.entries
+                && summary.full_prompt_entries <= population_entries
                 && summary.canonical_prefix_sha256.len() == 64
                 && group_entries_reconciled(
                     &summary.group_entries,
                     declared_groups,
-                    population.entries,
+                    population_entries,
                 ) => {}
         (false, None) => {}
         _ => {
@@ -967,7 +987,73 @@ pub(super) fn validate_population_preparation(
     }
     let conditioning_required =
         plan.client.effective_definition.cache_start == crate::workspace::BenchCacheStart::Primed;
-    match (conditioning_required, result.prefix_conditioning.as_ref()) {
+    if case_namespaces.is_empty() {
+        validate_conditioning(
+            conditioning_required,
+            result,
+            result.prefix_conditioning.as_ref(),
+            &result.group_prefix_conditioning,
+        )?;
+    } else {
+        // A namespaced Bench conditions each case's own profiling prefixes
+        // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+        for case in &result.case_populations {
+            validate_conditioning(
+                conditioning_required,
+                result,
+                case.prefix_conditioning.as_ref(),
+                &case.group_prefix_conditioning,
+            )?;
+        }
+    }
+    match (
+        shared_system_declared,
+        result.shared_system_content.as_ref(),
+    ) {
+        (true, Some(summary))
+            if valid_token_summary(&summary.system_content_tokens)
+                && valid_token_summary(&summary.user_content_tokens)
+                && summary.canonical_system_content_sha256.len() == 64 => {}
+        (false, None) => {}
+        _ => {
+            return Err(InferlabError::DatasetPreparation {
+                message: "synthetic shared-system-content summary is not reconciled".to_owned(),
+            });
+        }
+    }
+    if case_namespaces.is_empty() {
+        let population =
+            result
+                .population
+                .as_ref()
+                .ok_or_else(|| InferlabError::DatasetPreparation {
+                    message: "successful population preparation omitted its population".to_owned(),
+                })?;
+        validate_population_file(plan, population)?;
+        if result.evidence_path.as_ref() != Some(&population.evidence_path) {
+            return Err(InferlabError::DatasetPreparation {
+                message: "request population and preparation result disagree on evidence path"
+                    .to_owned(),
+            });
+        }
+    } else {
+        for case in &result.case_populations {
+            validate_population_file(plan, &case.population)?;
+        }
+    }
+    Ok(())
+}
+
+/// The canonical prefixes a primed start conditions: present exactly when
+/// the start is primed, matching their digests, the prefix geometry's
+/// maximum, and one artifact per further prefix group.
+fn validate_conditioning(
+    conditioning_required: bool,
+    result: &BenchPopulationPreparationResult,
+    prefix_conditioning: Option<&inferlab_protocol::BenchPrefixConditioningInput>,
+    group_prefix_conditioning: &[inferlab_protocol::BenchPrefixConditioningInput],
+) -> Result<(), InferlabError> {
+    match (conditioning_required, prefix_conditioning) {
         (true, Some(conditioning))
             if conditioning.prompt_tokens > 0
                 && conditioning.sha256.len() == 64
@@ -981,7 +1067,7 @@ pub(super) fn validate_population_preparation(
                     observed: observed_sha256,
                 });
             }
-            for group in &result.group_prefix_conditioning {
+            for group in group_prefix_conditioning {
                 let (_, observed_sha256) = hash_dataset_file(&group.path)?;
                 if observed_sha256 != group.sha256 {
                     return Err(InferlabError::DatasetDigest {
@@ -1002,9 +1088,8 @@ pub(super) fn validate_population_preparation(
                 .as_ref()
                 .map_or(0, |summary| summary.group_entries.len());
             let groups_reconciled = conditioning.group == 0
-                && result.group_prefix_conditioning.len() == groups.saturating_sub(1)
-                && result
-                    .group_prefix_conditioning
+                && group_prefix_conditioning.len() == groups.saturating_sub(1)
+                && group_prefix_conditioning
                     .iter()
                     .zip(1_u32..)
                     .all(|(item, group)| {
@@ -1024,32 +1109,28 @@ pub(super) fn validate_population_preparation(
             });
         }
     }
-    match (
-        shared_system_declared,
-        result.shared_system_content.as_ref(),
-    ) {
-        (true, Some(summary))
-            if valid_token_summary(&summary.system_content_tokens)
-                && valid_token_summary(&summary.user_content_tokens)
-                && summary.canonical_system_content_sha256.len() == 64 => {}
-        (false, None) => {}
-        _ => {
-            return Err(InferlabError::DatasetPreparation {
-                message: "synthetic shared-system-content summary is not reconciled".to_owned(),
-            });
-        }
-    }
+    Ok(())
+}
+
+/// One materialized population file: its template summaries, digest, replay
+/// identity, TPOT applicability, and evidence artifact.
+fn validate_population_file(
+    plan: &BenchPlan,
+    population: &inferlab_protocol::BenchPopulationInput,
+) -> Result<(), InferlabError> {
+    let total_entries = population.entries;
+    let replay_source = replay_source(plan);
     let session_backed = matches!(
         plan.client.effective_definition.source,
         ResolvedBenchSource::Sessions { .. }
     );
     if session_backed {
-        if population.session_templates.len() != population.entries as usize {
+        if population.session_templates.len() != total_entries as usize {
             return Err(InferlabError::DatasetPreparation {
                 message: format!(
                     "linear-session population has {} template summaries, expected {}",
                     population.session_templates.len(),
-                    population.entries
+                    total_entries
                 ),
             });
         }
@@ -1100,22 +1181,125 @@ pub(super) fn validate_population_preparation(
             ),
         });
     }
-    if !result
-        .evidence_path
-        .as_ref()
-        .is_some_and(|path| path.is_file())
-    {
+    if !population.evidence_path.is_file() {
         return Err(InferlabError::DatasetPreparation {
             message: "successful population preparation omitted its evidence artifact".to_owned(),
         });
     }
-    if result.evidence_path.as_ref() != Some(&population.evidence_path) {
+    Ok(())
+}
+
+/// The entries of the one population every case shares, checked against the
+/// Bench's required count.
+fn shared_population_entries(
+    plan: &BenchPlan,
+    result: &BenchPopulationPreparationResult,
+) -> Result<u32, InferlabError> {
+    if !result.case_populations.is_empty() {
         return Err(InferlabError::DatasetPreparation {
-            message: "request population and preparation result disagree on evidence path"
-                .to_owned(),
+            message: "population preparation returned case populations for a Bench whose cases share one population".to_owned(),
         });
     }
-    Ok(())
+    let population =
+        result
+            .population
+            .as_ref()
+            .ok_or_else(|| InferlabError::DatasetPreparation {
+                message: "successful population preparation omitted its population".to_owned(),
+            })?;
+    let replay_source = replay_source(plan);
+    if replay_source.is_some() {
+        // A replayed population is the whole file; cases consume its prefix,
+        // so the file must cover the required count without repeating entries.
+        if population.entries < plan.client.required_population_count {
+            return Err(InferlabError::DatasetPreparation {
+                message: format!(
+                    "replay population has {} entries, bench requires {}",
+                    population.entries, plan.client.required_population_count
+                ),
+            });
+        }
+    } else if population.entries != plan.client.required_population_count {
+        return Err(InferlabError::DatasetPreparation {
+            message: format!(
+                "request population has {} entries, expected {}",
+                population.entries, plan.client.required_population_count
+            ),
+        });
+    }
+    Ok(population.entries)
+}
+
+/// Each case's namespaces, in case order, when the Bench separates reuse by
+/// namespace ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+pub(super) fn case_namespaces(plan: &BenchPlan) -> Vec<inferlab_protocol::BenchCaseNamespaceInput> {
+    let (Some(nonce), BenchExecutionPlan::Matrix { cases }) =
+        (&plan.client.population_namespace_nonce, &plan.execution)
+    else {
+        return Vec::new();
+    };
+    let seed = plan.client.effective_definition.seed;
+    cases
+        .iter()
+        .map(|case| inferlab_protocol::BenchCaseNamespaceInput {
+            case_id: case.id.clone(),
+            warmup_entries: case.warmup_request_count,
+            profiling_entries: case.request_count,
+            warmup_namespace: crate::workload::plan::population_namespace(
+                nonce, seed, &case.id, "warmup",
+            ),
+            profiling_namespace: crate::workload::plan::population_namespace(
+                nonce,
+                seed,
+                &case.id,
+                "profiling",
+            ),
+        })
+        .collect()
+}
+
+/// The entries of every case's own population, each checked against its
+/// case's warmup and profiling counts.
+fn namespaced_population_entries(
+    case_namespaces: &[inferlab_protocol::BenchCaseNamespaceInput],
+    result: &BenchPopulationPreparationResult,
+) -> Result<u32, InferlabError> {
+    let returned = result
+        .case_populations
+        .iter()
+        .map(|case| (case.case_id.as_str(), case.population.entries))
+        .collect::<Vec<_>>();
+    let expected = case_namespaces
+        .iter()
+        .map(|case| {
+            (
+                case.case_id.as_str(),
+                case.warmup_entries.saturating_add(case.profiling_entries),
+            )
+        })
+        .collect::<Vec<_>>();
+    if returned != expected {
+        return Err(InferlabError::DatasetPreparation {
+            message: format!(
+                "population preparation returned case populations {returned:?}, expected {expected:?}"
+            ),
+        });
+    }
+    let total = expected
+        .iter()
+        .try_fold(0_u32, |total, (_, entries)| total.checked_add(*entries))
+        .ok_or_else(|| InferlabError::DatasetPreparation {
+            message: "case populations exceed u32 entries".to_owned(),
+        })?;
+    if result.requested_entries != total {
+        return Err(InferlabError::DatasetPreparation {
+            message: format!(
+                "population preparation returned {} requested entries, expected {total}",
+                result.requested_entries
+            ),
+        });
+    }
+    Ok(total)
 }
 
 fn valid_token_summary(summary: &inferlab_protocol::BenchTokenCountSummary) -> bool {

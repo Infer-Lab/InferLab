@@ -33,14 +33,15 @@ SMG's request envelope includes an `original_text` field alongside token IDs;
 the compatibility module accepts that envelope but discards the text before it
 constructs the token core's `GenerateRequest`.
 
-The publishable `inferlab-integration-specialized-engine` package plans one
-Engine rank process owning a nonzero pure-TP device set and one zero-device
-Gateway process through the same contract used by real Engine implementations.
-The generic integration accepts arbitrary TP widths. This fake implementation
-deliberately accepts only TP1 and returns a typed CLI error for wider requests;
-its token core does not access the allocated device. The package contains no
-fake-Engine lowering: the fixture's binary and subcommand,
-`inferlab-token-engine smg-worker`, are the default `engine_command`.
+The publishable `inferlab-integration-specialized-engine` package plans the
+fake Engine exactly as it plans a real one: one rank process per replica owning
+its declared `devices`, behind one zero-device Gateway process. The fake Engine
+accepts the contract arguments, ignores its device visibility (the token core
+never touches a device), and reports `data_parallel_size` 1 in
+`GetServerInfo`. It implements no KV tier, prefill/decode mode, or profiling
+RPC. The package contains no fake-Engine lowering: the fixture's binary and
+subcommand, `inferlab-token-engine smg-worker`, are the default
+`engine_command`.
 
 ## Reproducible checks
 
@@ -56,17 +57,19 @@ pixi run pytest python/inferlab-integration-specialized-engine/tests/test_integr
 The default Rust test covers the pure token boundary without compiling the SMG
 stack. The feature-enabled Rust test additionally covers the SMG request/stream
 mapping, the minimum control surface, and a real TCP/gRPC round trip through the
-published SMG client. The shared integration tests cover planning
-and rendering under the current adapter protocol:
+published SMG client. The integration tests cover planning and rendering of the
+contract, independent of any Engine implementation:
 
-- arbitrary pure-TP widths in one `serve` Engine replica and rank process, with
-  the fake executable itself limited to one device;
-- one `smg` Gateway targeting that Engine role;
-- one request-routing link from `gateway` to `serve`;
-- one closed `['gateway']` frontend binding and no P/D Router or KV transfer;
+- any declared device count in one rank process per replica, with no
+  parallelism component and no rendered layout;
+- one `smg` Gateway routing across every `serve` replica with the declared
+  policy;
+- Engine commands led by the stack's `engine_command`, followed by the role's
+  Engine arguments and only the contract arguments;
 - profiling plans that capture the Engine process tree while binding the
   framework-range window to the SMG Gateway;
-- exactly one rendered Engine command, led by the stack's `engine_command`, and one rendered SMG command.
+- `prefill_decode` servers behind one fused SMG Gateway and P/D Router;
+- `mooncake` and `filesystem` KV tiers and their serve-state probe.
 
 ## Opt-in live SMG transport check
 
@@ -82,8 +85,7 @@ cargo run --release -p inferlab-fake-engine --features smg-transport \
   --bin inferlab-token-engine -- smg-worker \
   --listen 127.0.0.1:50051 \
   --model <model-locator> \
-  --served-model-name fake-model \
-  --tensor-parallel-size 1
+  --served-model-name fake-model
 ```
 
 In a second terminal, start a lock-pinned SMG whose
@@ -124,7 +126,7 @@ finished.
 ## State, failure, cleanup, and evidence
 
 The model locator and served identity are shared between SMG metadata and the
-Inferlab-resolved plan. Engine/Gateway endpoints, device assignment, and
+InferLab-resolved plan. Engine/Gateway endpoints, device assignment, and
 commands are control-plane allocation facts. The fake core owns no persistent
 state, tokenizer cache, model-weight state, or KV cache. SMG may keep its own
 process-local tokenizer and routing state.
@@ -132,11 +134,11 @@ process-local tokenizer and routing state.
 A request without tokenized input is rejected by the Engine transport as an
 invalid argument. In the direct live check, the operator owns both foreground
 processes and cleanup; when the same two commands are launched through an
-Inferlab downstream workspace, Inferlab owns startup order, runtime handles,
+InferLab downstream workspace, InferLab owns startup order, runtime handles,
 rollback, stop, logs, and cleanup.
 
 The offline plan/render tests are the committed composition evidence. A manual
 SMG response is transport evidence only: it does not qualify a backend or
-justify a support-matrix claim. Qualification still requires a real Inferlab
+justify a support-matrix claim. Qualification still requires a real InferLab
 execution record for the exact hardware, model, integration revision, Gateway,
 route, and workload shape.

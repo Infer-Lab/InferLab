@@ -9,7 +9,7 @@ capabilities.
 
 import ipaddress
 import socket
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from typing import Literal
 
@@ -43,7 +43,9 @@ from inferlab_adapter_sdk import (
     fused_pd_frontend_plans,
     rank_zero_allocations,
     rendered_frontend,
+    validate_settings,
 )
+from pydantic import BaseModel, ConfigDict
 
 __all__ = [
     "BACKEND",
@@ -53,6 +55,7 @@ __all__ = [
     "PROMETHEUS_PORT",
     "PackageNotFoundError",
     "Policy",
+    "extra_args_setting",
     "flush_cache_reset",
     "gateway_readiness",
     "gateway_settings",
@@ -65,6 +68,7 @@ __all__ = [
     "require_policy_workers",
     "routed_single_command",
     "routed_single_readiness",
+    "validate_extra_args",
     "worker_server_info",
 ]
 
@@ -180,10 +184,18 @@ def worker_server_info(
     }, None
 
 
-def routed_single_readiness() -> ReadinessProbe:
+# Where SMG's `/workers` entry carries the data-parallel rank count a worker
+# reported in its GetServerInfo `server_args`: a decimal-string label
+# (observed on tokenspeed-smg 1.13.0+post20261016).
+DATA_PARALLEL_SIZE_POINTER = "/labels/dp_size"
+
+
+def routed_single_readiness(*, observe_data_parallel_size: bool = False) -> ReadinessProbe:
     """Readiness through SMG's `/workers` registry: SMG's `/readiness` turns
     ready once any one worker is healthy, so only the registry shows that
-    every regular worker has registered and is healthy."""
+    every regular worker has registered and is healthy. With
+    `observe_data_parallel_size`, each worker must also report its
+    data-parallel rank count, which readiness records."""
     return ReadinessProbe(
         root=ReadinessProbeHttpTargetRegistry(
             readiness_path="/readiness",
@@ -195,11 +207,16 @@ def routed_single_readiness() -> ReadinessProbe:
             target_bootstrap_port_field="bootstrap_port",
             target_scheme=TargetEndpointScheme.grpc,
             serve_role_value="regular",
+            target_data_parallel_size_pointer=(
+                DATA_PARALLEL_SIZE_POINTER if observe_data_parallel_size else None
+            ),
         )
     )
 
 
-def pd_router_readiness(*, prefill_bootstrap_port: str) -> ReadinessProbe:
+def pd_router_readiness(
+    *, prefill_bootstrap_port: str, observe_data_parallel_size: bool = False
+) -> ReadinessProbe:
     """Readiness through SMG's `/workers` registry of gRPC targets."""
     return ReadinessProbe(
         root=ReadinessProbeHttpTargetRegistry(
@@ -214,6 +231,9 @@ def pd_router_readiness(*, prefill_bootstrap_port: str) -> ReadinessProbe:
             prefill_role_value="prefill",
             decode_role_value="decode",
             prefill_bootstrap_port=prefill_bootstrap_port,
+            target_data_parallel_size_pointer=(
+                DATA_PARALLEL_SIZE_POINTER if observe_data_parallel_size else None
+            ),
         )
     )
 
@@ -266,6 +286,61 @@ def _launch(
 
 _FAILURE_HANDLING = ["--disable-retries", "--disable-circuit-breaker"]
 
+_OWNED_OPTIONS = frozenset(
+    {
+        "--host",
+        "--port",
+        "--prometheus-port",
+        "--worker-startup-timeout-secs",
+        "--model-path",
+        "--tokenizer-path",
+        "--worker-urls",
+        "--policy",
+        "--pd-disaggregation",
+        "--prefill",
+        "--decode",
+        "--prefill-policy",
+        "--decode-policy",
+        "--disable-retries",
+        "--disable-circuit-breaker",
+    }
+)
+"""The SMG options InferLab renders from the allocation and the typed
+settings; operator arguments may not name them."""
+
+
+def validate_extra_args(extra_args: Sequence[str], *, component: str) -> None:
+    """Reject operator arguments that would replace an option InferLab
+    renders, or end option parsing before the managed ones
+    ([[RFC-0003:C-GATEWAY-PD-ROUTER]])."""
+    for argument in extra_args:
+        if argument == "--":
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                f"{component} extra_args may not contain a bare '--'",
+            )
+        name = argument.partition("=")[0]
+        if name in _OWNED_OPTIONS:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                f"{component} extra_args entry {argument!r} names SMG option {name!r}, "
+                "which InferLab renders",
+            )
+
+
+class _OperatorArgs(BaseModel):
+    """The operator arguments among a component plan's effective settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    extra_args: list[str] = []
+
+
+def extra_args_setting(settings: Mapping[str, SettingValue]) -> list[str]:
+    """The operator arguments recorded in a component plan's effective
+    settings, in declared order."""
+    return validate_settings(_OperatorArgs, dict(settings)).extra_args
+
 
 def routed_single_command(
     *,
@@ -274,11 +349,14 @@ def routed_single_command(
     model_locator: str,
     workers: Sequence[EndpointAssignment],
     policy: str,
+    extra_args: Sequence[str] = (),
 ) -> ProcessSpec:
-    """SMG as the Gateway in front of one or more gRPC workers."""
+    """SMG as the Gateway in front of one or more gRPC workers, followed by the
+    operator's arguments."""
     argv = _launch(endpoint, prometheus, model_locator)
     argv.extend(["--worker-urls", *(_grpc(worker) for worker in workers), "--policy", policy])
     argv.extend(_FAILURE_HANDLING)
+    argv.extend(extra_args)
     return ProcessSpec(argv=argv, env={})
 
 
@@ -291,6 +369,7 @@ def prefill_decode_command(
     decode: Sequence[EndpointAssignment],
     prefill_policy: str,
     decode_policy: str,
+    extra_args: Sequence[str] = (),
 ) -> ProcessSpec:
     """SMG as the fused Gateway and P/D Router over gRPC workers; each
     prefill target carries its bootstrap port."""
@@ -309,6 +388,7 @@ def prefill_decode_command(
             "--decode-policy",
             decode_policy,
             *_FAILURE_HANDLING,
+            *extra_args,
         ]
     )
     return ProcessSpec(argv=argv, env={})
@@ -335,6 +415,7 @@ def pd_frontend(
     endpoint: EndpointDeclaration,
     policies: PdRoutingPolicies,
     pd_router_settings: dict[str, SettingValue],
+    observe_data_parallel_size: bool = False,
 ) -> tuple[GatewayPlan, PdRouterPlan, list[ServeRoleLink]]:
     """SMG as the fused Gateway and P/D Router over gRPC prefill and decode
     workers: both component plans and the frontend links. Each prefill worker
@@ -350,7 +431,10 @@ def pd_frontend(
         render_source=RenderSource.integration,
         endpoint=endpoint,
         gateway_readiness=gateway_readiness(),
-        pd_router_readiness=pd_router_readiness(prefill_bootstrap_port=BOOTSTRAP_PORT),
+        pd_router_readiness=pd_router_readiness(
+            prefill_bootstrap_port=BOOTSTRAP_PORT,
+            observe_data_parallel_size=observe_data_parallel_size,
+        ),
         gateway_settings=gateway_settings(),
         pd_router_settings=pd_router_settings,
         policies=policies,
@@ -433,5 +517,6 @@ def render_pd_frontend(
             decode=decode_targets,
             prefill_policy=policies.prefill,
             decode_policy=policies.decode,
+            extra_args=extra_args_setting(allocation.pd_router.effective_settings),
         ),
     )

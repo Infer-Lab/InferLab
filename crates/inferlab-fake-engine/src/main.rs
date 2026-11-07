@@ -39,10 +39,6 @@ struct SmgWorkerCli {
     #[arg(long)]
     served_model_name: String,
 
-    /// Number of devices jointly owned by this Engine process for pure TP.
-    #[arg(long)]
-    tensor_parallel_size: NonZeroU32,
-
     /// Output-token limit used when a request omits max_new_tokens.
     #[arg(long, default_value_t = 16)]
     default_max_output_tokens: u32,
@@ -80,8 +76,6 @@ struct SmgWorkerCli {
 
 #[derive(Debug, Error)]
 enum CliError {
-    #[error("fake Engine supports tensor parallel size 1, got {actual}")]
-    UnsupportedTensorParallel { actual: u32 },
     #[error("failed to bind the SMG worker at {address}: {source}")]
     Bind {
         address: SocketAddr,
@@ -114,12 +108,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 }
 
 async fn run_smg_worker(cli: SmgWorkerCli) -> Result<(), CliError> {
-    let tensor_parallel_size = cli.tensor_parallel_size.get();
-    if tensor_parallel_size != 1 {
-        return Err(CliError::UnsupportedTensorParallel {
-            actual: tensor_parallel_size,
-        });
-    }
     let service = SmgService::new(SmgServiceConfig::new(
         cli.model,
         cli.served_model_name,
@@ -147,7 +135,7 @@ async fn run_smg_worker(cli: SmgWorkerCli) -> Result<(), CliError> {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, CliCommand, CliError, run};
+    use super::{Cli, CliCommand};
 
     #[test]
     fn parses_the_canonical_token_engine_worker_contract() -> Result<(), clap::Error> {
@@ -160,8 +148,6 @@ mod tests {
             "/models/fake-model",
             "--served-model-name",
             "fake-model",
-            "--tensor-parallel-size",
-            "1",
             "--default-max-output-tokens",
             "3",
             "--max-num-batched-tokens",
@@ -172,7 +158,6 @@ mod tests {
         assert_eq!(worker.listen.to_string(), "127.0.0.1:50051");
         assert_eq!(worker.model, "/models/fake-model");
         assert_eq!(worker.served_model_name, "fake-model");
-        assert_eq!(worker.tensor_parallel_size.get(), 1);
         assert_eq!(worker.default_max_output_tokens, 3);
         assert_eq!(worker.max_num_batched_tokens.get(), 4_096);
         Ok(())
@@ -189,8 +174,6 @@ mod tests {
             "/models/fake-model",
             "--served-model-name",
             "fake-model",
-            "--tensor-parallel-size",
-            "2",
             "--gpu-memory-utilization-percent",
             "90",
             "--workspace-reserve-mib",
@@ -236,8 +219,6 @@ mod tests {
             "/models/fake-model",
             "--served-model-name",
             "fake-model",
-            "--tensor-parallel-size",
-            "1",
         ])?;
 
         let CliCommand::SmgWorker(worker) = cli.command;
@@ -247,28 +228,6 @@ mod tests {
         assert_eq!(worker.prefix_cache_host_memory_percent, 75);
         assert!(worker.prefix_cache_cpu_bytes_per_rank.is_empty());
         assert!(worker.prefix_cache_numa_node_per_rank.is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn rejects_a_parallel_width_the_fake_engine_cannot_execute() -> Result<(), clap::Error> {
-        let cli = Cli::try_parse_from([
-            "inferlab-token-engine",
-            "smg-worker",
-            "--listen",
-            "127.0.0.1:50051",
-            "--model",
-            "/models/fake-model",
-            "--served-model-name",
-            "fake-model",
-            "--tensor-parallel-size",
-            "2",
-        ])?;
-
-        assert!(matches!(
-            run(cli).await,
-            Err(CliError::UnsupportedTensorParallel { actual: 2 })
-        ));
         Ok(())
     }
 }

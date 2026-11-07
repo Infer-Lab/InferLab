@@ -538,6 +538,17 @@ impl ResolvedProcessAllocation {
             *kv_store = Some(Box::new(store.clone()));
         }
     }
+    pub fn bind_kv_tier_directory(&mut self, directory: String) {
+        if let ServeProcessAllocation::ModelRank {
+            kv_tier_directory, ..
+        } = &mut self.wire
+        {
+            *kv_tier_directory = Some(directory);
+        }
+    }
+    pub const fn is_model_rank(&self) -> bool {
+        matches!(self.wire, ServeProcessAllocation::ModelRank { .. })
+    }
     pub fn runtime_cache(&self) -> &RuntimeCachePlan {
         &self.runtime_cache
     }

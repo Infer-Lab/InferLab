@@ -16,6 +16,7 @@ from inferlab_bench_runner.result_population import (
 )
 from inferlab_measurement_sdk import (
     PROTOCOL_VERSION,
+    BenchCaseNamespaceInput,
     BenchPopulationPreparationRequest,
     BenchPopulationPreparationResult,
     ClientStatus,
@@ -1059,5 +1060,85 @@ def test_output_stop_changes_only_the_stop_controls_of_frozen_entries(tmp_path: 
     assert [row["extra"] for row in rows["length"]] == [
         {"ignore_eos": True, "min_tokens": row["output_length"]} for row in rows["length"]
     ]
-    assert all(row["extra"] == {} for row in rows["eos"])
-    assert [{**row, "extra": {}} for row in rows["length"]] == rows["eos"]
+    # Explicit, so a replay of this population overrides the length default.
+    assert all(row["extra"] == {"ignore_eos": False} for row in rows["eos"])
+    assert [{**row, "extra": {"ignore_eos": False}} for row in rows["length"]] == rows["eos"]
+
+
+def test_case_namespaces_give_every_case_phase_its_own_content_and_the_same_geometry(
+    tmp_path: Path,
+) -> None:
+    request = random_preparation_request(
+        tmp_path,
+        6,
+        request_source={
+            "kind": "random",
+            "prompt": {"kind": "flat"},
+            "input_tokens": {"kind": "inclusive_uniform", "min": 8, "max": 16},
+            "output_tokens": 2,
+            "prefix_sharing": {"shared_prefix_tokens": 4, "groups": 2},
+        },
+        cache_start="primed",
+    ).model_copy(
+        update={
+            "case_namespaces": [
+                BenchCaseNamespaceInput(
+                    case_id=case,
+                    warmup_entries=2,
+                    profiling_entries=4,
+                    warmup_namespace=f"fixture-nonce:7:{case}:warmup",
+                    profiling_namespace=f"fixture-nonce:7:{case}:profiling",
+                )
+                for case in ("concurrency-000", "concurrency-001")
+            ]
+        }
+    )
+    tokenizer = PeriodicCorpusTokenizer()
+
+    result = prepare_population(request, tokenizer)
+
+    assert result.population is None
+    assert result.requested_entries == 12
+    cases = {case.case_id: case for case in result.case_populations or []}
+    assert list(cases) == ["concurrency-000", "concurrency-001"]
+
+    def entries(case: str) -> list[tuple[dict[str, object], tuple[int, ...]]]:
+        population = cases[case].population
+        evidence = Path(population.evidence_path).read_text().splitlines()
+        prompts = Path(population.path).read_text().splitlines()
+        return [
+            (
+                json.loads(row),
+                tuple(
+                    tokenizer.encode(json.loads(line)["text_input"], add_special_tokens=False)[:4]
+                ),
+            )
+            for row, line in zip(evidence, prompts, strict=True)
+        ]
+
+    first, second = entries("concurrency-000"), entries("concurrency-001")
+    assert len(first) == len(second) == 6
+    # The seed keeps every selection draw, so both cases share their geometry.
+    for (left, _), (right, _) in zip(first, second, strict=True):
+        assert left["selected_prompt_tokens"] == right["selected_prompt_tokens"]
+        assert left["prefix_group"] == right["prefix_group"]
+
+    def group_prefixes(
+        case: list[tuple[dict[str, object], tuple[int, ...]]],
+    ) -> set[tuple[int, ...]]:
+        return {prefix for row, prefix in case}
+
+    warmup, profiling = first[:2], first[2:]
+    second_profiling = second[2:]
+    # No phase or case shares a prefix with another.
+    assert not group_prefixes(warmup) & group_prefixes(profiling)
+    assert not group_prefixes(profiling) & group_prefixes(second_profiling)
+    # A primed case conditions its own profiling namespace's canonical prefixes.
+    conditioning = cases["concurrency-000"].prefix_conditioning
+    assert conditioning is not None
+    conditioned = tuple(
+        tokenizer.encode(Path(conditioning.path).read_text(), add_special_tokens=False)[:4]
+    )
+    assert conditioned in group_prefixes(profiling)
+    assert conditioned not in group_prefixes(second_profiling)
+    assert [item.group for item in cases["concurrency-000"].group_prefix_conditioning or []] == [1]

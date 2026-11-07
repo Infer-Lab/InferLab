@@ -14,8 +14,10 @@ inferlab recipe run <RECIPE> --capture <WORKLOAD_ID>
 inferlab bench <BENCH> --serve <SERVER_RECORD_ID> --capture
 ```
 
-Recipe `--capture` is repeatable. The server must have launched with capture
-targets prepared; a manual Bench cannot retrofit targets onto an ordinary
+Recipe `--capture` is repeatable. A server with `profiling = true` runs
+instrumented even when the run selects no capture; such a recipe run warns at
+start and at the end (`no capture taken`), naming `--capture` and the recipe's
+workloads. The server must have launched with capture targets prepared; a manual Bench cannot retrofit targets onto an ordinary
 running server. Image-backed server launches reject either capture mechanism
 because InferLab does not claim host profiling of an in-container server
 process. Engine trace additionally requires a local, non-containerized
@@ -67,3 +69,19 @@ target role, replica, process and rank, session, range-to-window mapping,
 effective commands and environment, framework control requests and responses,
 finalization, report paths, and verification. A profiling failure still follows
 the measurement and server cleanup path.
+
+Read a capture's outcome from the measured workload's record, not the
+server's:
+
+- The Bench or Eval record's `capture.status` is the capture outcome, and
+  `capture.reports[]` lists every report with its `window_id`, `path`, and
+  `verified` flag; `capture.finalization[]` is that workload's collection stop.
+- Reports are written under the server's runtime directory,
+  `.inferlab/runtime/<server record>/<process>/profiles/<workload record>/`.
+  InferLab never deletes runtime directories or records; keeping or sharing
+  them is the operator's choice.
+- The server record's `process_evidence.<process>.profiler_finalization` is the
+  teardown check of the collection session when the server stops. `inactive`
+  with `observed_state: Launched` means no collection was running at stop,
+  which is the normal state once every workload finalized its windows; it
+  does not mean no capture was taken.

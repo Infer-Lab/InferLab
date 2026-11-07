@@ -96,7 +96,7 @@ pub(crate) fn run_eval(
         record_id,
         root.join(crate::record::RECORDS_DIR).join(record_id),
     ))?;
-    let passed = match execute_eval(root, server_record_id, plan, &mut session, progress) {
+    let passed = match eval_on_live_server(root, server_record_id, plan, &mut session, progress) {
         Ok(passed) => passed,
         Err(error) => {
             session.record_mut().error = Some(error.to_string());
@@ -110,6 +110,25 @@ pub(crate) fn run_eval(
         WorkloadStatus::Failed
     })?;
     Ok(session.into_record())
+}
+
+/// Run an Eval only against a server whose every process is alive, and fail
+/// it if one exited while it ran ([[RFC-0004:C-MEASUREMENTS]]).
+fn eval_on_live_server(
+    root: &Path,
+    server_record_id: &str,
+    plan: &EvalPlan,
+    session: &mut WorkloadRecordSession,
+    progress: &Progress,
+) -> Result<bool, InferlabError> {
+    let require_live = || match crate::server::lost_process_error(root, server_record_id)? {
+        Some(message) => Err(InferlabError::ServerLifecycle { message }),
+        None => Ok(()),
+    };
+    require_live()?;
+    let passed = execute_eval(root, server_record_id, plan, session, progress)?;
+    require_live()?;
+    Ok(passed)
 }
 
 pub(super) fn execute_eval(

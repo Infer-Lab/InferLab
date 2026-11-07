@@ -209,7 +209,16 @@ impl TokenSpeedScheduler for SmgService {
         _request: Request<wire::GetServerInfoRequest>,
     ) -> Result<Response<wire::GetServerInfoResponse>, Status> {
         Ok(Response::new(wire::GetServerInfoResponse {
-            server_args: None,
+            // The fake Engine runs one data-parallel rank; the Gateway relays
+            // the count from its registry ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+            server_args: Some(prost_types::Struct {
+                fields: std::collections::BTreeMap::from([(
+                    "data_parallel_size".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(1.0)),
+                    },
+                )]),
+            }),
             scheduler_info: None,
             active_requests: 0,
             is_paused: false,

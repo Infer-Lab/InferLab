@@ -52,6 +52,8 @@ struct ContextEvidence {
     provided: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cuda_visible_devices: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cuda_device_order: Option<String>,
     note: String,
 }
 
@@ -194,6 +196,10 @@ pub(super) fn execute(run: RecordedRun<'_>) -> Result<i32, InferlabError> {
         context: ContextEvidence {
             provided: provided.clone(),
             cuda_visible_devices: run.cuda_visible_devices.clone(),
+            cuda_device_order: run.cuda_visible_devices.as_deref().map(|devices| {
+                let [_, (_, order)] = crate::workspace::device_env(devices);
+                order
+            }),
             note: "provided to the command; InferLab does not verify that the command used it"
                 .to_owned(),
         },
@@ -238,7 +244,7 @@ pub(super) fn execute(run: RecordedRun<'_>) -> Result<i32, InferlabError> {
     }
     command.envs(&provided);
     if let Some(devices) = &run.cuda_visible_devices {
-        command.env("CUDA_VISIBLE_DEVICES", devices);
+        command.envs(crate::workspace::device_env(devices));
     }
     // Its own process group keeps the terminal's job-control signals away
     // from the command, so a terminal stdin would stop it on first read: a

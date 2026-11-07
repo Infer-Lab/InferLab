@@ -139,7 +139,7 @@ def dataset_request(tmp_path: Path, warmup_request_count: int = 0) -> BenchClien
             "license": "Apache-2.0",
             "cache_path": "/cache/source.json",
             "cache_state": "present",
-            "materialization_identity": "sharegpt-single-request-v1",
+            "materialization_identity": "sharegpt-single-request-v2",
             "provides_output_targets": True,
         },
     }
@@ -191,7 +191,7 @@ def speed_bench_request(tmp_path: Path) -> BenchClientRequest:
             "license": "NVIDIA Evaluation Dataset License",
             "cache_path": "/cache/qualitative.parquet",
             "cache_state": "present",
-            "materialization_identity": "speed-bench-first-turn-v1",
+            "materialization_identity": "speed-bench-first-turn-v2",
             "provides_output_targets": False,
         },
     }

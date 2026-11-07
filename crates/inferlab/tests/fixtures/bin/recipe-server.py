@@ -140,6 +140,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            if os.environ.get("FIXTURE_EXIT_AFTER_FIRST_COMPLETION") == "1":
+                # A server process that dies once the server is ready.
+                self.wfile.flush()
+                os._exit(3)
             return
         if self.path == "/v1/chat/completions":
             length = int(self.headers.get("Content-Length", "0"))

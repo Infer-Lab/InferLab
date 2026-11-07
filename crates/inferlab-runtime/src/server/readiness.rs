@@ -258,6 +258,7 @@ pub(super) struct HttpTargetRegistryProbe<'a> {
     pub(super) target_role_field: &'a str,
     pub(super) target_healthy_field: &'a str,
     pub(super) target_bootstrap_port_field: &'a str,
+    pub(super) target_data_parallel_size_pointer: Option<&'a str>,
     pub(super) expected_targets: &'a [TargetRegistryExpectedTarget],
 }
 
@@ -846,9 +847,9 @@ pub(super) fn match_target_registry(
     let mut evidence = Vec::with_capacity(probe.expected_targets.len());
     for expected in probe.expected_targets {
         readiness_remaining(bound)?;
-        let matches: Vec<&serde_json::Map<String, serde_json::Value>> = targets
+        let matches: Vec<&serde_json::Value> = targets
             .iter()
-            .filter_map(serde_json::Value::as_object)
+            .filter(|target| target.is_object())
             .filter(|target| {
                 target
                     .get(probe.target_url_field)
@@ -918,15 +919,39 @@ pub(super) fn match_target_registry(
                 ),
             });
         }
+        let data_parallel_size = probe
+            .target_data_parallel_size_pointer
+            .map(|pointer| {
+                reported_rank_count(target, pointer)
+                .ok_or_else(|| ReadinessProbeError::RegistryMismatch {
+                    details: format!(
+                        "target registry entry for {:?} at {:?} reports no positive data-parallel size at {pointer:?}",
+                        expected.role, expected.url
+                    ),
+                })
+            })
+            .transpose()?;
         evidence.push(TargetRegistryMatchEvidence {
             url: expected.url.clone(),
             role: expected.role.clone(),
             healthy,
             bootstrap_port,
+            data_parallel_size,
+            process: expected.process.clone(),
         });
     }
     readiness_remaining(bound)?;
     Ok(evidence)
+}
+
+/// A positive rank count at `pointer`, written by the registry as an integer
+/// or as a decimal string (SMG reports a worker's `dp_size` label as one).
+fn reported_rank_count(entry: &serde_json::Value, pointer: &str) -> Option<u32> {
+    let value = entry.pointer(pointer)?;
+    let count = value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))?;
+    u32::try_from(count).ok().filter(|count| *count > 0)
 }
 
 struct ProbeAttempt<T> {
@@ -1224,6 +1249,7 @@ impl ReadinessObserver for SystemProcessRuntime {
                 target_role_field,
                 target_healthy_field,
                 target_bootstrap_port_field,
+                target_data_parallel_size_pointer,
                 expected_targets,
             } => wait_http_target_registry_ready(
                 |bound| self.watched_status(handle, watched, bound),
@@ -1236,6 +1262,7 @@ impl ReadinessObserver for SystemProcessRuntime {
                     target_role_field,
                     target_healthy_field,
                     target_bootstrap_port_field,
+                    target_data_parallel_size_pointer: target_data_parallel_size_pointer.as_deref(),
                     expected_targets,
                 },
                 attempt_timeout_seconds,

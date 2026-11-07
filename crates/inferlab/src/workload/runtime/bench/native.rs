@@ -29,7 +29,10 @@ pub(super) fn run_bench_client(
         endpoint: wire::endpoint_input(&plan.client.endpoint),
         model: wire::model_input(&plan.client.model),
         definition: wire::bench_definition_input(&plan.client.effective_definition)?,
-        population: plan.client.population.as_ref().map(wire::population_input),
+        population: plan
+            .client
+            .population_for(&case.id)
+            .map(wire::population_input),
         case: BenchCaseInput {
             load_shape: bench_load_input(&case.load_shape),
             request_count: case.request_count,

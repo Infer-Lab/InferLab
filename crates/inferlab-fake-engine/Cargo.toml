@@ -12,6 +12,7 @@ default = []
 smg-transport = [
     "dep:clap",
     "dep:futures-util",
+    "dep:prost-types",
     "dep:smg-grpc-client",
     "dep:tokio",
     "dep:tokio-stream",
@@ -22,6 +23,7 @@ smg-transport = [
 [dependencies]
 clap = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
 smg-grpc-client = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }

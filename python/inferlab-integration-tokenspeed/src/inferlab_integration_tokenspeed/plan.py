@@ -248,6 +248,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
     routing = validate_settings(PdRouterSettings, input.pd_router_settings or {})
+    inferlab_gateway_smg.validate_extra_args(routing.extra_args or [], component="P/D Router")
     process_alive = ReadinessProbe(root=ReadinessProbeProcessAlive())
     prefill_result, prefill_replicas = _plan_role(
         input,

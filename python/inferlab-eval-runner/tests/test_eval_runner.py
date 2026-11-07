@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import subprocess
@@ -15,11 +16,15 @@ from inferlab_eval_runner.eval_client import (
 )
 from inferlab_eval_runner.lm_eval_entry import (
     STRUCTURAL_REQUEST_MEMBERS,
+    GenerationOutcomeLog,
     PayloadEvidenceWriter,
     RepeatedTrialState,
+    context_digest,
     initialize_payload_evidence,
+    install_generation_capture,
     install_repeated_response_capture,
     install_request_body,
+    install_sample_projection,
     merge_request_body,
     nonstructural_request_body,
     prepare_repeated_task,
@@ -190,6 +195,24 @@ def test_lm_eval_command_targets_completions_for_a_flat_generative_authority(
         in command[command.index("--model_args") + 1]
     )
     assert "--apply_chat_template" not in command
+
+
+def test_a_single_trial_eval_keeps_native_sample_logs(tmp_path: Path) -> None:
+    """A one-trial multi-question Eval keeps each question's native record
+    ([[RFC-0005:C-LM-EVAL-EVIDENCE]])."""
+    request = lm_eval_request(tmp_path, prompt="flat", declared_prompt=None)
+    definition = request.definition.root
+    assert isinstance(definition, EvalDefinitionInputLmEval)
+    assert definition.trials == 1
+
+    command = lm_eval_command(
+        request,
+        definition,
+        tmp_path / "raw",
+        task_resolution(("gsm8k", "generate_until")),
+    )
+
+    assert "--log_samples" in command
 
 
 def test_flat_generative_authority_records_that_it_was_defaulted(tmp_path: Path) -> None:
@@ -379,6 +402,7 @@ def test_lm_eval_entry_reads_cli_paths_as_paths(
                 "definition_request_body": {},
                 "trials": 1,
                 "base_seed": 1234,
+                "generation_outcome_path": str(tmp_path / "outcomes.jsonl"),
             }
         ),
         encoding="utf-8",
@@ -387,6 +411,12 @@ def test_lm_eval_entry_reads_cli_paths_as_paths(
     monkeypatch.setattr(
         "inferlab_eval_runner.lm_eval_entry.install_request_body",
         lambda fragment, evidence, repeated: None,
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.install_generation_capture", lambda log: None
+    )
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.install_sample_projection", lambda: None
     )
     monkeypatch.setattr(
         "sys.argv",
@@ -846,6 +876,307 @@ def test_repeated_completion_count_uses_the_resolved_huggingface_tokenizer(
     state.release({"model": "deepseek-v4-flash", "seed": 71})
 
     assert state.tokenizer_count("trial-0001", "generated answer") == 3
+
+
+class FakeResponse:
+    def __init__(self, status: int, body: object) -> None:
+        self.status_code = status
+        self.status = status
+        self.ok = 200 <= status < 300
+        self._body = body
+        self.text = json.dumps(body)
+
+    def raise_for_status(self) -> None:
+        if not self.ok:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> object:
+        return self._body
+
+
+def fake_api_models(post: object, session: object = object) -> SimpleNamespace:
+    """The lm-eval 0.4.13 API-client surface the capture wraps: generation
+    instances reach ``generate_until``, one context list reaches
+    ``model_call`` per HTTP request, and the transport posts it."""
+
+    class FakeTemplateApi:
+        def generate_until(self, requests: list[SimpleNamespace]) -> list[str]:
+            answers = []
+            for request in requests:
+                # The synchronous path batches contexts as the tuple zip builds.
+                body = self.model_call(messages=(request.arguments[0],), generate=True)
+                answers.append(str(body))
+            return answers
+
+        def model_call(self, *, messages: tuple[str, ...], generate: bool = True) -> object:
+            response = api_models.requests.post(
+                "http://127.0.0.1/v1/completions",
+                json={"prompt": messages},
+                headers={},
+                verify=True,
+                timeout=30,
+            )
+            if not response.ok:
+                # lm-eval logs the failed body before raising.
+                assert response.text
+                response.raise_for_status()
+            return response.json()
+
+        async def amodel_call(
+            self, session: object, sem: object, messages: list[str], *, generate: bool = True
+        ) -> object:
+            del session, sem, messages, generate
+            return None
+
+    api_models = SimpleNamespace(
+        requests=SimpleNamespace(post=post),
+        ClientSession=session,
+        ClientTimeout=lambda **kwargs: kwargs,
+        TemplateAPI=FakeTemplateApi,
+    )
+    return api_models
+
+
+def outcome_entries(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_single_trial_generation_outcomes_record_identity_and_each_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single-trial Eval keeps each question's identity, generation, and
+    reported usage as it happens, without the prompt or log-probabilities
+    ([[RFC-0005:C-LM-EVAL-EVIDENCE]])."""
+    replies = iter(
+        [
+            FakeResponse(503, {"error": "busy"}),
+            FakeResponse(
+                200,
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": "answer B",
+                            "finish_reason": "stop",
+                            "logprobs": {"tokens": ["answer", " B"]},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 2},
+                },
+            ),
+        ]
+    )
+
+    def post(url: str, **kwargs: object) -> FakeResponse:
+        del url, kwargs
+        return next(replies)
+
+    api_models = fake_api_models(post)
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module", lambda name: api_models
+    )
+    path = tmp_path / "generation-outcomes.jsonl"
+    install_generation_capture(GenerationOutcomeLog(path))
+    question = SimpleNamespace(
+        task_name="gpqa", doc_id=7, idx=0, arguments=("Question: which?", {"until": []})
+    )
+
+    client = api_models.TemplateAPI()
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        client.generate_until([question])
+    client.model_call(messages=("Question: which?",), generate=True)
+
+    instance, failed, completed = outcome_entries(path)
+    digest = context_digest("Question: which?")
+    assert instance == {
+        "entry": "instance",
+        "task_name": "gpqa",
+        "doc_id": 7,
+        "request_index": 0,
+        "context_sha256": digest,
+    }
+    assert failed["http_status"] == 503
+    assert failed["context_sha256"] == [digest]
+    assert completed["context_sha256"] == [digest]
+    assert completed["choices"] == [{"index": 0, "text": "answer B", "finish_reason": "stop"}]
+    assert completed["usage"] == {"prompt_tokens": 9, "completion_tokens": 2}
+    assert cast(int, completed["sent_unix_ns"]) <= cast(int, completed["completed_unix_ns"])
+    assert "Question: which?" not in path.read_text(encoding="utf-8")
+
+
+def test_single_trial_generation_outcomes_keep_a_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def post(url: str, **kwargs: object) -> FakeResponse:
+        del url, kwargs
+        raise ConnectionError("connection refused")
+
+    api_models = fake_api_models(post)
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module", lambda name: api_models
+    )
+    path = tmp_path / "generation-outcomes.jsonl"
+    install_generation_capture(GenerationOutcomeLog(path))
+
+    with pytest.raises(ConnectionError):
+        api_models.TemplateAPI().model_call(messages=("q",), generate=True)
+
+    (attempt,) = outcome_entries(path)
+    assert attempt["http_status"] is None
+    assert "connection refused" in str(attempt["error"])
+
+
+def test_loglikelihood_requests_record_no_generation_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def post(url: str, **kwargs: object) -> FakeResponse:
+        del url, kwargs
+        return FakeResponse(200, {"choices": [{"logprobs": {}}]})
+
+    api_models = fake_api_models(post)
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module", lambda name: api_models
+    )
+    path = tmp_path / "generation-outcomes.jsonl"
+    install_generation_capture(GenerationOutcomeLog(path))
+
+    api_models.TemplateAPI().model_call(messages=("q",), generate=False)
+
+    assert path.read_text(encoding="utf-8") == ""
+
+
+def test_concurrent_generation_outcomes_keep_each_request_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """lm-eval's concurrent path posts through one shared session from many
+    tasks; each attempt must carry its own request's context digest."""
+
+    class FakeContext:
+        def __init__(self, prompt: str) -> None:
+            self._prompt = prompt
+
+        async def __aenter__(self) -> SimpleNamespace:
+            await asyncio.sleep(0)
+            body = {"choices": [{"text": f"re: {self._prompt}"}], "usage": None}
+
+            async def read() -> object:
+                return body
+
+            return SimpleNamespace(ok=True, status=200, json=read)
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self, connector: object = None, timeout: object = None) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, object], headers: object) -> FakeContext:
+            del url, headers
+            return FakeContext(str(cast(list[str], json["prompt"])[0]))
+
+    api_models = fake_api_models(object, FakeSession)
+
+    async def amodel_call(
+        client: object, session: FakeSession, sem: object, messages: list[str], **kwargs: object
+    ) -> object:
+        del client, sem, kwargs
+        async with session.post("http://127.0.0.1", json={"prompt": messages}, headers={}) as r:
+            return await r.json()
+
+    api_models.TemplateAPI.amodel_call = amodel_call
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module", lambda name: api_models
+    )
+    path = tmp_path / "generation-outcomes.jsonl"
+    install_generation_capture(GenerationOutcomeLog(path))
+
+    async def run() -> None:
+        session = api_models.ClientSession(timeout={"total": 30})
+        client = api_models.TemplateAPI()
+        await asyncio.gather(
+            *(
+                client.amodel_call(session, None, [prompt], generate=True)
+                for prompt in ("first", "second", "third")
+            )
+        )
+
+    asyncio.run(run())
+
+    recorded = {
+        tuple(cast(list[str], entry["context_sha256"])): cast(
+            list[dict[str, str]], entry["choices"]
+        )[0]["text"]
+        for entry in outcome_entries(path)
+    }
+    assert recorded == {
+        (context_digest(prompt),): f"re: {prompt}" for prompt in ("first", "second", "third")
+    }
+
+
+def test_sample_projection_drops_documents_and_contexts_but_keeps_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[dict[str, object]] = []
+
+    class FakeTracker:
+        def save_results_samples(self, task_name: str, samples: list[dict[str, object]]) -> None:
+            del task_name
+            saved.extend(samples)
+
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module",
+        lambda name: SimpleNamespace(EvaluationTracker=FakeTracker),
+    )
+    install_sample_projection()
+
+    FakeTracker().save_results_samples(
+        "mmlu",
+        [
+            {
+                "doc_id": 3,
+                "doc": {"question": "a long passage"},
+                "arguments": [("long prompt", " A"), ("long prompt", " B")],
+                "resps": [[(-1.0, False)], [(-0.5, True)]],
+                "doc_hash": "d",
+                "prompt_hash": "p",
+                "target_hash": "t",
+                "acc": 1.0,
+            }
+        ],
+    )
+
+    assert saved == [
+        {
+            "doc_id": 3,
+            "arguments": [(None, " A"), (None, " B")],
+            "resps": [[(-1.0, False)], [(-0.5, True)]],
+            "doc_hash": "d",
+            "prompt_hash": "p",
+            "target_hash": "t",
+            "acc": 1.0,
+        }
+    ]
+
+
+def test_payload_evidence_indexes_stay_global_across_concurrent_writers(tmp_path: Path) -> None:
+    """Concurrent trial processes share one evidence file; each writer counts
+    only what others appended since it last wrote."""
+    path = tmp_path / "inference-requests.jsonl"
+    first = PayloadEvidenceWriter(path)
+    second = PayloadEvidenceWriter(path)
+
+    for writer in (first, second, second, first):
+        writer.record("completions", {}, {}, {})
+
+    indexes = [json.loads(line)["request_index"] for line in path.read_text().splitlines()]
+    assert indexes == [0, 1, 2, 3]
 
 
 def test_workspace_yaml_include_closure_is_ordered_and_complete(tmp_path: Path) -> None:
@@ -2093,6 +2424,7 @@ def test_run_lm_eval_reports_a_nonzero_exit(
         "lm-eval-task-resolution",
         "inference-request-config",
         "inference-request-payloads",
+        "lm-eval-generation-outcomes",
         "directory",
         "lm-eval-process",
     ]

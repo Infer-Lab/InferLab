@@ -169,7 +169,8 @@ pub(crate) struct PrefixCacheConditioningProjection {
 #[derive(Deserialize)]
 pub(crate) struct CachePreparationProjection {
     start: String,
-    reset: PrefixCacheResetProjection,
+    #[serde(default)]
+    reset: Option<PrefixCacheResetProjection>,
     #[serde(default)]
     conditioning: Option<PrefixCacheConditioningProjection>,
 }
@@ -288,7 +289,13 @@ pub(crate) fn case_evidence(evidence: CaseEvidence<'_>) -> (Vec<FactSection>, Ve
     }
     if let Some(preparation) = evidence.cache_preparation {
         common.push(fact("Cache start", preparation.start.clone()));
-        common.push(fact("Prefix-cache reset", prefix_reset(&preparation.reset)));
+        common.push(fact(
+            "Prefix-cache reset",
+            preparation
+                .reset
+                .as_ref()
+                .map_or_else(|| "none: content is namespaced".to_owned(), prefix_reset),
+        ));
         if let Some(conditioning) = &preparation.conditioning {
             let summary = if conditioning.succeeded {
                 let ranks = if conditioning.ranks.len() > 1 {

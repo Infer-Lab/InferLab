@@ -88,7 +88,8 @@ fn execute_local(
     // Project the workspace default placement's device set into local
     // execution ([[RFC-0002:C-ADHOC-EXECUTION]]); an operator-provided
     // CUDA_VISIBLE_DEVICES always wins.
-    let cuda_visible_devices = if std::env::var_os("CUDA_VISIBLE_DEVICES").is_none() {
+    let cuda_visible_devices = if std::env::var_os(crate::workspace::CUDA_VISIBLE_DEVICES).is_none()
+    {
         crate::workspace::soft_local_bindings(root)
             .and_then(|local| local.default_local_devices())
             .map(|devices| {
@@ -130,7 +131,7 @@ fn execute_local(
         model.as_ref(),
     ));
     if let Some(devices) = cuda_visible_devices {
-        process.env("CUDA_VISIBLE_DEVICES", devices);
+        process.envs(crate::workspace::device_env(&devices));
     }
     // Ctrl-C reaches the foreground command directly; the installed handler
     // keeps this process alive to report the command's real exit status.

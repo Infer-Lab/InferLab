@@ -1,8 +1,24 @@
 # Serving Bench load, sources, sessions, metrics, and SLOs
 
-Start with the smallest definition that expresses the workload. A Bench whose `kind` is omitted defaults to `serving`. A `random` or
-`random_mixture` source defaults to an exact flat completion prompt, so fixed
-ISL and OSL need no prompt table:
+- [Minimal definitions](#minimal-definitions)
+- [Load: concurrency, rate, and adaptive](#load-concurrency-rate-and-adaptive)
+- [Warmup](#warmup)
+- [Prefix-cache start](#prefix-cache-start)
+- [Metrics](#metrics)
+- [SLOs](#slos)
+- [Request sources](#request-sources): synthetic prompts, prefix geometry,
+  mixtures, server chat, datasets, [replay](#replaying-a-recorded-population),
+  [corpus](#drawing-random-content-from-a-text-corpus), and
+  [images](#attaching-images-to-random-requests)
+- [Source preparation and cold-to-warm verification](#source-preparation-and-cold-to-warm-verification)
+- [Linear serving sessions](#linear-serving-sessions)
+- [SemiAnalysis AgentX trace replay](#semianalysis-agentx-trace-replay)
+
+## Minimal definitions
+
+Start with the smallest definition that expresses the workload. `kind`
+defaults to `serving`, and a `random` or `random_mixture` source defaults to
+an exact `flat` completion prompt, so fixed ISL and OSL need no prompt table:
 
 ```toml
 [benches.fixed-8k1k]
@@ -12,7 +28,7 @@ prompts_per_concurrency = 4
 timeout_seconds = 900
 ```
 
-Use an untagged `{ min, max }` table for an inclusive-uniform integer range:
+An untagged `{ min, max }` table selects an inclusive-uniform integer range:
 
 ```toml
 [benches.range-8k1k]
@@ -22,25 +38,25 @@ prompts_per_concurrency = 4
 timeout_seconds = 900
 ```
 
-These are authoring defaults, not hidden execution state. The
-`inferlab workspace show --json` command renders them explicitly as `serving`,
-`flat`, and tagged `inclusive_uniform`. Existing
-explicit forms remain valid. Add the advanced controls below only when the
-workload needs their distinct semantics.
+These defaults are not hidden state: `inferlab workspace show --json` renders
+them as `serving`, `flat`, and the tagged
+`{ kind = "inclusive_uniform", min, max }` form, which is also accepted as
+input. Add the controls below only when the workload needs them.
 
-Eval definitions are covered by [eval-authoring.md](eval-authoring.md), which
-also owns the shared `request_body` rule: the measurement runtime owns the
-request members listed
-[there](eval-authoring.md#lm-eval-tasks-and-inference-requests). A Bench
-fragment additionally may not declare `min_tokens`, `min_new_tokens`, or
-`ignore_eos`, because the runtime owns output-length enforcement.
+`request_body` follows the shared Eval/Bench rule in
+[eval-authoring.md](eval-authoring.md#request-body). A Bench fragment
+additionally may not declare `min_tokens`, `min_new_tokens`, or `ignore_eos`,
+because InferLab derives output-length enforcement from `output_stop`.
 
-`output_stop` chooses that enforcement on a `random`, `random_mixture`,
-`dataset`, or `session_source` table. The default, `"length"`, treats each
-request's output-token limit as an exact length: the request sets a matching
-minimum and ignores end of sequence, so every response runs to the full limit.
-`"eos"` treats the limit as a cap: the model stops at its natural end of
-sequence or at the limit, whichever comes first.
+### Exact length or end of sequence
+
+`output_stop` on a `random`, `random_mixture`, `dataset`, or `session_source`
+table chooses how the output-token limit is enforced:
+
+- `"length"` (default): the limit is an exact length. Each request sets a
+  matching minimum and ignores end of sequence.
+- `"eos"`: the limit is a cap. The model stops at its natural end of sequence
+  or at the limit, whichever comes first.
 
 ```toml
 request_source = { kind = "dataset", dataset = "speed_bench", profile = "qualitative_qa", max_input_tokens = 8192, output_tokens = 1024, output_stop = "eos" }
@@ -50,18 +66,19 @@ Choose `"eos"` when the measurement depends on natural response length, such
 as speculative-decoding acceptance; SPEED-Bench's own methodology does not
 suppress end of sequence. Under `"eos"` a response can end after one token, so
 per-token timing covers fewer tokens, and results are not comparable with
-`"length"` runs. A `replay` source has no `output_stop`: each replayed entry
-already carries its stop controls.
+`"length"` runs. A `replay` source has no `output_stop`; see
+[Replaying a recorded population](#replaying-a-recorded-population).
 
-## Static and adaptive serving load
+## Load: concurrency, rate, and adaptive
 
-A static `serving` Bench uses either independent requests or dependent
-sessions. Concurrency cases use `prompts_per_concurrency` or
-`sessions_per_concurrency`. Request-rate cases instead declare `request_rates`
-and exactly one of `request_count` or `duration_seconds`; rates accept positive
-numbers or `"inf"`, an `"inf"` rate cannot be combined with
-`duration_seconds`, and `burstiness` controls supported stochastic arrival
-shaping. One definition cannot mix incompatible load authorities:
+A static `serving` Bench sends either independent requests or dependent
+sessions. One definition uses one load authority:
+
+- Concurrency cases: `concurrency` with `prompts_per_concurrency` (or
+  `sessions_per_concurrency` for sessions).
+- Request-rate cases: `request_rates` (positive numbers or `"inf"`) with
+  exactly one of `request_count` or `duration_seconds`. An `"inf"` rate cannot
+  be combined with `duration_seconds`. `burstiness` shapes stochastic arrival.
 
 ```toml
 [benches.rate-sweep]
@@ -71,12 +88,11 @@ request_count = 64
 timeout_seconds = 900
 ```
 
-An `adaptive-serving` Bench declares positive initial request rates, one or
-more aggregate or request SLO constraints, a bounded search-step count, and an
-optional minimum rate resolution. It measures every initial rate before its
-bounded expansion and bisection policy.
+An `adaptive-serving` Bench declares positive `initial_request_rates`, at
+least one aggregate or request SLO, `max_search_steps`, and optionally
+`min_rate_resolution`; see [SLOs](#slos) for an example and the search policy.
 
-## Serving Bench warmup and metrics
+## Warmup
 
 A concurrency Bench may run a native warmup phase before its profiled phase:
 
@@ -91,68 +107,117 @@ request_body = { temperature = 1.0 }
 timeout_seconds = 900
 ```
 
-- For concurrency `c`, the resolved warmup count is
-  `c * warmup_prompts_per_concurrency`, drawn from a disjoint prefix of the
-  frozen request population.
+- For concurrency `c`, warmup sends `c * warmup_prompts_per_concurrency`
+  requests drawn from a disjoint prefix of the frozen request population.
 - Warmup shares the profiled route, request source, request body, and
-  concurrency, and is excluded from normalized metrics and profiling request
-  counts.
-- Cache start defaults to uncontrolled; declare a cold or primed start only
-  when the experiment requires it:
+  concurrency, drains before profiling, and is excluded from normalized
+  metrics and profiling request counts.
+
+## Prefix-cache start
+
+`cache.start` selects the prefix-cache state profiling begins from. It
+defaults to `uncontrolled` (no reset or conditioning, and the record claims no
+known cache state); declare another start only when the experiment needs it:
 
 ```toml
-cache = { start = "cold" }   # warmup drains, then reset, then profiling
+cache = { start = "cold" }
 ```
 
-- `cold` requires the selected integration/topology to expose a prefix-cache
-  reset. `primed` additionally requires an exact flat or rendered-chat
-  `prefix_sharing` source; after reset, InferLab sends the maximum canonical
-  shared prefix once with one output token, then releases profiling. With
-  `groups`, every group's canonical prefix is sent, the first group first, and
-  any store publication wait follows the last. A rendered
-  prefix that cannot tokenize exactly as an independent conditioning prompt
-  fails preparation.
-- Under attention data parallelism, conditioning fans out one recorded request
-  per prefill replica and per attention data-parallel rank of that replica,
-  pinned through the `X-Data-Parallel-Rank` request header, so no rank stays
-  cold on a backend build that honors the header; the
-  [backend support matrix](backend-support.md) names those builds. The record preserves per-(replica, rank) status, token usage, and
-  timing evidence, and any rank's conditioning failure fails the case.
-- A frontend in front of more than one prefill-side cache-owning target
-  (replica × attention DP rank) must declare a conditioning fan-out capability,
-  and a cold start requires a declared reset capability; otherwise planning
-  rejects the start. A single-target frontend conditions through the ordinary
-  serving flow. The [backend support matrix](backend-support.md) owns which integrations,
-  proxies, Gateways, and routers declare reset and fan-out.
+How a `cold` or `primed` start keeps earlier content from being reused depends
+on who owns the content:
+
+- **Generated populations** (`random`, `random_mixture`) in a static matrix
+  are **namespaced**; nothing is reset. Every execution draws a nonce, and each
+  case reads its own population: warmup entries from the case's warmup
+  namespace, profiling entries from its profiling namespace. No case, phase,
+  earlier run, or other Bench of the run shares content with another, while
+  the seed keeps the geometry (lengths, prefix lengths, groups) identical
+  across runs. `cold` therefore means nothing the window could reuse exists
+  when it opens, not that the cache is empty: it may hold unrelated entries.
+  The server needs no reset capability, so this works on servers whose
+  integration declares none. The dry-run shows the nonce, and the record keeps
+  it with each case's namespaces, so every prompt can be regenerated.
+- **Replay, dataset, and linear-session sources, and adaptive searches** keep
+  resetting: the server must expose a prefix-cache reset (the public endpoint's
+  reset action or a per-target reset of every model-serving replica), and
+  profiling starts right after a successful reset.
+
+`primed` additionally requires a `flat` or `rendered_chat` source with
+`prefix_sharing`. After the reset, or directly for a namespaced case,
+InferLab sends the canonical shared prefix through the maximum resolved shared
+length — the case's profiling-namespace prefix when namespaced — with one
+output token and the profiling route, model, and `request_body`, then releases
+profiling. With `groups`, every group's prefix is sent, the first group first.
+A rendered prefix that does not tokenize exactly as an independent prompt fails
+preparation.
+
+The [backend support matrix](backend-support.md) owns which integrations,
+proxies, Gateways, and routers declare reset, conditioning fan-out, and
+cache-read reporting, and which builds honor rank pinning.
+
+### Which conditioning requests a primed start sends
+
+A primed start must reach every cache-owning target: each prefill replica and
+each attention data-parallel rank of that replica. What InferLab sends depends
+on the server shape:
+
+| Server shape | Conditioning |
+| --- | --- |
+| Engines share one prefix cache through a KV store | One target. One unpinned request through the ordinary serving flow, then a recorded wait for the store's publication bound (after the last group, with `groups`). |
+| Direct Engine endpoint | One request per attention data-parallel rank of the public role, each pinned with the `X-Data-Parallel-Rank` header (a single rank needs no header). A build that ignores the header leaves ranks cold. |
+| Gateway, one cache-owning target | One unpinned request through the ordinary serving flow; no fan-out capability needed. |
+| Gateway, more than one target | The frontend's conditioning fan-out sends one pinned request per replica and rank. A frontend without a declared fan-out is rejected. |
+
+The record keeps each (replica, rank) request's status, token usage, and
+timing; any rank's failure fails the case. Decode-side cache state produced by
+conditioning is kept as evidence, not claimed as coverage.
+
+When the target count follows from the declared server shape, planning rejects
+an unconditionable primed start. When it depends on facts an Engine reports
+only at readiness, such as a Specialized Engine's data-parallel rank count or
+its KV store access, InferLab applies the reported facts after the server is
+ready: an unconditionable primed start then fails before any reset or
+conditioning request, naming the reported counts, and the publication wait
+uses the reported bound.
+
+### Reset retries, timeouts, and ordering
+
+- A backend may decline a reset it cannot perform yet (for example while KV
+  blocks are still held for an unfinished transfer) by answering 2xx with the
+  opposite boolean of the reset action's success predicate; vLLM answers
+  `success: false`. InferLab retries after a growing delay until the reset
+  succeeds, an attempt fails another way, or the case timeout is spent. A
+  per-target reset retries only its declined targets; a public reset,
+  including one fanned out by a built-in prefill/decode proxy, retries the
+  whole action. Any other predicate mismatch (empty or unparseable body,
+  missing value, mismatched string) fails the case at once.
+- Every attempt is kept under `cache_preparation.reset.attempts`. A long run
+  of declines points at engine state left over from the previous case.
 - A reset, flush, or conditioning request sent through the built-in
-  prefill/decode proxy has no fixed per-target cap of its own: the case's
-  remaining `timeout_seconds` bounds the whole fan-out, and when the caller
-  gives up, the proxy cancels its in-flight target work.
-- A backend may decline a reset it cannot perform yet — for example while KV
-  blocks are still held for an unfinished transfer — by answering 2xx with the
-  opposite boolean of the reset action's boolean success predicate (vLLM
-  answers `success: false`). InferLab records that attempt and retries after a
-  growing delay until the reset succeeds, an attempt fails another way, or the
-  case timeout is spent; then the case fails. A per-target reset retries only
-  its declined targets; a public reset, including one fanned out by a built-in
-  prefill/decode proxy, retries the whole action. Any other answer that fails
-  the predicate — an empty or unparseable body, a missing value, a mismatched
-  string — fails the case at once. Every attempt is kept under
-  `cache_preparation.reset.attempts`, and a long run of declines between cases
-  points at engine state left over from the previous case.
-- Reset and conditioning occur after warmup, are excluded from profiling
-  metrics, and do not consume population entries.
+  prefill/decode proxy has no per-target cap of its own: the case's remaining
+  `timeout_seconds` bounds the whole fan-out, and the proxy cancels in-flight
+  target work when the caller gives up.
+- Reset and conditioning run after warmup, are excluded from profiling
+  metrics, and consume no population entries.
 - The one case timeout covers warmup, reset, conditioning, profiling, and
-  result handling; cleanup retains its separate grace. A default capture
-  window opens after cache preparation and before profiling release. Any
-  warmup or cache-preparation failure leaves the window unopened.
+  result handling; cleanup keeps its own grace. A capture window opens after
+  cache preparation and before profiling release; a warmup or
+  cache-preparation failure leaves it unopened.
+
+## Metrics
 
 Every successful Bench reports `request_throughput`, `output_throughput`, and
 `total_token_throughput`, plus `mean`, `min`, `max`, `stddev`, `p50`, `p90`,
 `p95`, and `p99` for each of `request_latency_ms`, `ttft_ms`, and `tpot_ms`
-(names such as `p95_tpot_ms`). TPOT is not applicable to an
-`output_tokens = 1` prefill-dominant workload and its TPOT metrics are then
-omitted.
+(names such as `p95_tpot_ms`). TPOT metrics are omitted for an
+`output_tokens = 1` prefill-dominant workload.
+
+The same statistics of AIPerf's backend-observed `input_sequence_length` are
+reported as `mean_prompt_tokens`, `p99_prompt_tokens`, and so on. They include
+the server-side template and are the token authority behind total-token
+throughput.
+
+### Cache-read metrics
 
 A Bench with `prefix_sharing`, `shared_system_content`, or a primed start
 requires backend prompt-token and cache-read-token usage on every completed
@@ -162,73 +227,76 @@ profiling request, and reports:
   distribution statistics;
 - `prompt_cache_read_ratio = sum(cache_read_tokens) / sum(prompt_tokens)`.
 
-A `cold` or `primed` case over a generated population with `prefix_sharing`
-also records each measured request's reuse opportunity: how many of its
-shared-prefix tokens an earlier request of its prefix group sent after the
-reset (conditioning included), and whether, when it was sent, that prefix was `first` (nobody had
-sent it), `in_flight` (sent, but not yet published), or `available` (an earlier
-request's first output token plus the store's declared publication bound had
-passed). From these come `available_miss_ratio`, the share of `available`
-requests that read no cached tokens, and `available_reuse_efficiency`, cached
-tokens read by `available` requests over their reusable tokens; both are
-omitted when no request is `available`. On a server whose prefix cache is
-shared, an `available` miss means the cache did not serve what it could; with
-several cache-owning targets it can also mean routing sent the request to a
-target that never saw the prefix. Engine-specific ceilings such as block
-rounding are left to whoever reads the per-request evidence.
-
 The endpoint must declare the backend cache-read capability; the
 [backend support matrix](backend-support.md) names the server setting each
 backend needs, and a prefill/decode frontend declares it only when both roles
-enable that setting. An integration may declare that its endpoint omits a
-zero read, as SGLang's does, and InferLab then preserves the request
-observation as zero; an undeclared missing value still fails normalization.
-A primed or prefix-geometry Bench against an endpoint without the
-declared capability fails at planning with a typed error naming the bench, the
-missing capability, and the remediation — enable the reporting setting on both
-roles and rebuild the server — instead of running to completion and failing
-every request's normalization. Other cases preserve AIPerf's optional aggregate
-cache ratio when available. `good_request_ratio` and `goodput` are derived only
-when a request SLO is configured.
+enable that setting. A primed or `prefix_sharing` Bench against an endpoint
+without it fails at planning with an error naming the Bench, the missing
+capability, and the remediation (enable the reporting setting and rebuild the
+server). An integration may declare that its endpoint omits a zero read, as
+SGLang's does; InferLab then records the omission as zero, while an undeclared
+missing value fails normalization. Other Benches report AIPerf's aggregate
+cache ratio when available.
 
-Set `server_metrics = true` to ask AIPerf to collect the server's declared JSON
-metrics export. This is accepted only when the selected integration/topology
-declares a metrics endpoint. Native warmup and cache preparation remain outside
-the exported profiling window. The integration may bind that endpoint to the
-public serving port or to one named port it already
-requires; InferLab allocates the port and freezes the exact URL before launching
-the measurement client. InferLab preserves framework routes such as `/metrics`
-or `/v1/metrics` rather than substituting a framework-neutral default; the
-[backend support matrix](backend-support.md) lists which endpoints declare a
-metrics export and the setting or port each needs. A successful
-`speed_bench` case additionally publishes `acceptance_length` and
-`acceptance_rate` from AIPerf's SPEED-Bench computation, taking each from the
-first of AIPerf's per-request records, run summary, and scraped server metrics
-that yields one and recording which; other request sources retain the raw
-server metrics but do not publish those two SPEED-specific scalars.
+A `cold` or `primed` case over a generated `prefix_sharing` population also
+records each measured request's reuse opportunity: how many of its
+shared-prefix tokens an earlier request of its prefix group sent after the
+reset (conditioning included), and whether that prefix was `first` (nobody had
+sent it), `in_flight` (sent, not yet published), or `available` (an earlier
+request's first output token plus the store's declared or reported
+publication bound, zero without a store, had passed). From these come:
 
-Any serving Bench whose backend reports accepted and rejected prediction tokens
-in each response's `usage.completion_tokens_details` — SMG does for a
-speculatively decoding Specialized Engine — also publishes
-`draft_accepted_tokens`, `draft_tokens`, and `draft_acceptance_rate`, the
-token-weighted share of drafted tokens the target model accepted across the
-profiling window. They are omitted when no request reports drafts. Usage
-carries no verify-step count, so no acceptance length is derived from it.
+- `available_miss_ratio`: the share of `available` requests that read no
+  cached tokens;
+- `available_reuse_efficiency`: cached tokens read by `available` requests
+  over their reusable tokens.
 
-Set `artifact_level = "performance"` to skip AIPerf's full raw
-request/response export while keeping the normalized per-request records and
-summary; omission resolves to `"diagnostic"`, which retains the raw export.
-Warmup validation and population-identity reconciliation read the normalized
-records under either level. Session- and agentic-source cases remain valid at
-the performance level; their raw-derived evidence dimensions are recorded as
-unavailable due to the artifact level rather than failing the case.
+Both are omitted when no request is `available`. With one cache-owning
+target, an `available` miss means the cache did not serve what it could; with
+several, routing may have sent the request to a target that never saw the
+prefix. Engine-specific ceilings such as block rounding are left to whoever
+reads the per-request evidence.
 
-## Serving Bench SLOs
+### Goodput, server metrics, and speculative decoding
+
+- `good_request_ratio` and `goodput` are derived only when a request SLO is
+  configured.
+- `server_metrics = true` asks AIPerf to collect the server's declared JSON
+  metrics export. It is accepted only when the integration/topology declares a
+  metrics endpoint, which may sit on the public serving port or on a named port
+  the integration already requires; InferLab freezes the exact URL, keeping
+  framework routes such as `/metrics` or `/v1/metrics`. Warmup and cache
+  preparation stay outside the exported window. The
+  [backend support matrix](backend-support.md) lists which endpoints declare a
+  metrics export and what each needs.
+- A successful `speed_bench` case publishes `acceptance_length` and
+  `acceptance_rate` from AIPerf's SPEED-Bench computation, taking each from the
+  first of AIPerf's per-request records, run summary, and scraped server
+  metrics that yields one, and recording which. Other sources keep raw server
+  metrics but do not publish these two scalars.
+- When the backend reports accepted and rejected prediction tokens in
+  `usage.completion_tokens_details` (SMG does for a speculatively decoding
+  Specialized Engine), any serving Bench also publishes
+  `draft_accepted_tokens`, `draft_tokens`, and `draft_acceptance_rate`, the
+  token-weighted share of drafted tokens accepted across the profiling window.
+  They are omitted when no request reports drafts. Usage carries no
+  verify-step count, so no acceptance length is derived from it.
+
+### Artifact level
+
+`artifact_level = "performance"` skips AIPerf's full raw request/response
+export while keeping normalized per-request records and the summary; the
+default `"diagnostic"` keeps the raw export. Warmup validation and population
+reconciliation work at either level. Session and agentic cases stay valid at
+`performance`; their raw-derived evidence is recorded as unavailable due to
+the artifact level.
+
+## SLOs
 
 A static or adaptive serving Bench may constrain normalized aggregate metrics,
 individual request latency, or both. Aggregate constraints are inclusive and
-AND-composed. Request SLOs count a request as good only when every configured
-latency bound passes, then gate the case with `minimum_good_request_ratio`.
+AND-composed. A request counts as good only when every configured latency
+bound passes, and `minimum_good_request_ratio` gates the case.
 
 ```toml
 [benches.saturation]
@@ -246,83 +314,80 @@ duration_seconds = 60
 timeout_seconds = 900
 ```
 
-Adaptive Bench uses `highest-feasible-rate-v1`: it probes every initial rate,
-then uses bounded doubling and directional bisection to select only the highest
-observed feasible rate. `max_search_steps` covers automatically added probes;
-it does not truncate the declared initial list. Use command-line `--set` to
-override recipe-specific SLO values without changing the stored definition.
+Adaptive Bench uses `highest-feasible-rate-v1`: it measures every initial
+rate, then uses bounded doubling and directional bisection, and selects the
+highest observed feasible rate; it does not claim an unmeasured optimum.
+`max_search_steps` counts only automatically added probes, never the declared
+initial list. Use `--set` to override SLO values for one run without changing
+the stored definition.
 
-## Serving Bench request sources
+## Request sources
 
-Every serving Bench selects one closed request source. A synthetic random
-source declares its desired complete profiling prompt shape. Omission selects
-`flat`; declare it explicitly when emphasizing tokenizer-exact scalar prompts
-sent to completions:
+Every serving Bench selects one closed request source.
+
+### Synthetic prompts: flat and rendered chat
+
+A `random` source declares its complete profiling prompt shape. `flat` (the
+default) sends tokenizer-exact scalar prompts to completions:
 
 ```toml
 request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = 8192, output_tokens = 1024 }
 ```
 
-Either random length may instead use an inclusive-uniform selector. The
-ordinary untagged range and the explicit tagged spelling resolve identically;
-canonical JSON and records use the tagged spelling:
+InferLab draws ISL and OSL independently from their ranges under the Bench
+seed and freezes the population before requests start. Extending a case
+preserves the existing sequence prefix. An OSL range cannot span both one
+token and two or more tokens.
 
-```toml
-request_source = { kind = "random", input_tokens = { min = 7000, max = 9000 }, output_tokens = { min = 900, max = 1100 } }
-```
-
-InferLab draws ISL and OSL independently from the closed integer intervals
-under the Bench seed, then freezes the realized population before requests
-start. Extending a case preserves the existing sequence prefix. An OSL interval
-cannot span both one token and two-or-more tokens.
-
-Use `rendered_chat` to freeze either the model tokenizer's default chat template
-or one definition-supplied template and kwargs. InferLab renders the complete
-prompt once during population preparation, verifies its exact final token
-length, and sends the resulting scalar prompt to completions. Template controls
-for this mode belong only to `prompt`; duplicating them in `request_body` is a
-validation error. Failure to resolve or satisfy the template is fatal rather
-than a fallback.
+`rendered_chat` freezes the model tokenizer's default chat template, or one
+definition-supplied template and kwargs. InferLab renders each complete prompt
+once during population preparation, verifies its exact token length, and sends
+the scalar prompt to completions. Template controls belong only to `prompt`;
+repeating them in `request_body` is a validation error, and failure to resolve
+or satisfy the template is fatal rather than a fallback.
 
 ```toml
 request_source = { kind = "random", prompt = { kind = "rendered_chat", chat_template = "{% for message in messages %}{{ message.content }}{% endfor %}", chat_template_kwargs = { enable_thinking = false } }, input_tokens = 8192, output_tokens = 1024 }
 ```
+
+### Prefix geometry
 
 Flat and rendered-chat sources may declare exact final-prompt prefix geometry
 as fixed tokens (`shared_prefix_tokens`) or a per-entry ratio
 (`shared_prefix_ratio`):
 
 ```toml
-request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { kind = "inclusive_uniform", min = 7000, max = 9000 }, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 0.75 } }
+request_source = { kind = "random", prompt = { kind = "flat" }, input_tokens = { min = 7000, max = 9000 }, output_tokens = 1024, prefix_sharing = { shared_prefix_ratio = 0.75 } }
 ```
 
-For selected input length `I`, a ratio resolves to
-`floor(I * shared_prefix_ratio)` shared tokens and an `I - shared` independently
-generated suffix. Fixed tokens and equivalent ratios produce the same seeded
-population. All entries use nested prefixes of one canonical stream, including
-distributed ISL. Both `0.0` (independent flat prompts) and `1.0` (full-prompt
-sharing) are valid. This is prompt geometry, not a requested or observed cache
-hit percentage; backend cache-read metrics remain separate evidence.
+For selected input length `I`, a ratio resolves to `floor(I * ratio)` shared
+tokens plus an independently generated `I - shared` suffix. Fixed tokens and
+equivalent ratios produce the same seeded population. All entries use nested
+prefixes of one canonical stream, including under distributed ISL. Both `0.0`
+(independent prompts) and `1.0` (full-prompt sharing) are valid. This is
+prompt geometry, not a requested or observed cache-hit percentage; backend
+cache-read metrics are separate evidence.
 
-Production reuse usually comes from many distinct prefixes — system prompts,
-tool definitions, few-shot blocks — a few of them hot and most rarely used.
-`groups` splits the population over that many independent canonical prefixes,
-and `popularity` sets how often each is drawn:
+Production reuse usually comes from many distinct prefixes (system prompts,
+tool definitions, few-shot blocks), a few hot and most rarely used. `groups`
+splits the population over that many independent canonical prefixes, and
+`popularity` sets how often each is drawn:
 
 ```toml
 prefix_sharing = { shared_prefix_tokens = 4096, groups = 32, popularity = { zipf = 1.1 } }
 ```
 
 Each entry draws its group under the Bench seed, independently of its input
-length; the group of rank `k` (counting from one) is drawn with probability
+length; the group of rank `k` (from one) is drawn with probability
 proportional to `1 / k^s`. `popularity` defaults to `uniform`; a Zipf exponent
-must be positive and needs at least two groups. Entries of different groups
-share no controlled prefix, and one group reproduces the ungrouped population.
-Population evidence records each entry's `prefix_group`, and the prefix
-geometry summary records `group_entries`, the entries drawn for each group. A
-replayed population brings its own prefixes and cannot declare either key.
+must be positive and needs at least two groups. Groups share no controlled
+prefix, and one group reproduces the ungrouped population. Population evidence
+records each entry's `prefix_group`, and the geometry summary records
+`group_entries` per group.
 
-Use `random_mixture` when one Bench should sample several exact ISL/OSL pairs:
+### Weighted shape mixtures
+
+`random_mixture` samples several exact ISL/OSL pairs:
 
 ```toml
 request_source = { kind = "random_mixture", prompt = { kind = "flat" }, shapes = [
@@ -331,18 +396,19 @@ request_source = { kind = "random_mixture", prompt = { kind = "flat" }, shapes =
 ] }
 ```
 
-Each request independently selects one shape with probability
-`weight / sum(weight)` under the Bench seed. Weights are sampling proportions,
-not exact request quotas. Shapes must be distinct, and their output lengths
-must either all equal one or all be at least two so TPOT applicability remains
-unambiguous. Every case starts from the same deterministic source sequence;
-its warmup and profiling phases consume consecutive, non-overlapping entries.
+Each request selects one shape with probability `weight / sum(weight)` under
+the Bench seed; weights are proportions, not quotas. Shapes must be distinct,
+and their output lengths must all equal one or all be at least two. Every case
+starts from the same deterministic sequence, with warmup and profiling taking
+consecutive, non-overlapping entries.
 
-Use `server_chat` when the server must retain chat-template authority. Requests
-stay as structured messages and use chat completions. Template controls may be
-sent under their real backend-owned names in `request_body`; InferLab locally
-projects the effective template only to target and explain ISL. If projection
-is unavailable or exact targeting is unsatisfiable, the unadjusted content is
+### Server-rendered chat
+
+`server_chat` keeps chat-template authority on the server: requests stay
+structured messages on chat completions, and template controls go in
+`request_body` under their backend-owned names. InferLab projects the
+effective template locally only to target and explain ISL; when projection is
+unavailable or exact targeting is unsatisfiable, the unadjusted content is
 sent and the fallback is recorded.
 
 ```toml
@@ -350,60 +416,54 @@ request_source = { kind = "random", prompt = { kind = "server_chat" }, input_tok
 request_body = { chat_template_kwargs = { enable_thinking = false } }
 ```
 
-`shared_system_content` is a server-chat compatibility shape: it reserves
-pre-template system-message content and an independent user suffix, declared as
-`{ ratio = R }` or `{ tokens = N }`. A ratio must be strictly between zero and
-one. It is not exact final-prompt prefix
-geometry, cannot be combined with `prefix_sharing`, and cannot be declared on a
-weighted mixture.
+`shared_system_content` reserves shared pre-template system-message content
+and an independent user suffix, declared as `{ ratio = R }` (strictly between
+zero and one) or `{ tokens = N }`. It is not exact final-prompt prefix
+geometry: it cannot be combined with `prefix_sharing`, used by a primed start,
+or declared on a weighted mixture.
 
-Synthetic population evidence records the selected complete-prompt target,
-request representation, prompt kind, realized pre-template content length,
-local prediction, exact or fallback outcome, and template content and digest
-when one is frozen or projected. Prefix evidence preserves the declaration,
-resolved prefix and suffix lengths, canonical-stream digest, and exact frozen
-population. Native request identities reconcile warmup and profiling requests
-to their frozen population entries. For flat and rendered-chat prompts, every
-completed profiling request must also reconcile the selected ISL with AIPerf's
-backend-observed `input_sequence_length`; a mismatch fails the case. Dataset
-admission bounds remain pre-template message-content limits and do not rewrite
-source content. A successful Bench separately reports `mean_prompt_tokens`,
-`min_prompt_tokens`, `max_prompt_tokens`, `stddev_prompt_tokens`, and the
-`p50`/`p90`/`p95`/`p99` prompt-token metrics from AIPerf's backend-observed
-`input_sequence_length`. Those values include the server-side template and are
-also the token authority behind total-token throughput.
+### Population evidence
 
-The release catalog currently exposes ShareGPT as a bounded conversational
-source. InferLab pins an immutable snapshot of the Apache-2.0
-[ShareGPT Vicuna dataset](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered);
-dry-run reports the pinned revision:
+Synthetic population evidence records the complete-prompt target, request
+representation, prompt kind, realized pre-template content length, local
+prediction, exact or fallback outcome, and template content and digest when
+one is frozen or projected. Prefix evidence keeps the declaration, resolved
+prefix and suffix lengths, canonical-stream digest, and the frozen population.
+Native request identities reconcile warmup and profiling requests to their
+population entries. For flat and rendered-chat prompts, every completed
+profiling request's selected ISL must match AIPerf's backend-observed
+`input_sequence_length`, or the case fails. Dataset admission bounds are
+pre-template message-content limits and never rewrite source content.
+
+### ShareGPT
+
+The release catalog pins an immutable snapshot of the Apache-2.0
+[ShareGPT Vicuna dataset](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered)
+as a bounded conversational source; dry-run reports the pinned revision:
 
 ```toml
 request_source = { kind = "dataset", dataset = "sharegpt", max_input_tokens = 8192 }
 ```
 
-InferLab downloads the release-pinned snapshot on first execution, verifies
-its digest, and reuses it from
-`$XDG_CACHE_HOME/inferlab/datasets/sha256/<digest>` (normally
-`~/.cache/inferlab/datasets/sha256/<digest>`). Dry-run reports the catalog and
-cache state but does not download missing data.
+InferLab downloads the snapshot on first execution, verifies its digest, and
+reuses it from `$XDG_CACHE_HOME/inferlab/datasets/sha256/<digest>` (normally
+`~/.cache/inferlab/datasets/sha256/<digest>`). Dry-run reports catalog and
+cache state but never downloads.
 
-Each selected conversation becomes one independent chat-completions request.
-The final assistant message is held out to derive the output limit. If the
-pre-template message-content length exceeds `max_input_tokens`, InferLab rolls
-back complete trailing user/assistant exchanges until an earlier target fits;
-it never truncates a message or discards the leading history. Set
-`output_tokens` inside the table to replace target-derived output lengths,
-including `output_tokens = 1` for a prefill-dominant run. The Bench-level `seed`
-controls deterministic sampling without replacement. Command-line overrides
-may change fields within the selected source, but cannot change
-`request_source.kind`.
+Each selected conversation becomes one independent chat-completions request,
+with the final assistant message held out to derive the output limit. If the
+pre-template content exceeds `max_input_tokens`, InferLab drops complete
+trailing user/assistant exchanges until an earlier target fits; it never
+truncates a message or drops leading history. `output_tokens` inside the table
+replaces target-derived lengths (`output_tokens = 1` gives a prefill-dominant
+run). The Bench `seed` controls sampling without replacement. Overrides may
+change fields within the source but not `request_source.kind`.
 
-The same release catalog exposes NVIDIA SPEED-Bench profiles. Profile names
-are catalog data rather than Rust or Python enum variants; the catalog maps
-each identifier to an AIPerf SPEED-Bench dataset, its pinned content digest,
-and a category filter.
-Qualitative profiles use names such as `qualitative_coding`; throughput
+### SPEED-Bench
+
+The catalog also exposes NVIDIA SPEED-Bench profiles, each mapped to an AIPerf
+SPEED-Bench dataset, a pinned content digest, and a category filter.
+Qualitative profiles have names such as `qualitative_coding`; throughput
 profiles combine an input bucket and entropy tier, such as
 `throughput_8k_mixed`:
 
@@ -418,26 +478,24 @@ warmup_prompts_per_concurrency = 0
 timeout_seconds = 900
 ```
 
-SPEED-Bench publishes placeholders for prompts whose source datasets do not
-permit redistribution. Before the first case, AIPerf resolves the selected
-SPEED-Bench configuration from those sources and InferLab holds the resolved
-rows to the release catalog's pinned digest, failing preparation if they
-differ. Resolution downloads the source datasets once into the Hugging Face
-cache and needs an account that has accepted the terms of the gated
-`cais/hle` dataset; without it, preparation fails with AIPerf's message.
-InferLab then filters and samples without replacement and freezes only each
-row's first user turn as an independent request. Later turns are recorded as
-omitted rather than silently becoming sessions.
+SPEED-Bench publishes placeholders for prompts whose source datasets forbid
+redistribution. Before the first case, AIPerf resolves them from those
+sources, and InferLab holds the resolved rows to the catalog digest, failing
+preparation on a mismatch. Resolution downloads the sources once into the
+Hugging Face cache and needs an account that has accepted the terms of the
+gated `cais/hle` dataset; without it, preparation fails with AIPerf's message.
+InferLab then samples without replacement and keeps only each row's first
+user turn as an independent request; later turns are recorded as omitted.
 
 ## Replaying a recorded population
 
-Any earlier independent-request Bench record (a `random`, `random_mixture`,
-`dataset`, or `replay` source) freezes its request population at
+An independent-request Bench record (`random`, `random_mixture`, `dataset`, or
+`replay` source) freezes its population at
 `.inferlab/records/<record-id>/cases/request-source/artifacts/population.jsonl`.
-Copy that file into the workspace and pin its digest to replay the exact same
+Copy that file into the workspace and pin its digest to replay the same
 requests against another server or configuration. Linear-session records store
 turn templates and AgentX records freeze no population, so neither can be
-replayed this way:
+replayed this way.
 
 ```toml
 [benches.replay-c8k1k]
@@ -448,63 +506,72 @@ prompts_per_concurrency = 4
 timeout_seconds = 900
 ```
 
-`path` is workspace-relative (absolute paths and `..` escapes are rejected),
-and `prompt` must be declared explicitly: `flat` (or `rendered_chat`) entries
-carry a `text_input` string, `server_chat` entries carry structured
-`messages`. `expected_sha256` is optional; when declared, preparation verifies
-the file bytes before any request runs. The file is the sole population
-authority: InferLab offers no selection, filtering, or transformation — edit,
-subset, or reorder the file itself instead. Each entry keeps its own recorded
-`output_length`; mixing `1` and larger values in one file is rejected, and a
-file with fewer entries than the largest case requires fails preparation
-rather than repeating entries. `prefix_sharing` follows the generated-source
-semantics with the shared geometry resolved from the file entries. Dry-run
-reports the path, declared and observed digests, and entry count without
-running anything, and command-line overrides cannot change the replay `path`
-or `expected_sha256`.
+- `path` is workspace-relative; absolute paths and `..` escapes are rejected.
+  `expected_sha256` is optional; when declared, preparation verifies the file
+  before any request runs.
+- `prompt` is required: `flat` (or `rendered_chat`) entries carry a
+  `text_input` string, `server_chat` entries carry structured `messages`.
+- The file is the sole population authority. InferLab does not select,
+  filter, or transform it; edit, subset, or reorder the file instead. A file
+  with fewer entries than the largest case needs fails preparation rather than
+  repeating entries.
+- Each entry keeps its recorded `output_length`; mixing `1` and larger values
+  in one file is rejected.
+- `prefix_sharing` follows the generated-source semantics, with geometry
+  resolved from the entries. `groups` and `popularity` cannot be declared: a
+  replayed population brings its own prefixes.
+- Dry-run reports the path, declared and observed digests, and entry count.
+  Overrides cannot change `path` or `expected_sha256`.
+
+Every replayed request starts from the exact-length default (end of sequence
+suppressed), and each entry's `extra` members override it member by member.
+An entry without a stop member generates exactly its `output_length`. To stop
+at end of sequence with `output_length` as a cap, set
+`"extra": {"ignore_eos": false}`; other members, such as a per-entry
+`temperature`, pass through the same way. Populations InferLab writes under
+`output_stop = "eos"` carry `"ignore_eos": false` and replay as recorded;
+populations exported under `eos` by earlier releases lack it and replay at
+full length until you add it or export them again. Population evidence
+records each entry's resolved `output_stop`.
 
 ## Drawing random content from a text corpus
 
-A `random` source can replace its synthetic hash-word prompts with slices of
-an operator-supplied text corpus, for content-sensitive measurements such as
-speculative-decoding acceptance rates:
+A `random` source can replace its synthetic prompts with slices of an
+operator-supplied text corpus, for content-sensitive measurements such as
+speculative-decoding acceptance:
 
 ```toml
 [benches.corpus-c8k1k]
 kind = "serving"
-request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024, corpus = { path = "corpus/shakespeare.txt", expected_sha256 = "<64-hex digest of the file>" } }
+request_source = { kind = "random", input_tokens = 8192, output_tokens = 1024, corpus = { path = "corpus/example.txt", expected_sha256 = "<64-hex digest of the file>" } }
 concurrency = [1, 4]
 prompts_per_concurrency = 4
 timeout_seconds = 900
 ```
 
-`corpus.path` is workspace-relative (absolute paths and `..` escapes are
-rejected, exactly like a replay population file), and `expected_sha256` is
-optional; when declared, preparation verifies the corpus bytes before any
-request runs. Pin the digest whenever the corpus identity matters — an edited
-corpus silently changes the workload otherwise. Corpus content cannot be
-inlined or fetched remotely, and command-line overrides cannot change the
-corpus `path` or `expected_sha256`. Corpus slicing requires
-`prompt = { kind = "flat" }` (the default), because entry content must be one
-exact token-length slice of the corpus stream.
-
-InferLab tokenizes the corpus once with the resolved model tokenizer and cuts
-each entry as one slice of exactly its selected `input_tokens` length at an
-offset determined by the Bench seed and the entry's population index, so the
-same seed reproduces the same prompts and generating a larger population keeps
-the same first entries. A corpus whose token stream is shorter than the
-largest selected input target fails preparation. `prefix_sharing` keeps its
-controlled semantics: the shared prefix is one fixed corpus slice and each
-entry's unique suffix is drawn independently, with primed-cache conditioning
-unchanged. Slices are drawn independently and may overlap; such incidental
-sharing is natural reuse — it is not measured, promised, or presented as
-controlled prefix geometry. The record preserves the corpus path, declared
-and observed digests, and each entry's slice offset and length.
+- `corpus.path` follows the replay path rules, and `expected_sha256` is
+  optional. Pin it whenever corpus identity matters: an edited corpus
+  otherwise silently changes the workload. Corpus content cannot be inlined
+  or fetched remotely, and overrides cannot change `path` or
+  `expected_sha256`.
+- Corpus slicing requires `prompt = { kind = "flat" }` (the default), because
+  each entry is one exact token-length slice of the corpus stream.
+- InferLab tokenizes the corpus once with the resolved model tokenizer and
+  cuts each entry at an offset determined by the Bench seed and the entry's
+  population index, so the same seed reproduces the same prompts and a larger
+  population keeps the same first entries. A corpus shorter than the largest
+  selected input target fails preparation.
+- With `prefix_sharing`, the shared prefix is one fixed corpus slice and each
+  suffix is drawn independently; primed conditioning is unchanged. Slices may
+  overlap; that incidental sharing is not measured or presented as controlled
+  prefix geometry.
+- The record keeps the corpus path, declared and observed digests, and each
+  entry's slice offset and length.
 
 ## Attaching images to random requests
 
-A `random` source can decorate every request with images for
-vision-language servers:
+A `random` source can attach images to every request for vision-language
+servers:
 
 ```toml
 [benches.vlm-random]
@@ -515,50 +582,48 @@ prompts_per_concurrency = 4
 timeout_seconds = 900
 ```
 
-`width` and `height` are required fixed pixel values and `count` resolves to
-one image per request when omitted; distribution spellings are rejected, as
-for token-length selectors. `input_tokens` keeps its text meaning — the images
-ride on top, and the server-derived image token count remains observable in
-the backend-reported prompt tokens. An images declaration forces the
-`server_chat` prompt authority (an omitted `prompt` resolves to it; declaring
-`flat` or `rendered_chat` is rejected), because image content parts only exist
-on the chat-completions route. The other request-source kinds reject `images`.
+- `width` and `height` are required fixed pixel values; `count` defaults to
+  one image per request. Distribution spellings are rejected.
+- `input_tokens` keeps its text meaning; image tokens ride on top and show up
+  in backend-reported prompt tokens.
+- Images force the `server_chat` prompt (an omitted `prompt` resolves to it;
+  `flat` or `rendered_chat` is rejected), because image content parts exist
+  only on chat completions. Other source kinds reject `images`.
 
-By default the measurement runtime synthesizes noise images. To load real
+The measurement runtime synthesizes noise images by default. To load real
 images, declare one workspace-relative directory:
 
 ```toml
 request_source = { kind = "random", input_tokens = 512, output_tokens = 128, images = { width = 512, height = 384, source = { path = "corpora/vlm-smoke-images", expected_sha256 = "<64-hex directory digest>", sampling = "shuffle-cycle" } } }
 ```
 
-The same locator rules as the corpus apply: the path must stay inside the
-workspace, and `expected_sha256` optionally binds the directory content through
-InferLab's recursive enumeration digest (regular files ordered by relative
-path); a missing or empty directory, or a digest mismatch, fails preparation
-before any request runs. `sampling` is one of `random-with-replacement`,
-`shuffle-cycle` (the default), or `sequential-cycle`. Overrides cannot change
-the source `path`, digest, or `sampling`, while dimensions and `count` remain
-ordinary override targets. Images are attached at measurement-run time and the
-Bench seed determines the selection sequence; frozen populations stay
-text-only, and the record preserves the effective decoration policy and the
-directory's observed digest rather than per-request image identities.
+The path follows the corpus rules; `expected_sha256` binds the directory
+through InferLab's recursive enumeration digest (regular files ordered by
+relative path). A missing or empty directory, or a digest mismatch, fails
+preparation. `sampling` is `random-with-replacement`, `shuffle-cycle`
+(default), or `sequential-cycle`. Overrides cannot change the source `path`,
+digest, or `sampling`; dimensions and `count` remain overridable. Images are
+attached at run time in a sequence the Bench seed determines; frozen
+populations stay text-only, and the record keeps the effective policy and the
+directory's observed digest, not per-request image identities.
 
 ## Source preparation and cold-to-warm verification
 
-Non-synthetic measurement sources are prepared before a recipe launches its
-server. Release-catalog and AgentX sources must close and verify their immutable
-content; a task-owned lm-eval source that cannot expose its complete closure is
-recorded explicitly as opaque and non-reproducible. Source preparation is
-separate from lm-eval, AIPerf, or InferLab population materialization, so its
-time and cache outcome are not charged to an arbitrary measurement case.
-[eval-authoring.md](eval-authoring.md#source-preparation) describes how a
-workspace lm-eval YAML's file closure is snapshotted.
+Non-synthetic sources are prepared before a recipe launches its server, or
+before a manual Bench's first request. Release-catalog and AgentX sources must
+close and verify their immutable content; a task-owned lm-eval source that
+cannot expose its complete closure is recorded as opaque and
+non-reproducible. Preparation is separate from lm-eval, AIPerf, or population
+materialization, so its time and cache outcome are not charged to a
+measurement case. [eval-authoring.md](eval-authoring.md#source-preparation)
+describes how a workspace lm-eval YAML's file closure is snapshotted. A failed
+manual-Bench preparation leaves the managed server running and records
+`target_server_unchanged = true` in the Bench record's `data_assets`.
 
-Use an isolated cache to exercise a real cold preparation followed by verified
-reuse without changing the recipe or measurement definitions. Point every cache
-binding preparation honors into the scratch directory; Hugging Face downloads,
-including AgentX corpora, follow `HF_HOME` and `HF_HUB_CACHE` before
-`XDG_CACHE_HOME`:
+To exercise a real cold preparation followed by verified reuse, point every
+cache binding preparation honors into a scratch directory. Hugging Face
+downloads, including AgentX corpora, follow `HF_HOME` and `HF_HUB_CACHE`
+before `XDG_CACHE_HOME`:
 
 ```sh
 C=$(mktemp -d)
@@ -567,28 +632,27 @@ inferlab recipe run <RECIPE> > cold-recipe.json
 inferlab recipe run <RECIPE> > warm-recipe.json
 ```
 
-Choose a recipe whose suite contains a release-qualified dataset or AgentX
-source. Both records must report `source_preparation_completed = true` and
-`serving_launch_attempted = true`. In `data_assets`, the same selection must
-have the same `source_key_sha256`; the cold attempt's terminal preparation
-phase reports downloaded source bytes and a cache miss, while the warm attempt
-reports reused source bytes and a verified full hit. The terminal `ready`
-attempt must retain a closed content list and its expected-versus-observed
-verification. Compare the two records' data-asset `source`, `effective_selection`,
-`consumers`, and
-the selected workload definitions under `resolved.measurements` to confirm
-that only the cache outcome changed. A dry-run may inspect an existing local
-path, but never downloads, verifies, or claims source readiness.
+Use a recipe whose suite contains a release-qualified dataset or AgentX
+source. Then check:
 
-For a manual Bench, the same preparation occurs before its first inference
-request. A preparation failure leaves the selected managed server running and
-records `target_server_unchanged = true` in the Bench record's standalone
-`data_assets` evidence.
+- Both records report `source_preparation_completed = true` and
+  `serving_launch_attempted = true`.
+- In `data_assets`, the selection has the same `source_key_sha256` in both.
+  The cold attempt's terminal phase reports downloaded bytes and a cache miss;
+  the warm attempt reports reused bytes and a verified full hit.
+- The terminal `ready` attempt keeps a closed content list and its
+  expected-versus-observed verification.
+- The data-asset `source`, `effective_selection`, and `consumers`, and the
+  workload definitions under `resolved.measurements`, are identical, so only
+  the cache outcome changed.
+
+A dry-run may inspect an existing local path but never downloads, verifies,
+or claims source readiness.
 
 ## Linear serving sessions
 
-A linear session Bench selects a qualified conversational source instead of an
-independent `request_source`:
+A linear session Bench selects a qualified conversational source instead of
+an independent `request_source`:
 
 ```toml
 [benches.linear-chat]
@@ -600,20 +664,20 @@ warmup_sessions_per_concurrency = 1
 timeout_seconds = 900
 ```
 
-Every later user turn waits for the preceding live assistant response and its
-effective inter-turn delay. Concurrency counts active conversations, including
-their delay intervals, rather than individual HTTP requests. Positive warmup
-uses complete AIPerf-native sessions and drains before profiling. AIPerf adds
-its native `warmup` system marker to warmup transport messages; InferLab keeps
-that phase-tagged request and its observed prompt-token count, while excluding
-all warmup traffic from profiling metrics. Native `session_num` values restart
-per phase, so their durable request identity is the pair of phase and
+Each later user turn waits for the preceding live assistant response and its
+effective inter-turn delay. Concurrency counts active conversations, delay
+intervals included, not HTTP requests. Positive warmup runs complete
+AIPerf-native sessions and drains before profiling. AIPerf adds its native
+`warmup` system marker to warmup transport messages; InferLab keeps that
+phase-tagged request and its observed prompt-token count, while excluding all
+warmup traffic from profiling metrics. Native `session_num` values restart per
+phase, so a request's durable identity is the pair of phase and
 `session_num`.
 
 ## SemiAnalysis AgentX trace replay
 
-AgentX is a third, deliberately closed static serving source. It is neither a
-population of independent prompts nor a linear live-response session:
+AgentX is a third, closed static serving source: neither a population of
+independent prompts nor a linear live-response session.
 
 ```toml
 [benches.agentx]
@@ -622,46 +686,43 @@ concurrency = [1]
 timeout_seconds = 7200
 ```
 
-`concurrency` counts root session-tree lanes. Spawned subagents can therefore
-produce more simultaneous HTTP requests than the declared value. The
-`inferencex` release profile fixes source-response replay, first-turn-prefix
-cache busting, trajectory sampling, a per-trace and a global cap on recorded
-idle gaps, a per-lane cache-pressure warmup, streaming chat requests, native
-failure thresholds, and minimum and default profiling durations. Recorded idle
-periods longer than the caps are shortened, so replay timing differs from the
-raw trace. Omitting `duration_seconds` selects the profile's default duration,
-and omitting `seed` selects the profile's default seed rather than the ordinary
-Bench default of 0. Live server responses are measured but do not become the
-context for later source turns, so this workflow measures replay transport
-behavior rather than agent task quality.
+`concurrency` counts root session-tree lanes; spawned subagents can produce
+more simultaneous HTTP requests than that. The `inferencex` release profile
+fixes source-response replay, first-turn-prefix cache busting, trajectory
+sampling, per-trace and global caps on recorded idle gaps, a per-lane
+cache-pressure warmup, streaming chat requests, native failure thresholds, and
+minimum and default profiling durations. Idle periods longer than the caps are
+shortened, so replay timing differs from the raw trace. Omitting
+`duration_seconds` or `seed` selects the profile's default, not the ordinary
+Bench seed default of 0. Live responses are measured but do not become context
+for later turns, so this measures replay transport behavior, not agent task
+quality.
 
-Choose the corpus the served context length can hold. Use
-`semianalysis_agentx_062126_256k` for a server whose context limit is at least
-256k tokens; the full-context `semianalysis_agentx_062126` corpus carries longer
-histories for servers with a larger native context. InferLab does not compare
-the corpus with the server's context length while planning: AIPerf records
-requests that exceed it as context overflows, excludes them from the latency
-distributions, and judges the overflow rate against its native scenario
-threshold, and an invalid native submission fails the case.
+Choose the corpus the served context length can hold:
+`semianalysis_agentx_062126_256k` for a context limit of at least 256k tokens,
+or the full-context `semianalysis_agentx_062126` for servers with a larger
+native context. InferLab does not compare the corpus with the server's context
+length: AIPerf records over-length requests as context overflows, excludes
+them from latency distributions, and judges the overflow rate against its
+native scenario threshold; an invalid native submission fails the case.
 
 AIPerf decides whether a warmup failure aborts the case, as InferenceX runs
 do: any failed root-stream warmup request, including a single cache-pressure
-request, aborts the case before profiling, while a failed subagent warmup
-request does not by itself. Warmup failures are recorded as warmup evidence
-either way.
+request, aborts before profiling, while a failed subagent warmup request does
+not by itself. Warmup failures are recorded either way.
 
-Both corpora are sizable downloads. Source preparation, which runs before a
-recipe launches its server or before a manual Bench's first request, verifies
-the immutable Hugging Face revision and complete `traces.jsonl` digest; AIPerf
-then validates and materializes the trace trees when each
-case's client starts, inside that case's `timeout_seconds`, together with
-warmup, profiling, and result handling. Budget the timeout for all of them.
+Both corpora are sizable downloads. Source preparation verifies the immutable
+Hugging Face revision and the complete `traces.jsonl` digest before the server
+launches (or before a manual Bench's first request). AIPerf then validates and
+materializes the trace trees when each case's client starts, inside that
+case's `timeout_seconds` together with warmup, profiling, and result handling.
+Budget the timeout for all of them.
 
 The release profile, not workspace fields, owns loader, scenario, timing,
-warmup, cache-bust, and failure-policy details. Besides `agentic_source`, an
-AgentX Bench accepts `concurrency`, `duration_seconds` (at least the profile
-minimum), `timeout_seconds`, `seed`, `server_metrics`, and `artifact_level`. It
-rejects request counts and rates, prompt and request-body controls,
+warmup, cache-bust, and failure policy. Besides `agentic_source`, an AgentX
+Bench accepts only `concurrency`, `duration_seconds` (at least the profile
+minimum), `timeout_seconds`, `seed`, `server_metrics`, and `artifact_level`.
+It rejects request counts and rates, prompt and request-body controls,
 linear-session counts and delays, cache-start controls, SLOs, and adaptive
 serving. `inferlab workspace show --json` shows only the dataset and profile
 names; use dry-run (`recipe run --dry-run`, or `bench --dry-run` against a

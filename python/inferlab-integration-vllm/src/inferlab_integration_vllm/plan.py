@@ -1,5 +1,4 @@
 import inferlab_gateway_dynamo
-import inferlab_kvstore
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
@@ -50,6 +49,7 @@ from inferlab_adapter_sdk import (
     require_declared_devices,
     require_role,
 )
+from inferlab_kvstore import mooncake
 
 from .auxiliary import validate_auxiliary_models
 from .settings import VllmServeSettings, _settings
@@ -392,7 +392,7 @@ def _kv_store_plan(input: PlanServeInput, settings: VllmServeSettings) -> KvStor
             "MOONCAKE_CONFIG_PATH is rendered from the declared kv_store; "
             "set kv_store_* settings instead",
         )
-    return inferlab_kvstore.plan(input.kv_store)
+    return mooncake.plan(input.kv_store)
 
 
 def _plan_dynamo_single(input: PlanServeInput, role: ServeRoleInput) -> PlanServeResult:

@@ -259,11 +259,9 @@ pub(crate) fn resolve<C: AdapterClient>(
                 role.public_endpoint.is_some(),
                 role.kind,
                 role.effective_replica_count,
-                role.effective_parallelism
-                    .attention
-                    .as_ref()
-                    .and_then(|attention| attention.data_parallel_size)
-                    .unwrap_or(1),
+                // A role without a shape reports its rank count only once the
+                // server is ready ([[RFC-0003:C-SERVE-PARALLELISM]]).
+                crate::workload::RoleDataParallel::from_shape(&role.effective_parallelism),
             )
         }),
     )
@@ -271,6 +269,15 @@ pub(crate) fn resolve<C: AdapterClient>(
         integration::shared_prefix_cache(planned),
         integration::prefix_publication_ms(planned),
     );
+    let conditioning_serving = if planned
+        .kv_store
+        .as_ref()
+        .is_some_and(|store| store.access_observed)
+    {
+        conditioning_serving.with_sharing_pending()
+    } else {
+        conditioning_serving
+    };
     let measurements = compose_measurements(
         workspace,
         request,
@@ -436,12 +443,28 @@ fn serve_state_probe_plan(
     image_launched: bool,
 ) -> Result<Option<crate::execution::ServeStateProbePlan>, InferlabError> {
     if !planned.serve_state_probe {
+        // Observed access is read only by the probe, so a plan that observes
+        // it must declare one ([[RFC-0006:C-INTEGRATIONS]]).
+        if planned
+            .kv_store
+            .as_ref()
+            .is_some_and(|store| store.access_observed)
+        {
+            return Err(InferlabError::AdapterSemantics {
+                message: format!(
+                    "integration {integration:?} declared KV store access observed without a serve-state probe"
+                ),
+            });
+        }
         return Ok(None);
     }
+    // A plan that observes store access probes every model-serving role,
+    // since no role's use of the store is declared
+    // ([[RFC-0003:C-SERVE-KV-STORE]]).
     let Some(store_plan) = planned
         .kv_store
         .as_ref()
-        .filter(|store| !store.role_access.is_empty())
+        .filter(|store| store.access_observed || !store.role_access.is_empty())
     else {
         return Err(InferlabError::AdapterSemantics {
             message: format!(
@@ -466,15 +489,17 @@ fn serve_state_probe_plan(
             rank: 0,
             endpoint: Some(endpoint),
             kv_store: store,
+            kv_tier_directory,
             ..
         } = allocation.wire()
-            && store_plan.role_access.contains_key(role)
+            && (store_plan.access_observed || store_plan.role_access.contains_key(role))
         {
             processes.push(inferlab_protocol::ProbeServeTarget {
                 process: process.clone(),
                 role: role.clone(),
                 replica: *replica,
                 endpoint: endpoint.clone(),
+                kv_tier_directory: kv_tier_directory.clone(),
             });
             if let Some(store) = store {
                 kv_store = Some((**store).clone());
@@ -493,6 +518,7 @@ fn serve_state_probe_plan(
         kv_store,
         attempt_bound_seconds,
         adapter_timeout_seconds,
+        access_observed: store_plan.access_observed,
     }))
 }
 

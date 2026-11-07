@@ -32,16 +32,32 @@ inferlab bench <BENCH> --serve <RECORD_ID>
 inferlab serve stop <RECORD_ID>
 ```
 
-`start` emits the running server record id. `status`, `logs`, and `stop`
+`start` prints the running server record; its `id` is the record ID the other
+commands take. `status`, `logs`, and `stop`
 use only that record; they do not reload workspace or local bindings. `stop`
 is idempotent and finalizes cleanup evidence, including the device-residual
 check described in
 [Failure and cleanup](evidence-and-diagnosis.md#failure-and-cleanup). Always
 stop a manual server after the last measurement.
 
+## Readiness
+
 Ordinary readiness, capture preparation, framework control, and report
-finalization use separate resolved budgets. Read
-[Profiling](profiling.md) for capture lifecycle interpretation.
+finalization use separate resolved budgets; read [Profiling](profiling.md) for
+the capture lifecycle.
+
+A Specialized Engine server reports facts InferLab does not allocate, so its
+readiness waits for them. It completes only after every Engine reports a
+positive data-parallel rank count through the Gateway's worker registry and,
+with a KV tier (`mooncake` or `filesystem`), reports the tier available at its
+rendered location together with its tier access and publication bound; every
+Engine of one role must report the same access. When the readiness budget
+expires without a rank count, the failure names the Engine and the field; a
+disagreeing access names the disagreeing Engines. Dry-run
+cannot show these values; read them from the server record (see
+[Record-first reading](evidence-and-diagnosis.md#record-first-reading)). A
+primed Bench start that the observed cache-owning targets cannot condition
+therefore fails after readiness rather than at planning.
 
 ## Closed Loop
 
@@ -57,9 +73,9 @@ A failed recipe still finalizes its record; see
 SLO failure does not suppress later static Bench cases; execution failure,
 timeout, or interruption follows the closed-loop failure path.
 
-`recipe run --capture <WORKLOAD_ID>` is repeatable and captures only selected
-Evals or Benches. `bench --capture` attaches capture to a manual Bench. Capture
-does not mutate the stored measurement definition.
+`recipe run --capture <WORKLOAD_ID>` (repeatable) and `bench --capture` attach
+workload capture without changing the stored measurement definition; see
+[Profiling](profiling.md#run-a-capture).
 
 ## Occupied Devices
 
@@ -125,7 +141,8 @@ host sharing the workspace can stop it. `recipe stop` of a running recipe and
   after confirming the named controller no longer runs.
 
 `recipe stop` of a finished recipe changes nothing and prints it. `serve stop`
-of a running server stops it as before.
+of a running server stops it as described under
+[Manual server lifecycle](#manual-server-lifecycle).
 
 ## Image Selection
 

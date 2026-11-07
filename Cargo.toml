@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.23.2"
+version = "0.23.3"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -36,6 +36,7 @@ insta = "1"
 maud = { version = "0.27", features = ["axum"] }
 memchr = "2"
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "compression", "std"] }
+prost-types = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls", "stream"] }
 smg-grpc-client = "1"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

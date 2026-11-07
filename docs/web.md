@@ -120,17 +120,17 @@ stopping or restarting the console does not stop it, and a restarted console
 finds every job again from its directory. A launch that cannot start shows its
 error and leaves no job directory. The console does not queue or deduplicate
 launches; the CLI's own locks govern concurrent work. Job files are run-time
-conveniences rather than evidence, and the console never deletes them. Jobs
-launched from the CLI with `--detach` use the same directories and appear here
-too.
+conveniences rather than evidence, and the console never deletes them. A job
+launched from the CLI with `--detach` uses the same directory layout.
 
 A job reads as **running**, as **exited** with its exit code, as
 **interrupted** or ended by another signal, as **ended, status unknown** when
 no exit status was recorded and the recorded process is no longer running, or
 as **not observable from this host** when it was launched on another host or
-before a reboot and recorded no exit status. **Interrupt** sends the
-running job the interrupt a terminal Ctrl+C sends; repeat it if needed. It
-never escalates to a kill and leaves cleanup to the CLI. The console signals
+before a reboot and recorded no exit status. **Interrupt** sends the running
+job the interrupt a terminal Ctrl+C sends, as `inferlab job interrupt <job-id>`
+does from the CLI; repeat it if needed. It never escalates to a kill and leaves
+cleanup to the CLI. The console signals
 only after the recorded host, boot, and process identity match the live
 process, so it never signals a process that reused the job's process
 identifier.
@@ -142,5 +142,4 @@ browser; they stay off until you enable them, and the browser asks for
 permission the first time. While any console page is open, a notification
 appears when a job of a registered workspace ends or when a running server's
 observed process dies, including a server a recipe started; selecting it opens
-the job or the server. Select the button
-again to turn them off.
+the job or the server. Select the button again to turn them off.

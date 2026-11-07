@@ -1,8 +1,6 @@
 """Planning and rendering for the shared token-only Specialized Engine contract."""
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import Annotated
 
 import inferlab_gateway_smg
 import inferlab_kvstore
@@ -14,6 +12,7 @@ from inferlab_adapter_sdk import (
     CaptureWindowControlEndpoint,
     CaptureWindowControlRequirement,
     CaptureWindowHttpActionSpec,
+    EndpointAssignment,
     EndpointDeclaration,
     EndpointProtocol,
     FrontendCoRendering,
@@ -28,15 +27,13 @@ from inferlab_adapter_sdk import (
     KvStoreAccess,
     KvStorePlan,
     Parallelism,
-    ParallelismAttention,
-    ParallelismExperts,
-    ParallelismOuter,
     PdRoutingPolicies,
     PlanServeInput,
     PlanServeResult,
     ProbeServeInput,
     ProbeServeProcessState,
     ProbeServeResult,
+    ProbeServeTarget,
     ProcessSpec,
     PromptCacheReadZeroRepresentation,
     ReadinessProbe,
@@ -59,106 +56,78 @@ from inferlab_adapter_sdk import (
     ServeTopology,
     SettingValue,
     effective_settings,
-    fill_outer_tensor_parallel,
     integration_identity,
     merge_serve_args,
     rendered_frontend,
     rendered_model_rank,
     replica_id,
-    require_declared_devices,
     require_role,
     split_serve_allocations,
-    validate_extra_args,
     validate_settings,
 )
-from inferlab_kvstore import mooncake
+from inferlab_kvstore import filesystem, mooncake
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .auxiliary import reject_auxiliary_locators, validate_auxiliary_models
 
 _ADAPTER_DISTRIBUTION = "inferlab-integration-specialized-engine"
 
-# Flags the managed Engine argv owns; the escape hatch must not restate them.
-_INFERLAB_OWNED_OPTIONS: set[str] = {
-    "--context-parallel-size",
-    "--data-parallel-size",
-    "--default-max-output-tokens",
-    "--disaggregation-bootstrap-port",
-    "--disaggregation-mode",
-    "--disaggregation-transfer-backend",
-    "--expert-parallel-size",
-    "--gpu-memory-utilization-percent",
-    "--kv-tier-capacity",
-    "--kv-tier-snapshot-interval",
-    "--kv-tier-store",
-    "--kv-tier-timeout",
-    "--listen",
-    "--max-num-batched-tokens",
-    "--model",
-    "--prefix-cache-cpu-bytes-per-rank",
-    "--prefix-cache-gpu-entries",
-    "--prefix-cache-host-memory-percent",
-    "--prefix-cache-numa-node-per-rank",
-    "--served-model-name",
-    "--tensor-parallel-size",
-    "--workspace-reserve-mib",
-}
+# The contract arguments: the allocation facts InferLab renders, which an
+# Engine argument must not restate, before or after the override sentinel
+# ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+_CONTRACT_ARGUMENTS: frozenset[str] = frozenset(
+    {
+        "--disaggregation-bootstrap-port",
+        "--disaggregation-mode",
+        "--disaggregation-transfer-backend",
+        "--host-count",
+        "--host-index",
+        "--kv-tier-backend",
+        "--kv-tier-store",
+        "--listen",
+        "--model",
+        "--rendezvous",
+        "--rendezvous-listen",
+        "--served-model-name",
+    }
+)
 
+# The port rank zero of a multi-host replica admits its members on; the
+# control plane allocates a primary port only to rank zero of a multi-rank
+# replica ([[ADR-0073]]).
+_RENDEZVOUS_PORT = "rendezvous"
 
-class PrefixCacheRank(BaseModel):
-    """Explicit host prefix-cache placement for one tensor-parallel rank.
+# Environment the allocation owns: the Engine's devices are its visibility,
+# enumerated in PCI bus order ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+_DEVICE_VISIBILITY = ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")
 
-    Pairing bytes with their NUMA node in one entry keeps the worker's two
-    positionally matched argument lists from drifting apart in configuration.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    cpu_bytes: Annotated[int, Field(ge=1)]
-    numa_node: Annotated[int, Field(ge=0)]
+# Typed settings this contract no longer renders: each is an Engine option,
+# spelled by the Engine, in `extra_args` ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+_RETIRED_ROLE_SETTINGS: frozenset[str] = frozenset(
+    {
+        "default_max_output_tokens",
+        "gpu_memory_utilization_percent",
+        "kv_tier_capacity_bytes",
+        "kv_tier_snapshot_interval",
+        "kv_tier_timeout_seconds",
+        "max_num_batched_tokens",
+        "prefix_cache_gpu_entries",
+        "prefix_cache_host_memory_percent",
+        "prefix_cache_ranks",
+        "workspace_reserve_mib",
+    }
+)
 
 
 class EngineContractSettings(BaseModel):
-    """Settings shared by every implementation of the token Engine contract.
-
-    An omitted optional setting renders no worker argument, so the worker's own
-    default governs and InferLab does not restate it. `extra_args` and
-    `extra_env` carry implementation-specific worker knobs whose exact
-    effective contents are returned and recorded ([[ADR-0048]]).
-    """
+    """A role's Engine arguments: every Engine option that is not a contract
+    argument, in the Engine's own spelling, rendered and recorded verbatim
+    ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
 
     model_config = ConfigDict(extra="forbid")
 
-    default_max_output_tokens: Annotated[int, Field(ge=1)] | None = None
-    max_num_batched_tokens: Annotated[int, Field(ge=1)] | None = None
-    gpu_memory_utilization_percent: Annotated[int, Field(ge=1, le=100)] | None = None
-    workspace_reserve_mib: Annotated[int, Field(ge=0)] | None = None
-    prefix_cache_gpu_entries: Annotated[int, Field(ge=1)] | None = None
-    prefix_cache_host_memory_percent: Annotated[int, Field(ge=1, le=100)] | None = None
-    prefix_cache_ranks: list[PrefixCacheRank] | None = None
-    # Tier settings apply only with a declared KV store
-    # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-    kv_tier_capacity_bytes: Annotated[int, Field(ge=0)] | None = None
-    kv_tier_snapshot_interval: Annotated[int, Field(ge=2)] | None = None
-    kv_tier_timeout_seconds: Annotated[float, Field(gt=0)] | None = None
     extra_args: list[str] | None = None
     extra_env: dict[str, str] | None = None
-
-    @model_validator(mode="after")
-    def _one_host_prefix_cache_authority(self) -> "EngineContractSettings":
-        if self.prefix_cache_ranks is None:
-            return self
-        if not self.prefix_cache_ranks:
-            raise ValueError("prefix_cache_ranks must declare at least one rank when present")
-        if self.prefix_cache_host_memory_percent is not None:
-            # The worker ignores the percent once an explicit list sizes the
-            # host cache, so accepting both would record a value that did not
-            # participate in the capacity it appears to describe.
-            raise ValueError(
-                "prefix_cache_host_memory_percent does not size the host cache when "
-                "prefix_cache_ranks is declared; declare exactly one host sizing authority"
-            )
-        return self
 
 
 class GatewaySettings(BaseModel):
@@ -168,6 +137,8 @@ class GatewaySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     policy: inferlab_gateway_smg.Policy = "least_load"
+    # SMG options of the operator's own, appended to the rendered command.
+    extra_args: list[str] | None = None
 
 
 class PdRouterSettings(BaseModel):
@@ -178,6 +149,8 @@ class PdRouterSettings(BaseModel):
 
     prefill_policy: inferlab_gateway_smg.Policy = "round_robin"
     decode_policy: inferlab_gateway_smg.Policy = "round_robin"
+    # SMG options of the operator's own, appended to the rendered command.
+    extra_args: list[str] | None = None
 
 
 _WORKER_PROTOCOL = "tokenspeed.grpc.scheduler.TokenSpeedScheduler"
@@ -196,10 +169,6 @@ class StackSettings(BaseModel):
     engine_command: list[str] = Field(
         default_factory=lambda: ["inferlab-token-engine", "smg-worker"]
     )
-    # How long after a request completes a prefix the Engine wrote becomes
-    # readable from the KV tier; a primed start waits it after conditioning
-    # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-    kv_tier_publication_seconds: Annotated[float, Field(ge=0)] = 0.0
 
     @model_validator(mode="after")
     def _bare_executable(self) -> "StackSettings":
@@ -215,7 +184,19 @@ class StackSettings(BaseModel):
         return self
 
 
+# Stack settings this contract no longer takes: the Engine reports its tier
+# publication bound at readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+_RETIRED_STACK_SETTINGS: frozenset[str] = frozenset({"kv_tier_publication_seconds"})
+
+
 def stack_settings(values: dict[str, SettingValue]) -> dict[str, SettingValue]:
+    retired = sorted(_RETIRED_STACK_SETTINGS.intersection(values))
+    if retired:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"stack setting {retired[0]!r} is no longer part of the Specialized Engine "
+            "contract; the Engine reports kv_tier_publication_ms at readiness",
+        )
     settings = validate_settings(StackSettings, values)
     _reject_owned_options("engine_command", settings.engine_command)
     return effective_settings(settings)
@@ -224,16 +205,32 @@ def stack_settings(values: dict[str, SettingValue]) -> dict[str, SettingValue]:
 def _reject_owned_options(field: str, arguments: list[str]) -> None:
     for argument in arguments:
         name, _separator, _value = argument.partition("=")
-        if name in _INFERLAB_OWNED_OPTIONS:
+        if name in _CONTRACT_ARGUMENTS:
             raise AdapterOperationError(
                 AdapterErrorCode.invalid_settings,
-                f"{field} entry {argument!r} names contract-owned option {name!r}",
+                f"{field} entry {argument!r} names contract argument {name!r}, which "
+                "InferLab renders from the allocation",
             )
 
 
 def _settings(values: dict[str, SettingValue]) -> EngineContractSettings:
+    retired = sorted(_RETIRED_ROLE_SETTINGS.intersection(values))
+    if retired:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"setting {retired[0]!r} is no longer part of the Specialized Engine contract; "
+            "pass the Engine's own option for it in extra_args",
+        )
     settings = validate_settings(EngineContractSettings, values)
-    validate_extra_args(settings.extra_args or [], _INFERLAB_OWNED_OPTIONS)
+    # The sentinel overrides Engine options only; no declaration may redirect
+    # an allocation ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    _reject_owned_options("extra_args", settings.extra_args or [])
+    for name in _DEVICE_VISIBILITY:
+        if name in (settings.extra_env or {}):
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                f"extra_env must not set {name}: the Engine's devices are its allocation",
+            )
     return settings
 
 
@@ -243,91 +240,6 @@ def _identity() -> IntegrationIdentity:
         adapter_distribution=_ADAPTER_DISTRIBUTION,
         framework="specialized-engine",
         framework_distribution=_ADAPTER_DISTRIBUTION,
-    )
-
-
-@dataclass(frozen=True)
-class _Layout:
-    """The rank process's world and how the contract splits it."""
-
-    world: int
-    attention_tensor_parallel_size: int
-    data_parallel_size: int
-    context_parallel_size: int
-    expert_parallel_size: int
-
-
-def _layout(
-    parallelism: Parallelism,
-    error_code: AdapterErrorCode = AdapterErrorCode.invalid_settings,
-) -> tuple[Parallelism, _Layout]:
-    """The contract's reading: the device count is outer tensor parallelism;
-    attention tensor x data x context parallelism multiply to it and expert
-    parallelism divides it ([[RFC-0003:C-SPECIALIZED-ENGINE]]). Only this
-    arithmetic is checked; the Engine rejects layouts it does not support."""
-    outer = parallelism.outer or ParallelismOuter()
-    attention = parallelism.attention or ParallelismAttention()
-    experts = parallelism.experts or ParallelismExperts()
-    world = outer.tensor_parallel_size or 1
-    if (outer.pipeline_parallel_size or 1) != 1 or (experts.data_parallel_size or 1) != 1:
-        raise AdapterOperationError(
-            error_code,
-            "the Specialized Engine contract has no pipeline or expert data parallelism",
-        )
-    data = attention.data_parallel_size or 1
-    context = attention.context_parallel_size or 1
-    if world % (data * context) != 0:
-        raise AdapterOperationError(
-            error_code,
-            f"attention data x context parallelism ({data * context}) must divide "
-            f"the device count ({world})",
-        )
-    attention_tp = world // (data * context)
-    if attention.tensor_parallel_size not in (None, attention_tp):
-        raise AdapterOperationError(
-            error_code,
-            f"attention tensor x data x context parallelism must equal the device count "
-            f"({world}); attention tensor parallelism is {attention_tp}",
-        )
-    expert = experts.expert_parallel_size or 1
-    if world % expert != 0:
-        raise AdapterOperationError(
-            error_code,
-            f"expert parallelism ({expert}) must divide the device count ({world})",
-        )
-    expert_tp = world // expert
-    if experts.tensor_parallel_size not in (None, expert_tp):
-        raise AdapterOperationError(
-            error_code,
-            f"expert tensor parallelism is the device count divided by expert "
-            f"parallelism ({expert_tp})",
-        )
-    if experts.dense_tensor_parallel_size not in (None, attention_tp):
-        raise AdapterOperationError(
-            error_code,
-            f"dense expert tensor parallelism equals attention tensor parallelism ({attention_tp})",
-        )
-
-    effective = Parallelism(
-        outer=ParallelismOuter(tensor_parallel_size=world, pipeline_parallel_size=1),
-        attention=ParallelismAttention(
-            tensor_parallel_size=attention_tp,
-            data_parallel_size=data,
-            context_parallel_size=context,
-        ),
-        experts=ParallelismExperts(
-            tensor_parallel_size=expert_tp,
-            data_parallel_size=1,
-            expert_parallel_size=expert,
-            dense_tensor_parallel_size=attention_tp,
-        ),
-    )
-    return effective, _Layout(
-        world=world,
-        attention_tensor_parallel_size=attention_tp,
-        data_parallel_size=data,
-        context_parallel_size=context,
-        expert_parallel_size=expert,
     )
 
 
@@ -345,20 +257,13 @@ def _public_endpoint(worker_count: int) -> EndpointDeclaration:
     )
 
 
-def _kv_store_plan(
-    input: PlanServeInput, role_access: dict[str, KvStoreAccess]
-) -> KvStorePlan | None:
-    """The declared store, with how each Engine role uses it and how long the
-    Engine takes to publish to it ([[RFC-0003:C-SERVE-KV-STORE]])."""
+def _kv_store_plan(input: PlanServeInput) -> KvStorePlan | None:
+    """The declared tier — a `mooncake` store InferLab runs, or a `filesystem`
+    directory each machine binds — whose access and publication bound every
+    Engine reports at readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
     if input.kv_store is None:
         return None
-    engine = validate_settings(StackSettings, input.stack_settings or {})
-    return inferlab_kvstore.plan(input.kv_store).model_copy(
-        update={
-            "role_access": role_access,
-            "publication_bound_ms": round(engine.kv_tier_publication_seconds * 1000),
-        }
-    )
+    return inferlab_kvstore.plan(input.kv_store).model_copy(update={"access_observed": True})
 
 
 def _plan_engine_role(
@@ -367,35 +272,30 @@ def _plan_engine_role(
     ports: list[str],
     profiled: bool,
 ) -> tuple[ServeRoleResult, list[ServeReplicaRequirement]]:
-    """One Engine role: each replica is one rank process owning its devices."""
+    """One Engine role: each replica is one rank process owning its devices on
+    each machine its placement binds ([[ADR-0073]])."""
     settings = _settings(role.settings)
-    if input.kv_store is None and any(
-        value is not None
-        for value in (
-            settings.kv_tier_capacity_bytes,
-            settings.kv_tier_snapshot_interval,
-            settings.kv_tier_timeout_seconds,
-        )
-    ):
+    # The Engine owns its layout: a role declares only its device count, and
+    # the Engine reports its data-parallel rank count at readiness
+    # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    if role.parallelism != Parallelism():
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            "kv_tier_* settings apply only when the server declares a kv_store",
+            f"role {role.id!r} declares parallelism components; a Specialized Engine "
+            "takes its layout from Engine arguments in extra_args, so declare only devices",
         )
-    parallelism, layout = _layout(
-        fill_outer_tensor_parallel(role.parallelism, role.devices, 1, "no other parallelism")
-    )
-    require_declared_devices(
-        layout.world,
-        role.devices,
-        "the Specialized Engine contract (outer tensor parallelism is the device count)",
-    )
+    if role.devices is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"role {role.id!r} must declare devices, the Engine's device count",
+        )
     role_result = ServeRoleResult(
         id=role.id,
         kind=role.kind,
         declared_replica_count=role.replica_count,
         effective_replica_count=role.replica_count,
         effective_settings=effective_settings(settings),
-        effective_parallelism=parallelism,
+        effective_parallelism=Parallelism(),
         public_endpoint=None,
     )
     replicas = [
@@ -403,9 +303,9 @@ def _plan_engine_role(
             id=replica_id(role, replica_index),
             role_id=role.id,
             replica_index=replica_index,
-            device_count=layout.world,
+            device_count=role.devices,
             ports=list(ports),
-            primary_ports=[],
+            primary_ports=[_RENDEZVOUS_PORT] if role.kind == ServeRoleKind.serve else [],
             primary_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
             worker_readiness=ReadinessProbe(root=ReadinessProbeProcessAlive()),
             capture_target=(
@@ -450,6 +350,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             "pd_router_settings instead of gateway_settings",
         )
     routing = validate_settings(PdRouterSettings, input.pd_router_settings or {})
+    inferlab_gateway_smg.validate_extra_args(routing.extra_args or [], component="P/D Router")
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
     prefill_result, prefill_replicas = _plan_engine_role(
@@ -467,14 +368,10 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             "worker_protocol": SettingValue(root=_WORKER_PROTOCOL),
             **effective_settings(routing),
         },
+        observe_data_parallel_size=True,
     )
     return PlanServeResult(
-        # Prefill reads and writes the tier; decode writes the blocks it
-        # generates so a later request can reuse them
-        # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-        kv_store=_kv_store_plan(
-            input, {prefill.id: KvStoreAccess.read_write, decode.id: KvStoreAccess.write}
-        ),
+        kv_store=_kv_store_plan(input),
         serve_state_probe=input.kv_store is not None,
         integration=_identity(),
         roles=[prefill_result, decode_result],
@@ -521,6 +418,7 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
         )
     role = require_role(input, ServeRoleKind.serve)
     gateway_settings = validate_settings(GatewaySettings, input.gateway_settings or {})
+    inferlab_gateway_smg.validate_extra_args(gateway_settings.extra_args or [], component="Gateway")
     inferlab_gateway_smg.require_policy_workers(
         gateway_settings.policy, role.replica_count, role.id
     )
@@ -539,11 +437,11 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
         implementation_version=inferlab_gateway_smg.installed_version(),
         effective_settings={
             "worker_protocol": SettingValue(root=_WORKER_PROTOCOL),
-            "policy": SettingValue(root=gateway_settings.policy),
+            **effective_settings(gateway_settings),
             **inferlab_gateway_smg.gateway_settings(),
         },
         endpoint=_public_endpoint(role.replica_count),
-        readiness=inferlab_gateway_smg.routed_single_readiness(),
+        readiness=inferlab_gateway_smg.routed_single_readiness(observe_data_parallel_size=True),
         ports=[inferlab_gateway_smg.PROMETHEUS_PORT],
         targets=[GatewayTarget(root=GatewayTargetEngine(role=role.id))],
         render_inputs=[],
@@ -559,11 +457,10 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
         ],
         gateway=gateway,
         pd_router=None,
-        # The contract's Engine reaches a declared store through
-        # `--kv-tier-store` ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-        # Every Engine writes computed prefixes to the tier and reads from it,
-        # so one priming request covers the server.
-        kv_store=_kv_store_plan(input, {role.id: KvStoreAccess.read_write}),
+        # The contract's Engine reaches a declared tier through
+        # `--kv-tier-store` and reports how it uses it
+        # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+        kv_store=_kv_store_plan(input),
         # A worker keeps serving without its store, so readiness and every
         # profiling window read each worker's tier state
         # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
@@ -571,36 +468,60 @@ def plan_serve(input: PlanServeInput) -> PlanServeResult:
     )
 
 
+def _hosts(
+    engines: list[ServeProcessAllocationModelRank],
+) -> list[list[ServeProcessAllocationModelRank]]:
+    """Each replica's rank processes in rank order: one per host, rank zero
+    being host 0 ([[ADR-0073]]). Ranks of one replica hold equal device
+    counts, since the Engine's world is its visible devices times the host
+    count."""
+    replicas: dict[tuple[str, int], list[ServeProcessAllocationModelRank]] = {}
+    for engine in engines:
+        replicas.setdefault((engine.role, engine.replica), []).append(engine)
+    hosts = []
+    for (role, replica), ranks in sorted(replicas.items()):
+        ranks.sort(key=lambda engine: engine.rank)
+        if [engine.rank for engine in ranks] != list(range(ranks[0].rank_count)):
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_request,
+                f"replica {replica} of role {role!r} does not carry every rank of its allocation",
+            )
+        if len({len(engine.devices) for engine in ranks}) > 1:
+            held = ", ".join(f"{engine.machine} {len(engine.devices)}" for engine in ranks)
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_settings,
+                f"replica {replica} of role {role!r} spans hosts with unequal device counts "
+                f"({held}); every host of a Specialized Engine replica holds the same count",
+            )
+        hosts.append(ranks)
+    return hosts
+
+
 def _require_engines(
     allocations: list[ServeProcessAllocationModelRank],
-) -> list[ServeProcessAllocationModelRank]:
-    if not allocations or sorted(engine.replica for engine in allocations) != list(
-        range(len(allocations))
-    ):
+    role_kinds: tuple[ServeRoleKind, ...] = (ServeRoleKind.serve,),
+) -> list[list[ServeProcessAllocationModelRank]]:
+    if not allocations:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
-            "the Specialized Engine integration requires one model-rank allocation per replica",
+            "the Specialized Engine integration requires model-rank allocations",
         )
-    return [_require_engine(engine) for engine in allocations]
+    return _hosts([_require_engine(engine, role_kinds) for engine in allocations])
 
 
 def _require_engine(
     engine: ServeProcessAllocationModelRank,
-    role_kinds: tuple[ServeRoleKind, ...] = (ServeRoleKind.serve,),
+    role_kinds: tuple[ServeRoleKind, ...],
 ) -> ServeProcessAllocationModelRank:
-    if engine.role_kind not in role_kinds or engine.rank != 0 or engine.rank_count != 1:
+    if engine.role_kind not in role_kinds:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
-            "each Engine allocation must be a serve replica in one rank process",
+            f"Engine allocation {engine.process!r} belongs to an unplanned role kind",
         )
-    effective_parallelism, layout = _layout(
-        engine.effective_parallelism,
-        AdapterErrorCode.invalid_request,
-    )
-    if engine.effective_parallelism != effective_parallelism or len(engine.devices) != layout.world:
+    if engine.effective_parallelism != Parallelism() or not engine.devices:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
-            "the Engine rank process must own one device per rank of its world",
+            "the Engine rank process must own its allocated devices and no parallelism shape",
         )
     if engine.endpoint is None:
         raise AdapterOperationError(
@@ -652,10 +573,36 @@ def _require_gateway(allocation: object, engine_role: str) -> ServeProcessAlloca
     return allocation
 
 
+def _tier_location(
+    store: EndpointAssignment | None, directory: str | None
+) -> tuple[str, str] | None:
+    """The tier backend and location rendered for an Engine: the `mooncake`
+    store's address, or the machine's bound `filesystem` directory."""
+    if store is not None:
+        return mooncake.BACKEND, mooncake.client_address(store)
+    if directory is not None:
+        return filesystem.BACKEND, directory
+    return None
+
+
+def _rendezvous(host_zero: ServeProcessAllocationModelRank) -> str:
+    port = host_zero.ports.get(_RENDEZVOUS_PORT)
+    if port is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"multi-host rank zero {host_zero.process!r} is missing its rendezvous port",
+        )
+    return f"{port.host}:{port.port}"
+
+
 def _render_engine(
     input: RenderServeInput,
     allocation: ServeProcessAllocationModelRank,
+    rendezvous: str | None,
 ) -> RenderedServeProcess:
+    """One host's Engine. Rank zero is host 0 and the replica's endpoint; on a
+    replica spanning machines, the other ranks join host 0 at `rendezvous`
+    and listen nowhere ([[ADR-0073]])."""
     reject_auxiliary_locators(allocation)
     endpoint = allocation.endpoint
     if endpoint is None:
@@ -664,35 +611,20 @@ def _render_engine(
             "the Engine allocation is missing its endpoint",
         )
     settings = _settings(allocation.effective_settings)
-    _, layout = _layout(
-        allocation.effective_parallelism,
-        AdapterErrorCode.invalid_request,
+    contract_args = ["--listen", f"{endpoint.host}:{endpoint.port}"] if allocation.rank == 0 else []
+    contract_args.extend(
+        ["--model", allocation.model_locator, "--served-model-name", input.model.served_name]
     )
-    if settings.prefix_cache_ranks is not None and len(settings.prefix_cache_ranks) != layout.world:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"prefix_cache_ranks declares {len(settings.prefix_cache_ranks)} ranks "
-            f"but the Engine's world has {layout.world}",
-        )
-    inferlab_args = [
-        "--listen",
-        f"{endpoint.host}:{endpoint.port}",
-        "--model",
-        allocation.model_locator,
-        "--served-model-name",
-        input.model.served_name,
-        "--tensor-parallel-size",
-        str(layout.attention_tensor_parallel_size),
-    ]
-    if allocation.kv_store is not None:
-        inferlab_args.extend(["--kv-tier-store", mooncake.client_address(allocation.kv_store)])
-        for option, value in (
-            ("--kv-tier-capacity", settings.kv_tier_capacity_bytes),
-            ("--kv-tier-snapshot-interval", settings.kv_tier_snapshot_interval),
-            ("--kv-tier-timeout", settings.kv_tier_timeout_seconds),
-        ):
-            if value is not None:
-                inferlab_args.extend([option, str(value)])
+    if rendezvous is not None:
+        contract_args.extend(["--host-count", str(allocation.rank_count)])
+        if allocation.rank == 0:
+            contract_args.extend(["--rendezvous-listen", rendezvous])
+        else:
+            contract_args.extend(["--host-index", str(allocation.rank), "--rendezvous", rendezvous])
+    tier = _tier_location(allocation.kv_store, allocation.kv_tier_directory)
+    if tier is not None:
+        backend, location = tier
+        contract_args.extend(["--kv-tier-backend", backend, "--kv-tier-store", location])
     # A prefill/decode Engine learns its role, the declared transfer
     # mechanism, and, on prefill, the bootstrap port its decode counterparts
     # connect to ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
@@ -703,7 +635,7 @@ def _render_engine(
                 "the prefill/decode render input carries no KV-transfer mechanism",
             )
         mode = "prefill" if allocation.role_kind == ServeRoleKind.prefill else "decode"
-        inferlab_args.extend(
+        contract_args.extend(
             [
                 "--disaggregation-mode",
                 mode,
@@ -718,34 +650,9 @@ def _render_engine(
                     AdapterErrorCode.invalid_request,
                     f"prefill allocation {allocation.process!r} is missing its bootstrap port",
                 )
-            inferlab_args.extend(["--disaggregation-bootstrap-port", str(bootstrap.port)])
-    # Layout arguments render only when not one, so pure-TP Engines see the
-    # same command as before ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-    for option, size in (
-        ("--data-parallel-size", layout.data_parallel_size),
-        ("--context-parallel-size", layout.context_parallel_size),
-        ("--expert-parallel-size", layout.expert_parallel_size),
-    ):
-        if size != 1:
-            inferlab_args.extend([option, str(size)])
-    for option, value in (
-        ("--default-max-output-tokens", settings.default_max_output_tokens),
-        ("--max-num-batched-tokens", settings.max_num_batched_tokens),
-        ("--gpu-memory-utilization-percent", settings.gpu_memory_utilization_percent),
-        ("--workspace-reserve-mib", settings.workspace_reserve_mib),
-        ("--prefix-cache-gpu-entries", settings.prefix_cache_gpu_entries),
-        ("--prefix-cache-host-memory-percent", settings.prefix_cache_host_memory_percent),
-    ):
-        if value is not None:
-            inferlab_args.extend([option, str(value)])
-    # The worker pairs these two lists by occurrence order, so each is emitted
-    # once per rank in rank order.
-    for rank in settings.prefix_cache_ranks or ():
-        inferlab_args.extend(["--prefix-cache-cpu-bytes-per-rank", str(rank.cpu_bytes)])
-    for rank in settings.prefix_cache_ranks or ():
-        inferlab_args.extend(["--prefix-cache-numa-node-per-rank", str(rank.numa_node)])
+            contract_args.extend(["--disaggregation-bootstrap-port", str(bootstrap.port)])
     argv = list(validate_settings(StackSettings, input.stack_settings or {}).engine_command)
-    argv.extend(merge_serve_args(settings.extra_args or [], inferlab_args, _INFERLAB_OWNED_OPTIONS))
+    argv.extend(merge_serve_args(settings.extra_args or [], contract_args, _CONTRACT_ARGUMENTS))
     return rendered_model_rank(
         allocation, ProcessSpec(argv=argv, env=dict(settings.extra_env or {}))
     )
@@ -781,6 +688,9 @@ def _render_gateway(
             model_locator=engines[0].model_locator,
             workers=[worker for worker in workers if worker is not None],
             policy=policy.root,
+            extra_args=inferlab_gateway_smg.extra_args_setting(
+                allocation.gateway.effective_settings
+            ),
         ),
     )
 
@@ -796,10 +706,14 @@ def _render_prefill_decode(input: RenderServeInput) -> RenderServeResult:
             "render input is not the planned prefill/decode SMG workflow",
         )
     allocations, model_allocations = split_serve_allocations(input.allocations)
-    engines = [
-        _require_engine(engine, (ServeRoleKind.prefill, ServeRoleKind.decode))
-        for engine in model_allocations
-    ]
+    hosts = _require_engines(model_allocations, (ServeRoleKind.prefill, ServeRoleKind.decode))
+    if any(len(ranks) > 1 for ranks in hosts):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "a prefill or decode Specialized Engine replica cannot span machines; "
+            "multi-host replicas are supported for the serve role",
+        )
+    engines = [ranks[0] for ranks in hosts]
     frontends = [
         allocation
         for allocation in allocations
@@ -817,7 +731,7 @@ def _render_prefill_decode(input: RenderServeInput) -> RenderServeResult:
             "and at most one KV store",
         )
     processes = [inferlab_kvstore.render(store) for store in stores]
-    processes.extend(_render_engine(input, engine) for engine in engines)
+    processes.extend(_render_engine(input, engine, None) for engine in engines)
     processes.append(inferlab_gateway_smg.render_pd_frontend(frontends[0], engines))
     return RenderServeResult(integration=_identity(), processes=processes)
 
@@ -836,13 +750,26 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
             "render input is not the planned routed-single SMG workflow",
         )
     allocations, model_allocations = split_serve_allocations(input.allocations)
-    engines = _require_engines(model_allocations)
+    hosts = _require_engines(model_allocations)
+    if input.profiling is not None and any(len(ranks) > 1 for ranks in hosts):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "the Specialized Engine cannot profile a replica that spans machines: the "
+            "Gateway's profiling window reaches only host 0",
+        )
+    # The Gateway routes to each replica's host 0, its only endpoint.
+    engines = [ranks[0] for ranks in hosts]
+    rendezvous = {
+        engine.process: _rendezvous(ranks[0]) if len(ranks) > 1 else None
+        for ranks in hosts
+        for engine in ranks
+    }
     stores = [
         allocation
         for allocation in allocations
         if isinstance(allocation, ServeProcessAllocationKvStore)
     ]
-    if len(allocations) != len(engines) + len(stores) + 1 or len(stores) > 1:
+    if len(allocations) != len(model_allocations) + len(stores) + 1 or len(stores) > 1:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
             "the routed-single workflow requires Engine allocations and one Gateway allocation",
@@ -862,7 +789,7 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
     processes: list[RenderedServeProcess] = []
     for allocation in allocations:
         if isinstance(allocation, ServeProcessAllocationModelRank):
-            processes.append(_render_engine(input, allocation))
+            processes.append(_render_engine(input, allocation, rendezvous[allocation.process]))
         elif isinstance(allocation, ServeProcessAllocationFrontend):
             processes.append(_render_gateway(allocation, engines))
         elif isinstance(allocation, ServeProcessAllocationKvStore):
@@ -870,18 +797,61 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
     return RenderServeResult(integration=_identity(), processes=processes)
 
 
+def _reported_access(value: object) -> KvStoreAccess | None:
+    if isinstance(value, str) and value in {access.value for access in KvStoreAccess}:
+        return KvStoreAccess(value)
+    return None
+
+
+def _reported_publication_ms(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _probe_state(
+    target: ProbeServeTarget,
+    location: str,
+    info: dict[str, object] | None,
+    error: str | None,
+) -> ProbeServeProcessState:
+    if info is None:
+        return ProbeServeProcessState(process=target.process, engaged=False, state={}, error=error)
+    scheduler_info = info.get("scheduler_info")
+    reported: dict[str, object] = scheduler_info if isinstance(scheduler_info, dict) else {}
+    state = {
+        key: SettingValue(root=value)
+        for key in ("kv_tier_state", "kv_tier_store", "kv_tier_access")
+        if isinstance(value := reported.get(key), str)
+    }
+    publication_ms = _reported_publication_ms(reported.get("kv_tier_publication_ms"))
+    if publication_ms is not None:
+        state["kv_tier_publication_ms"] = SettingValue(root=publication_ms)
+    engaged = (
+        reported.get("kv_tier_state") == "available" and reported.get("kv_tier_store") == location
+    )
+    return ProbeServeProcessState(
+        process=target.process,
+        engaged=engaged,
+        state=state,
+        access=_reported_access(reported.get("kv_tier_access")),
+        publication_bound_ms=publication_ms,
+    )
+
+
 def probe_serve(input: ProbeServeInput) -> ProbeServeResult:
-    """Read each Engine's `kv_tier_state` and `kv_tier_store` from its
-    `GetServerInfo` `scheduler_info`: engaged only when the tier is
-    `available` at the store address InferLab rendered
-    ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
-    if input.kv_store is None:
+    """Read each Engine's tier report from its `GetServerInfo`
+    `scheduler_info`: engaged only when the tier is `available` at the
+    location InferLab rendered for it, with the Engine's own access and
+    publication bound ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
+    tiers = [_tier_location(input.kv_store, target.kv_tier_directory) for target in input.processes]
+    locations = [tier[1] for tier in tiers if tier is not None]
+    if not input.processes or len(locations) != len(input.processes):
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
-            "the Specialized Engine probes serve state only for a server with a KV store",
+            "the Specialized Engine probes serve state only for Engines rendered with a KV tier",
         )
-    expected_store = mooncake.client_address(input.kv_store)
-    with ThreadPoolExecutor(max_workers=max(1, len(input.processes))) as pool:
+    with ThreadPoolExecutor(max_workers=len(input.processes)) as pool:
         readings = list(
             pool.map(
                 lambda target: inferlab_gateway_smg.worker_server_info(
@@ -890,23 +860,12 @@ def probe_serve(input: ProbeServeInput) -> ProbeServeResult:
                 input.processes,
             )
         )
-    states: list[ProbeServeProcessState] = []
-    for target, (info, error) in zip(input.processes, readings, strict=True):
-        if info is None:
-            states.append(
-                ProbeServeProcessState(process=target.process, engaged=False, state={}, error=error)
+    return ProbeServeResult(
+        integration=_identity(),
+        processes=[
+            _probe_state(target, location, info, error)
+            for target, location, (info, error) in zip(
+                input.processes, locations, readings, strict=True
             )
-            continue
-        scheduler_info = info.get("scheduler_info")
-        reported = scheduler_info if isinstance(scheduler_info, dict) else {}
-        state = {
-            key: SettingValue(root=value)
-            for key in ("kv_tier_state", "kv_tier_store")
-            if isinstance(value := reported.get(key), str)
-        }
-        engaged = (
-            reported.get("kv_tier_state") == "available"
-            and reported.get("kv_tier_store") == expected_store
-        )
-        states.append(ProbeServeProcessState(process=target.process, engaged=engaged, state=state))
-    return ProbeServeResult(integration=_identity(), processes=states)
+        ],
+    )

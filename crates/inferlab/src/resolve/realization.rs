@@ -291,7 +291,13 @@ pub(super) fn realize_runtime(
                 ),
             });
         }
-        if command.env.contains_key("CUDA_VISIBLE_DEVICES") {
+        if command
+            .env
+            .contains_key(crate::workspace::CUDA_VISIBLE_DEVICES)
+            || command
+                .env
+                .contains_key(crate::workspace::CUDA_DEVICE_ORDER)
+        {
             return Err(InferlabError::AdapterSemantics {
                 message: format!(
                     "integration {:?} attempted to select devices for process {:?}",
@@ -330,16 +336,16 @@ pub(super) fn realize_runtime(
         };
         let mut explicit_env = command.env.keys().cloned().collect::<Vec<_>>();
         env.extend(command.env.clone());
-        env.insert(
-            "CUDA_VISIBLE_DEVICES".to_owned(),
-            allocation
-                .devices()
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        explicit_env.push("CUDA_VISIBLE_DEVICES".to_owned());
+        let devices = allocation
+            .devices()
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        for (name, value) in crate::workspace::device_env(&devices) {
+            env.insert(name.to_owned(), value);
+            explicit_env.push(name.to_owned());
+        }
         env.insert("PWD".to_owned(), runtime_cwd.to_string_lossy().into_owned());
         explicit_env.push("PWD".to_owned());
         explicit_env.sort();

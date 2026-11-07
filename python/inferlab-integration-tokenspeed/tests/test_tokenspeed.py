@@ -249,6 +249,7 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
         "serve_role_value": None,
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
+        "target_data_parallel_size_pointer": None,
     }
     assert result.gateway.backend == "smg"
     assert result.gateway.implementation == "smg"
@@ -713,3 +714,25 @@ def test_a_kv_store_on_a_prefill_decode_server_is_rejected_during_planning() -> 
 
     with pytest.raises(AdapterOperationError, match="KV store on a prefill/decode server"):
         plan_serve(plan_input)
+
+
+def test_p_d_router_extra_args_are_recorded_and_may_not_name_a_rendered_option() -> None:
+    declared = SettingValue.model_validate(["--worker-startup-check-interval", "1"])
+    result = plan_serve(
+        _prefill_decode_plan_input().model_copy(
+            update={"pd_router_settings": {"extra_args": declared}}
+        )
+    )
+    assert result.pd_router is not None
+    assert result.pd_router.effective_settings["extra_args"] == declared
+
+    with pytest.raises(AdapterOperationError, match="--decode-policy"):
+        plan_serve(
+            _prefill_decode_plan_input().model_copy(
+                update={
+                    "pd_router_settings": {
+                        "extra_args": SettingValue.model_validate(["--decode-policy=random"])
+                    }
+                }
+            )
+        )

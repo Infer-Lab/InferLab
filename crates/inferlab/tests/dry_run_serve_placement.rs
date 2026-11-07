@@ -206,9 +206,11 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
         recipe["measurements"]["benches"][0]["client"]["command"]["argv"][2],
         "inferlab_bench_runner.bench_client"
     );
-    assert_eq!(
-        recipe["measurements"]["benches"][0]["client"]["prefix_cache_reset"]["path"],
-        "/reset_prefix_cache"
+    // A generated cold population is namespaced and plans no reset
+    // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    assert!(recipe["measurements"]["benches"][0]["client"]["prefix_cache_reset"].is_null());
+    assert!(
+        recipe["measurements"]["benches"][0]["client"]["population_namespace_nonce"].is_string()
     );
     assert_eq!(serve["workspace"]["dirty"], false);
     assert_eq!(serve["workspace"]["revision_reproducible"], true);
@@ -271,6 +273,9 @@ fn serve_and_recipe_dry_run_share_the_default_case() -> Result<(), Box<dyn Error
     assert_eq!(serve["server"]["readiness_timeout_seconds"], 900);
     assert_eq!(server_rank.devices, [0, 1]);
     assert_eq!(server_rank.command.env["CUDA_VISIBLE_DEVICES"], "0,1");
+    // Ordinals are nvidia-smi indices, so the process enumerates its devices
+    // in PCI bus order ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    assert_eq!(server_rank.command.env["CUDA_DEVICE_ORDER"], "PCI_BUS_ID");
     let cache = &server_rank.runtime_cache;
     let default_cache_root = workspace.root.path().join(".inferlab/cache/runtime");
     assert_eq!(cache.storage_root_source, "workspace-default");
@@ -2712,7 +2717,7 @@ fn write_server_record(
     Ok(())
 }
 
-const CURRENT_SERVER_SCHEMA: u32 = 16;
+const CURRENT_SERVER_SCHEMA: u32 = 17;
 
 /// A running server keeps its ports, which observation may not see while
 /// idle, and the plan names the command that releases them
@@ -2927,6 +2932,66 @@ fn a_plan_that_disagrees_with_declared_devices_is_rejected() -> Result<(), Box<d
     Ok(())
 }
 
+/// An integration whose Engines own their layout returns no shape: the
+/// declared `devices` places the role and the record claims no layout
+/// ([[RFC-0003:C-SERVE-PARALLELISM]]).
+#[test]
+fn an_engine_owned_layout_is_placed_by_devices_and_claims_no_shape() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    // A role of such an integration declares only its device count.
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let manifest = fs::read_to_string(&manifest_path)?
+        .replacen(
+            "[servers.deepseek-v4-flash-qualify.cases.tp2.parallelism.outer]\ntensor_parallel_size = 2\n",
+            "[servers.deepseek-v4-flash-qualify.cases.tp2]\n",
+            1,
+        )
+        .replacen(
+            "[servers.deepseek-v4-flash-qualify.parallelism.outer]\npipeline_parallel_size = 1\n",
+            "",
+            1,
+        )
+        .replacen(
+            "[servers.deepseek-v4-flash-qualify.roles.serve.parallelism.attention]\ncontext_parallel_size = 1\n",
+            "",
+            1,
+        );
+    fs::write(manifest_path, manifest)?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_ENGINE_OWNED_LAYOUT", "1")
+        .args([
+            "serve",
+            "start",
+            "deepseek-v4-flash-qualify",
+            "--set",
+            "server.devices=2",
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let role = &plan["server"]["roles"][0];
+    assert_eq!(role["effective_parallelism"], serde_json::json!({}));
+    assert_eq!(role["replicas"][0]["device_count"], 2);
+
+    let undeclared = workspace
+        .command()
+        .env("FIXTURE_ENGINE_OWNED_LAYOUT", "1")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(!undeclared.status.success());
+    assert!(
+        String::from_utf8(undeclared.stderr)?.contains("returned no parallelism shape"),
+        "a shapeless plan without declared devices must be rejected"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_placement_shortfall_names_the_declared_devices_layer() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
@@ -3112,6 +3177,92 @@ fn a_declared_kv_store_runs_beside_the_first_replica_and_reaches_every_rank()
     assert_eq!(
         server["declarations"][0]["common"]["kv_store"]["backend"],
         "mooncake"
+    );
+    Ok(())
+}
+
+fn filesystem_tier_workspace() -> Result<TestWorkspace, Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let manifest_path = workspace.root.path().join(".inferlab/workspace.toml");
+    let mut manifest = fs::read_to_string(&manifest_path)?;
+    manifest.push_str("\n[servers.deepseek-v4-flash-qualify.kv_store]\nbackend = \"filesystem\"\n");
+    fs::write(manifest_path, manifest)?;
+    Ok(workspace)
+}
+
+/// A `filesystem` tier is a directory each machine binds: no store process
+/// runs, and every Engine on the machine receives the bound directory
+/// unchanged ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[test]
+fn a_filesystem_tier_reaches_each_engine_as_its_machine_binding() -> Result<(), Box<dyn Error>> {
+    let workspace = filesystem_tier_workspace()?;
+    let unbound = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+    assert!(!unbound.status.success());
+    assert!(
+        String::from_utf8(unbound.stderr)?.contains("binds no kv_tier_directory"),
+        "a tier server on a machine without a bound directory must be rejected"
+    );
+
+    let bindings_path = workspace.root.path().join(".inferlab/local.toml");
+    let bindings = fs::read_to_string(&bindings_path)?.replacen(
+        "ports = [8000]\n",
+        "ports = [8000]\nkv_tier_directory = \"/fixture/kv-tier\"\n",
+        1,
+    );
+    fs::write(bindings_path, bindings)?;
+    let plan = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])?;
+    let server = &plan["server"];
+    assert_eq!(
+        server["declarations"][0]["common"]["kv_store"]["backend"],
+        "filesystem"
+    );
+    assert!(
+        server["kv_store"].is_null(),
+        "an externally operated tier runs no store process"
+    );
+    let argv = server["roles"][0]["replicas"][0]["ranks"][0]["command"]["argv"]
+        .as_array()
+        .ok_or("the Engine has no argv")?;
+    let directory = argv
+        .iter()
+        .position(|argument| argument == "--kv-tier-store")
+        .and_then(|index| argv.get(index + 1))
+        .ok_or("the Engine did not receive the tier directory")?;
+    assert_eq!(directory, "/fixture/kv-tier");
+    Ok(())
+}
+
+/// A store InferLab runs may still have its access observed: the store
+/// process starts as declared, and the probe reaches every model-serving
+/// rank with the store's endpoint ([[RFC-0003:C-SERVE-KV-STORE]]).
+#[test]
+fn a_run_store_with_observed_access_probes_every_rank_at_its_endpoint() -> Result<(), Box<dyn Error>>
+{
+    let workspace = kv_store_workspace()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_KV_STORE_ACCESS_OBSERVED", "1")
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let server = &plan["server"];
+    assert_eq!(server["kv_store"]["process"]["id"], "kv-store");
+    let probe = &server["serve_state_probe"];
+    assert_eq!(probe["access_observed"], true);
+    assert_eq!(
+        probe["kv_store"]["port"],
+        server["kv_store"]["process"]["endpoint"]["port"]
+    );
+    assert!(
+        probe["processes"]
+            .as_array()
+            .is_some_and(|targets| !targets.is_empty()),
+        "every model-serving rank is probed"
     );
     Ok(())
 }

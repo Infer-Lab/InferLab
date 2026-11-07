@@ -2,7 +2,8 @@
 
 `inferlab tui` opens a persistent, read-only view of one InferLab workspace.
 It uses the same upward discovery as other workspace commands. Select a
-workspace explicitly with the global option when needed:
+workspace explicitly with `--workspace`, and an alternate machine-local
+bindings file with `--local`, when needed:
 
 ```sh
 inferlab tui
@@ -13,8 +14,9 @@ inferlab tui --refresh-interval 2s
 The refresh override applies only to that invocation; `inferlab tui --help`
 prints the current default interval. Declared workspace definitions and the
 workspace dirty state refresh on a slower cadence of at least a minute; press
-`r` to re-read every source, including those, immediately. Opening, refreshing, searching, and
-closing the TUI do not write a UI session or launch an InferLab workflow.
+`r` to re-read every source, including those, immediately. Opening,
+refreshing, searching, and closing the TUI do not write a UI session or launch
+an InferLab workflow.
 
 At startup the TUI asks the terminal for its background color, then falls back
 to `COLORFGBG`, and otherwise assumes a dark background; it then uses a palette
@@ -39,8 +41,7 @@ the switched palette is not tinted.
 - **Operations** shows concurrent workspace CLI invocations. Each command owns
   one atomic JSON observation under `.inferlab/runtime/observations/`. A normal
   completion removes it; abrupt residue stays visible and is classified from
-  its host, boot, PID, and process-start identity.
-  A workspace command fails with `E5002` before continuing when it cannot
+  its host, boot, PID, and process-start identity. A workspace command fails with `E5002` before continuing when it cannot
   establish this required observation; update failures remove the previous
   live observation and are reported rather than silently degrading.
 - **Records** shows top-level records as a timeline grouped by calendar day.
@@ -52,9 +53,9 @@ the switched palette is not tinted.
   stays beneath its parent as unavailable. Details open with status and
   authority pills, then human-readable start, finish, duration, and age; a
   workload record shows its case metrics as one table with a column per case
-  and a trend across the cases, followed by case state. Exact record identifiers, paths, child
-  references, scratchpad references, and explicitly referenced logs remain
-  available farther down the detail surface; case stdout and stderr artifacts
+  and a trend across the cases, followed by case state. Exact record
+  identifiers, paths, child references, scratchpad references, and explicitly
+  referenced logs remain available farther down the detail surface; case stdout and stderr artifacts
   remain mapped to their owning case under **Case Artifacts**. Bench records
   additionally show the recorded terminal and capture outcomes and identify the
   request, linear-session, or agentic-replay source. Request details include
@@ -65,8 +66,8 @@ the switched palette is not tinted.
   profiling populations, branch/join counters, unavailable dimensions, and raw
   artifact references distinct. Older records without tagged source evidence
   remain navigable and say that the source is unavailable instead of inferring
-  one. For a workload record with case metrics, `m` opens a
-  record-local comparison surface. It selects one available metric at a time
+  one. For a workload record with case metrics, `m` opens a record-local
+  comparison surface. It selects one available metric at a time
   and draws horizontal bars for every case in that record; it does not combine
   records or add an SLO interpretation.
 - **Workspace** groups declared models, stacks, servers, Evals, Benches,
@@ -83,8 +84,9 @@ or reconstruct a record from definitions.
 A list row is one line: a status glyph (`✓` succeeded, `×` failed, `◆`
 warning, `●` live or running, a spinner for an active operation), the kind, the
 name with its summary, the lifecycle, a subdued `DECL`, `REC`, `EPH`, or `OBS`
-authority badge, and the age. A successful read is intentionally implicit. Only exceptional read
-health is added to a row, for example `refresh stale` or `refresh unavailable`.
+authority badge, and the age. A successful read is intentionally implicit;
+only exceptional read health is added to a row, for example `refresh stale` or
+`refresh unavailable`.
 A record row therefore presents its authoritative recorded lifecycle
 (`running`, `stopped`, `failed`, or a workload outcome) without making a
 successful file read look like another lifecycle. Detail surfaces keep source
@@ -96,17 +98,16 @@ existing bounded server-status observation to report `OBS process alive`, `OBS
 process dead`, `OBS process stale`, or `OBS process unavailable`. A successfully
 observed dead process is Attention rather than Active. One failed probe does
 not affect other objects; after an earlier successful probe its last value
-remains visible as stale.
-Terminal server records such as `stopped` are not probed because their recorded
-lifecycle is already authoritative and no running process is claimed.
+remains visible as stale. Terminal server records such as `stopped` are not
+probed because their recorded lifecycle is already authoritative and no running
+process is claimed.
 
 The Metrics selector groups recorded names into throughput, observed input,
 request latency, TTFT, TPOT, cache, speculation, SLO, and `OTHER` families.
 Acceptance length uses tokens; acceptance rate and good-request ratio use
 percentages; goodput uses requests per second. It defaults to request throughput
 when that metric exists and retains unknown recorded metric names unchanged
-under `OTHER` without inventing a unit.
-Concurrency and request-rate cases form separate chart regions and are ordered
+under `OTHER` without inventing a unit. Concurrency and request-rate cases form separate chart regions and are ordered
 by their typed effective load values, including the explicit request evidence
 for adaptive probes; case identifiers are not parsed to recover load. A case
 whose selected metric is absent remains visible as `—`, and its recorded state
@@ -118,8 +119,9 @@ serialization.
 
 Source Health distinguishes a current read from `stale`, `unavailable`, or
 `incompatible` data. A current read condenses to its authority and observation
-time; an exceptional read lists every observation fact. A failed refresh after an earlier success retains the last
-successful value as stale with its observation time and age. A malformed or
+time; an exceptional read lists every observation fact. A failed refresh after
+an earlier success retains the last successful value as stale with its
+observation time and age. A malformed or
 newer operation schema is isolated to that operation. Refresh generations do
 not overlap; missed ticks coalesce, and the prior complete generation remains
 navigable while the next one is read. The refresh indicator describes that
@@ -150,8 +152,7 @@ with a count per status (Overview and Records), and the refresh indicator.
 Below that width a header carries the same facts. Wide terminals show list and
 detail together. Intermediate and narrow terminals show one pane at a time so
 neither pane is squeezed into unreadable columns. Panels have rounded borders,
-and the focused one is drawn in the brand blue.
-List and detail titles retain the selected object and list position while the
+and the focused one is drawn in the brand blue. List and detail titles retain the selected object and list position while the
 content scrolls. Long labels and workspace paths use a visible ellipsis instead
 of silent clipping. Empty collections, an empty filter result, and an
 unavailable source have different messages. Refresh and quit remain visible
@@ -161,8 +162,7 @@ current dimensions.
 Global Find is a dedicated cross-view result surface. Results are labeled by
 object kind and authority, with contiguous kinds sectioned visually. The arrow
 keys select a result while the query remains open, and `Enter` opens that
-selected object. Matching
-is case-insensitive and ranks exact, prefix, and contains matches before bounded
+selected object. Matching is case-insensitive and ranks exact, prefix, and contains matches before bounded
 fuzzy matches. Each typed field is matched independently, so characters from an
 identifier cannot combine with characters from a status or another field to
 create a false result. Find never searches raw JSON, environments, artifacts,

@@ -348,6 +348,17 @@ impl Progress {
         Ok(())
     }
 
+    /// A diagnostic the operator should act on; it never changes the outcome.
+    pub(crate) fn warning(&self, message: &str) {
+        let Some(shared) = &self.shared else {
+            return;
+        };
+        let command = lock_state(shared).progress.command.clone();
+        tracing::dispatcher::with_default(&shared.dispatcher, || {
+            tracing::warn!("[{command}] {message}");
+        });
+    }
+
     pub(crate) fn readiness_failure(&self, failure: &str) {
         let Some(shared) = &self.shared else {
             return;

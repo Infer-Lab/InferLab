@@ -140,12 +140,16 @@ pub(super) fn build_bench_plan(
             });
         }
     }
-    // The reset capability is the public action or the per-target reset of
-    // every model-serving replica ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    // A generated population separates reuse by namespace and needs no reset;
+    // every other cold or primed start resets through the public action or
+    // the per-target reset of every model-serving replica
+    // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    let namespaced = execution::namespaces_population(&definition);
     let (prefix_cache_reset, replica_prefix_cache_resets) = if matches!(
         resolved_definition.cache_start,
         BenchCacheStart::Cold | BenchCacheStart::Primed
-    ) {
+    ) && !namespaced
+    {
         if context.prefix_cache_reset.is_none() && context.replica_prefix_cache_resets.is_empty() {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
@@ -195,6 +199,9 @@ pub(super) fn build_bench_plan(
             slo,
             required_population_count,
             population: None,
+            population_namespace_nonce: namespaced
+                .then(crate::workload::plan::draw_population_namespace_nonce),
+            case_populations: BTreeMap::new(),
             command: ClientCommandPlan {
                 argv: vec![
                     toolchain.python.to_string_lossy().into_owned(),
@@ -209,6 +216,11 @@ pub(super) fn build_bench_plan(
             serve_state_probe: context.serve_state_probe.clone(),
             prefix_cache_conditioning,
             prefix_publication_ms: context.conditioning_serving.publication_wait_ms,
+            // A rank count or store sharing the server reports only at
+            // readiness is applied to the run's plan before preparation
+            // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+            serving_facts_observed: context.conditioning_serving.data_parallel_pending
+                || context.conditioning_serving.sharing_pending,
         },
     })
 }
@@ -269,7 +281,12 @@ fn prefix_cache_conditioning_plan(
         | ResolvedBenchRequestSource::Dataset { .. }
         | ResolvedBenchRequestSource::Replay { .. } => return Ok(None),
     };
-    let (route, frontend_fanout) = if serving.gateway_frontend && serving.conditioning_targets > 1 {
+    // Observed sharing may collapse every target into one shared cache, so
+    // the target check waits for readiness ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    let (route, frontend_fanout) = if serving.gateway_frontend
+        && serving.conditioning_targets > 1
+        && !serving.sharing_pending
+    {
         let Some(action) = frontend_conditioning else {
             return Err(InferlabError::InvalidConfig {
                 message: format!(

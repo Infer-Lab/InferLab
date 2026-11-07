@@ -26,10 +26,12 @@ pub(crate) use runtime::{run_bench, run_eval};
 pub(crate) use plan::{
     BenchCasePlan, BenchExecutionPlan, BenchPlan, BenchPrefixCacheConditioningPlan,
     BenchPreparationStep, ClientCommandPlan, ConditioningServingShape, EvalExecutionPlan, EvalPlan,
-    LoadShape, MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan,
+    LoadShape, MeasurementPlan, MeasurementResolveContext, ResolvedWorkloadPlan, RoleDataParallel,
     WorkloadServeStateProbe, WorkloadServerAccess,
 };
-pub(crate) use planning::{resolve_manual_bench, resolve_measurements, resolved_request_count};
+pub(crate) use planning::{
+    conditioning_shape_of, resolve_manual_bench, resolve_measurements, resolved_request_count,
+};
 
 #[cfg(test)]
 mod tests {

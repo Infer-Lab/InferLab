@@ -9,6 +9,7 @@ use inferlab_protocol::{ProbeServeInput, ProbeServeProcessState, ProbeServeResul
 use inferlab_runtime::operation_bound::OperationBound;
 use inferlab_runtime::server::SystemProcessRuntime;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -85,7 +86,41 @@ pub(crate) fn probe_once<P: ServeStateProbe>(
         Duration::from_secs(plan.adapter_timeout_seconds),
         probe_input(resolved, plan),
     );
-    judge(outcome, started)
+    let mut evidence = judge(outcome, started);
+    if plan.access_observed && evidence.engaged {
+        require_observed_access(&mut evidence, plan);
+    }
+    evidence
+}
+
+/// An observed store access is engaged only when every process reported its
+/// access and publication bound and every process of one role reported the
+/// same access ([[RFC-0003:C-SERVE-KV-STORE]]).
+fn require_observed_access(evidence: &mut ServeStateProbeEvidence, plan: &ServeStateProbePlan) {
+    let mut role_access = BTreeMap::new();
+    for state in &evidence.processes {
+        let role = plan.role_of(&state.process);
+        let failure = match (role, state.access, state.publication_bound_ms) {
+            (Some(role), Some(access), Some(_)) => {
+                match role_access.insert(role, (state.process.as_str(), access)) {
+                    Some((earlier_process, earlier)) if earlier != access => Some(format!(
+                        "role {role:?} processes report different store access: {earlier_process:?} {earlier:?}, {:?} {access:?}",
+                        state.process
+                    )),
+                    _ => None,
+                }
+            }
+            _ => Some(format!(
+                "process {:?} reported no store access and publication bound",
+                state.process
+            )),
+        };
+        if let Some(failure) = failure {
+            evidence.engaged = false;
+            evidence.error = Some(failure);
+            return;
+        }
+    }
 }
 
 /// Probe a bound server from a Bench case at a profiling window boundary

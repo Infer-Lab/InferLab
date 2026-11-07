@@ -4,7 +4,7 @@
 mod tests;
 
 use super::BenchRunOutcome;
-use super::case::run_bench_case;
+use super::case::run_case_on_live_server;
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
 use crate::workload::adaptive::{AdaptiveRatePlanner, Observation, ProbeClassification};
@@ -20,6 +20,7 @@ use inferlab_runtime::interrupt;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_adaptive(
+    server_record_id: &str,
     plan: &BenchPlan,
     policy: &str,
     preparation_order: &[BenchPreparationStep],
@@ -74,7 +75,15 @@ pub(crate) fn run_adaptive(
                 .item(&case.id, observations.len() + 1, maximum_probe_count)
                 .log(session.absolute(&paths.stderr)),
         )?;
-        let mut record = run_bench_case(plan, &case, session, None)?;
+        // A lost server fails the probe, which ends the search below.
+        let (mut record, _) = run_case_on_live_server(
+            server_record_id,
+            !observations.is_empty(),
+            plan,
+            &case,
+            session,
+            None,
+        )?;
         let case_succeeded = record.status == WorkloadStatus::Succeeded;
         let classification = record.evidence.slo.as_ref().map(classify_slo_evaluation);
         if case_succeeded && classification.is_none() {

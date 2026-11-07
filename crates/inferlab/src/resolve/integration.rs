@@ -425,12 +425,29 @@ pub(super) fn plan_integration<C: AdapterClient>(
                     stack.integration, role_input.id
                 ),
             })?;
-        validate_effective_parallelism(
-            &stack.integration,
-            &format!("role {:?}", role_input.id),
-            &role_input.parallelism,
-            &role.effective_parallelism,
-        )?;
+        // An integration whose Engines own their layout returns no shape: the
+        // declared `devices` is then the role's only placement fact, and the
+        // data-parallel rank count is observed at readiness
+        // ([[RFC-0003:C-SERVE-PARALLELISM]]).
+        if role.effective_parallelism == inferlab_protocol::Parallelism::default() {
+            if role_input.devices.is_none()
+                || role_input.parallelism != inferlab_protocol::Parallelism::default()
+            {
+                return Err(InferlabError::AdapterSemantics {
+                    message: format!(
+                        "integration {:?} returned no parallelism shape for role {:?}, which requires the role to declare devices and no parallelism component",
+                        stack.integration, role_input.id
+                    ),
+                });
+            }
+        } else {
+            validate_effective_parallelism(
+                &stack.integration,
+                &format!("role {:?}", role_input.id),
+                &role_input.parallelism,
+                &role.effective_parallelism,
+            )?;
+        }
         // A declared device count is the sole authority; an integration
         // that plans any other count violates the contract
         // ([[RFC-0003:C-SERVE-PARALLELISM]]).
@@ -676,11 +693,15 @@ pub(super) fn plan_integration<C: AdapterClient>(
             ),
         });
     }
+    // An externally operated store is infrastructure the control plane runs
+    // no process for ([[RFC-0003:C-SERVE-KV-STORE]]).
     if let Some(store) = validate_kv_store_plan(
         &stack.integration,
         effective.kv_store.as_ref(),
         planned.kv_store.as_ref(),
-    )? {
+    )?
+    .filter(|store| !store.externally_operated)
+    {
         let render_inputs =
             load_render_inputs(&workspace.root, &stack.integration, &store.render_inputs)?;
         requirements.push(ProcessRequirement::new(
@@ -717,6 +738,33 @@ pub(super) fn rendered_process_id(process: &RenderedServeProcess) -> &str {
     }
 }
 
+/// An externally operated tier is a directory each machine binds; every
+/// Engine receives its own machine's directory unchanged
+/// ([[RFC-0003:C-SERVE-KV-STORE]]).
+fn bind_kv_tier_directories(
+    workspace: &LoadedWorkspace,
+    allocations: &mut [ResolvedProcessAllocation],
+) -> Result<(), InferlabError> {
+    for allocation in allocations
+        .iter_mut()
+        .filter(|allocation| allocation.is_model_rank())
+    {
+        let machine = allocation.machine().to_owned();
+        let directory = workspace
+            .local
+            .machines
+            .get(&machine)
+            .and_then(|binding| binding.kv_tier_directory.as_ref())
+            .ok_or_else(|| InferlabError::InvalidConfig {
+                message: format!(
+                    "machine {machine:?} binds no kv_tier_directory for the server's externally operated KV store"
+                ),
+            })?;
+        allocation.bind_kv_tier_directory(directory.display().to_string());
+    }
+    Ok(())
+}
+
 pub(super) fn render_integration<C: AdapterClient>(
     workspace: &LoadedWorkspace,
     request: &ResolveRequest<'_>,
@@ -732,7 +780,7 @@ pub(super) fn render_integration<C: AdapterClient>(
         .as_ref()
         .is_some_and(|gateway| gateway.render_source == RenderSource::ControlPlane);
     let mut occupancy = super::occupancy::Occupancy::new(&workspace.root);
-    let (allocations, unavailable) = allocate_processes(
+    let (mut allocations, unavailable) = allocate_processes(
         workspace,
         &selection.server_id,
         &selection.placement_id,
@@ -749,6 +797,13 @@ pub(super) fn render_integration<C: AdapterClient>(
         &effective.devices_origins(),
         &mut occupancy,
     )?;
+    if planned
+        .kv_store
+        .as_ref()
+        .is_some_and(|store| store.externally_operated)
+    {
+        bind_kv_tier_directories(workspace, &mut allocations)?;
+    }
     gate_engine_trace_placement(
         workspace,
         request,
@@ -836,13 +891,25 @@ pub(super) fn render_integration<C: AdapterClient>(
             .ok_or_else(|| InferlabError::InvalidConfig {
                 message: "control-plane frontend requires a P/D Router plan".to_owned(),
             })?;
-        let prefill_data_parallel_size = planned
+        // The built-in frontend is rendered before readiness, so it needs a
+        // declared prefill data-parallel size ([[RFC-0003:C-SERVE-PARALLELISM]]).
+        let prefill_data_parallel_size = match planned
             .roles
             .iter()
             .find(|role| role.id == pd_router.prefill_role)
-            .and_then(|role| role.effective_parallelism.attention.as_ref())
-            .and_then(|attention| attention.data_parallel_size)
-            .unwrap_or(1);
+            .map(|role| crate::workload::RoleDataParallel::from_shape(&role.effective_parallelism))
+        {
+            Some(crate::workload::RoleDataParallel::Declared(size)) => size,
+            Some(_) => {
+                return Err(InferlabError::AdapterSemantics {
+                    message: format!(
+                        "integration {:?} returned no parallelism shape for prefill role {:?}, which the control-plane frontend needs to render",
+                        stack.integration, pd_router.prefill_role
+                    ),
+                });
+            }
+            None => 1,
+        };
         let process = render_builtin_frontend(
             gateway,
             pd_router,
@@ -927,6 +994,20 @@ fn validate_kv_store_plan<'a>(
                     "integration {integration:?} declared KV store readiness other than an HTTP path or process liveness"
                 )));
             }
+            // Observed access is reported by the serve-state probe; a plan
+            // that also declares it would hold two authorities for one fact.
+            if plan.access_observed
+                && (!plan.role_access.is_empty() || plan.publication_bound_ms > 0)
+            {
+                return Err(semantics(format!(
+                    "integration {integration:?} declared KV store access or a publication bound for a store whose access it observes"
+                )));
+            }
+            if plan.externally_operated && !plan.ports.is_empty() {
+                return Err(semantics(format!(
+                    "integration {integration:?} declared ports for an externally operated KV store"
+                )));
+            }
             Ok(Some(plan))
         }
     }
@@ -939,20 +1020,12 @@ pub(super) fn shared_prefix_cache(planned: &inferlab_protocol::PlanServeResult) 
     let Some(store) = &planned.kv_store else {
         return false;
     };
-    let mut owners = planned
-        .roles
-        .iter()
-        .filter(|role| {
-            matches!(
-                role.kind,
-                inferlab_protocol::ServeRoleKind::Serve | inferlab_protocol::ServeRoleKind::Prefill
-            )
-        })
-        .peekable();
-    owners.peek().is_some()
-        && owners.all(|role| {
-            store.role_access.get(&role.id) == Some(&inferlab_protocol::KvStoreAccess::ReadWrite)
-        })
+    crate::execution::store_cache_is_shared(
+        planned
+            .roles
+            .iter()
+            .map(|role| (role.kind, [store.role_access.get(&role.id).copied()])),
+    )
 }
 
 /// The publication bound a primed start waits after conditioning: the store

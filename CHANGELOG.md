@@ -7,6 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-11-07
+
+### Changed
+
+- An Eval or Bench case now fails when a server process has exited, checked
+  before and after each one, naming the process and the `inferlab serve stop`
+  command. A static-matrix Bench then skips its remaining cases, and a recipe
+  skips its remaining workloads and cleans up at once, so a server that lost a
+  process no longer keeps producing measurements or holding devices until the
+  recipe ends. Each process is observed within a bounded attempt, so an
+  unreachable host stops the measurement, reported as a process that could not
+  be observed, instead of blocking it.
+- Every process InferLab gives devices — server processes, containers, and
+  `inferlab run` with a projected placement — now also receives
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`. Device ordinals in machine bindings are
+  `nvidia-smi` indices, which follow PCI bus order, while CUDA enumerates
+  fastest-first by default, so on a machine with mixed GPUs a process could
+  open other devices than the ones InferLab checked. An integration may not
+  render the variable, and a container's `pass_env` may not name it.
+- **Breaking:** a `cold` or `primed` Bench over a generated population
+  (`random`, `random_mixture`) in a static matrix no longer resets the server's
+  prefix cache ([[ADR-0072]]). Each execution draws a nonce, recorded in the
+  plan and the record, and each case reads its own population: warmup entries
+  from the case's warmup namespace, profiling entries from its profiling
+  namespace, so no case, phase, run, or other Bench shares content, while the
+  seed keeps lengths, prefix lengths, and groups identical. `cold` now means
+  nothing the window could reuse exists, not an empty cache. These Benches no
+  longer need a reset capability, so they run on servers that declare none,
+  such as SGLang with a KV store. Prompts differ between runs; regenerate them
+  from the recorded seed and namespaces. Replay, dataset, linear-session, and
+  adaptive Benches keep resetting, and `uncontrolled` keeps the shared
+  seed-keyed population.
+- **Breaking:** the Specialized Engine integration renders only what InferLab
+  allocates ([[ADR-0071]]): `--listen`, `--model`, `--served-model-name`, the
+  prefill/decode arguments, and a KV tier's backend and directory, with the
+  Engine's devices as its `CUDA_VISIBLE_DEVICES`. It no longer renders
+  `--tensor-parallel-size`, `--data-parallel-size`, `--context-parallel-size`,
+  `--expert-parallel-size`, or any tuning option. A role declares only
+  `devices`; declaring a `parallelism` component fails planning. Every other
+  Engine option, layout included, goes in the role's `extra_args` with the
+  Engine's own spelling. The typed settings `default_max_output_tokens`,
+  `max_num_batched_tokens`, `gpu_memory_utilization_percent`,
+  `workspace_reserve_mib`, `prefix_cache_*`, and `kv_tier_*`, and the stack
+  setting `kv_tier_publication_seconds`, now fail planning with a pointer to
+  Engine arguments. An Engine must report `data_parallel_size` in
+  `GetServerInfo` `server_args`: readiness reads it for every Engine from the
+  Gateway's `/workers` registry, the record keeps it, and Bench derives the
+  cache-owning targets from it. A primed start that the Gateway cannot condition
+  therefore fails after the server is ready and before any reset, naming the
+  reported counts.
+- **Breaking:** a Specialized Engine given a KV tier, `mooncake` or the new
+  `filesystem`, receives `--kv-tier-backend` with the backend beside
+  `--kv-tier-store`, and reports `kv_tier_access` and
+  `kv_tier_publication_ms` beside `kv_tier_state` and `kv_tier_store`.
+  Readiness requires every Engine engaged at its rendered store address or
+  directory with one access per role, the shared prefix cache follows the
+  reported access, and a primed start waits the largest reported publication
+  bound.
+- **Breaking:** the adapter protocol is version 15. The Adapter SDK is 0.15.0;
+  the vLLM, SGLang, and TensorRT-LLM integrations 0.14.0; TokenSpeed and the
+  Specialized Engine 0.15.0; `inferlab-gateway-smg` 0.5.0,
+  `inferlab-gateway-dynamo` 0.4.0, and `inferlab-kvstore` 0.2.0. Server records
+  move to schema version 17, recipe records to 7, and workload records to 27.
+  Stop servers and recipes started by an earlier InferLab before upgrading.
+- Every lm-eval Eval keeps lm-eval's per-sample log, including single-trial
+  runs: each question's responses, filtered answer, and score. Previously only
+  repeated trials kept it, so a multi-question Eval such as GPQA kept
+  aggregate scores only. The log omits each question's document and rendered
+  prompt, which the task reproduces, and keeps lm-eval's hashes of both.
+
+### Added
+
+- SMG Gateway and P/D Router settings (Specialized Engine, and the TokenSpeed
+  P/D Router) accept `extra_args`: SMG options of your own, such as
+  `--worker-startup-check-interval`, appended after every option InferLab
+  renders and recorded verbatim. An entry naming an option InferLab renders,
+  or a bare `--`, fails planning.
+- A recipe run whose server has `profiling = true` but that selects no
+  `--capture` now warns at start and at the end (`no capture taken`), naming
+  `--capture` and the recipe's workloads. The server runs instrumented either
+  way, so such a run used to finish successfully with no profile.
+- A Specialized Engine `serve` replica can span machines ([[ADR-0073]]). Place it
+  as an explicit rank list in the local bindings, one rank per machine: host 0
+  receives `--listen`, `--host-count`, and `--rendezvous-listen` on a port from
+  its machine, and every other host receives `--host-count`, `--host-index`,
+  `--rendezvous`, and its own machine's model locator. The Gateway, readiness,
+  and observed facts address host 0, which answers for the whole replica.
+  Hosts with unequal device counts, multi-host prefill/decode, and multi-host
+  profiling are rejected before launch.
+- A `filesystem` KV store backend: a tier directory on a shared file system
+  that each machine binds as `kv_tier_directory` in its local machine binding
+  and that every Engine on the machine receives unchanged. InferLab runs no
+  process for it and never creates, inspects, or cleans the directory; other
+  servers may share it, and keeping it undisturbed during a measurement is up
+  to whoever runs it. A server on a machine without a binding fails
+  resolution, naming the machine.
+- A single-trial lm-eval Eval records each generation request and every HTTP
+  attempt's returned text, reasoning content, finish reason, server token
+  usage, timing, and status as it runs, so the questions answered before a
+  timeout or interruption are kept.
+
+### Fixed
+
+- A replayed population can stop at end of sequence again. Populations written
+  under `output_stop = "eos"` expressed it as an empty `extra`, which could not
+  override the exact-length default every replayed request starts from, so
+  their replay generated to the full output length; they now carry
+  `"ignore_eos": false` explicitly. An entry you write yourself does the same
+  with `"extra": {"ignore_eos": false}`. Entries without a stop member keep
+  generating exactly their `output_length`, and other `extra` members still
+  reach their requests. Populations exported under `eos` by earlier releases
+  replay at full length; add `"ignore_eos": false` to their entries or export
+  them again.
+- Recording Eval request payloads no longer re-reads the evidence file for
+  every request, which made long Evals spend time quadratic in their request
+  count.
+
 ## [0.23.2] - 2026-10-28
 
 ### Added

@@ -156,6 +156,54 @@ pub(crate) struct DeviceWaitEvidence {
 }
 
 impl ServerRecord {
+    /// Whether the server's cache-owning roles share one prefix cache, and
+    /// the largest publication bound, from the store access each process
+    /// reported in the engaged readiness probe; absent until one engaged
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    pub(crate) fn observed_store_sharing(&self) -> Option<(bool, u64)> {
+        let plan = self.resolved.server.serve_state_probe.as_ref()?;
+        let engaged = self
+            .serve_state_probes
+            .iter()
+            .rev()
+            .find(|probe| probe.engaged)?;
+        let shared = crate::execution::store_cache_is_shared(
+            self.resolved.server.roles.iter().map(|role| {
+                (
+                    role.kind,
+                    engaged
+                        .processes
+                        .iter()
+                        .filter(|state| plan.role_of(&state.process) == Some(role.id.as_str()))
+                        .map(|state| state.access),
+                )
+            }),
+        );
+        let publication_ms = engaged
+            .processes
+            .iter()
+            .filter_map(|state| state.publication_bound_ms)
+            .max()
+            .unwrap_or(0);
+        Some((shared, if shared { publication_ms } else { 0 }))
+    }
+
+    /// Each model-serving process's data-parallel rank count, as its frontend
+    /// registry reported it at readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    pub(crate) fn observed_data_parallel_sizes(&self) -> BTreeMap<String, u32> {
+        self.process_evidence
+            .values()
+            .filter_map(|evidence| match &evidence.readiness {
+                Some(ReadinessEvidence::HttpTargetRegistry {
+                    matched_targets, ..
+                }) => Some(matched_targets),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|target| Some((target.process.clone()?, target.data_parallel_size?)))
+            .collect()
+    }
+
     /// Evidence shapes MUST NOT be encoded under an earlier server record
     /// version, so the version gate stops older records before serde does.
     /// Version 15 records cleanup completion waits — process exit, container
@@ -163,8 +211,11 @@ impl ServerRecord {
     /// removal, and settle deadlines ([[RFC-0005:C-EVIDENCE]],
     /// [[RFC-0009:C-COMPLETION-WAITS]]). Version 16 records each role's
     /// declared `devices` in the resolved declarations
-    /// ([[RFC-0003:C-SERVE-PARALLELISM]]).
-    pub(crate) const SCHEMA_VERSION: u32 = 16;
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]). Version 17 records each role's
+    /// observed data-parallel rank counts in place of an absent effective
+    /// shape, each Engine's observed KV store access and publication bound,
+    /// and each Engine's bound tier directory ([[RFC-0005:C-EVIDENCE]]).
+    pub(crate) const SCHEMA_VERSION: u32 = 17;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence
@@ -402,7 +453,7 @@ fn adapter_operation_evidence(resolved: &ResolvedExecution) -> Vec<AdapterOperat
     .collect()
 }
 
-pub(super) fn load_record(root: &Path, id: &str) -> Result<ServerRecord, InferlabError> {
+pub(crate) fn load_record(root: &Path, id: &str) -> Result<ServerRecord, InferlabError> {
     validate_record_id("server record", id)?;
     let path = root.join(RECORDS_DIR).join(id).join(RECORD_FILE);
     let bytes = fs::read(&path).map_err(|source| InferlabError::RecordIo {

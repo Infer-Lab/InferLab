@@ -1,7 +1,7 @@
 //! Deterministic matrix-case scheduling and per-execution identity checks.
 
 use super::BenchRunOutcome;
-use super::case::run_bench_case;
+use super::case::run_case_on_live_server;
 use super::session::duplicate_runtime_session_identity;
 use crate::InferlabError;
 use crate::progress::{Phase, Progress};
@@ -10,6 +10,7 @@ use crate::workload::{BenchCasePlan, BenchPlan};
 use inferlab_runtime::interrupt;
 
 pub(super) fn run_matrix_cases(
+    server_record_id: &str,
     plan: &BenchPlan,
     cases: &[BenchCasePlan],
     session: &mut WorkloadRecordSession,
@@ -32,7 +33,14 @@ pub(super) fn run_matrix_cases(
                 .item(&case.id, index + 1, cases.len())
                 .log(session.absolute(&paths.stderr)),
         )?;
-        let mut record = run_bench_case(plan, case, session, capture.as_deref_mut())?;
+        let (mut record, server_lost) = run_case_on_live_server(
+            server_record_id,
+            index > 0,
+            plan,
+            case,
+            session,
+            capture.as_deref_mut(),
+        )?;
         if let Some(evidence) = record.evidence.session.as_ref()
             && let Some(duplicate) = duplicate_runtime_session_identity(
                 session
@@ -60,6 +68,11 @@ pub(super) fn run_matrix_cases(
                 .is_none_or(|evaluation| evaluation.passed);
         session.push_bench_case(record)?;
         session.rewrite()?;
+        if server_lost {
+            session.record_mut().skip_reason =
+                Some("remaining Bench cases skipped because the server lost a process".to_owned());
+            break;
+        }
     }
     Ok(BenchRunOutcome {
         measurement_succeeded,

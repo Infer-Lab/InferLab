@@ -83,8 +83,10 @@ impl RecipeRecord {
     /// the local workspace definition files composed into the run
     /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). Version 6 carries each role's
     /// declared `devices` in the embedded resolved execution
-    /// ([[RFC-0003:C-SERVE-PARALLELISM]]).
-    pub(crate) const SCHEMA_VERSION: u32 = 6;
+    /// ([[RFC-0003:C-SERVE-PARALLELISM]]). Version 7 embeds a resolved
+    /// execution whose Engines may report their layout and store access at
+    /// readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    pub(crate) const SCHEMA_VERSION: u32 = 7;
 }
 
 pub(crate) fn run(
@@ -111,6 +113,10 @@ pub(crate) fn run(
     ))?;
     let server_id = session.record().server.id.clone();
     let mut server_started = false;
+    let capture_hint = uncaptured_profiling_warning(&resolved);
+    if let Some(warning) = &capture_hint {
+        progress.warning(warning);
+    }
 
     let mut data_assets = session.record().data_assets.clone();
     let owner_record_id = session.record().id.clone();
@@ -180,6 +186,9 @@ pub(crate) fn run(
     }
 
     let mut gate_succeeded = measurements.gate.is_none();
+    // Each workload checks the server before and after it measures; a failed
+    // workload tells the recipe whether the server lost a process.
+    let mut server_lost = false;
     let eval_total = measurements.evals.len();
     for (index, plan) in measurements.evals.iter().enumerate() {
         progress.phase(Phase::named("Eval").item(&plan.id, index + 1, eval_total))?;
@@ -190,27 +199,19 @@ pub(crate) fn run(
             DataAssetConsumerKind::Eval,
             &plan.id,
         )?;
-        let outcome = if !server_started {
-            workload::skip(
+        let outcome = match skip_reason(server_started, server_lost) {
+            Some(reason) => workload::skip(
                 root,
                 &id,
                 workload::ResolvedWorkloadPlan::Eval(Box::new(plan.clone())),
-                "server did not start",
+                reason,
                 progress,
                 data_assets.clone(),
-            )
-        } else if interrupt::received() {
-            workload::skip(
-                root,
-                &id,
-                workload::ResolvedWorkloadPlan::Eval(Box::new(plan.clone())),
-                "recipe interrupted",
-                progress,
-                data_assets.clone(),
-            )
-        } else {
-            workload::run_eval(root, &id, plan, &server_id, progress, data_assets)
+            ),
+            None => workload::run_eval(root, &id, plan, &server_id, progress, data_assets),
         };
+        server_lost |= workload_failed(outcome.as_ref().ok().map(|record| record.status))
+            && server_lost_process(root, &server_id);
         match outcome {
             Ok(record) => {
                 if measurements.gate.as_deref() == Some(plan.id.as_str()) {
@@ -251,35 +252,18 @@ pub(crate) fn run(
             DataAssetConsumerKind::Bench,
             &plan.id,
         )?;
-        let outcome = if !server_started {
-            workload::skip(
+        let reason = skip_reason(server_started, server_lost)
+            .or_else(|| (!gate_succeeded).then_some("eval gate did not succeed"));
+        let outcome = match reason {
+            Some(reason) => workload::skip(
                 root,
                 &id,
                 workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
-                "server did not start",
+                reason,
                 progress,
                 data_assets.clone(),
-            )
-        } else if interrupt::received() {
-            workload::skip(
-                root,
-                &id,
-                workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
-                "recipe interrupted",
-                progress,
-                data_assets.clone(),
-            )
-        } else if !gate_succeeded {
-            workload::skip(
-                root,
-                &id,
-                workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
-                "eval gate did not succeed",
-                progress,
-                data_assets.clone(),
-            )
-        } else {
-            workload::run_bench(
+            ),
+            None => workload::run_bench(
                 root,
                 &id,
                 plan,
@@ -289,8 +273,10 @@ pub(crate) fn run(
                 workload::ResolvedWorkloadPlan::Bench(Box::new(plan.clone())),
                 progress,
                 data_assets,
-            )
+            ),
         };
+        server_lost |= workload_failed(outcome.as_ref().ok().map(|record| record.status))
+            && server_lost_process(root, &server_id);
         match outcome {
             Ok(record) => session.record_mut().benches.push(WorkloadRecordRef {
                 definition_id: plan.id.clone(),
@@ -385,7 +371,32 @@ pub(crate) fn run(
     } else {
         RecipeStatus::Failed
     })?;
+    if let Some(warning) = &capture_hint {
+        progress.warning(warning);
+    }
     Ok(session.into_record())
+}
+
+/// A server set up for profiling is run to capture; a run that selects no
+/// capture says so at start and at the end, so a missing `--capture` is not
+/// found only when analysis begins.
+fn uncaptured_profiling_warning(resolved: &ResolvedExecution) -> Option<String> {
+    let measurements = resolved.measurements.as_ref()?;
+    let captures = measurements.evals.iter().any(|eval| eval.capture)
+        || measurements.benches.iter().any(|bench| bench.capture);
+    (!captures && resolved.server.profiling).then(|| {
+        let workloads = measurements
+            .evals
+            .iter()
+            .map(|eval| eval.id.as_str())
+            .chain(measurements.benches.iter().map(|bench| bench.id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no capture taken: server {:?} sets profiling = true, but this run selects no capture; pass --capture <WORKLOAD> (one of: {workloads})",
+            resolved.server.id
+        )
+    })
 }
 
 /// Stop one recipe record ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). A terminal
@@ -660,4 +671,34 @@ impl RecipeRecordSession {
 fn write_record(root: &Path, record: &RecipeRecord) -> Result<(), InferlabError> {
     let path = root.join(RECORDS_DIR).join(&record.id).join(RECORD_FILE);
     crate::record::write_json(&path, record)
+}
+
+/// Why the recipe's next workload is skipped, if it is. A server that lost
+/// a process measures nothing more; cleanup ends its remaining processes
+/// ([[RFC-0004:C-MEASUREMENTS]]).
+fn skip_reason(server_started: bool, server_lost: bool) -> Option<&'static str> {
+    if !server_started {
+        Some("server did not start")
+    } else if interrupt::received() {
+        Some("recipe interrupted")
+    } else if server_lost {
+        Some("server lost a process")
+    } else {
+        None
+    }
+}
+
+/// Whether a workload failed; `None` is a workload that ended in an error.
+fn workload_failed(status: Option<WorkloadStatus>) -> bool {
+    status.is_none_or(|status| status == WorkloadStatus::Failed)
+}
+
+/// Whether the recipe's server is observed to have lost a process. An
+/// observation that cannot be made counts as not lost: the workload's own
+/// check then fails with the cause.
+fn server_lost_process(root: &Path, server_id: &str) -> bool {
+    crate::server::lost_process_error(root, server_id)
+        .ok()
+        .flatten()
+        .is_some()
 }

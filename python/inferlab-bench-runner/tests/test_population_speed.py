@@ -70,7 +70,7 @@ def test_speed_bench_materialization_filters_without_replacement_and_keeps_only_
                     "license": "NVIDIA Evaluation Dataset License",
                     "cache_path": str(source_path),
                     "cache_state": "present",
-                    "materialization_identity": "speed-bench-first-turn-v1",
+                    "materialization_identity": "speed-bench-first-turn-v2",
                     "provides_output_targets": False,
                 },
             },

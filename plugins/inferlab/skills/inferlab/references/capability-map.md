@@ -8,18 +8,19 @@ this map are not implicitly exposed by InferLab.
 
 | Command | Purpose | Owning reference |
 | --- | --- | --- |
-| `tui` | View operations, records, declarations, metrics, logs, and journal state without mutation | [Evidence and diagnosis](evidence-and-diagnosis.md) |
+| `tui` | View operations, records, declarations, metrics, logs, and journal state without mutation | [Evidence and diagnosis](evidence-and-diagnosis.md#tui) |
+| `web` | Serve a token-protected browser console that views and compares records across workspaces and launches detached jobs through the CLI | [Evidence and diagnosis](evidence-and-diagnosis.md#web-console) |
 | `workspace show`, `workspace lock` | Inspect the merged public catalog and produce its Pixi lock | [Workspaces and stacks](workspaces-and-stacks.md) |
 | `stack status` | Check Pixi confirmation and declared realization checks | [Workspaces and stacks](workspaces-and-stacks.md) |
-| `toolchain install` | Install the release-owned lm-eval and AIPerf runtimes | [Measurements](measurements.md) |
-| `serve start`, `status`, `logs`, `stop` | Own a long-running named server lifecycle | [Serving and recipes](serving-and-recipes.md) |
-| `recipe run` | Run serve, selected Eval/Bench suite, and cleanup as one closed loop | [Serving and recipes](serving-and-recipes.md) |
+| `toolchain install` | Install the release-owned lm-eval, AIPerf, and image-packaging runtimes | [Measurements](measurements.md) |
+| `serve start`, `status`, `logs`, `stop` | Own a long-running named server lifecycle | [Serving and recipes](serving-and-recipes.md#manual-server-lifecycle) |
+| `recipe run` | Run serve, selected Eval/Bench suite, and cleanup as one closed loop | [Serving and recipes](serving-and-recipes.md#closed-loop) |
 | `recipe stop` | Stop a running recipe from any shell or host sharing the workspace | [Serving and recipes](serving-and-recipes.md#stopping-a-run) |
 | `bench` | Run one named Bench against an explicit managed server | [Measurements](measurements.md) |
 | `job interrupt` | Interrupt a detached job started by `--detach` or the web console | [Serving and recipes](serving-and-recipes.md#detached-runs) |
 | `run` | Execute a probe in a stack or image realization; with `--record`, keep a run record of a workload InferLab does not model | [Images and ad-hoc execution](images-and-run.md) |
 | `image build` | Assemble, inspect, optionally export, and validate a named runtime image | [Images and ad-hoc execution](images-and-run.md) |
-| `scratchpad note`, `scratchpad show` | Maintain the append-only operator narrative | [Evidence and diagnosis](evidence-and-diagnosis.md) |
+| `scratchpad note`, `scratchpad show` | Maintain the append-only operator narrative | [Evidence and diagnosis](evidence-and-diagnosis.md#scratchpad) |
 | `agent install`, `update`, `uninstall`, `doctor` | Manage the bundled agent plugin | [Agent plugin](agent-plugin.md) |
 | `license` | Print the retained product license | [Agent plugin](agent-plugin.md) |
 
@@ -43,37 +44,32 @@ The [workspace-authoring index](workspace-authoring.md) routes every authoring
 task to one of these authorities. Operational references describe how to
 run and diagnose the resolved definitions; they do not define a second schema.
 
-## Measurement Coverage
-
-Prefix geometry describes the frozen request population. Cache-read metrics
-describe observed server behavior; neither substitutes for the other. AgentX
-trace replay delegates its tree scheduling to AIPerf rather than adding a
-general InferLab DAG runtime; its semantics live in
-[Bench authoring](bench-authoring.md#semianalysis-agentx-trace-replay).
-
-## Parallelism And Capture Mechanisms
-
-- Attention context parallelism (`parallelism.attention`), per-backend
-  lowering, and device rules:
-  [Workspace definitions and placement](workspace-definition.md#context-parallelism).
-- Workload capture mechanisms and per-backend support:
-  [Execution authoring](execution-authoring.md#workload-profiling);
-  capture lifecycle and evidence: [Profiling](profiling.md).
-
 ## Cross-Cutting Workflows
 
-- Dry-run and typed overrides: [Serving and recipes](serving-and-recipes.md) and
-  [Execution authoring](execution-authoring.md).
+- Dry-run and typed overrides:
+  [Serving and recipes](serving-and-recipes.md#resolution) and
+  [Invocation patches](execution-authoring.md#invocation-patches).
 - Local, SSH, multi-rank, multi-replica, and prefill/decode placement:
-  [Workspace definitions and placement](workspace-definition.md).
-- Workload-attached capture definitions: [Execution authoring](execution-authoring.md).
-  Capture execution and evidence: [Profiling](profiling.md).
-- Runtime-image and container definitions: [Execution authoring](execution-authoring.md).
-  Build, selection, and probes: [Images and ad-hoc execution](images-and-run.md).
-- Source identity, effective-value records, cleanup, TUI observations, metric
-  comparisons, scratchpad links, stable error codes, and privacy:
+  [Workspace definitions and placement](workspace-definition.md); attention
+  context parallelism in
+  [Context parallelism](workspace-definition.md#context-parallelism).
+- Workload capture: definitions and per-backend mechanisms in
+  [Execution authoring](execution-authoring.md#workload-profiling); execution
+  and evidence in [Profiling](profiling.md).
+- Runtime images and containers: definitions in
+  [Execution authoring](execution-authoring.md#runtime-images-and-ad-hoc-execution);
+  build, selection, and probes in
+  [Images and ad-hoc execution](images-and-run.md).
+- Request populations and cache behavior: prefix geometry describes the frozen
+  request population and cache-read metrics describe observed server behavior;
+  neither substitutes for the other. See [Measurements](measurements.md) and
+  [Bench authoring](bench-authoring.md). AgentX trace replay delegates tree
+  scheduling to AIPerf; InferLab has no general workflow DAG runtime
+  ([AgentX trace replay](bench-authoring.md#semianalysis-agentx-trace-replay)).
+- Source identity, effective-value records, cleanup, TUI and web observations,
+  metric comparisons, scratchpad links, stable error codes, and privacy:
   [Evidence and diagnosis](evidence-and-diagnosis.md).
 
-Consult the [backend support matrix](backend-support.md) before claiming a topology, endpoint,
-profiling path, parallelism mode, or hardware/model combination is qualified.
-“Supported” and “Qualified” are not interchangeable.
+Consult the [backend support matrix](backend-support.md) before claiming a
+topology, endpoint, profiling path, parallelism mode, or hardware/model
+combination is qualified. “Supported” and “Qualified” are not interchangeable.

@@ -207,6 +207,8 @@ if operation == "plan_serve":
             "dense_tensor_parallel_size": 1,
         },
     }
+    if os.environ.get("FIXTURE_ENGINE_OWNED_LAYOUT"):
+        effective_parallelism = {}
     output = {
         "stack_settings": (
             {} if os.environ.get("FIXTURE_DROP_STACK_SETTINGS")
@@ -303,7 +305,18 @@ if operation == "plan_serve":
         } if gateway_backend else {}),
     }
     kv_store = input.get("kv_store")
-    if kv_store and not os.environ.get("FIXTURE_OMIT_KV_STORE_PLAN"):
+    if kv_store and kv_store["backend"] == "filesystem":
+        output["kv_store"] = {
+            "backend": "filesystem",
+            "implementation": "fixture-tier",
+            "implementation_version": "1",
+            "effective_settings": {},
+            "externally_operated": True,
+            "access_observed": True,
+            "readiness": {"kind": "process_alive"},
+        }
+        output["serve_state_probe"] = True
+    elif kv_store and not os.environ.get("FIXTURE_OMIT_KV_STORE_PLAN"):
         output["kv_store"] = {
             "backend": kv_store["backend"],
             "implementation": "fixture-store",
@@ -315,6 +328,9 @@ if operation == "plan_serve":
             "readiness": {"kind": "http", "path": "/health", "port": "admin"},
             "render_inputs": [],
         }
+        if os.environ.get("FIXTURE_KV_STORE_ACCESS_OBSERVED"):
+            output["kv_store"].update(role_access={}, publication_bound_ms=0, access_observed=True)
+            output["serve_state_probe"] = True
     synthetic = input.get("synthetic_acceptance")
     if synthetic:
         # Echo a deterministic valid outcome: the declared length for the
@@ -365,9 +381,9 @@ elif operation == "render_serve":
             continue
         parallelism = allocation["effective_parallelism"]
         settings = allocation["effective_settings"]
-        tp = parallelism["outer"]["tensor_parallel_size"]
-        dp = parallelism["attention"]["data_parallel_size"]
-        ep = parallelism["experts"]["expert_parallel_size"]
+        tp = (parallelism.get("outer") or {}).get("tensor_parallel_size", 1)
+        dp = (parallelism.get("attention") or {}).get("data_parallel_size", 1)
+        ep = (parallelism.get("experts") or {}).get("expert_parallel_size", 1)
         cache_root = allocation["cache"]
         argv = [
             "python", "-m", "vllm.entrypoints.cli.main", "serve",
@@ -379,6 +395,8 @@ elif operation == "render_serve":
         if allocation.get("kv_store"):
             store = allocation["kv_store"]
             argv.extend(["--kv-store", f'{store["host"]}:{store["port"]}'])
+        if allocation.get("kv_tier_directory"):
+            argv.extend(["--kv-tier-store", allocation["kv_tier_directory"]])
         if settings.get("fixture_render_empty_argv"):
             argv = []
         if dp > 1:

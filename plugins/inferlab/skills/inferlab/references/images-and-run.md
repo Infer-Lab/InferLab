@@ -15,7 +15,8 @@ inferlab image build <IMAGE> --builder local --placement local
 inferlab image build <IMAGE> --export /absolute/output/directory
 ```
 
-Dry-run resolves package builds, including the project directory each selected
+Image build, dry-run included, requires a clean workspace; commit or stash
+local changes first. Dry-run resolves package builds, including the project directory each selected
 source path builds at, content-closure reuse, platforms, inspection, export
 paths, and validation eligibility without assembly. A real build creates
 one record, assembles and inspects every producible platform, optionally exports
@@ -59,8 +60,8 @@ environment and `PIXI_PROJECT_ROOT` is unset. Then `[activation.env]` values
 apply: a self-referencing value (`LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"`)
 composes onto what the scripts left, and any other value applies unless the
 variable was already non-empty at container start (`docker run --env` wins).
-`CONDA_PREFIX`, `CUDA_VISIBLE_DEVICES`, `HOME`, `USER`, and `LOGNAME` keep
-InferLab's values. Package-provided `etc/conda/activate.d` scripts do not run
+`CONDA_PREFIX`, `CUDA_DEVICE_ORDER`, `CUDA_VISIBLE_DEVICES`, `HOME`, `USER`, and
+`LOGNAME` keep InferLab's values. Package-provided `etc/conda/activate.d` scripts do not run
 in the image.
 
 A script must be committed, workspace-relative, and must not mention
@@ -93,7 +94,7 @@ realization: its `workspace` path is only a launch directory. Resolution
 probes the framework version inside the image, and the record marks the launch
 as not qualified by the workspace, carrying that observed version. Built and
 external selections are mutually exclusive. Image-backed launches reject
-profiling until an in-container profiler contract exists.
+workload capture; see [Profiling](profiling.md#run-a-capture).
 
 ## Ad-Hoc Probes
 
@@ -109,10 +110,10 @@ inferlab run --external-image official --mount /data -- python3 /data/probe.py
 
 With multiple stacks, `--stack` is required. Container probes receive no host
 mount, device, or machine container grant implicitly, and an external image
-declaring `entrypoint = "image"` runs the command through its own entrypoint. `--mount /absolute/path` is same-path read-only;
-append `:rw` for write access. `--devices 0,1` exposes only those host device
+declaring `entrypoint = "image"` runs the command through its own entrypoint.
+`--mount /absolute/path` is same-path read-only; append `:rw` for write access. `--devices 0,1` exposes only those host device
 indexes. Local probes execute with `CUDA_VISIBLE_DEVICES` set from the
-workspace's default placement when every machine it references launches
+workspace's default placement, with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, when every machine it references launches
 locally — an explicit `CUDA_VISIBLE_DEVICES` in the environment wins, so
 ad-hoc GPU work lands on the workspace's own devices without extra flags.
 Use `run` for diagnostics and for workloads InferLab does not model; a run
@@ -181,5 +182,5 @@ A recorded run behaves differently from an unrecorded one in three ways:
   example piping into `head`) does not stop the command: the record keeps
   its complete output.
 
-Never execute a binary directly through `.pixi/envs/<env>/bin/`; the
-[skill entry point](../SKILL.md) explains why `run` replaces it.
+Never execute a binary directly through `.pixi/envs/<env>/bin/`: that bypasses
+the manifest activation `run` applies.

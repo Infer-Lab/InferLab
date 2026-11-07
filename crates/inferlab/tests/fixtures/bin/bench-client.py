@@ -124,6 +124,83 @@ if args.prepare_source:
     with open(args.output, "w") as handle:
         json.dump(result, handle)
     raise SystemExit(0)
+
+
+def case_group_conditioning(result):
+    """A case's further-group conditioning; misnumbered on request, to show
+    each case's own list is reconciled."""
+    groups = result.get("group_prefix_conditioning")
+    if groups and os.environ.get("FIXTURE_CASE_GROUP_MISNUMBERED") == "1":
+        return [dict(item, group=item["group"] + 1) for item in groups]
+    return groups
+
+
+def namespaced(result):
+    """Mirror the runner's case-namespace contract: one population per case,
+    its warmup entries then its profiling entries, with summaries over every
+    entry and each case's own conditioning prefixes. Content stays the
+    fixture's; only the result shape matters here."""
+    cases = request.get("case_namespaces") or []
+    if not cases or result["status"] != "succeeded":
+        return result
+    shared = result["population"]
+    lines = Path(shared["path"]).read_bytes().splitlines(keepends=True)
+    evidence_rows = Path(shared["evidence_path"]).read_text(encoding="utf-8").splitlines()
+    required = result["requested_entries"]
+    total = 0
+    case_populations = []
+    for case in cases:
+        entries = case["warmup_entries"] + case["profiling_entries"]
+        total += entries
+        case_dir = artifact_dir / f"case-{case['case_id']}"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        population_path = case_dir / "population.jsonl"
+        evidence_path = case_dir / "population-evidence.jsonl"
+        digest = hashlib.sha256()
+        with population_path.open("wb") as population:
+            for index in range(entries):
+                line = lines[index % len(lines)]
+                population.write(line)
+                digest.update(line)
+        evidence_path.write_text(
+            "\n".join(evidence_rows[index % len(evidence_rows)] for index in range(entries)) + "\n",
+            encoding="utf-8",
+        )
+        case_populations.append(
+            {
+                "case_id": case["case_id"],
+                "population": {
+                    "path": str(population_path),
+                    "evidence_path": str(evidence_path),
+                    "sha256": digest.hexdigest(),
+                    "entries": entries,
+                    "tpot_applicable": shared["tpot_applicable"],
+                    "session_templates": [],
+                },
+                "prefix_conditioning": result.get("prefix_conditioning"),
+                "group_prefix_conditioning": case_group_conditioning(result),
+            }
+        )
+    result = dict(result)
+    for key in ("requested_entries", "candidate_entries", "admitted_entries"):
+        result[key] = total
+    targeting = result.get("prompt_token_targeting")
+    if targeting is not None:
+        targeting["exact_entries"] = total
+    geometry = result.get("prefix_geometry")
+    if geometry is not None:
+        if geometry.get("full_prompt_entries") == required:
+            geometry["full_prompt_entries"] = total
+        if geometry.get("group_entries"):
+            geometry["group_entries"] = [total] + [0] * (len(geometry["group_entries"]) - 1)
+    result["population"] = None
+    result["prefix_conditioning"] = None
+    result["group_prefix_conditioning"] = None
+    result["evidence_path"] = case_populations[0]["population"]["evidence_path"]
+    result["case_populations"] = case_populations
+    return result
+
+
 if args.prepare:
     artifact_dir = Path(request["artifact_dir"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +264,7 @@ if args.prepare:
                 "error": replay_failure,
             }
             with open(args.output, "w") as handle:
-                json.dump(result, handle)
+                json.dump(namespaced(result), handle)
             raise SystemExit(0)
         population_path = artifact_dir / "population.jsonl"
         population_path.write_bytes(payload)
@@ -257,7 +334,7 @@ if args.prepare:
             "error": None,
         }
         with open(args.output, "w") as handle:
-            json.dump(result, handle)
+            json.dump(namespaced(result), handle)
         raise SystemExit(0)
     corpus = request_source.get("corpus") if request_source is not None else None
     if request_source is not None and request_source["kind"] == "random" and corpus is not None:
@@ -278,7 +355,7 @@ if args.prepare:
             result = {
                 "schema_version": 1,
                 "status": "failed",
-                "materialization_identity": "inferlab-corpus-slice-v1",
+                "materialization_identity": "inferlab-corpus-slice-v2",
                 "requested_entries": required_entries,
                 "candidate_entries": required_entries,
                 "admitted_entries": 0,
@@ -294,7 +371,7 @@ if args.prepare:
                 ),
             }
             with open(args.output, "w") as handle:
-                json.dump(result, handle)
+                json.dump(namespaced(result), handle)
             raise SystemExit(0)
         sharing = request_source.get("prefix_sharing")
         shared = 0
@@ -377,7 +454,7 @@ if args.prepare:
         result = {
             "schema_version": 1,
             "status": "succeeded",
-            "materialization_identity": "inferlab-corpus-slice-v1",
+            "materialization_identity": "inferlab-corpus-slice-v2",
             "requested_entries": required_entries,
             "candidate_entries": required_entries,
             "admitted_entries": required_entries,
@@ -423,7 +500,7 @@ if args.prepare:
             "error": None,
         }
         with open(args.output, "w") as handle:
-            json.dump(result, handle)
+            json.dump(namespaced(result), handle)
         raise SystemExit(0)
     population_path = artifact_dir / "population.jsonl"
     population_digest = hashlib.sha256()
@@ -456,7 +533,7 @@ if args.prepare:
     materialization_identity = (
         catalog["materialization_identity"]
         if catalog is not None
-        else "inferlab-synthetic-prompt-authority-v4"
+        else "inferlab-synthetic-prompt-authority-v5"
     )
     tpot_applicable = True
     if request_source is not None:
@@ -552,7 +629,7 @@ if args.prepare:
         "error": None,
     }
     with open(args.output, "w") as handle:
-        json.dump(result, handle)
+        json.dump(namespaced(result), handle)
     raise SystemExit(0)
 if os.environ.get("FIXTURE_RECORD_CLIENT_START") == "1":
     record_capture_event("client_started")

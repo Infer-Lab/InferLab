@@ -714,6 +714,80 @@
         "request_count"
       ]
     },
+    "BenchCaseNamespaceInput": {
+      "description": "One case's population: its warmup entries, then its profiling entries, each\nphase drawing content from its own namespace.",
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "profiling_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "profiling_namespace": {
+          "type": "string"
+        },
+        "warmup_entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "warmup_namespace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "warmup_entries",
+        "profiling_entries",
+        "warmup_namespace",
+        "profiling_namespace"
+      ]
+    },
+    "BenchCasePopulationOutput": {
+      "description": "One case's materialized population and the canonical prefixes of its\nprofiling namespace that a primed start conditions.",
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "group_prefix_conditioning": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BenchPrefixConditioningInput"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "population": {
+          "$ref": "#/$defs/BenchPopulationInput"
+        },
+        "prefix_conditioning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchPrefixConditioningInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "population"
+      ]
+    },
     "BenchClientRequest": {
       "description": "The request the Bench measurement runtime passes to its client: the\nendpoint, model, bench definition, the load case to run, and the artifact\ndirectory.",
       "type": "object",
@@ -1406,6 +1480,20 @@
         "cache_start": {
           "$ref": "#/$defs/BenchCacheStartInput"
         },
+        "case_namespaces": {
+          "description": "One population per case, each drawing its content from the case's\nwarmup and profiling namespaces while the seed keeps every selection\ndraw; absent, one seed-keyed population serves every case\n([[RFC-0004:C-BENCH-CACHE-STATE]]).",
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BenchCaseNamespaceInput"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "model": {
           "$ref": "#/$defs/MeasurementModelInput"
         },
@@ -1494,6 +1582,20 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "case_populations": {
+          "description": "Each case's population when the request named case namespaces\n([[RFC-0004:C-BENCH-CACHE-STATE]]).",
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BenchCasePopulationOutput"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "error": {
           "type": [
@@ -4250,12 +4352,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `14` (serialized as the\nstring `\"14\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `\"15\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 14.",
+          "description": "Protocol version 15.",
           "type": "string",
-          "const": "14"
+          "const": "15"
         }
       ]
     },

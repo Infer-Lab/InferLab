@@ -218,6 +218,53 @@ def test_replay_rejects_invalid_output_length(tmp_path: Path) -> None:
         prepare_population(preparation_request(tmp_path, source), tokenizer=FakeTokenizer())
 
 
+def bare_entry(index: int, text: str, output: int, extra: object = None) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "session_id": f"inferlab-{index:08}",
+        "text_input": text,
+        "output_length": output,
+    }
+    if extra is not None:
+        entry["extra"] = extra
+    return entry
+
+
+def evidence_rows(result: object) -> list[dict[str, object]]:
+    path = getattr(result, "evidence_path", None)
+    assert isinstance(path, str)
+    return [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+
+def test_replay_entries_override_the_length_default(tmp_path: Path) -> None:
+    """Every replayed request starts from an exact length, and an entry's own
+    members override it: no stop member keeps the exact length, `ignore_eos`
+    false stops at end of sequence, and other members such as a per-entry
+    temperature pass through ([[RFC-0004:C-BENCH-REQUEST-SOURCES]])."""
+    path = tmp_path / "population.jsonl"
+    payload = write_population(
+        path,
+        [
+            bare_entry(0, "q one", 4),
+            bare_entry(1, "q two", 4, {"ignore_eos": False}),
+            bare_entry(2, "q three", 4, {"temperature": 0.0}),
+        ],
+    )
+
+    result = prepare_population(preparation_request(tmp_path, path, required=3), WordTokenizer())
+
+    assert [row["output_stop"] for row in evidence_rows(result)] == ["length", "eos", "length"]
+    assert result.population is not None
+    assert Path(result.population.path).read_bytes() == payload
+
+
+def test_replay_rejects_an_extra_that_is_not_an_object(tmp_path: Path) -> None:
+    path = tmp_path / "population.jsonl"
+    write_population(path, [bare_entry(0, "q one", 4, ["ignore_eos"]), flat_entry(1, "q two", 4)])
+
+    with pytest.raises(ValueError, match=r"line 1: entry extra must be a JSON object"):
+        prepare_population(preparation_request(tmp_path, path), WordTokenizer())
+
+
 def test_replay_resolves_prefix_geometry_from_entries(tmp_path: Path) -> None:
     source = tmp_path / "replay.jsonl"
     write_population(

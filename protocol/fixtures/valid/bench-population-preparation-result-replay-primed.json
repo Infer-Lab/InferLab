@@ -51,5 +51,6 @@
   "requested_entries": 2,
   "schema_version": 1,
   "shared_system_content": null,
-  "status": "succeeded"
+  "status": "succeeded",
+  "case_populations": null
 }

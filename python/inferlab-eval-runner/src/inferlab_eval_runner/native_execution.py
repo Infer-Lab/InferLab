@@ -114,8 +114,9 @@ def lm_eval_command(
         command.extend(["--gen_kwargs", f"max_gen_toks={definition.max_tokens}"])
     if target.apply_chat_template:
         command.append("--apply_chat_template")
-    if definition.trials > 1:
-        command.append("--log_samples")
+    # Every attempt keeps lm-eval's per-sample records, not only repeated
+    # trials ([[RFC-0005:C-LM-EVAL-EVIDENCE]]).
+    command.append("--log_samples")
     return command
 
 
@@ -130,6 +131,7 @@ def write_inference_request_config(
     }
     payload_evidence_path = path.with_name("inference-requests.jsonl")
     trial_evidence_path = path.with_name("eval-trials.json")
+    outcome_path = path.with_name("generation-outcomes.jsonl")
     payload_evidence_path.write_text("", encoding="utf-8")
     path.write_text(
         json.dumps(
@@ -145,6 +147,7 @@ def write_inference_request_config(
                 "threshold": definition.threshold,
                 "trial_evidence_path": str(trial_evidence_path),
                 "payload_evidence_path": str(payload_evidence_path),
+                "generation_outcome_path": str(outcome_path),
                 "native_model": target.model,
                 "apply_chat_template": target.apply_chat_template,
                 "prompt_authority": target.prompt_authority,
@@ -169,6 +172,15 @@ def write_inference_request_config(
             path=str(payload_evidence_path),
         ),
     ]
+    if definition.trials == 1:
+        outcome_path.write_text("", encoding="utf-8")
+        artifacts.append(
+            RawArtifact(
+                name="generation_outcomes",
+                kind="lm-eval-generation-outcomes",
+                path=str(outcome_path),
+            )
+        )
     if definition.trials > 1:
         task_identity = resolution.get("task_identity")
         if not isinstance(task_identity, str):
@@ -446,7 +458,7 @@ def sample_file_artifacts(paths: Sequence[Path]) -> list[RawArtifact]:
     return [
         RawArtifact(
             name=f"lm_eval_samples_{index}",
-            kind="lm-eval-samples",
+            kind="lm-eval-samples-projected",
             path=str(path),
         )
         for index, path in enumerate(paths)

@@ -104,6 +104,30 @@ pub(crate) struct MachineBinding {
     /// for CPU placement and memory allocation ([[RFC-0002:C-LOCAL-PLACEMENT]]).
     #[serde(default)]
     pub numa_nodes: Option<Vec<u32>>,
+    /// The directory of the externally operated KV tier this machine mounts,
+    /// passed unchanged to every Engine placed here; the file system and any
+    /// reclaimer are infrastructure ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default)]
+    pub kv_tier_directory: Option<PathBuf>,
+}
+
+/// The variable that selects a process's devices.
+pub(crate) const CUDA_VISIBLE_DEVICES: &str = "CUDA_VISIBLE_DEVICES";
+
+/// The variable that fixes the order in which a process enumerates its
+/// visible devices.
+pub(crate) const CUDA_DEVICE_ORDER: &str = "CUDA_DEVICE_ORDER";
+
+/// The environment that gives a process `devices`. Device ordinals in
+/// machine bindings are nvidia-smi indices, which follow PCI bus order, and
+/// the CUDA runtime enumerates fastest-first unless told otherwise; every
+/// process InferLab gives devices runs in PCI bus order so it opens the
+/// devices InferLab checked ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+pub(crate) fn device_env(devices: &str) -> [(&'static str, String); 2] {
+    [
+        (CUDA_VISIBLE_DEVICES, devices.to_owned()),
+        (CUDA_DEVICE_ORDER, "PCI_BUS_ID".to_owned()),
+    ]
 }
 
 /// Container environment variables Inferlab itself manages: injected at
@@ -113,7 +137,8 @@ pub(crate) struct MachineBinding {
 /// ([[RFC-0007:C-IMAGE-BUILD]]).
 pub(crate) const MANAGED_CONTAINER_ENV: &[&str] = &[
     "CONDA_PREFIX",
-    "CUDA_VISIBLE_DEVICES",
+    CUDA_DEVICE_ORDER,
+    CUDA_VISIBLE_DEVICES,
     "HOME",
     "LOGNAME",
     "USER",
@@ -531,6 +556,15 @@ pub(super) fn validate_local_bindings(local: &LocalBindings) -> Result<(), Infer
         {
             return invalid(format!(
                 "machine binding {id:?} cache_root must be an absolute path"
+            ));
+        }
+        if machine
+            .kv_tier_directory
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return invalid(format!(
+                "machine binding {id:?} kv_tier_directory must be an absolute path"
             ));
         }
         match &machine.launch {

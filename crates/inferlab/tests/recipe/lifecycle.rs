@@ -97,17 +97,15 @@ fn recipe_runs_eval_and_bench_then_stops_the_server() -> Result<(), Box<dyn Erro
             .as_array()
             .is_some_and(|cases| { cases.iter().all(|case| case.get("slo").is_none()) })
     );
-    assert_eq!(
-        matrix["cases"][0]["cache_preparation"]["reset"]["succeeded"],
-        true
+    // The generated cold matrix is namespaced and issues no reset
+    // ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    assert!(
+        matrix["cases"][0]["cache_preparation"]
+            .get("reset")
+            .is_none()
     );
     assert!(matrix["cases"][0].get("eval_gate").is_none());
     assert!(matrix["cases"][0].get("eval_trial_summary").is_none());
-    assert!(
-        matrix["cases"][0]["cache_preparation"]["reset"]
-            .get("status")
-            .is_none()
-    );
     let adaptive_id = record["benches"][1]["id"]
         .as_str()
         .ok_or("missing adaptive bench record id")?;
@@ -713,5 +711,45 @@ fn failing_local_check_fails_before_server_launch() -> Result<(), Box<dyn Error>
         Value::Null,
         "no process launches after a failed preflight check"
     );
+    Ok(())
+}
+
+/// A server process that exits after readiness fails the measurement that
+/// observed it, and the recipe skips its remaining workloads and cleans up
+/// ([[RFC-0004:C-MEASUREMENTS]]).
+#[test]
+fn a_server_that_loses_a_process_fails_the_measurement_and_skips_the_rest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let workspace = TestWorkspace::new()?;
+    let output = workspace
+        .command()
+        .env("FIXTURE_EXIT_AFTER_FIRST_COMPLETION", "1")
+        .args(["recipe", "run", "deepseek-v4-flash-qualify"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let recipe: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let eval = workspace.load_record(
+        recipe["evals"][0]["id"]
+            .as_str()
+            .ok_or("recipe has no Eval record")?,
+    )?;
+    assert_eq!(eval["status"], "failed");
+    assert!(
+        eval["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("lost process")),
+        "{}",
+        eval["error"]
+    );
+    for bench in recipe["benches"]
+        .as_array()
+        .ok_or("recipe has no benches")?
+    {
+        let bench = workspace.load_record(bench["id"].as_str().ok_or("bench has no id")?)?;
+        assert_eq!(bench["status"], "skipped", "{bench}");
+        assert_eq!(bench["skip_reason"], "server lost a process");
+    }
+    assert_eq!(recipe["cleanup"]["verified"], true);
     Ok(())
 }

@@ -1,4 +1,3 @@
-import inferlab_kvstore
 from inferlab_adapter_sdk import (
     AdapterErrorCode,
     AdapterOperationError,
@@ -49,6 +48,7 @@ from inferlab_adapter_sdk import (
     require_role,
     validate_extra_args,
 )
+from inferlab_kvstore import mooncake
 
 from .auxiliary import validate_auxiliary_models
 from .settings import _KV_STORE_OWNED_OPTIONS, SglangServeSettings, _settings
@@ -357,7 +357,7 @@ def _kv_store_plan(input: PlanServeInput, settings: SglangServeSettings) -> KvSt
             )
         return None
     validate_extra_args(settings.extra_args or [], _KV_STORE_OWNED_OPTIONS)
-    return inferlab_kvstore.plan(input.kv_store)
+    return mooncake.plan(input.kv_store)
 
 
 def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:

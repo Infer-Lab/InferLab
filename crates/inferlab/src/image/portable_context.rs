@@ -83,6 +83,7 @@ mod tests {
                 cache_root: None,
                 container: None,
                 numa_nodes: None,
+                kv_tier_directory: None,
                 launch: LaunchBinding::Ssh {
                     target: "operator@gpu-node-7".to_owned(),
                 },

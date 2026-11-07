@@ -12,14 +12,17 @@ Rust Engine binary, SMG, model intent, source revision, locked environment, and
 private placement bindings. Consequently, a new conforming Engine does not
 need another Inferlab integration package.
 
-The supported shape is deliberately closed: one `single` Engine replica in one
-process behind one SMG Gateway. The process owns an arbitrary nonzero pure-TP
-device set; attention, expert, and dense-expert tensor parallelism all equal
-the outer TP width, while pipeline, data, context, and expert parallelism stay
-at one. The contract remains serial and has no P/D Router, KV-transfer,
-batching, or Engine-local profiling surface. InferLab can profile the Engine
-process tree while TokenSpeed SMG exposes the capture-window
-`POST /start_profile` and `POST /stop_profile` actions on the Gateway.
+InferLab renders only what it allocates: the listen address, model, served
+model name, prefill/decode role with its transfer mechanism and bootstrap port,
+and a `filesystem` KV tier's bound directory, with the Engine's devices as its
+`CUDA_VISIBLE_DEVICES`. Layout, memory, and every other Engine option travel
+verbatim in the role's `extra_args` and `extra_env`. The Engine reports its
+data-parallel rank count and, with a tier, its tier access and publication
+bound at readiness. Servers run one or more Engine replicas behind one SMG
+Gateway, or prefill and decode Engines behind one fused SMG Gateway and P/D
+Router. InferLab can profile a single Engine's process tree while SMG exposes
+the capture-window `POST /start_profile` and `POST /stop_profile` actions on the
+Gateway.
 
 The Gateway exposes server metrics on its separately allocated `prometheus`
 port. The integration selects SMG's single-target `least_load` policy so its

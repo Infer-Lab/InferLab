@@ -886,6 +886,13 @@
       "description": "The integration's plan for the declared KV store; the control plane\nderives, places, and launches its one process\n([[RFC-0003:C-SERVE-KV-STORE]]).",
       "type": "object",
       "properties": {
+        "access_observed": {
+          "description": "Whether each model-serving role's access and the publication bound\nare reported by the serve-state probe instead of declared here; the\nplan then carries neither and declares the probe\n([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "backend": {
           "type": "string"
         },
@@ -894,6 +901,13 @@
           "additionalProperties": {
             "$ref": "#/$defs/SettingValue"
           }
+        },
+        "externally_operated": {
+          "description": "Whether the store is infrastructure operated outside InferLab, for\nwhich the control plane runs no process: a `filesystem` store is a\ndirectory each machine binds ([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "implementation": {
           "type": "string"
@@ -1525,6 +1539,17 @@
       "description": "One process's serve state: engaged or not, the framework values that\ndecided it, or why it could not be read.",
       "type": "object",
       "properties": {
+        "access": {
+          "description": "The process's own store access, when the plan declares access\nobserved ([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KvStoreAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "engaged": {
           "type": "boolean"
         },
@@ -1536,6 +1561,15 @@
         },
         "process": {
           "type": "string"
+        },
+        "publication_bound_ms": {
+          "description": "How long after a request completes a prefix this process wrote may\ntake to become readable from the store, when the plan declares the\nbound observed ([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         },
         "state": {
           "type": "object",
@@ -1577,6 +1611,13 @@
       "properties": {
         "endpoint": {
           "$ref": "#/$defs/EndpointAssignment"
+        },
+        "kv_tier_directory": {
+          "description": "The tier directory the process was rendered with, for a `filesystem`\nKV store ([[RFC-0003:C-SERVE-KV-STORE]]).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "process": {
           "type": "string"
@@ -1630,12 +1671,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `14` (serialized as the\nstring `\"14\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `\"15\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 14.",
+          "description": "Protocol version 15.",
           "type": "string",
-          "const": "14"
+          "const": "15"
         }
       ]
     },
@@ -1708,6 +1749,13 @@
             },
             "target_bootstrap_port_field": {
               "type": "string"
+            },
+            "target_data_parallel_size_pointer": {
+              "description": "A JSON pointer, within each target entry, to the target's\ndata-parallel rank count, an integer or a decimal string; when\ndeclared, a target is ready only once it reports a positive count\n([[RFC-0003:C-SPECIALIZED-ENGINE]]).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "target_healthy_field": {
               "type": "string"
@@ -2243,6 +2291,13 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "kv_tier_directory": {
+              "description": "The machine's bound tier directory, when the server declares a\n`filesystem` KV store ([[RFC-0003:C-SERVE-KV-STORE]]).",
+              "type": [
+                "string",
+                "null"
               ]
             },
             "launch": {

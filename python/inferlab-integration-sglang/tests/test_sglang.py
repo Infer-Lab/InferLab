@@ -318,6 +318,7 @@ def test_plan_sglang_router_declares_worker_aware_readiness() -> None:
         "serve_role_value": None,
         "decode_role_value": "decode",
         "prefill_bootstrap_port": "bootstrap",
+        "target_data_parallel_size_pointer": None,
     }
     assert result.gateway.render_source == RenderSource.integration
     assert result.pd_router.render_source == RenderSource.integration
@@ -1518,3 +1519,8 @@ def test_a_kv_store_leaves_sglang_without_a_reset(monkeypatch: pytest.MonkeyPatc
     endpoint = plan.roles[0].public_endpoint
     assert endpoint is not None
     assert endpoint.prefix_cache_reset is None
+
+
+def test_a_filesystem_kv_store_is_rejected_naming_mooncake() -> None:
+    with pytest.raises(AdapterOperationError, match='select "mooncake"'):
+        plan_serve(_plan_input(kv_store=KvStoreInput(backend="filesystem", settings={})))

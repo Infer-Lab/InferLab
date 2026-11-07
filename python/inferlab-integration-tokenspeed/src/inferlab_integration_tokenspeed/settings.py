@@ -93,3 +93,5 @@ class PdRouterSettings(BaseModel):
 
     prefill_policy: inferlab_gateway_smg.Policy = "round_robin"
     decode_policy: inferlab_gateway_smg.Policy = "round_robin"
+    # SMG options of the operator's own, appended to the rendered command.
+    extra_args: list[str] | None = None

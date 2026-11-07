@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `14` (serialized as the
-/// string `"14"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `15` (serialized as the
+/// string `"15"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 14.
-    #[serde(rename = "14")]
-    V14,
+    /// Protocol version 15.
+    #[serde(rename = "15")]
+    V15,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V14;
+    pub const CURRENT: Self = Self::V15;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V14 => "14",
+            Self::V15 => "15",
         }
     }
 }
@@ -219,6 +219,10 @@ pub struct ProbeServeTarget {
     pub role: String,
     pub replica: u32,
     pub endpoint: EndpointAssignment,
+    /// The tier directory the process was rendered with, for a `filesystem`
+    /// KV store ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_tier_directory: Option<String>,
 }
 
 /// The integration's reading of every probed process.
@@ -240,6 +244,15 @@ pub struct ProbeServeProcessState {
     pub state: BTreeMap<String, SettingValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The process's own store access, when the plan declares access
+    /// observed ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<KvStoreAccess>,
+    /// How long after a request completes a prefix this process wrote may
+    /// take to become readable from the store, when the plan declares the
+    /// bound observed ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_bound_ms: Option<u64>,
 }
 
 /// The requested serve shape a `PlanServe` operation lowers into a topology.
@@ -849,6 +862,27 @@ pub struct KvStorePlan {
     )]
     #[schemars(with = "Option<u64>")]
     pub publication_bound_ms: u64,
+    /// Whether each model-serving role's access and the publication bound
+    /// are reported by the serve-state probe instead of declared here; the
+    /// plan then carries neither and declares the probe
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    #[schemars(with = "Option<bool>")]
+    pub access_observed: bool,
+    /// Whether the store is infrastructure operated outside InferLab, for
+    /// which the control plane runs no process: a `filesystem` store is a
+    /// directory each machine binds ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    #[schemars(with = "Option<bool>")]
+    pub externally_operated: bool,
     /// Logical ports beyond the endpoint that consumers connect to.
     #[serde(default)]
     pub ports: Vec<String>,
@@ -1127,6 +1161,12 @@ pub struct HttpTargetRegistryReadiness {
     /// The logical port whose value each prefill target registers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_bootstrap_port: Option<String>,
+    /// A JSON pointer, within each target entry, to the target's
+    /// data-parallel rank count, an integer or a decimal string; when
+    /// declared, a target is ready only once it reports a positive count
+    /// ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_data_parallel_size_pointer: Option<String>,
 }
 
 /// An HTTP action invoked against a logical serving endpoint.
@@ -1194,6 +1234,9 @@ pub struct CaptureWindowHttpActionSpec {
 /// One concrete process allocation supplied to `RenderServe`. Model-rank and
 /// process-only frontend identities are distinct so a frontend cannot acquire
 /// model coordinates or a model locator by construction.
+// A wire DTO decoded once per process: the model-rank variant's size has no
+// cost worth boxing its fields, which would only reshape the generated schema.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServeProcessAllocation {
@@ -1240,6 +1283,10 @@ pub enum ServeProcessAllocation {
         /// ([[RFC-0003:C-SERVE-KV-STORE]]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kv_store: Option<Box<EndpointAssignment>>,
+        /// The machine's bound tier directory, when the server declares a
+        /// `filesystem` KV store ([[RFC-0003:C-SERVE-KV-STORE]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kv_tier_directory: Option<String>,
         #[serde(default)]
         render_inputs: Vec<SuppliedRenderInput>,
     },
@@ -2398,6 +2445,47 @@ pub struct BenchPopulationPreparationRequest {
     #[serde(default)]
     pub request_body: BTreeMap<String, SettingValue>,
     pub artifact_dir: PathBuf,
+    /// One population per case, each drawing its content from the case's
+    /// warmup and profiling namespaces while the seed keeps every selection
+    /// draw; absent, one seed-keyed population serves every case
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<BenchCaseNamespaceInput>>")]
+    pub case_namespaces: Vec<BenchCaseNamespaceInput>,
+}
+
+/// One case's population: its warmup entries, then its profiling entries, each
+/// phase drawing content from its own namespace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchCaseNamespaceInput {
+    pub case_id: String,
+    pub warmup_entries: u32,
+    pub profiling_entries: u32,
+    pub warmup_namespace: String,
+    pub profiling_namespace: String,
+}
+
+/// One case's materialized population and the canonical prefixes of its
+/// profiling namespace that a primed start conditions.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchCasePopulationOutput {
+    pub case_id: String,
+    pub population: BenchPopulationInput,
+    #[serde(default)]
+    pub prefix_conditioning: Option<BenchPrefixConditioningInput>,
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<BenchPrefixConditioningInput>>")]
+    pub group_prefix_conditioning: Vec<BenchPrefixConditioningInput>,
 }
 
 /// Summary of the realized token counts. Exact per-entry values remain in the
@@ -2525,6 +2613,15 @@ pub struct BenchPopulationPreparationResult {
     pub shared_system_content: Option<BenchSharedSystemContentSummary>,
     pub evidence_path: Option<PathBuf>,
     pub error: Option<String>,
+    /// Each case's population when the request named case namespaces
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[schemars(schema_with = "nullable::<Vec<BenchCasePopulationOutput>>")]
+    pub case_populations: Vec<BenchCasePopulationOutput>,
 }
 
 /// The result a Bench client writes for the measurement runtime to consume.

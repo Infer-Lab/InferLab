@@ -614,6 +614,7 @@ pub(super) fn allocate_processes(
                         effective_settings: effective_settings.clone(),
                         effective_parallelism: effective_parallelism.clone(),
                         kv_store: None,
+                        kv_tier_directory: None,
                         links: links.clone(),
                         dependencies: requirement.launch_dependencies().to_vec(),
                         discovery: discovery_process.clone(),
@@ -1059,6 +1060,7 @@ pub(super) fn readiness_plan(
                         url: target_endpoint_url(endpoint, registry.target_scheme),
                         role: role.to_owned(),
                         bootstrap_port,
+                        process: Some(allocation.process().to_owned()),
                     })
                 })
                 .collect::<Result<Vec<_>, InferlabError>>()?;
@@ -1070,6 +1072,9 @@ pub(super) fn readiness_plan(
                 target_role_field: registry.target_role_field.clone(),
                 target_healthy_field: registry.target_healthy_field.clone(),
                 target_bootstrap_port_field: registry.target_bootstrap_port_field.clone(),
+                target_data_parallel_size_pointer: registry
+                    .target_data_parallel_size_pointer
+                    .clone(),
                 expected_targets,
             })
         }
@@ -1202,6 +1207,7 @@ mod tests {
                         render_inputs: Vec::new(),
                         discovery: None,
                         kv_store: None,
+                        kv_tier_directory: None,
                     },
                     RuntimeCachePlan {
                         storage_root: PathBuf::from("/cache"),
@@ -1237,6 +1243,7 @@ mod tests {
             prefill_role_value: Some("prefill".to_owned()),
             decode_role_value: Some("decode".to_owned()),
             prefill_bootstrap_port: Some("bootstrap".to_owned()),
+            target_data_parallel_size_pointer: None,
         }));
 
         let readiness = readiness_plan(&probe, &allocations, "served-model", &BTreeMap::new())?;
@@ -1255,11 +1262,13 @@ mod tests {
                         url: "grpc://node.example:8000".to_owned(),
                         role: "prefill".to_owned(),
                         bootstrap_port: Some(9000),
+                        process: Some("prefill".to_owned()),
                     },
                     TargetRegistryExpectedTarget {
                         url: "grpc://node.example:8100".to_owned(),
                         role: "decode".to_owned(),
                         bootstrap_port: None,
+                        process: Some("decode".to_owned()),
                     },
                 ]
             );

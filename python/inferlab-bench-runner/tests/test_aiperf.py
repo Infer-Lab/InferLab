@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 from inferlab_bench_runner.aiperf import (
+    aiperf_client_defaults,
     aiperf_config,
     compute_speed_bench_acceptance,
     inference_request_config,
@@ -519,6 +520,19 @@ def test_config_lowers_weighted_exact_shapes_to_aiperf_sequence_distribution(
     extra = cast(dict[str, object], endpoint["extra"])
     assert extra["ignore_eos"] is True
     assert "min_tokens" not in extra
+
+
+def test_replay_requests_start_from_the_exact_length_default(tmp_path: Path) -> None:
+    """AIPerf merges each replayed entry's members over these defaults, so an
+    entry without a stop member keeps the exact length and one setting
+    `ignore_eos` false stops at end of sequence
+    ([[RFC-0004:C-BENCH-REQUEST-SOURCES]])."""
+    source: dict[str, object] = {"kind": "replay", "path": "population.jsonl"}
+    defaults = aiperf_client_defaults(
+        request(tmp_path, {"kind": "concurrency_limited", "concurrency": 1}, request_source=source)
+    )
+
+    assert defaults["ignore_eos"] is True
 
 
 def test_eos_output_stop_sends_the_limit_as_a_cap(tmp_path: Path) -> None:

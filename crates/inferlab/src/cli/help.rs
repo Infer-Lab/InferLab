@@ -7,7 +7,7 @@ pub(super) const ROOT_EXAMPLES: &str = "FIRST RUN:
   # write .inferlab/local.toml (copy .inferlab/local.example.toml when provided)
   pixi install --locked --all
   inferlab stack status
-  inferlab toolchain install        # only for lm-eval Evals or serving Benches
+  inferlab toolchain install        # for lm-eval Evals, serving Benches, or image package builds
 
 SAFE DISCOVERY:
   Add --dry-run to serve start, recipe run, bench, or image build before a stateful execution.";
@@ -49,9 +49,9 @@ pub(super) const STACK_STATUS: &str = "Report Pixi confirmation, declared realiz
 
 This command does not require machine-local bindings. A confirmed environment is checked on every invocation; a failed check reports its captured output and declared repair hint without repairing or changing the retained Pixi confirmation.";
 
-pub(super) const TOOLCHAIN_INSTALL: &str = "Install and verify the release-owned lm-eval and AIPerf measurement runtimes.
+pub(super) const TOOLCHAIN_INSTALL: &str = "Install and verify the release-owned lm-eval and AIPerf measurement runtimes and the image-packaging runtime.
 
-This toolchain is needed only for lm-eval and serving Bench measurements. It is separate from each serving stack's Pixi environment, and its internal measurement packages must not be added to a serving workspace. Installation fetches the pinned measurement packages, so it needs network access, and it must be rerun after upgrading InferLab.";
+This toolchain is needed only for lm-eval and serving Bench measurements and for image builds that package workspace wheels. It is separate from each serving stack's Pixi environment, and its internal measurement packages must not be added to a serving workspace. Installation fetches the pinned measurement packages, so it needs network access, and it must be rerun after upgrading InferLab.";
 
 pub(super) const SERVE_START: &str = "Resolve and start one named server as a managed long-running lifecycle.
 
@@ -116,7 +116,7 @@ pub(super) const BENCH_OVERRIDE: &str = "Override one typed field inside the sel
 
 pub(super) const RUN: &str = "Execute one command with the same stack activation or container substitution used by InferLab launches; --record keeps a run record.
 
-Do not invoke .pixi/envs/<env>/bin tools directly: that bypasses manifest activation. Local execution exports the default placement's devices as CUDA_VISIBLE_DEVICES when every machine in it launches locally; an operator-set CUDA_VISIBLE_DEVICES wins. A container receives no host mount or device implicitly. An external image declaring entrypoint = \"image\" keeps its own entrypoint and receives the command as its arguments. Local --stack and the two container-image selectors are mutually exclusive; --mount and --devices require a container image.
+Do not invoke .pixi/envs/<env>/bin tools directly: that bypasses manifest activation. Local execution exports the default placement's devices as CUDA_VISIBLE_DEVICES, with CUDA_DEVICE_ORDER=PCI_BUS_ID, when every machine in it launches locally; an operator-set CUDA_VISIBLE_DEVICES wins. A container receives no host mount or device implicitly. An external image declaring entrypoint = \"image\" keeps its own entrypoint and receives the command as its arguments. Local --stack and the two container-image selectors are mutually exclusive; --mount and --devices require a container image.
 
 Local execution provides an InferLab context the command may read: INFERLAB_CONTEXT and INFERLAB_WORKSPACE_ROOT always; INFERLAB_RECORD_ID and INFERLAB_RECORD_ARTIFACTS with --record; INFERLAB_SERVE_RECORD, INFERLAB_SERVE_BASE_URL (scheme, host, and port, no path), and INFERLAB_SERVE_MODEL with --serve; INFERLAB_MODEL_ID and INFERLAB_MODEL_PATH with --model. --record, --serve, and --model reject a container image. A run nested inside another inferlab run replaces the inherited context and records the outer run as its parent; INFERLAB_ context variables set by hand fail the run. The command runs unchanged, so its own arguments stay the authority for where it writes outputs. A recorded run is non-interactive: the command writes to pipes copied to the terminal and the record's logs, a closed reader does not stop it, and an interrupt sends SIGTERM and then SIGKILL to the command's process tree.";
 

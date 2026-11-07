@@ -1,5 +1,5 @@
 {
-  "protocol_version": "14",
+  "protocol_version": "15",
   "result": {
     "operation": "plan_serve",
     "output": {
@@ -25,7 +25,9 @@
           "port": "admin"
         },
         "render_inputs": [],
-        "role_access": null
+        "role_access": null,
+        "access_observed": null,
+        "externally_operated": null
       },
       "links": [],
       "pd_router": null,

@@ -19,7 +19,7 @@ use inferlab_runtime::server::{
     ReadinessFailureKind, ServerRuntime, SystemProcessRuntime, WatchedProcess,
 };
 use preflight::{HardwareProbeError, PreflightObserver, RemoteCheckRequest};
-use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession, load_record};
+use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession};
 use residual::{
     DeviceRelease, ProbedDevice, RESIDUAL_SETTLE_INTERVAL, ResidualProbe, probe_device_residual,
     residual_held,
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use numa::NumaPinningError;
-pub(crate) use record::{ServerRecord, ServerStatus};
+pub(crate) use record::{ServerRecord, ServerStatus, load_record};
 
 const STARTUP_INTERRUPTED: &str = "server startup was interrupted";
 const OPERATION_LOCK_FILE: &str = "operation.lock";
@@ -102,7 +102,13 @@ pub(crate) fn start_for_recipe(
 }
 
 pub(crate) fn status(root: &Path, id: &str) -> Result<ServerStatusReport, InferlabError> {
-    status_with_runtime(root, id, &SystemProcessRuntime, &Progress::silent(), None)
+    status_with_runtime(
+        root,
+        id,
+        &SystemProcessRuntime,
+        &Progress::silent(),
+        StatusBound::Unbounded,
+    )
 }
 
 pub(crate) fn status_with_bound(
@@ -115,7 +121,7 @@ pub(crate) fn status_with_bound(
         id,
         &SystemProcessRuntime,
         &Progress::silent(),
-        Some(bound),
+        StatusBound::Shared(bound),
     )
 }
 
@@ -124,27 +130,107 @@ pub(crate) fn status_with_progress(
     id: &str,
     progress: &Progress,
 ) -> Result<ServerStatusReport, InferlabError> {
-    status_with_runtime(root, id, &SystemProcessRuntime, progress, None)
+    status_with_runtime(
+        root,
+        id,
+        &SystemProcessRuntime,
+        progress,
+        StatusBound::Unbounded,
+    )
+}
+
+/// Why a server cannot be measured, if it cannot: it is not running, or a
+/// process of it is observed exited. A measurement must not continue
+/// against a server that lost a process ([[RFC-0004:C-MEASUREMENTS]]).
+fn liveness_error(report: &ServerStatusReport) -> Option<String> {
+    let id = &report.record.id;
+    if report.record.status != ServerStatus::Running {
+        return Some(format!(
+            "server record {id:?} is {:?}, not running",
+            report.record.status
+        ));
+    }
+    if report.observed_alive {
+        return None;
+    }
+    if report.processes.is_empty() {
+        return Some(format!(
+            "running server record {id:?} has no observed process"
+        ));
+    }
+    // An exited process and one that could not be observed both stop the
+    // measurement, but only the first is a lost process.
+    let mut exited = Vec::new();
+    let mut unobserved = Vec::new();
+    for process in report
+        .processes
+        .iter()
+        .filter(|process| !process.observed_alive)
+    {
+        match &process.process_status {
+            Some(status) if status.queried => exited.push(format!("{:?}", process.id)),
+            Some(ProcessStatus {
+                error: Some(error), ..
+            }) => unobserved.push(format!("{:?} ({error})", process.id)),
+            _ => unobserved.push(format!("{:?}", process.id)),
+        }
+    }
+    let mut causes = Vec::new();
+    if !exited.is_empty() {
+        causes.push(format!("lost process {}", exited.join(", ")));
+    }
+    if !unobserved.is_empty() {
+        causes.push(format!(
+            "could not observe process {}",
+            unobserved.join(", ")
+        ));
+    }
+    Some(format!(
+        "server {id:?} {}; stop it with `inferlab serve stop {id}`",
+        causes.join(" and ")
+    ))
 }
 
 pub(crate) fn require_running(report: &ServerStatusReport) -> Result<(), InferlabError> {
-    if report.record.status != ServerStatus::Running {
-        return Err(InferlabError::ServerLifecycle {
-            message: format!(
-                "server record {:?} is {:?}, not running",
-                report.record.id, report.record.status
-            ),
-        });
-    }
-    if !report.observed_alive {
-        return Err(InferlabError::ServerLifecycle {
-            message: format!(
-                "not every process in running server record {:?} is observed alive",
-                report.record.id
-            ),
-        });
-    }
-    Ok(())
+    liveness_error(report).map_or(Ok(()), |message| {
+        Err(InferlabError::ServerLifecycle { message })
+    })
+}
+
+/// Why the server can no longer be measured, if it cannot. Each process is
+/// observed within one observation attempt bound, so an unreachable host
+/// stops the measurement instead of blocking it.
+pub(crate) fn lost_process_error(
+    root: &Path,
+    server_record_id: &str,
+) -> Result<Option<String>, InferlabError> {
+    measurement_liveness(root, server_record_id, &SystemProcessRuntime)
+}
+
+fn measurement_liveness<R: ProcessObserver>(
+    root: &Path,
+    server_record_id: &str,
+    runtime: &R,
+) -> Result<Option<String>, InferlabError> {
+    let report = status_with_runtime(
+        root,
+        server_record_id,
+        runtime,
+        &Progress::silent(),
+        StatusBound::PerProcess(inferlab_runtime::completion::ATTEMPT_BOUND),
+    )?;
+    Ok(liveness_error(&report))
+}
+
+/// How long observing a server's processes may take.
+#[derive(Clone, Copy)]
+enum StatusBound<'a> {
+    /// An operator's own status query, which waits for every answer.
+    Unbounded,
+    /// One budget for every process, such as a presentation refresh.
+    Shared(&'a inferlab_runtime::operation_bound::OperationBound),
+    /// Its own bound for each process observation.
+    PerProcess(std::time::Duration),
 }
 
 pub(crate) fn running_profiler_selection(
@@ -1175,7 +1261,7 @@ fn status_with_runtime<R: ProcessObserver>(
     id: &str,
     runtime: &R,
     progress: &Progress,
-    bound: Option<&inferlab_runtime::operation_bound::OperationBound>,
+    bound: StatusBound<'_>,
 ) -> Result<ServerStatusReport, InferlabError> {
     let record = load_record(root, id)?;
     let finalized = record.finished_unix_ms.is_some();
@@ -1189,8 +1275,12 @@ fn status_with_runtime<R: ProcessObserver>(
             None
         } else {
             evidence.handle.as_ref().map(|handle| match bound {
-                Some(bound) => runtime.status_with_bound(handle, bound),
-                None => runtime.status(handle),
+                StatusBound::Unbounded => runtime.status(handle),
+                StatusBound::Shared(bound) => runtime.status_with_bound(handle, bound),
+                StatusBound::PerProcess(limit) => runtime.status_with_bound(
+                    handle,
+                    &inferlab_runtime::operation_bound::OperationBound::finite(limit),
+                ),
             })
         };
         let observed_alive = process_status.as_ref().is_some_and(|status| status.alive);
@@ -1620,24 +1710,41 @@ mod tests {
         ) -> Result<inferlab_protocol::ProbeServeResult, InferlabError> {
             self.events.borrow_mut().push("probe");
             let engaged = self.probe_answers.borrow_mut().pop_front().unwrap_or(false);
-            Ok(inferlab_protocol::ProbeServeResult {
-                integration: inferlab_protocol::IntegrationIdentity {
-                    adapter_id: "fixture".to_owned(),
-                    adapter_version: "1".to_owned(),
-                    framework: "fixture".to_owned(),
-                    framework_version: "1".to_owned(),
-                },
-                processes: input
-                    .processes
-                    .iter()
-                    .map(|target| inferlab_protocol::ProbeServeProcessState {
+            Ok(fixture_probe_result(&input, |_| (engaged, None)))
+        }
+    }
+
+    /// A fixture answer reporting, for each probed process, whether it is
+    /// engaged and its store access, with a publication bound beside any
+    /// access.
+    fn fixture_probe_result(
+        input: &inferlab_protocol::ProbeServeInput,
+        answer: impl Fn(
+            &inferlab_protocol::ProbeServeTarget,
+        ) -> (bool, Option<inferlab_protocol::KvStoreAccess>),
+    ) -> inferlab_protocol::ProbeServeResult {
+        inferlab_protocol::ProbeServeResult {
+            integration: inferlab_protocol::IntegrationIdentity {
+                adapter_id: "fixture".to_owned(),
+                adapter_version: "1".to_owned(),
+                framework: "fixture".to_owned(),
+                framework_version: "1".to_owned(),
+            },
+            processes: input
+                .processes
+                .iter()
+                .map(|target| {
+                    let (engaged, access) = answer(target);
+                    inferlab_protocol::ProbeServeProcessState {
                         process: target.process.clone(),
                         engaged,
                         state: BTreeMap::new(),
                         error: None,
-                    })
-                    .collect(),
-            })
+                        access,
+                        publication_bound_ms: access.map(|_| 1000),
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -1954,6 +2061,96 @@ mod tests {
         Ok(())
     }
 
+    /// A measurement's liveness check bounds every process observation, so
+    /// an unreachable host cannot block a Bench between cases.
+    #[test]
+    fn measurement_liveness_observes_each_process_under_a_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = FakeRuntime {
+            spawn_results: RefCell::new(VecDeque::from([Ok(fake_handle(61)), Ok(fake_handle(62))])),
+            terminated: RefCell::new(Vec::new()),
+            status_calls: Cell::new(0),
+            bounded_status_calls: Cell::new(0),
+            readiness_bounds: RefCell::new(Vec::new()),
+            residuals: BTreeMap::new(),
+            events: RefCell::new(Vec::new()),
+            fail_first_readiness: false,
+            probe_answers: RefCell::new(VecDeque::new()),
+            exited: RefCell::new(Vec::new()),
+        };
+        let record = start_with_runtime(
+            root.path(),
+            resolved(),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
+
+        let lost = measurement_liveness(root.path(), &record.id, &runtime)?;
+
+        assert_eq!(lost, None);
+        assert_eq!(runtime.status_calls.get(), 0);
+        assert_eq!(
+            runtime.bounded_status_calls.get(),
+            record.process_evidence.len()
+        );
+        Ok(())
+    }
+
+    /// A process whose observation failed is reported as unobserved, not as
+    /// lost: the measurement still stops, but the record names the cause.
+    #[test]
+    fn an_unobserved_process_is_not_reported_as_lost() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let runtime = FakeRuntime {
+            spawn_results: RefCell::new(VecDeque::from([Ok(fake_handle(71)), Ok(fake_handle(72))])),
+            terminated: RefCell::new(Vec::new()),
+            status_calls: Cell::new(0),
+            bounded_status_calls: Cell::new(0),
+            readiness_bounds: RefCell::new(Vec::new()),
+            residuals: BTreeMap::new(),
+            events: RefCell::new(Vec::new()),
+            fail_first_readiness: false,
+            probe_answers: RefCell::new(VecDeque::new()),
+            exited: RefCell::new(Vec::new()),
+        };
+        let record = start_with_runtime(
+            root.path(),
+            resolved(),
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
+        let mut report = status_with_runtime(
+            root.path(),
+            &record.id,
+            &runtime,
+            &Progress::silent(),
+            StatusBound::Unbounded,
+        )?;
+        let process = report
+            .processes
+            .first_mut()
+            .ok_or("server has no process")?;
+        process.observed_alive = false;
+        process.process_status = Some(ProcessStatus {
+            queried: false,
+            alive: false,
+            error: Some("status command timed out".to_owned()),
+        });
+        report.observed_alive = false;
+
+        let error = liveness_error(&report).ok_or("an unobserved process passed")?;
+
+        assert!(error.contains("could not observe process"), "{error}");
+        assert!(error.contains("status command timed out"), "{error}");
+        assert!(!error.contains("lost process"), "{error}");
+        Ok(())
+    }
+
     #[test]
     fn bounded_status_uses_only_the_bounded_process_observer_path()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1988,7 +2185,7 @@ mod tests {
             &record.id,
             &runtime,
             &Progress::silent(),
-            Some(&bound),
+            StatusBound::Shared(&bound),
         )?;
 
         assert!(report.observed_alive);
@@ -2112,6 +2309,8 @@ mod tests {
         resolved.server.kv_store = Some(crate::execution::KvStoreComponentPlan {
             plan: inferlab_protocol::KvStorePlan {
                 publication_bound_ms: 0,
+                access_observed: false,
+                externally_operated: false,
                 role_access: BTreeMap::new(),
                 backend: "mooncake".to_owned(),
                 implementation: "mooncake".to_owned(),
@@ -2150,6 +2349,7 @@ mod tests {
                 process: "worker".to_owned(),
                 role: "serve".to_owned(),
                 replica: 0,
+                kv_tier_directory: None,
                 endpoint: inferlab_protocol::EndpointAssignment {
                     host: "engine.example".to_owned(),
                     port: 50051,
@@ -2158,6 +2358,7 @@ mod tests {
             kv_store: None,
             attempt_bound_seconds: 1,
             adapter_timeout_seconds: 1,
+            access_observed: false,
         });
         resolved
     }
@@ -2238,6 +2439,145 @@ mod tests {
             !runtime.events.borrow().contains(&"probe"),
             "the gate stops before probing an exited server"
         );
+        Ok(())
+    }
+
+    /// Answers every probe with each process engaged and the scripted access.
+    struct ReportedAccess(BTreeMap<&'static str, Option<inferlab_protocol::KvStoreAccess>>);
+
+    impl serve_state::ServeStateProbe for ReportedAccess {
+        fn probe_serve(
+            &self,
+            _root: &std::path::Path,
+            _stack: &crate::execution::StackPlan,
+            _adapter_timeout: Duration,
+            input: inferlab_protocol::ProbeServeInput,
+        ) -> Result<inferlab_protocol::ProbeServeResult, InferlabError> {
+            Ok(fixture_probe_result(&input, |target| {
+                (true, self.0.get(target.process.as_str()).copied().flatten())
+            }))
+        }
+    }
+
+    fn observed_access_probe(targets: &[(&str, &str)]) -> crate::execution::ServeStateProbePlan {
+        crate::execution::ServeStateProbePlan {
+            processes: targets
+                .iter()
+                .map(|(process, role)| inferlab_protocol::ProbeServeTarget {
+                    process: (*process).to_owned(),
+                    role: (*role).to_owned(),
+                    replica: 0,
+                    kv_tier_directory: Some("/fixture/kv-tier".to_owned()),
+                    endpoint: inferlab_protocol::EndpointAssignment {
+                        host: "engine.example".to_owned(),
+                        port: 50051,
+                    },
+                })
+                .collect(),
+            kv_store: None,
+            attempt_bound_seconds: 1,
+            adapter_timeout_seconds: 1,
+            access_observed: true,
+        }
+    }
+
+    /// Observed store access engages only when every process reports its
+    /// access and publication bound and one role's processes agree
+    /// ([[RFC-0003:C-SERVE-KV-STORE]]).
+    #[test]
+    fn observed_access_engages_only_when_reported_and_consistent_within_a_role() {
+        use inferlab_protocol::KvStoreAccess::{ReadWrite, Write};
+        let root = std::path::Path::new("/fixture/workspace");
+        let resolved = resolved();
+        let probe = |plan: &crate::execution::ServeStateProbePlan, reported: ReportedAccess| {
+            serve_state::probe_once(root, &resolved, plan, &reported, std::time::Instant::now())
+        };
+        let pd = observed_access_probe(&[("rank-000", "prefill"), ("rank-001", "decode")]);
+        let consistent = probe(
+            &pd,
+            ReportedAccess(BTreeMap::from([
+                ("rank-000", Some(ReadWrite)),
+                ("rank-001", Some(Write)),
+            ])),
+        );
+        assert!(consistent.engaged, "{:?}", consistent.error);
+
+        let unreported = probe(
+            &pd,
+            ReportedAccess(BTreeMap::from([
+                ("rank-000", Some(ReadWrite)),
+                ("rank-001", None),
+            ])),
+        );
+        assert!(!unreported.engaged);
+
+        let split = observed_access_probe(&[("rank-000", "prefill"), ("rank-002", "prefill")]);
+        let disagreeing = probe(
+            &split,
+            ReportedAccess(BTreeMap::from([
+                ("rank-000", Some(ReadWrite)),
+                ("rank-002", Some(Write)),
+            ])),
+        );
+        assert!(!disagreeing.engaged);
+        assert!(
+            disagreeing
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("different store access")),
+            "{:?}",
+            disagreeing.error
+        );
+    }
+
+    /// A Bench plans against the sharing the engaged readiness probe
+    /// reported: shared, with its publication bound, when every cache-owning
+    /// role reads and writes; pending while no probe engaged
+    /// ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    #[test]
+    fn observed_access_decides_the_conditioning_sharing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use inferlab_protocol::KvStoreAccess::{ReadWrite, Write};
+        let root = tempfile::tempdir()?;
+        let runtime = discovery_runtime(false);
+        runtime.probe_answers.borrow_mut().push_back(true);
+        let mut resolved = resolved_with_serve_state_probe(60);
+        resolved.server.serve_state_probe = Some(observed_access_probe(&[
+            ("rank-000", "prefill"),
+            ("rank-001", "decode"),
+        ]));
+        if let Some(plan) = resolved.server.serve_state_probe.as_mut() {
+            plan.access_observed = false;
+        }
+        let mut record = start_with_runtime(
+            root.path(),
+            resolved,
+            None,
+            None,
+            &runtime,
+            &Progress::silent(),
+        )?;
+        if let Some(probe) = record.resolved.server.serve_state_probe.as_mut() {
+            probe.access_observed = true;
+        }
+        let probes = std::mem::take(&mut record.serve_state_probes);
+        assert_eq!(record.observed_store_sharing(), None);
+        assert!(crate::workload::conditioning_shape_of(&record).sharing_pending);
+
+        record.serve_state_probes = probes;
+        for state in record
+            .serve_state_probes
+            .iter_mut()
+            .flat_map(|probe| probe.processes.iter_mut())
+        {
+            let prefill = state.process == "rank-000";
+            state.access = Some(if prefill { ReadWrite } else { Write });
+            state.publication_bound_ms = Some(if prefill { 1000 } else { 0 });
+        }
+        assert_eq!(record.observed_store_sharing(), Some((true, 1000)));
+        let shape = crate::workload::conditioning_shape_of(&record);
+        assert!(!shape.sharing_pending);
+        assert_eq!(shape.publication_wait_ms, 1000);
         Ok(())
     }
 

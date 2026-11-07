@@ -227,13 +227,26 @@ fn recipe_measurement_overrides_preserve_declared_effective_and_ordered_values()
     assert_eq!(bench["execution"]["cases"][0]["warmup_request_count"], 2);
     assert_eq!(bench["execution"]["cases"][1]["warmup_request_count"], 16);
     assert_eq!(bench["execution"]["cases"][2]["warmup_request_count"], 0);
+    // A generated cold population separates its cases by namespace instead
+    // of resetting the server ([[RFC-0004:C-BENCH-CACHE-STATE]]).
     assert_eq!(
         bench["execution"]["cases"][0]["preparation_order"],
-        serde_json::json!(["warmup_drain", "cache_reset", "profiling_release"])
+        serde_json::json!(["warmup_drain", "profiling_release"])
     );
     assert_eq!(
         bench["execution"]["cases"][2]["preparation_order"],
-        serde_json::json!(["cache_reset", "profiling_release"])
+        serde_json::json!(["profiling_release"])
+    );
+    assert!(
+        bench["client"]["population_namespace_nonce"]
+            .as_str()
+            .is_some_and(|nonce| !nonce.is_empty()),
+        "the plan carries the nonce its namespaces derive from"
+    );
+    assert!(
+        bench["client"]
+            .get("prefix_cache_reset")
+            .is_none_or(serde_json::Value::is_null)
     );
     assert_eq!(
         bench["client"]["effective_definition"]["request_body"],

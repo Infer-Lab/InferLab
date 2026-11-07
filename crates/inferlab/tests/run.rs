@@ -459,7 +459,11 @@ fn write_local_bindings(root: &Path, local_toml: &str) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-const DEVICE_ECHO: &[&str] = &["sh", "-c", "echo \"CVD=${CUDA_VISIBLE_DEVICES-unset}\""];
+const DEVICE_ECHO: &[&str] = &[
+    "sh",
+    "-c",
+    "echo \"CVD=${CUDA_VISIBLE_DEVICES-unset} ORDER=${CUDA_DEVICE_ORDER-unset}\"",
+];
 
 #[test]
 fn local_run_projects_the_default_placement_devices() -> Result<(), Box<dyn Error>> {
@@ -482,8 +486,8 @@ fn local_run_projects_the_default_placement_devices() -> Result<(), Box<dyn Erro
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let stdout = String::from_utf8(output.stdout)?;
     assert!(
-        stdout.contains("CVD=4,5"),
-        "the default placement device set must reach the command: {stdout}"
+        stdout.contains("CVD=4,5 ORDER=PCI_BUS_ID"),
+        "the default placement device set must reach the command in PCI bus order: {stdout}"
     );
     Ok(())
 }

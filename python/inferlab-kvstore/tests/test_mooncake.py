@@ -63,5 +63,5 @@ def test_extra_args_cannot_restate_an_owned_master_flag() -> None:
 
 
 def test_another_backend_is_rejected() -> None:
-    with pytest.raises(AdapterOperationError, match="select one of 'mooncake'"):
+    with pytest.raises(AdapterOperationError, match="select one of 'mooncake', 'filesystem'"):
         inferlab_kvstore.plan(KvStoreInput(backend="redis", settings={}))

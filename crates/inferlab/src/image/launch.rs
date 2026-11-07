@@ -596,7 +596,7 @@ pub(crate) fn containerize(
         // the ambient environment, so an explicit setting that coincides
         // with the host still reaches the image.
         for name in &process.command.explicit_env {
-            if name == "CUDA_VISIBLE_DEVICES" {
+            if name == crate::workspace::CUDA_VISIBLE_DEVICES {
                 // `--gpus device=...` already selects and renumbers the
                 // devices inside the container.
                 let renumbered = (0..process.allocation.devices.len())

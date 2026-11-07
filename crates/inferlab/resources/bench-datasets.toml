@@ -3,8 +3,8 @@ schema_version = 1
 [datasets.sharegpt]
 default_source = "snapshot"
 license = "Apache-2.0"
-materialization_identity = "sharegpt-single-request-v1"
-linear_session_materialization_identity = "sharegpt-linear-session-v1"
+materialization_identity = "sharegpt-single-request-v2"
+linear_session_materialization_identity = "sharegpt-linear-session-v2"
 provides_output_targets = true
 
 [datasets.sharegpt.sources.snapshot]
@@ -16,7 +16,7 @@ aiperf_format = "mooncake_trace"
 
 [datasets.speed_bench]
 license = "NVIDIA Evaluation Dataset License"
-materialization_identity = "speed-bench-first-turn-v1"
+materialization_identity = "speed-bench-first-turn-v2"
 provides_output_targets = false
 
 [datasets.speed_bench.sources.qualitative]

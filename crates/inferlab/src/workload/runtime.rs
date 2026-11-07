@@ -32,9 +32,9 @@ use std::time::Duration;
 const CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLIENT_TERM_GRACE: Duration = Duration::from_secs(2);
 const CLIENT_CLEANUP_STATUS_DEADLINE: Duration = Duration::from_secs(2);
-const SYNTHETIC_MATERIALIZATION_IDENTITY: &str = "inferlab-synthetic-prompt-authority-v4";
+const SYNTHETIC_MATERIALIZATION_IDENTITY: &str = "inferlab-synthetic-prompt-authority-v5";
 const REPLAY_MATERIALIZATION_IDENTITY: &str = "inferlab-replay-population-v1";
-const CORPUS_MATERIALIZATION_IDENTITY: &str = "inferlab-corpus-slice-v1";
+const CORPUS_MATERIALIZATION_IDENTITY: &str = "inferlab-corpus-slice-v2";
 struct AdjudicatedClient<T> {
     accepted: AcceptedClient<T>,
     succeeded: bool,

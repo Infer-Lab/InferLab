@@ -292,6 +292,12 @@ class ProbeServeTarget(BaseModel):
         extra='forbid',
     )
     endpoint: EndpointAssignment
+    kv_tier_directory: Annotated[
+        str | None,
+        Field(
+            description='The tier directory the process was rendered with, for a `filesystem`\nKV store ([[RFC-0003:C-SERVE-KV-STORE]]).'
+        ),
+    ] = None
     process: str
     replica: Annotated[int, Field(ge=0)]
     role: str
@@ -310,13 +316,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['14']]):
+class ProtocolVersion(RootModel[Literal['15']]):
     root: Annotated[
-        Literal['14'],
+        Literal['15'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `14` (serialized as the\nstring `"14"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `"15"`); a mismatch is rejected before lowering.'
         ),
-    ] = '14'
+    ] = '15'
 
 
 class ReadinessProbeHttp(BaseModel):
@@ -710,9 +716,22 @@ class ProbeServeProcessState(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    access: Annotated[
+        KvStoreAccess | None,
+        Field(
+            description="The process's own store access, when the plan declares access\nobserved ([[RFC-0003:C-SERVE-KV-STORE]])."
+        ),
+    ] = None
     engaged: bool
     error: str | None = None
     process: str
+    publication_bound_ms: Annotated[
+        int | None,
+        Field(
+            description='How long after a request completes a prefix this process wrote may\ntake to become readable from the store, when the plan declares the\nbound observed ([[RFC-0003:C-SERVE-KV-STORE]]).',
+            ge=0,
+        ),
+    ] = None
     state: Annotated[dict[str, SettingValue], Field(validate_default=True)] = {}
 
 
@@ -746,6 +765,12 @@ class ReadinessProbeHttpTargetRegistry(BaseModel):
         ),
     ] = None
     target_bootstrap_port_field: str
+    target_data_parallel_size_pointer: Annotated[
+        str | None,
+        Field(
+            description="A JSON pointer, within each target entry, to the target's\ndata-parallel rank count, an integer or a decimal string; when\ndeclared, a target is ready only once it reports a positive count\n([[RFC-0003:C-SPECIALIZED-ENGINE]])."
+        ),
+    ] = None
     target_healthy_field: str
     target_role_field: str
     target_scheme: TargetEndpointScheme
@@ -880,6 +905,12 @@ class ServeProcessAllocationModelRank(BaseModel):
             description="The endpoint of the server's KV store, when it declares one\n([[RFC-0003:C-SERVE-KV-STORE]])."
         ),
     ] = None
+    kv_tier_directory: Annotated[
+        str | None,
+        Field(
+            description="The machine's bound tier directory, when the server declares a\n`filesystem` KV store ([[RFC-0003:C-SERVE-KV-STORE]])."
+        ),
+    ] = None
     launch: AllocationLaunch
     links: Annotated[list[ServeRoleLink], Field(validate_default=True)] = []
     machine: str
@@ -998,8 +1029,20 @@ class KvStorePlan(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    access_observed: Annotated[
+        bool | None,
+        Field(
+            description="Whether each model-serving role's access and the publication bound\nare reported by the serve-state probe instead of declared here; the\nplan then carries neither and declares the probe\n([[RFC-0003:C-SERVE-KV-STORE]])."
+        ),
+    ] = None
     backend: str
     effective_settings: dict[str, SettingValue]
+    externally_operated: Annotated[
+        bool | None,
+        Field(
+            description='Whether the store is infrastructure operated outside InferLab, for\nwhich the control plane runs no process: a `filesystem` store is a\ndirectory each machine binds ([[RFC-0003:C-SERVE-KV-STORE]]).'
+        ),
+    ] = None
     implementation: str
     implementation_version: str
     ports: Annotated[

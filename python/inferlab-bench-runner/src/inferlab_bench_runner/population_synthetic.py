@@ -1,8 +1,9 @@
 """Materialize deterministic synthetic request populations."""
 
 import hashlib
+import itertools
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -10,6 +11,7 @@ from typing import cast
 from inferlab_measurement_sdk import (
     SCHEMA_VERSION,
     BenchCacheStartInput,
+    BenchCasePopulationOutput,
     BenchInclusiveUniformInput,
     BenchPopulationInput,
     BenchPopulationPreparationRequest,
@@ -40,6 +42,7 @@ from inferlab_measurement_sdk import (
 from inferlab_bench_runner.chat_tokens import required_messages_content_tokens
 from inferlab_bench_runner.population_types import (
     ChatTokenizer,
+    ContentKey,
     common_prefix_length,
     count_summary,
     decode_exact,
@@ -49,8 +52,8 @@ from inferlab_bench_runner.population_types import (
     unbiased_index,
 )
 
-SYNTHETIC_MATERIALIZATION_IDENTITY = "inferlab-synthetic-prompt-authority-v4"
-CORPUS_MATERIALIZATION_IDENTITY = "inferlab-corpus-slice-v1"
+SYNTHETIC_MATERIALIZATION_IDENTITY = "inferlab-synthetic-prompt-authority-v5"
+CORPUS_MATERIALIZATION_IDENTITY = "inferlab-corpus-slice-v2"
 MAX_EXACT_TARGETING_ATTEMPTS = 32
 MAX_EXACT_CONTENT_VARIANTS = 16
 
@@ -80,7 +83,7 @@ class CorpusTextFactory:
     def exact_slice(
         self,
         target_tokens: int,
-        seed: int,
+        seed: ContentKey,
         population_index: int,
         label: str,
     ) -> CorpusSlice:
@@ -111,7 +114,7 @@ class SyntheticTextFactory:
 
     @staticmethod
     def _corpus_word(
-        seed: int,
+        seed: ContentKey,
         population_index: int,
         label: str,
         word_index: int,
@@ -122,7 +125,7 @@ class SyntheticTextFactory:
     def exact_text(
         self,
         target_tokens: int,
-        seed: int,
+        seed: ContentKey,
         population_index: int,
         label: str,
     ) -> str:
@@ -341,7 +344,7 @@ def _target_synthetic_prompt(
     fixed_messages: list[dict[str, str]],
     selected_prompt_tokens: int,
     unadjusted_content_tokens: int,
-    seed: int,
+    seed: ContentKey,
     population_index: int,
     label: str,
 ) -> SyntheticPromptTargeting:
@@ -604,7 +607,7 @@ def _flat_prompt(
     canonical_ids: list[int] | None,
     input_tokens: int,
     shared_prefix_tokens: int | None,
-    seed: int,
+    seed: ContentKey,
     population_index: int,
 ) -> str:
     if shared_prefix_tokens is None or shared_prefix_tokens == 0:
@@ -643,7 +646,7 @@ def _corpus_flat_prompt(
     canonical_offset: int | None,
     input_tokens: int,
     shared_prefix_tokens: int | None,
-    seed: int,
+    seed: ContentKey,
     population_index: int,
 ) -> tuple[str, CorpusSlice]:
     """One corpus-backed flat prompt and the slice evidence for its entry.
@@ -691,7 +694,7 @@ def _rendered_prompt_without_geometry(
     text_factory: SyntheticTextFactory,
     projection: PromptProjection,
     input_tokens: int,
-    seed: int,
+    seed: ContentKey,
     population_index: int,
     label: str,
 ) -> SyntheticPromptTargeting:
@@ -736,7 +739,7 @@ def _rendered_prompt_with_geometry(
     canonical_ids: list[int],
     input_tokens: int,
     shared_prefix_tokens: int,
-    seed: int,
+    seed: ContentKey,
     population_index: int,
 ) -> SyntheticPromptTargeting:
     if shared_prefix_tokens == input_tokens:
@@ -837,16 +840,158 @@ def _rendered_prompt_with_geometry(
     )
 
 
+@dataclass
+class _CanonicalStreams:
+    """The canonical streams of one content key."""
+
+    ids_by_group: list[list[int] | None]
+    offset_by_group: list[int | None]
+    targeting_by_group: list[SyntheticPromptTargeting | None]
+    system_text: str | None
+    system_ids: list[int] | None
+
+
+@dataclass
+class _Materialized:
+    """One written population and the per-entry facts its summaries need."""
+
+    population: BenchPopulationInput
+    conditioning: list[BenchPrefixConditioningInput]
+    selected_prompt_counts: list[int]
+    output_counts: list[int]
+    resolved_prefix_counts: list[int | None]
+    resolved_system_counts: list[int | None]
+    pre_template_content_counts: list[int]
+    entry_groups: list[int]
+    exact_entries: int
+    fallback_entries: int
+    fallback_reasons: dict[str, int]
+    canonical_prefix_ids: list[int] | None
+    canonical_system_text: str | None
+
+
 def write_synthetic_population(
     request: BenchPopulationPreparationRequest,
     tokenizer: ChatTokenizer,
     source: BenchRequestSourceInputRandom | BenchRequestSourceInputRandomMixture,
 ) -> BenchPopulationPreparationResult:
-    required = request.required_entries
-    if required <= 0:
-        raise ValueError("population preparation requires at least one entry")
+    """Write the Bench's population: one seed-keyed population every case
+    shares, or, when the request names case namespaces, one population per
+    case whose warmup and profiling entries draw content from the case's own
+    namespaces while the seed keeps every selection draw
+    ([[RFC-0004:C-BENCH-CACHE-STATE]])."""
     artifact_dir = Path(request.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    corpus_factory = _corpus_factory(request, tokenizer, source)
+    projection, projection_reason, projection_detail = _resolve_prompt_projection(
+        request, tokenizer
+    )
+    resolved_projection = (projection, projection_reason, projection_detail)
+    if not request.case_namespaces:
+        if request.required_entries <= 0:
+            raise ValueError("population preparation requires at least one entry")
+        seed = request.seed
+        shared = _write_population(
+            request,
+            tokenizer,
+            source,
+            corpus_factory,
+            resolved_projection,
+            artifact_dir,
+            request.required_entries,
+            lambda _index: seed,
+            seed,
+        )
+        return _population_result(request, source, corpus_factory, projection, [shared], [])
+    materialized: list[_Materialized] = []
+    case_populations: list[BenchCasePopulationOutput] = []
+    for case in request.case_namespaces:
+        entries = case.warmup_entries + case.profiling_entries
+        if entries <= 0:
+            raise ValueError(f"case {case.case_id!r} requires at least one population entry")
+        case_dir = artifact_dir / f"case-{case.case_id}"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        warmup_entries = case.warmup_entries
+        warmup_namespace = case.warmup_namespace
+        profiling_namespace = case.profiling_namespace
+        written = _write_population(
+            request,
+            tokenizer,
+            source,
+            corpus_factory,
+            resolved_projection,
+            case_dir,
+            entries,
+            _phase_key(warmup_entries, warmup_namespace, profiling_namespace),
+            profiling_namespace,
+        )
+        materialized.append(written)
+        case_populations.append(
+            BenchCasePopulationOutput(
+                case_id=case.case_id,
+                population=written.population,
+                prefix_conditioning=written.conditioning[0] if written.conditioning else None,
+                group_prefix_conditioning=written.conditioning[1:],
+            )
+        )
+    return _population_result(
+        request, source, corpus_factory, projection, materialized, case_populations
+    )
+
+
+def _phase_key(
+    warmup_entries: int, warmup_namespace: str, profiling_namespace: str
+) -> Callable[[int], ContentKey]:
+    """A case's content key per entry: its warmup namespace for the leading
+    warmup entries, its profiling namespace for the rest."""
+
+    def key(index: int) -> ContentKey:
+        return warmup_namespace if index < warmup_entries else profiling_namespace
+
+    return key
+
+
+def _corpus_factory(
+    request: BenchPopulationPreparationRequest,
+    tokenizer: ChatTokenizer,
+    source: BenchRequestSourceInputRandom | BenchRequestSourceInputRandomMixture,
+) -> CorpusTextFactory | None:
+    """Tokenize a declared corpus once with the resolved model tokenizer
+    ([[RFC-0004:C-BENCH-REQUEST-SOURCES]])."""
+    if not isinstance(source, BenchRequestSourceInputRandom) or source.corpus is None:
+        return None
+    corpus = source.corpus
+    if not isinstance(request.prompt.root, BenchPromptInputFlat):
+        raise ValueError("a corpus request source requires prompt kind flat")
+    if request.source_path is None:
+        raise ValueError("corpus preparation requires a source path")
+    corpus_bytes = Path(request.source_path).read_bytes()
+    if corpus.expected_sha256 is not None:
+        observed_sha256 = hashlib.sha256(corpus_bytes).hexdigest()
+        if observed_sha256 != corpus.expected_sha256:
+            raise ValueError(
+                "corpus SHA-256 does not match the declared expected digest: "
+                f"expected {corpus.expected_sha256}, observed {observed_sha256}"
+            )
+    corpus_ids = tokenizer.encode(corpus_bytes.decode("utf-8"), add_special_tokens=False)
+    return CorpusTextFactory(tokenizer, corpus_ids)
+
+
+def _write_population(
+    request: BenchPopulationPreparationRequest,
+    tokenizer: ChatTokenizer,
+    source: BenchRequestSourceInputRandom | BenchRequestSourceInputRandomMixture,
+    corpus_factory: CorpusTextFactory | None,
+    resolved_projection: tuple[PromptProjection | None, str | None, str | None],
+    artifact_dir: Path,
+    required: int,
+    content_key: Callable[[int], ContentKey],
+    conditioning_key: ContentKey,
+) -> _Materialized:
+    """Write one population of `required` entries. Selection draws use the
+    Bench seed and the entry's index; content draws use the entry's
+    `content_key`, and the canonical prefixes a primed start conditions are
+    those of `conditioning_key`."""
     population_path = artifact_dir / "population.jsonl"
     evidence_path = artifact_dir / "population-evidence.jsonl"
     population_digest = hashlib.sha256()
@@ -872,108 +1017,23 @@ def write_synthetic_population(
         else None
         for input_tokens in selected_prompt_counts
     ]
-    corpus_factory: CorpusTextFactory | None = None
-    if isinstance(source, BenchRequestSourceInputRandom) and source.corpus is not None:
-        # The corpus replaces only the content supply: tokenize it once with
-        # the resolved model tokenizer, then serve exact-length slices
-        # ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
-        corpus = source.corpus
-        if not isinstance(request.prompt.root, BenchPromptInputFlat):
-            raise ValueError("a corpus request source requires prompt kind flat")
-        if request.source_path is None:
-            raise ValueError("corpus preparation requires a source path")
-        corpus_bytes = Path(request.source_path).read_bytes()
-        if corpus.expected_sha256 is not None:
-            observed_sha256 = hashlib.sha256(corpus_bytes).hexdigest()
-            if observed_sha256 != corpus.expected_sha256:
-                raise ValueError(
-                    "corpus SHA-256 does not match the declared expected digest: "
-                    f"expected {corpus.expected_sha256}, observed {observed_sha256}"
-                )
-        corpus_ids = tokenizer.encode(corpus_bytes.decode("utf-8"), add_special_tokens=False)
+    if corpus_factory is not None:
         largest_selected = max(selected_prompt_counts)
-        if len(corpus_ids) < largest_selected:
+        if len(corpus_factory.corpus_ids) < largest_selected:
             raise ValueError(
-                f"corpus token stream has {len(corpus_ids)} tokens, shorter than the "
-                f"largest selected input-token target {largest_selected}"
+                f"corpus token stream has {len(corpus_factory.corpus_ids)} tokens, shorter than "
+                f"the largest selected input-token target {largest_selected}"
             )
-        corpus_factory = CorpusTextFactory(tokenizer, corpus_ids)
-
     prompt = request.prompt.root
-    projection, projection_reason, projection_detail = _resolve_prompt_projection(
-        request, tokenizer
-    )
+    projection, projection_reason, projection_detail = resolved_projection
     exact_entries = 0
     fallback_entries = 0
     fallback_reasons: dict[str, int] = {}
     text_factory = SyntheticTextFactory(tokenizer)
     group_count = _prefix_group_count(source)
     entry_groups = [_prefix_group(source, request.seed, index) for index in range(required)]
-    # One canonical stream per prefix group; the first is the ungrouped stream.
-    canonical_ids_by_group: list[list[int] | None] = [None] * group_count
-    canonical_offset_by_group: list[int | None] = [None] * group_count
-    canonical_targeting_by_group: list[SyntheticPromptTargeting | None] = [None] * group_count
     maximum_possible_input = _maximum_selected_input(source)
     maximum_prefix_tokens = _resolved_prefix_tokens(source, maximum_possible_input)
-    if maximum_prefix_tokens is not None:
-        for group in range(group_count):
-            canonical_ids: list[int] | None = None
-            canonical_offset: int | None = None
-            canonical_targeting: SyntheticPromptTargeting | None = None
-            if isinstance(prompt, BenchPromptInputFlat):
-                if corpus_factory is not None:
-                    # The shared prefix is one fixed corpus slice at a
-                    # seed-determined offset, independent of the population size.
-                    if len(corpus_factory.corpus_ids) < maximum_prefix_tokens:
-                        raise ValueError(
-                            f"corpus token stream has {len(corpus_factory.corpus_ids)} tokens, "
-                            f"shorter than the resolved maximum shared prefix "
-                            f"{maximum_prefix_tokens}"
-                        )
-                    canonical_offset = unbiased_index(
-                        request.seed,
-                        group,
-                        "corpus-canonical-slice",
-                        len(corpus_factory.corpus_ids) - maximum_prefix_tokens + 1,
-                    )
-                    canonical_ids = corpus_factory.corpus_ids[
-                        canonical_offset : canonical_offset + maximum_prefix_tokens
-                    ]
-                else:
-                    canonical_text = text_factory.exact_text(
-                        maximum_possible_input,
-                        request.seed,
-                        group,
-                        "canonical-shared-stream",
-                    )
-                    canonical_ids = tokenizer.encode(canonical_text, add_special_tokens=False)
-            elif isinstance(prompt, BenchPromptInputRenderedChat):
-                if projection is None:
-                    raise ValueError(
-                        projection_detail
-                        or projection_reason
-                        or "rendered-chat prompt has no usable local template"
-                    )
-                canonical_targeting = _rendered_prompt_without_geometry(
-                    tokenizer,
-                    text_factory,
-                    projection,
-                    maximum_possible_input,
-                    request.seed,
-                    group,
-                    "canonical-rendered-prompt",
-                )
-                if canonical_targeting.transport_prompt is None:
-                    raise ValueError("rendered-chat canonical prompt was not frozen")
-                canonical_ids = tokenizer.encode(
-                    canonical_targeting.transport_prompt, add_special_tokens=False
-                )
-            else:
-                raise ValueError("server-chat prompt cannot declare exact prefix geometry")
-            canonical_ids_by_group[group] = canonical_ids
-            canonical_offset_by_group[group] = canonical_offset
-            canonical_targeting_by_group[group] = canonical_targeting
-    canonical_system_text: str | None = None
     maximum_system_tokens: int | None = None
     if (
         isinstance(source, BenchRequestSourceInputRandom)
@@ -982,12 +1042,97 @@ def write_synthetic_population(
         maximum_system_tokens = _resolved_system_tokens(source, maximum_possible_input)
         if maximum_system_tokens is None:
             raise ValueError("shared system content omitted its resolved maximum length")
-        canonical_system_text = text_factory.exact_text(
-            maximum_system_tokens,
-            request.seed,
-            0,
-            "canonical-system-content",
+    canonical_by_key: dict[ContentKey, _CanonicalStreams] = {}
+
+    def canonical_streams(key: ContentKey) -> _CanonicalStreams:
+        """One canonical stream per prefix group, the first being the
+        ungrouped stream, and the shared system content, all drawn under one
+        content key."""
+        cached = canonical_by_key.get(key)
+        if cached is not None:
+            return cached
+        canonical_ids_by_group: list[list[int] | None] = [None] * group_count
+        canonical_offset_by_group: list[int | None] = [None] * group_count
+        canonical_targeting_by_group: list[SyntheticPromptTargeting | None] = [None] * group_count
+        if maximum_prefix_tokens is not None:
+            for group in range(group_count):
+                canonical_ids: list[int] | None = None
+                canonical_offset: int | None = None
+                canonical_targeting: SyntheticPromptTargeting | None = None
+                if isinstance(prompt, BenchPromptInputFlat):
+                    if corpus_factory is not None:
+                        # The shared prefix is one fixed corpus slice at a
+                        # content-key-determined offset, independent of the population size.
+                        if len(corpus_factory.corpus_ids) < maximum_prefix_tokens:
+                            raise ValueError(
+                                f"corpus token stream has {len(corpus_factory.corpus_ids)} tokens, "
+                                f"shorter than the resolved maximum shared prefix "
+                                f"{maximum_prefix_tokens}"
+                            )
+                        canonical_offset = unbiased_index(
+                            key,
+                            group,
+                            "corpus-canonical-slice",
+                            len(corpus_factory.corpus_ids) - maximum_prefix_tokens + 1,
+                        )
+                        canonical_ids = corpus_factory.corpus_ids[
+                            canonical_offset : canonical_offset + maximum_prefix_tokens
+                        ]
+                    else:
+                        canonical_text = text_factory.exact_text(
+                            maximum_possible_input,
+                            key,
+                            group,
+                            "canonical-shared-stream",
+                        )
+                        canonical_ids = tokenizer.encode(canonical_text, add_special_tokens=False)
+                elif isinstance(prompt, BenchPromptInputRenderedChat):
+                    if projection is None:
+                        raise ValueError(
+                            projection_detail
+                            or projection_reason
+                            or "rendered-chat prompt has no usable local template"
+                        )
+                    canonical_targeting = _rendered_prompt_without_geometry(
+                        tokenizer,
+                        text_factory,
+                        projection,
+                        maximum_possible_input,
+                        key,
+                        group,
+                        "canonical-rendered-prompt",
+                    )
+                    if canonical_targeting.transport_prompt is None:
+                        raise ValueError("rendered-chat canonical prompt was not frozen")
+                    canonical_ids = tokenizer.encode(
+                        canonical_targeting.transport_prompt, add_special_tokens=False
+                    )
+                else:
+                    raise ValueError("server-chat prompt cannot declare exact prefix geometry")
+                canonical_ids_by_group[group] = canonical_ids
+                canonical_offset_by_group[group] = canonical_offset
+                canonical_targeting_by_group[group] = canonical_targeting
+        canonical_system_text: str | None = None
+        if maximum_system_tokens is not None:
+            canonical_system_text = text_factory.exact_text(
+                maximum_system_tokens,
+                key,
+                0,
+                "canonical-system-content",
+            )
+        streams = _CanonicalStreams(
+            ids_by_group=canonical_ids_by_group,
+            offset_by_group=canonical_offset_by_group,
+            targeting_by_group=canonical_targeting_by_group,
+            system_text=canonical_system_text,
+            system_ids=None
+            if canonical_system_text is None
+            else tokenizer.encode(canonical_system_text, add_special_tokens=False),
         )
+        canonical_by_key[key] = streams
+        return streams
+
+    conditioning_streams = canonical_streams(conditioning_key)
 
     # A primed start conditions every group through the longest prefix the
     # frozen population drew, which a ratio over variable inputs may leave
@@ -1002,7 +1147,7 @@ def write_synthetic_population(
         and drawn_prefix_tokens is not None
         and drawn_prefix_tokens > 0
     ):
-        for group, group_ids in enumerate(canonical_ids_by_group):
+        for group, group_ids in enumerate(conditioning_streams.ids_by_group):
             if group_ids is None:
                 raise ValueError("canonical prefix token stream was not frozen")
             canonical_prefix = decode_exact(
@@ -1028,9 +1173,12 @@ def write_synthetic_population(
         for index, (input_tokens, output_tokens) in enumerate(selected_shapes):
             shared_prefix_tokens = resolved_prefix_counts[index]
             prefix_group = entry_groups[index]
-            canonical_ids = canonical_ids_by_group[prefix_group]
-            canonical_offset = canonical_offset_by_group[prefix_group]
-            canonical_targeting = canonical_targeting_by_group[prefix_group]
+            key = content_key(index)
+            streams = canonical_streams(key)
+            canonical_ids = streams.ids_by_group[prefix_group]
+            canonical_offset = streams.offset_by_group[prefix_group]
+            canonical_targeting = streams.targeting_by_group[prefix_group]
+            canonical_system_ids = streams.system_ids
             system_content_tokens = resolved_system_counts[index]
             corpus_slice: CorpusSlice | None = None
             if isinstance(prompt, BenchPromptInputFlat):
@@ -1042,7 +1190,7 @@ def write_synthetic_population(
                         canonical_offset,
                         input_tokens,
                         shared_prefix_tokens,
-                        request.seed,
+                        key,
                         index,
                     )
                 else:
@@ -1052,7 +1200,7 @@ def write_synthetic_population(
                         canonical_ids,
                         input_tokens,
                         shared_prefix_tokens,
-                        request.seed,
+                        key,
                         index,
                     )
                 targeting = SyntheticPromptTargeting(
@@ -1077,7 +1225,7 @@ def write_synthetic_population(
                         text_factory,
                         projection,
                         input_tokens,
-                        request.seed,
+                        key,
                         index,
                         "rendered-user-content",
                     )
@@ -1094,7 +1242,7 @@ def write_synthetic_population(
                         canonical_ids,
                         input_tokens,
                         shared_prefix_tokens,
-                        request.seed,
+                        key,
                         index,
                     )
             elif system_content_tokens is None:
@@ -1102,12 +1250,11 @@ def write_synthetic_population(
                 unadjusted_content_tokens = input_tokens
                 content_label = "user-content"
             else:
-                if canonical_system_text is None or maximum_system_tokens is None:
+                if canonical_system_ids is None or maximum_system_tokens is None:
                     raise ValueError("shared system content omitted its canonical stream")
-                system_ids = tokenizer.encode(canonical_system_text, add_special_tokens=False)
                 system_text = decode_exact(
                     tokenizer,
-                    system_ids[:system_content_tokens],
+                    canonical_system_ids[:system_content_tokens],
                     "shared system content",
                 )
                 fixed_messages = [{"role": "system", "content": system_text}]
@@ -1123,7 +1270,7 @@ def write_synthetic_population(
                     fixed_messages,
                     input_tokens,
                     unadjusted_content_tokens,
-                    request.seed,
+                    key,
                     index,
                     content_label,
                 )
@@ -1197,6 +1344,61 @@ def write_synthetic_population(
                 )
             )
             pre_template_content_counts.append(targeting.pre_template_content_tokens)
+    return _Materialized(
+        population=BenchPopulationInput(
+            path=str(population_path),
+            evidence_path=str(evidence_path),
+            sha256=population_digest.hexdigest(),
+            entries=required,
+            tpot_applicable=all(value >= 2 for value in output_counts),
+        ),
+        conditioning=group_conditioning,
+        selected_prompt_counts=selected_prompt_counts,
+        output_counts=output_counts,
+        resolved_prefix_counts=resolved_prefix_counts,
+        resolved_system_counts=resolved_system_counts,
+        pre_template_content_counts=pre_template_content_counts,
+        entry_groups=entry_groups,
+        exact_entries=exact_entries,
+        fallback_entries=fallback_entries,
+        fallback_reasons=fallback_reasons,
+        canonical_prefix_ids=conditioning_streams.ids_by_group[0],
+        canonical_system_text=conditioning_streams.system_text,
+    )
+
+
+def _concat[T](lists: Iterable[list[T]]) -> list[T]:
+    return list(itertools.chain.from_iterable(lists))
+
+
+def _population_result(
+    request: BenchPopulationPreparationRequest,
+    source: BenchRequestSourceInputRandom | BenchRequestSourceInputRandomMixture,
+    corpus_factory: CorpusTextFactory | None,
+    projection: PromptProjection | None,
+    materialized: list[_Materialized],
+    case_populations: list[BenchCasePopulationOutput],
+) -> BenchPopulationPreparationResult:
+    """The preparation result. Its summaries cover every entry written; the
+    canonical digests describe the first population's conditioning key."""
+    first = materialized[0]
+    selected_prompt_counts = _concat(written.selected_prompt_counts for written in materialized)
+    output_counts = _concat(written.output_counts for written in materialized)
+    resolved_prefix_counts = _concat(written.resolved_prefix_counts for written in materialized)
+    resolved_system_counts = _concat(written.resolved_system_counts for written in materialized)
+    pre_template_content_counts = _concat(
+        written.pre_template_content_counts for written in materialized
+    )
+    entry_groups = _concat(written.entry_groups for written in materialized)
+    exact_entries = sum(written.exact_entries for written in materialized)
+    fallback_entries = sum(written.fallback_entries for written in materialized)
+    fallback_reasons: dict[str, int] = {}
+    for written in materialized:
+        for reason, count in written.fallback_reasons.items():
+            fallback_reasons[reason] = fallback_reasons.get(reason, 0) + count
+    group_count = _prefix_group_count(source)
+    required = len(selected_prompt_counts)
+    shared = None if case_populations else first
     prefix_counts = [value for value in resolved_prefix_counts if value is not None]
     system_counts = [value for value in resolved_system_counts if value is not None]
     return BenchPopulationPreparationResult(
@@ -1212,13 +1414,7 @@ def write_synthetic_population(
         admitted_entries=required,
         ineligible_entries=0,
         ineligible_reasons={},
-        population=BenchPopulationInput(
-            path=str(population_path),
-            evidence_path=str(evidence_path),
-            sha256=population_digest.hexdigest(),
-            entries=required,
-            tpot_applicable=all(value >= 2 for value in output_counts),
-        ),
+        population=shared.population if shared is not None else None,
         input_tokens=count_summary(selected_prompt_counts),
         output_tokens=count_summary(output_counts),
         prompt_token_targeting=BenchPromptTokenTargetingSummary(
@@ -1242,7 +1438,7 @@ def write_synthetic_population(
                 ),
                 maximum_shared_prefix_tokens=max(prefix_counts),
                 canonical_prefix_sha256=token_stream_digest(
-                    (canonical_ids_by_group[0] or [])[: max(prefix_counts)]
+                    (first.canonical_prefix_ids or [])[: max(prefix_counts)]
                 ),
                 full_prompt_entries=sum(
                     input_tokens == prefix_tokens
@@ -1259,8 +1455,10 @@ def write_synthetic_population(
             if prefix_counts
             else None
         ),
-        prefix_conditioning=group_conditioning[0] if group_conditioning else None,
-        group_prefix_conditioning=group_conditioning[1:],
+        prefix_conditioning=(
+            shared.conditioning[0] if shared is not None and shared.conditioning else None
+        ),
+        group_prefix_conditioning=shared.conditioning[1:] if shared is not None else [],
         shared_system_content=(
             BenchSharedSystemContentSummary(
                 system_content_tokens=count_summary(system_counts),
@@ -1273,12 +1471,13 @@ def write_synthetic_population(
                     ]
                 ),
                 canonical_system_content_sha256=hashlib.sha256(
-                    (canonical_system_text or "").encode()
+                    (first.canonical_system_text or "").encode()
                 ).hexdigest(),
             )
             if system_counts
             else None
         ),
-        evidence_path=str(evidence_path),
+        evidence_path=first.population.evidence_path,
         error=None,
+        case_populations=case_populations,
     )

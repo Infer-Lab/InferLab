@@ -146,15 +146,13 @@ fn reset_prefix_cache(
 /// it succeeds, fails otherwise, or the case budget cannot hold another
 /// delay ([[RFC-0004:C-BENCH-CACHE-STATE]]).
 fn reset_outcome(
-    input: &CachePreparationInput<'_>,
+    endpoint: &WorkloadEndpoint,
+    reset: ResetCapability<'_>,
     bound: &OperationBound,
 ) -> PrefixCacheResetOutcome {
-    let targets = match input.reset {
+    let targets = match reset {
         ResetCapability::Public(action) => vec![(
-            format!(
-                "http://{}:{}{}",
-                input.endpoint.host, input.endpoint.port, action.path
-            ),
+            format!("http://{}:{}{}", endpoint.host, endpoint.port, action.path),
             action,
             None,
         )],
@@ -209,7 +207,7 @@ fn reset_outcome(
     }
     failed.sort_unstable();
     let error = (!failed.is_empty()).then(|| {
-        let mut message = match input.reset {
+        let mut message = match reset {
             ResetCapability::Public(_) => attempts
                 .last()
                 .and_then(|attempt| attempt.error.clone())
@@ -260,7 +258,9 @@ impl<'a> ResetCapability<'a> {
 
 pub(super) struct CachePreparationInput<'a> {
     pub(super) endpoint: &'a WorkloadEndpoint,
-    pub(super) reset: ResetCapability<'a>,
+    /// The reset to issue; absent when the case separates reuse by
+    /// namespace ([[RFC-0004:C-BENCH-CACHE-STATE]]).
+    pub(super) reset: Option<ResetCapability<'a>>,
     pub(super) start: BenchCacheStart,
     pub(super) conditioning: Option<&'a BenchPrefixCacheConditioningPlan>,
     pub(super) population: Option<&'a BenchPopulation>,
@@ -278,14 +278,17 @@ pub(super) fn prepare_prefix_cache(
             elapsed_ms: bound.elapsed_ms(),
         });
     }
-    let reset = reset_outcome(&input, bound);
-    transitions.push(BenchCachePreparationTransition {
-        phase: BenchCachePreparationPhase::CacheReset,
-        elapsed_ms: bound.elapsed_ms(),
+    let reset = input.reset.map(|reset| {
+        let outcome = reset_outcome(input.endpoint, reset, bound);
+        transitions.push(BenchCachePreparationTransition {
+            phase: BenchCachePreparationPhase::CacheReset,
+            elapsed_ms: bound.elapsed_ms(),
+        });
+        outcome
     });
     let mut conditioning = None;
     let mut group_conditioning = Vec::new();
-    if reset.succeeded
+    if reset.as_ref().is_none_or(|reset| reset.succeeded)
         && input.start == BenchCacheStart::Primed
         && let (Some(plan), Some(population)) = (input.conditioning, input.population)
     {
@@ -777,20 +780,6 @@ mod tests {
         }
     }
 
-    fn cold<'a>(
-        endpoint: &'a WorkloadEndpoint,
-        reset: ResetCapability<'a>,
-    ) -> CachePreparationInput<'a> {
-        CachePreparationInput {
-            endpoint,
-            reset,
-            start: BenchCacheStart::Cold,
-            conditioning: None,
-            population: None,
-            warmup_drained: false,
-        }
-    }
-
     #[test]
     fn a_declined_reset_is_retried_only_on_the_declined_target_until_it_succeeds()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -810,7 +799,8 @@ mod tests {
         ];
         let endpoint = endpoint_at(declining);
         let outcome = reset_outcome(
-            &cold(&endpoint, ResetCapability::PerTarget(&targets)),
+            &endpoint,
+            ResetCapability::PerTarget(&targets),
             &OperationBound::finite(Duration::from_secs(10)),
         );
 
@@ -866,7 +856,8 @@ mod tests {
         ];
         let endpoint = endpoint_at(failing);
         let outcome = reset_outcome(
-            &cold(&endpoint, ResetCapability::PerTarget(&targets)),
+            &endpoint,
+            ResetCapability::PerTarget(&targets),
             &OperationBound::finite(Duration::from_secs(10)),
         );
 
@@ -898,7 +889,8 @@ mod tests {
             let (address, server) = serve_responses(vec![response])?;
             let endpoint = endpoint_at(address);
             let outcome = reset_outcome(
-                &cold(&endpoint, ResetCapability::Public(&action)),
+                &endpoint,
+                ResetCapability::Public(&action),
                 &OperationBound::finite(Duration::from_secs(10)),
             );
             assert!(!outcome.succeeded, "{outcome:?}");
@@ -916,7 +908,8 @@ mod tests {
         let action = vllm_reset();
         let endpoint = endpoint_at(address);
         let outcome = reset_outcome(
-            &cold(&endpoint, ResetCapability::Public(&action)),
+            &endpoint,
+            ResetCapability::Public(&action),
             &OperationBound::finite(Duration::from_millis(1_200)),
         );
 
@@ -990,14 +983,8 @@ mod tests {
         let endpoint = endpoint_at(failing);
         let reset = ResetCapability::of(Some(&public), &targets).ok_or("reset capability")?;
         let outcome = reset_outcome(
-            &CachePreparationInput {
-                endpoint: &endpoint,
-                reset,
-                start: BenchCacheStart::Cold,
-                conditioning: None,
-                population: None,
-                warmup_drained: false,
-            },
+            &endpoint,
+            reset,
             &OperationBound::finite(Duration::from_secs(5)),
         );
 

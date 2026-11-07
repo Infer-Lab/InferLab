@@ -875,6 +875,7 @@ fn http_target_registry_readiness_fixture_preserves_registry_contract() -> Resul
         prefill_role_value,
         decode_role_value,
         prefill_bootstrap_port,
+        target_data_parallel_size_pointer: _,
     } = *registry;
     assert_eq!(serve_role_value, None);
 

@@ -48,10 +48,12 @@ pub(crate) use definitions::{
 };
 #[cfg(test)]
 pub(crate) use local::LocalBindings;
-pub(crate) use local::MANAGED_CONTAINER_ENV;
 pub(crate) use local::{
     AdapterBinding, BuilderKind, LaunchBinding, MachineBinding, ModelWeightBinding,
     PlacementBinding, PlacementRoleBinding,
+};
+pub(crate) use local::{
+    CUDA_DEVICE_ORDER, CUDA_VISIBLE_DEVICES, MANAGED_CONTAINER_ENV, device_env,
 };
 pub(crate) use source::{
     git_status_flags, source_digest_script, source_pathspecs, workspace_mutations,

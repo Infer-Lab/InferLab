@@ -1809,11 +1809,12 @@ fn uncontrolled_warmup_failure_never_releases_profiling() -> Result<(), Box<dyn 
             .ok_or("matrix bench has no record id")?,
     )?;
     assert_eq!(bench["cases"][0]["status"], "failed");
-    assert!(
-        bench["cases"][0]["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("before AIPerf reported profiling readiness"))
-    );
+    assert!(bench["cases"][0]["error"].as_str().is_some_and(|error| {
+        error.contains("before AIPerf reported profiling readiness")
+            && error.contains("AIPerf's log is in")
+            && error.contains("/cases/")
+            && error.ends_with("/artifacts/logs")
+    }));
     assert_eq!(recipe["cleanup"]["verified"], true);
     Ok(())
 }

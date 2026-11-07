@@ -55,6 +55,7 @@ from inferlab_adapter_sdk import (
     ServeRoleResult,
     ServeTopology,
     SettingValue,
+    authority,
     effective_settings,
     integration_identity,
     merge_serve_args,
@@ -592,7 +593,7 @@ def _rendezvous(host_zero: ServeProcessAllocationModelRank) -> str:
             AdapterErrorCode.invalid_request,
             f"multi-host rank zero {host_zero.process!r} is missing its rendezvous port",
         )
-    return f"{port.host}:{port.port}"
+    return authority(port.host, port.port)
 
 
 def _render_engine(
@@ -611,7 +612,9 @@ def _render_engine(
             "the Engine allocation is missing its endpoint",
         )
     settings = _settings(allocation.effective_settings)
-    contract_args = ["--listen", f"{endpoint.host}:{endpoint.port}"] if allocation.rank == 0 else []
+    contract_args = (
+        ["--listen", authority(endpoint.host, endpoint.port)] if allocation.rank == 0 else []
+    )
     contract_args.extend(
         ["--model", allocation.model_locator, "--served-model-name", input.model.served_name]
     )

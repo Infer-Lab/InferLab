@@ -536,10 +536,24 @@ pub(crate) struct ResourcePlan {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct MachineAddressPlan {
+    pub host: String,
+    pub address: String,
+}
+
+/// Each used machine's declared host and resolved address, keyed by machine.
+pub(crate) type MachineAddresses = BTreeMap<String, MachineAddressPlan>;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct PlacementPlan {
     pub id: String,
     pub selection: PlacementSelectionSource,
     pub machines: Vec<String>,
+    /// Each used machine's declared `host` and the address it resolved to
+    /// once on the InferLab machine, which every rendered endpoint of the
+    /// machine carries ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub addresses: MachineAddresses,
     /// Pool ports observed held on each used machine's launch path before
     /// allocation, with what held each ([[RFC-0002:C-LOCAL-PLACEMENT]]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

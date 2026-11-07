@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import json
 import math
 import time
@@ -55,7 +56,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def endpoint_url(endpoint: ClientEndpointInput, path: str) -> str:
-    return f"{endpoint.protocol.root}://{endpoint.host}:{endpoint.port}{path}"
+    """The endpoint's URL; an IPv6 address is bracketed."""
+    try:
+        host = (
+            f"[{endpoint.host}]"
+            if ipaddress.ip_address(endpoint.host).version == 6
+            else endpoint.host
+        )
+    except ValueError:
+        host = endpoint.host
+    return f"{endpoint.protocol.root}://{host}:{endpoint.port}{path}"
 
 
 def load_json_object(path: Path) -> JsonObject:

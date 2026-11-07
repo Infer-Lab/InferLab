@@ -20,6 +20,7 @@ from inferlab_adapter_sdk import (
     ServeRoleKind,
     ServeTopology,
     append_option,
+    authority,
     merge_serve_args,
     rank_zero_allocations,
     rendered_frontend,
@@ -245,7 +246,7 @@ def _render_router(
         argv.extend(
             [
                 "--prefill",
-                f"http://{item.endpoint.host}:{item.endpoint.port}",
+                f"http://{authority(item.endpoint.host, item.endpoint.port)}",
                 str(bootstrap.port),
             ]
         )
@@ -255,7 +256,7 @@ def _render_router(
                 AdapterErrorCode.invalid_request,
                 f"decode allocation {item.process!r} has no endpoint",
             )
-        argv.extend(["--decode", f"http://{item.endpoint.host}:{item.endpoint.port}"])
+        argv.extend(["--decode", f"http://{authority(item.endpoint.host, item.endpoint.port)}"])
     argv.extend(["--policy", "round_robin"])
     return rendered_frontend(allocation, ProcessSpec(argv=argv, env={}))
 
@@ -288,7 +289,7 @@ def _multi_node_args(
         "--node-rank",
         str(allocation.rank),
         "--dist-init-addr",
-        f"{master.host}:{master.port}",
+        authority(master.host, master.port),
     ]
 
 

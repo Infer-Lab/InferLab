@@ -432,6 +432,9 @@ fn start_with_runtime<
     let mut session = ServerRecordSession::begin(root, &resolved, requested_id)?;
     // The record now carries the allocation ([[RFC-0002:C-LOCAL-PLACEMENT]]).
     drop(allocation);
+    if let Some(warning) = crate::resolve::loopback_warning(&resolved.server) {
+        progress.warning(&warning);
+    }
     progress.phase(
         Phase::named("record created").record(
             session.record().id.clone(),
@@ -2814,6 +2817,7 @@ mod tests {
                     id: "placement".to_owned(),
                     selection: PlacementSelectionSource::Explicit,
                     machines: (0..2).map(|index| format!("node-{index}")).collect(),
+                    addresses: BTreeMap::new(),
                     unavailable_ports: BTreeMap::new(),
                     unavailable_devices: BTreeMap::new(),
                     remote_workspaces: BTreeMap::new(),

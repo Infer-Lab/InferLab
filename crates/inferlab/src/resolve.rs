@@ -1,3 +1,5 @@
+mod address;
+pub(crate) use address::loopback_warning;
 mod allocation;
 mod integration;
 pub(crate) mod occupancy;
@@ -185,7 +187,7 @@ pub(crate) fn resolve<C: AdapterClient>(
 
     let served_name = selection.model.served_name.clone();
     let planned_stage = plan_integration(workspace, &selection, &effective, adapter)?;
-    let (rendered_stage, unavailable) = render_integration(
+    let (rendered_stage, unavailable, addresses) = render_integration(
         workspace,
         request,
         &selection,
@@ -384,6 +386,7 @@ pub(crate) fn resolve<C: AdapterClient>(
                 id: selection.placement_id,
                 selection: selection.placement_selection,
                 machines: selected_machines,
+                addresses,
                 unavailable_ports: unavailable.ports,
                 unavailable_devices: unavailable.devices,
                 remote_workspaces,

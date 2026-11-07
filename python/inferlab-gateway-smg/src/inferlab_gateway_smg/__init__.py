@@ -7,8 +7,6 @@ qualification decides, such as routing policies and declared endpoint
 capabilities.
 """
 
-import ipaddress
-import socket
 from collections.abc import Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from typing import Literal
@@ -40,6 +38,7 @@ from inferlab_adapter_sdk import (
     SettingValue,
     SuccessMatch,
     TargetEndpointScheme,
+    authority,
     fused_pd_frontend_plans,
     rank_zero_allocations,
     rendered_frontend,
@@ -171,13 +170,13 @@ def worker_server_info(
     )
 
     try:
-        with grpc.insecure_channel(f"{endpoint.host}:{endpoint.port}") as channel:
+        with grpc.insecure_channel(authority(endpoint.host, endpoint.port)) as channel:
             stub = tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerStub(channel)
             response = stub.GetServerInfo(
                 tokenspeed_scheduler_pb2.GetServerInfoRequest(), timeout=timeout_seconds
             )
     except grpc.RpcError as error:
-        return None, f"GetServerInfo at {endpoint.host}:{endpoint.port} failed: {error}"
+        return None, f"GetServerInfo at {authority(endpoint.host, endpoint.port)} failed: {error}"
     return {
         "server_args": MessageToDict(response.server_args),
         "scheduler_info": MessageToDict(response.scheduler_info),
@@ -239,28 +238,7 @@ def pd_router_readiness(
 
 
 def _grpc(target: EndpointAssignment) -> str:
-    return f"grpc://{target.host}:{target.port}"
-
-
-def _bind_address(host: str) -> str:
-    """SMG parses `--host` as an IP literal and exits on a hostname, which
-    other frameworks resolve themselves; a hostname binds its first resolved
-    address, so the rendered argv records what SMG listens on."""
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        pass
-    else:
-        return host
-    try:
-        resolved = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError as error:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"SMG Gateway host {host!r} does not resolve to an IP address to bind: {error}; "
-            "declare a resolvable hostname or an IP address as the gateway machine's host",
-        ) from error
-    return str(resolved[0][4][0])
+    return f"grpc://{authority(target.host, target.port)}"
 
 
 def _launch(
@@ -270,7 +248,7 @@ def _launch(
         "smg",
         "launch",
         "--host",
-        _bind_address(endpoint.host),
+        endpoint.host,
         "--port",
         str(endpoint.port),
         "--prometheus-port",

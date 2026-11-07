@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A machine's `host` is looked up once, on the machine running InferLab, and
+  its address is used everywhere: the Engine's listen address, every endpoint
+  and named port, readiness and metrics checks, prefix-cache control, the
+  Bench client, and `INFERLAB_SERVE_BASE_URL` ([[ADR-0074]]). Previously each
+  of them resolved the name itself, so a machine whose hostname maps to
+  127.0.1.1 in `/etc/hosts` could pass readiness on that address while AIPerf
+  connected to the machine's network address and was refused, failing every
+  Bench in warmup. A name with an IPv4 address uses its first IPv4 address,
+  otherwise its first IPv6 address, which is bracketed wherever it is joined
+  with a port. `--dry-run` and the server record show each machine's `host`
+  and address under `placement.addresses`; a name that does not resolve fails
+  resolution naming the machine; a loopback address on a server that also uses
+  an SSH machine warns at start. The SMG and Dynamo Gateway packages no longer
+  resolve names themselves.
+- A Bench case whose client exits before AIPerf reports profiling readiness
+  now names the directory of AIPerf's own log, where a refused connection or
+  other AIPerf failure is recorded.
 - An Eval or Bench case now fails when a server process has exited, checked
   before and after each one, naming the process and the `inferlab serve stop`
   command. A static-matrix Bench then skips its remaining cases, and a recipe

@@ -103,6 +103,7 @@ impl TestWorkspace {
             &bin,
             &[
                 FakeTool::Pixi,
+                FakeTool::Getent,
                 FakeTool::Ssh,
                 FakeTool::Ss,
                 FakeTool::Nsys,

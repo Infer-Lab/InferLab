@@ -101,10 +101,12 @@ pub(super) fn allocate_processes(
     (
         Vec<ResolvedProcessAllocation>,
         super::occupancy::Unavailable,
+        crate::execution::MachineAddresses,
     ),
     InferlabError,
 > {
     let mut process_ids = BTreeSet::new();
+    let mut addresses = super::address::MachineAddresses::default();
     let mut usage = BTreeMap::<String, MachineAllocationUsage>::new();
     let mut allocations: Vec<ResolvedProcessAllocation> = Vec::with_capacity(requirements.len());
     // Every model rank and the Gateway register with the discovery process
@@ -453,6 +455,7 @@ pub(super) fn allocate_processes(
             });
         }
         used.ports.extend(&selected_ports);
+        let address = addresses.address(&machine_id, machine)?;
         let named_ports = requirement
             .ports()
             .iter()
@@ -461,14 +464,14 @@ pub(super) fn allocate_processes(
                 (
                     name.clone(),
                     EndpointAssignment {
-                        host: machine.host.clone(),
+                        host: address.clone(),
                         port: *port,
                     },
                 )
             })
             .collect::<BTreeMap<_, _>>();
         let endpoint = EndpointAssignment {
-            host: machine.host.clone(),
+            host: address,
             port: endpoint_port,
         };
         let runtime_cache = runtime_cache_plan(
@@ -781,7 +784,8 @@ pub(super) fn allocate_processes(
             );
         }
     }
-    Ok((allocations, unavailable))
+    let addresses = addresses.finish();
+    Ok((allocations, unavailable, addresses))
 }
 
 fn sanitize_path_segment(value: &str) -> String {
@@ -1122,7 +1126,7 @@ fn registry_membership_plan(
         expected_targets.push(RegistryMemberTarget {
             process: allocation.process().to_owned(),
             role: role.to_owned(),
-            address: format!("{}:{}", port.host, port.port),
+            address: inferlab_runtime::address::authority(&port.host, port.port),
         });
     }
     Ok(ReadinessPlan::RegistryMembership {
@@ -1153,7 +1157,10 @@ fn target_endpoint_url(endpoint: &EndpointAssignment, scheme: TargetEndpointSche
         TargetEndpointScheme::Grpc => "grpc",
         TargetEndpointScheme::Tcp => "tcp",
     };
-    format!("{scheme}://{}:{}", endpoint.host, endpoint.port)
+    format!(
+        "{scheme}://{}",
+        inferlab_runtime::address::authority(&endpoint.host, endpoint.port)
+    )
 }
 
 #[cfg(test)]

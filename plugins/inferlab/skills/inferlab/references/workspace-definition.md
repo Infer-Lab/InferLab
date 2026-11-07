@@ -443,6 +443,17 @@ Published workspaces should provide this shape as
 `.inferlab/local.example.toml`; operators copy it to the ignored local file and
 replace the generic values.
 
+A machine's `host` is a name or an IP address. Resolution looks the name up
+once, on the machine running InferLab, and every process, Gateway, readiness
+check, and measurement client of the server then uses that one address, which
+`--dry-run` and the server record show under `placement.addresses` beside the
+declared `host`. A name with an IPv4 address uses its first IPv4 address;
+otherwise its first IPv6 address. A name that does not resolve fails
+resolution. A machine whose own hostname maps to a loopback address in
+`/etc/hosts` is served on that loopback address; when the server also uses an
+SSH machine, the start warns, because only processes on this machine reach
+it. Write the address other machines reach as `host` in that case.
+
 A workflow selects its placement from an explicit `--placement`, then, for a
 recipe run, the recipe's entry in the local `recipe_placements`, then the local
 `default_placement`, then the sole declared placement; more than one remaining

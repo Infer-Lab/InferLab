@@ -772,7 +772,14 @@ pub(super) fn render_integration<C: AdapterClient>(
     effective: &EffectiveServerInput,
     planned_stage: &PlannedServeStage,
     adapter: &C,
-) -> Result<(RenderedServeStage, super::occupancy::Unavailable), InferlabError> {
+) -> Result<
+    (
+        RenderedServeStage,
+        super::occupancy::Unavailable,
+        crate::execution::MachineAddresses,
+    ),
+    InferlabError,
+> {
     let stack = selection.stack;
     let planned = planned_stage.planned();
     let control_plane_frontend = planned
@@ -780,7 +787,7 @@ pub(super) fn render_integration<C: AdapterClient>(
         .as_ref()
         .is_some_and(|gateway| gateway.render_source == RenderSource::ControlPlane);
     let mut occupancy = super::occupancy::Occupancy::new(&workspace.root);
-    let (mut allocations, unavailable) = allocate_processes(
+    let (mut allocations, unavailable, addresses) = allocate_processes(
         workspace,
         &selection.server_id,
         &selection.placement_id,
@@ -947,6 +954,7 @@ pub(super) fn render_integration<C: AdapterClient>(
     Ok((
         RenderedServeStage::new(evidence, allocations, rendered_processes),
         unavailable,
+        addresses,
     ))
 }
 

@@ -21,6 +21,7 @@ from inferlab_adapter_sdk import (
     ServeTopology,
     SuppliedRenderInput,
     append_option,
+    authority,
     merge_serve_args,
     rank_zero_allocations,
     rendered_frontend,
@@ -216,7 +217,7 @@ def _render_native_router(
         "context_servers": {
             "num_instances": len(prefill),
             "urls": [
-                f"{item.endpoint.host}:{item.endpoint.port}"
+                authority(item.endpoint.host, item.endpoint.port)
                 for item in prefill
                 if item.endpoint is not None
             ],
@@ -225,7 +226,7 @@ def _render_native_router(
         "generation_servers": {
             "num_instances": len(decode),
             "urls": [
-                f"{item.endpoint.host}:{item.endpoint.port}"
+                authority(item.endpoint.host, item.endpoint.port)
                 for item in decode
                 if item.endpoint is not None
             ],

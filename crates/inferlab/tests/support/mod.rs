@@ -900,6 +900,7 @@ pub(crate) fn wait_for_exit(
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FakeTool {
     Docker,
+    Getent,
     Ibdev2netdev,
     Ip,
     Nsys,
@@ -914,6 +915,7 @@ impl FakeTool {
     const fn program(self) -> (&'static str, &'static str) {
         match self {
             Self::Docker => ("docker", include_str!("../fixtures/bin/docker.py")),
+            Self::Getent => ("getent", include_str!("../fixtures/bin/getent.sh")),
             Self::Ibdev2netdev => (
                 "ibdev2netdev",
                 include_str!("../fixtures/bin/ibdev2netdev.sh"),

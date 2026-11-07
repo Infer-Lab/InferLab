@@ -67,6 +67,7 @@ impl RunWorkspace {
             &[
                 crate::support::FakeTool::Pixi,
                 crate::support::FakeTool::Docker,
+                crate::support::FakeTool::Getent,
             ],
         )?;
 

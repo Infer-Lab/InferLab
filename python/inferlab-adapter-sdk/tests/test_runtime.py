@@ -7,7 +7,7 @@ from inferlab_adapter_sdk import (
     fill_outer_tensor_parallel,
     last_option_value,
 )
-from inferlab_adapter_sdk.runtime import merge_serve_args, validate_extra_args
+from inferlab_adapter_sdk.runtime import authority, merge_serve_args, validate_extra_args
 
 OWNED_OPTIONS: set[str] = {
     "--block-size",
@@ -120,3 +120,8 @@ def test_declared_devices_that_the_other_factors_do_not_divide_is_rejected() -> 
 
     assert error.value.code == AdapterErrorCode.invalid_settings
     assert "devices (6) is not divisible by pipeline parallelism (4)" in error.value.message
+
+
+def test_authority_brackets_only_an_ipv6_address() -> None:
+    assert authority("2001:db8::1", 8000) == "[2001:db8::1]:8000"
+    assert authority("192.0.2.10", 8000) == "192.0.2.10:8000"

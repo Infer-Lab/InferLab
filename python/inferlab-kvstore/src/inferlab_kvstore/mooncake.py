@@ -20,6 +20,7 @@ from inferlab_adapter_sdk import (
     ReadinessProbeHttp,
     RenderedServeProcess,
     ServeProcessAllocationKvStore,
+    authority,
     effective_settings,
     rendered_kv_store,
     validate_extra_args,
@@ -172,4 +173,4 @@ def render(allocation: ServeProcessAllocationKvStore) -> RenderedServeProcess:
 
 def client_address(endpoint: EndpointAssignment) -> str:
     """The `host:port` every consumer passes as the master address."""
-    return f"{endpoint.host}:{endpoint.port}"
+    return authority(endpoint.host, endpoint.port)

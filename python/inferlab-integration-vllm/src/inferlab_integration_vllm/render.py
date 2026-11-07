@@ -26,6 +26,7 @@ from inferlab_adapter_sdk import (
     ServeRoleKind,
     ServeTopology,
     append_option,
+    authority,
     merge_serve_args,
     rank_zero_allocations,
     rendered_frontend,
@@ -442,7 +443,7 @@ def _render_router(
         )
     endpoint = allocation.endpoint
     decode = [
-        f"http://{item.endpoint.host}:{item.endpoint.port}"
+        f"http://{authority(item.endpoint.host, item.endpoint.port)}"
         for item in decode_allocations
         if item.endpoint is not None
     ]
@@ -468,7 +469,7 @@ def _render_router(
                 AdapterErrorCode.invalid_request,
                 f"prefill allocation {item.process!r} has no endpoint",
             )
-        argv.extend(["--prefill", f"http://{item_endpoint.host}:{item_endpoint.port}"])
+        argv.extend(["--prefill", f"http://{authority(item_endpoint.host, item_endpoint.port)}"])
         if input.kv_transfer == KvTransferMechanism.mooncake:
             bootstrap = item.ports.get("bootstrap")
             if bootstrap is None:

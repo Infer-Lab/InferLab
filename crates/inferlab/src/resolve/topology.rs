@@ -232,7 +232,10 @@ fn validate_discovery_and_registry_members(
 }
 
 pub(super) fn endpoint_url(endpoint: &EndpointAssignment) -> String {
-    format!("http://{}:{}", endpoint.host, endpoint.port)
+    format!(
+        "http://{}",
+        inferlab_runtime::address::authority(&endpoint.host, endpoint.port)
+    )
 }
 
 /// Validate an adapter-declared control-plane-rendered frontend component

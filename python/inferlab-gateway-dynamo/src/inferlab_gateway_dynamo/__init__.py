@@ -9,10 +9,8 @@ control routes. Integrations keep their framework's worker module and engine
 arguments.
 """
 
-import socket
 from collections.abc import Collection, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
-from ipaddress import ip_address
 from pathlib import Path
 
 from inferlab_adapter_sdk import (
@@ -52,6 +50,7 @@ from inferlab_adapter_sdk import (
     SettingValue,
     SuccessMatch,
     TargetEndpointScheme,
+    authority,
     fused_pd_frontend_plans,
     rendered_discovery,
     rendered_frontend,
@@ -333,7 +332,7 @@ def _discovery_url(process: str, link: str | None, allocations: Collection[Serve
             AdapterErrorCode.invalid_request,
             f"Dynamo process {process!r} has no discovery allocation to link to",
         )
-    return f"http://{discovery.endpoint.host}:{discovery.endpoint.port}"
+    return f"http://{authority(discovery.endpoint.host, discovery.endpoint.port)}"
 
 
 def _discovery_env(url: str) -> dict[str, str]:
@@ -343,39 +342,6 @@ def _discovery_env(url: str) -> dict[str, str]:
         "DYN_NAMESPACE": NAMESPACE,
         "DYN_REQUEST_PLANE": "tcp",
     }
-
-
-def _require_ip(process: str, host: str) -> str:
-    """etcd binds and Dynamo's request plane listens only on IP literals, and
-    both advertise that address to processes on other machines: a hostname
-    renders as its first resolved address other than loopback."""
-    try:
-        ip_address(host)
-    except ValueError:
-        pass
-    else:
-        return host
-    try:
-        resolved = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError as error:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"Dynamo process {process!r} was allocated host {host!r}, which does not resolve "
-            f"to an IP address to bind: {error}; declare a resolvable hostname or an IP "
-            "address as its machine's host",
-        ) from error
-    addresses = [str(entry[4][0]) for entry in resolved]
-    reachable = next(
-        (address for address in addresses if not ip_address(address).is_loopback), None
-    )
-    if reachable is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            f"Dynamo process {process!r} was allocated host {host!r}, which resolves only to "
-            f"loopback {', '.join(addresses)}; Dynamo advertises its listeners to processes "
-            "on other machines, so declare an address they can reach as its machine's host",
-        )
-    return reachable
 
 
 def worker_env(
@@ -403,25 +369,24 @@ def worker_env(
         )
     return {
         **_discovery_env(_discovery_url(allocation.process, allocation.discovery, allocations)),
-        "DYN_SYSTEM_HOST": _require_ip(allocation.process, allocation.endpoint.host),
+        "DYN_SYSTEM_HOST": allocation.endpoint.host,
         "DYN_SYSTEM_PORT": str(allocation.endpoint.port),
         "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": '["generate"]',
-        "DYN_TCP_RPC_HOST": _require_ip(allocation.process, request.host),
+        "DYN_TCP_RPC_HOST": request.host,
         "DYN_TCP_RPC_PORT": str(request.port),
     }
 
 
 def render_discovery(allocation: ServeProcessAllocationDiscovery) -> RenderedServeProcess:
     """One single-member etcd on the allocated client and peer listeners."""
-    host = _require_ip(allocation.process, allocation.endpoint.host)
-    client = f"http://{host}:{allocation.endpoint.port}"
+    client = f"http://{authority(allocation.endpoint.host, allocation.endpoint.port)}"
     peer_port = allocation.ports.get(_PEER_PORT)
     if peer_port is None:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,
             f"discovery process {allocation.process!r} is missing its {_PEER_PORT} port",
         )
-    peer = f"http://{_require_ip(allocation.process, peer_port.host)}:{peer_port.port}"
+    peer = f"http://{authority(peer_port.host, peer_port.port)}"
     argv = [
         "etcd",
         "--name",

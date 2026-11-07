@@ -1,5 +1,6 @@
 //! Framework-neutral runtime lifecycle mechanics for the InferLab product.
 
+pub mod address;
 pub mod completion;
 pub mod container;
 pub mod interrupt;

@@ -96,7 +96,11 @@ pub(super) fn wait_http_ready(
     // A capture-armed server carries no readiness deadline
     // ([[RFC-0004:C-WORKLOAD-PROFILING]]); the loop still terminates on
     // readiness, process-group exit, or interruption.
-    let url = format!("http://{}:{}{}", endpoint.host, endpoint.port, path);
+    let url = format!(
+        "http://{}{}",
+        crate::address::authority(&endpoint.host, endpoint.port),
+        path
+    );
     let mut attempts = 0_u32;
     let mut diagnostic_attempts = Vec::new();
     // The probe cadence backs off from POLL_INTERVAL to a cap: sub-second
@@ -480,12 +484,14 @@ pub(super) fn wait_http_target_registry_ready(
     on_probe_failure: &mut dyn FnMut(&str),
 ) -> Result<ReadinessEvidence, ReadinessFailure> {
     let readiness_url = format!(
-        "http://{}:{}{}",
-        endpoint.host, endpoint.port, probe.readiness_path
+        "http://{}{}",
+        crate::address::authority(&endpoint.host, endpoint.port),
+        probe.readiness_path
     );
     let registry_url = format!(
-        "http://{}:{}{}",
-        endpoint.host, endpoint.port, probe.registry_path
+        "http://{}{}",
+        crate::address::authority(&endpoint.host, endpoint.port),
+        probe.registry_path
     );
     wait_polled_ready(
         status,
@@ -575,12 +581,17 @@ pub(super) fn wait_registry_membership_ready(
     on_probe_failure: &mut dyn FnMut(&str),
 ) -> Result<ReadinessEvidence, ReadinessFailure> {
     let registry_url = format!(
-        "http://{}:{}{}",
-        endpoint.host, endpoint.port, probe.registry_path
+        "http://{}{}",
+        crate::address::authority(&endpoint.host, endpoint.port),
+        probe.registry_path
     );
-    let model_list_url = probe
-        .model_list
-        .map(|list| format!("http://{}:{}{}", endpoint.host, endpoint.port, list.path));
+    let model_list_url = probe.model_list.map(|list| {
+        format!(
+            "http://{}{}",
+            crate::address::authority(&endpoint.host, endpoint.port),
+            list.path
+        )
+    });
     wait_polled_ready(
         status,
         attempt_timeout_seconds,
@@ -984,7 +995,7 @@ fn probe_http_attempt(
     let attempt = readiness_attempt(bound, attempt_timeout_seconds);
     let effective_bound_ms = attempt.configured_ms().unwrap_or_default();
     let outcome = (|| {
-        let url = format!("http://{host}:{port}{path}");
+        let url = format!("http://{}{path}", crate::address::authority(host, port));
         let timeout = attempt_remaining(&attempt)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
@@ -1039,7 +1050,7 @@ fn probe_http_json_attempt(
     let attempt = readiness_attempt(bound, attempt_timeout_seconds);
     let effective_bound_ms = attempt.configured_ms().unwrap_or_default();
     let outcome = (|| {
-        let url = format!("http://{host}:{port}{path}");
+        let url = format!("http://{}{path}", crate::address::authority(host, port));
         let timeout = attempt_remaining(&attempt)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)

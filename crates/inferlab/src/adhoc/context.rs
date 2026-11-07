@@ -132,14 +132,12 @@ pub(super) fn serve(root: &Path, record_id: &str) -> Result<ServeContext, Inferl
         inferlab_protocol::EndpointProtocol::Http => "http",
     };
     let host = &server.endpoint.host;
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.clone()
-    };
     Ok(ServeContext {
         record_id: record_id.to_owned(),
-        base_url: format!("{scheme}://{host}:{}", server.endpoint.port),
+        base_url: format!(
+            "{scheme}://{}",
+            inferlab_runtime::address::authority(host, server.endpoint.port)
+        ),
         model: server.model.served_name.clone(),
     })
 }

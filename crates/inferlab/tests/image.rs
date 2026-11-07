@@ -221,6 +221,7 @@ impl TestWorkspace {
             &[
                 FakeTool::Pixi,
                 FakeTool::Docker,
+                FakeTool::Getent,
                 FakeTool::Ssh,
                 FakeTool::Ss,
                 FakeTool::NvidiaSmi,

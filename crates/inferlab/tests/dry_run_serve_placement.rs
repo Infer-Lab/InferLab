@@ -829,6 +829,45 @@ fn auxiliary_draft_model_resolves_per_machine_into_dry_run_evidence() -> Result<
     Ok(())
 }
 
+/// A machine host that does not resolve fails resolution naming the
+/// machine, before anything launches ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+#[test]
+fn an_unresolvable_machine_host_fails_resolution_naming_the_machine() -> Result<(), Box<dyn Error>>
+{
+    let workspace = TestWorkspace::new()?;
+    fs::write(
+        workspace.root.path().join(".inferlab/local.toml"),
+        format!(
+            "default_placement = \"one\"\n\
+             \n\
+             [model_weights.deepseek-v4-flash]\n\
+             locator = {:?}\n\
+             \n\
+             [machines.node-x]\n\
+             host = \"unknown-node.example\"\n\
+             ports = [8000, 29501]\n\
+             devices = [0, 1, 2, 3]\n\
+             \n\
+             [placements.one]\n\
+             machines = [\"node-x\"]\n",
+            workspace.private_weight,
+        ),
+    )?;
+
+    let output = workspace
+        .command()
+        .args(["serve", "start", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("host \"unknown-node.example\" of machine \"node-x\" does not resolve"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 #[test]
 fn ordered_two_node_placement_is_allocated_before_process_rendering() -> Result<(), Box<dyn Error>>
 {
@@ -886,7 +925,17 @@ fn ordered_two_node_placement_is_allocated_before_process_rendering() -> Result<
     assert_eq!(second.devices, [4, 5]);
     assert_eq!(first.ports["master"].port, 29501);
     assert_eq!(second.model_locator.as_deref(), node_b_weight.to_str());
-    assert_eq!(plan["server"]["endpoint"]["host"], "node-a.example");
+    // Every endpoint carries the address the host resolved to once, and the
+    // placement records the declared host beside it ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    assert_eq!(plan["server"]["endpoint"]["host"], "192.0.2.11");
+    assert_eq!(
+        plan["server"]["placement"]["addresses"]["node-a"],
+        serde_json::json!({"host": "node-a.example", "address": "192.0.2.11"})
+    );
+    assert_eq!(
+        plan["server"]["placement"]["addresses"]["node-b"]["address"],
+        "192.0.2.12"
+    );
     assert_eq!(plan["server"]["network"]["selected_interface"], "ens-rdma");
     assert_eq!(plan["server"]["network"]["reason"], "common-rdma-interface");
     assert_eq!(
@@ -1573,14 +1622,14 @@ fn built_in_proxy_prefers_the_local_machine_in_a_remote_first_placement()
              locator = {:?}\n\
              \n\
              [machines.remote]\n\
-             host = \"127.0.0.1\"\n\
+             host = \"node-b.example\"\n\
              ports = [8100, 8101, 8102]\n\
              devices = [0, 1]\n\
              workspace = {:?}\n\
              launch = {{ kind = \"ssh\", target = \"remote\" }}\n\
              \n\
              [machines.local]\n\
-             host = \"127.0.0.1\"\n\
+             host = \"node-a.example\"\n\
              ports = [8200, 8201]\n\
              devices = [2, 3]\n\
              \n\

@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import math
 import sys
@@ -403,6 +404,17 @@ def validate_extra_args(extra_args: list[str], owned_options: Collection[str]) -
                 "set it through the typed serve settings instead, or place it "
                 "after a '--' sentinel for a deliberate verbatim override",
             )
+
+
+def authority(host: str, port: int) -> str:
+    """The `host:port` of an allocated endpoint. Allocated hosts are IP
+    addresses ([[RFC-0002:C-LOCAL-PLACEMENT]]); an IPv6 address is bracketed,
+    as URLs and `host:port` options require."""
+    try:
+        bracketed = ipaddress.ip_address(host).version == 6
+    except ValueError:
+        bracketed = False
+    return f"[{host}]:{port}" if bracketed else f"{host}:{port}"
 
 
 def merge_serve_args(

@@ -47,3 +47,19 @@ def test_write_result_replaces_the_target_atomically(tmp_path: Path) -> None:
         )
         == second
     )
+
+
+def test_an_ipv6_endpoint_url_is_bracketed() -> None:
+    from inferlab_measurement_sdk._generated import ClientEndpointInput
+    from inferlab_measurement_sdk.runtime import endpoint_url
+
+    endpoint = ClientEndpointInput.model_validate(
+        {
+            "protocol": "http",
+            "host": "2001:db8::1",
+            "port": 8000,
+            "completions_path": "/v1/completions",
+            "chat_completions_path": "/v1/chat/completions",
+        }
+    )
+    assert endpoint_url(endpoint, "/v1/models") == "http://[2001:db8::1]:8000/v1/models"

@@ -152,7 +152,11 @@ fn reset_outcome(
 ) -> PrefixCacheResetOutcome {
     let targets = match reset {
         ResetCapability::Public(action) => vec![(
-            format!("http://{}:{}{}", endpoint.host, endpoint.port, action.path),
+            format!(
+                "http://{}{}",
+                inferlab_runtime::address::authority(&endpoint.host, endpoint.port),
+                action.path
+            ),
             action,
             None,
         )],
@@ -360,7 +364,11 @@ fn condition_prefix_cache(
     let path = conditioning.map_or_else(std::path::PathBuf::new, |item| item.path.clone());
     let sha256 = conditioning.map_or_else(String::new, |item| item.sha256.clone());
     let prompt_tokens = conditioning.map_or(0, |item| item.prompt_tokens);
-    let url = format!("http://{}:{}{}", endpoint.host, endpoint.port, plan.route);
+    let url = format!(
+        "http://{}{}",
+        inferlab_runtime::address::authority(&endpoint.host, endpoint.port),
+        plan.route
+    );
     let data_parallel_size = plan.attention_data_parallel_size.max(1);
     let evidence = |ranks: Vec<PrefixCacheConditioningRankEvidence>,
                     succeeded: bool,

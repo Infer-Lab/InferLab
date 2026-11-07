@@ -106,6 +106,7 @@ impl TestWorkspace {
                 FakeTool::Pixi,
                 FakeTool::Ssh,
                 FakeTool::Ss,
+                FakeTool::Getent,
                 FakeTool::Ip,
                 FakeTool::Ibdev2netdev,
                 FakeTool::NvidiaSmi,
@@ -1035,7 +1036,22 @@ fn ordered_two_node_ssh_lifecycle_preserves_logs_and_reverse_cleanup() -> Result
     let workspace = TestWorkspace::new()?;
     workspace.configure_ssh_pair()?;
 
-    let started = workspace.run_json(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    let output = workspace.run(&["serve", "start", "deepseek-v4-flash-qualify"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The fake SSH machines run here on loopback, which only an SSH target
+    // that is this machine reaches, so the start warns and proceeds
+    // ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("resolves to loopback address 127.0.0.1")
+            && stderr.contains("launches over SSH"),
+        "{stderr}"
+    );
+    let started: Value = serde_json::from_slice(&output.stdout)?;
     let id = started["id"].as_str().ok_or("missing record id")?;
     let evidence = started["process_evidence"]
         .as_object()

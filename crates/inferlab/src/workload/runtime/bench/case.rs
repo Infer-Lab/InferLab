@@ -353,6 +353,7 @@ fn run_after_setup_barrier(
                     plan,
                     case,
                     bound,
+                    &paths.artifact_dir.join("logs"),
                     capture.as_deref_mut(),
                 )
                 .map_err(|error| {
@@ -675,6 +676,7 @@ fn finish_before_profile_release(
     plan: &BenchPlan,
     case: &BenchCasePlan,
     bound: &OperationBound,
+    aiperf_logs: &std::path::Path,
     mut capture: Option<&mut inferlab_profiler::session::CaptureSession>,
 ) -> Result<CaseRun, InferlabError> {
     let accepted = match join_bench_client(client) {
@@ -687,12 +689,13 @@ fn finish_before_profile_release(
         }
     };
     let mut adjudicated = adjudicate_bench_client(accepted, bound, plan, case);
-    let message =
-        "Bench client exited before AIPerf reported profiling readiness; capture remained unopened"
-            .to_owned();
+    let unopened =
+        "Bench client exited before AIPerf reported profiling readiness; capture remained unopened";
     if let Some(capture) = capture {
-        capture.record_unopened_window(&case.id, true, message.clone())?;
+        capture.record_unopened_window(&case.id, true, unopened.to_owned())?;
     }
+    // AIPerf's own failure, such as a refused connection, is in its log.
+    let message = format!("{unopened}; AIPerf's log is in {}", aiperf_logs.display());
     adjudicated.succeeded = false;
     adjudicated.error = Some(
         adjudicated

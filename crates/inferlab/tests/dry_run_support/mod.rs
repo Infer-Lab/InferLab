@@ -96,6 +96,7 @@ impl TestWorkspace {
             &adapter_bin,
             &[
                 FakeTool::Pixi,
+                FakeTool::Getent,
                 FakeTool::Ip,
                 FakeTool::Ibdev2netdev,
                 FakeTool::Ssh,

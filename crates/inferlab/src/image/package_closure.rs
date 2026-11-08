@@ -18,7 +18,6 @@ use std::process::Command;
 /// Epoch 7: the maps reach rustc and cover the Cargo home.
 pub(super) const WHEEL_BUILD_EPOCH: u32 = 7;
 
-/// Map an OCI platform (`linux/amd64`) to the Pixi platform (`linux-64`).
 pub(super) fn pixi_platform(oci_platform: &str) -> Result<&'static str, InferlabError> {
     match oci_platform {
         "linux/amd64" => Ok("linux-64"),
@@ -39,13 +38,13 @@ struct PixiListEntry {
     sha256: Option<String>,
 }
 
-/// List the locked packages of one environment via `pixi list --json`; Pixi
-/// remains the only package authority. `--locked --no-install` keeps the
-/// listing read-only: a stale lock fails instead of being re-solved, so image
-/// resolution never rewrites the committed lock it derives facts from. The listing covers the host platform,
-/// which is the only platform the local builder assembles. Entries without a
-/// registry hash are source-backed (editable path dependencies) and are
-/// either replaced by locally built wheels or deliberately excluded.
+/// Pixi remains the only package authority. `--locked --no-install` keeps
+/// the listing read-only: a stale lock fails instead of being re-solved, so
+/// image resolution never rewrites the committed lock it derives facts from.
+/// The listing covers the host platform, which is the only platform the local
+/// builder assembles. Entries without a registry hash are source-backed
+/// (editable path dependencies) and are either replaced by locally built
+/// wheels or deliberately excluded.
 pub(super) fn locked_packages(
     root: &Path,
     environment: &str,

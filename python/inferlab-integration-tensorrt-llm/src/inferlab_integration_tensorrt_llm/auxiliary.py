@@ -28,7 +28,6 @@ _DRAFT_MODEL_KEY = "speculative_model"
 
 
 def _splice_target(config: dict[str, object], context: str) -> dict[str, object]:
-    """The speculative_config mapping the draft-model locator splices into."""
     value = config.get(_SPLICE_TARGET)
     if value is None:
         raise AdapterOperationError(
@@ -68,8 +67,6 @@ def splice_draft_model(
     allocation: ServeProcessAllocationModelRank,
     auxiliary_models: list[AuxiliaryModelInput] | None,
 ) -> None:
-    """Splice the allocation's resolved draft-model locator into the merged
-    extra_llm_api_options mapping that rendering turns into the launch file."""
     locator = resolve_draft_model_locator(allocation, auxiliary_models)
     if locator is None:
         return

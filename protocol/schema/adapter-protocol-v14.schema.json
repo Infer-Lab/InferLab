@@ -556,12 +556,9 @@
     },
     "EndpointProtocol": {
       "description": "The application protocol a workload endpoint speaks.",
-      "oneOf": [
-        {
-          "description": "HTTP.",
-          "type": "string",
-          "const": "http"
-        }
+      "type": "string",
+      "enum": [
+        "http"
       ]
     },
     "FrontendCoRendering": {
@@ -782,12 +779,9 @@
     },
     "HttpMethod": {
       "description": "The HTTP method of an action specification.",
-      "oneOf": [
-        {
-          "description": "HTTP POST.",
-          "type": "string",
-          "const": "post"
-        }
+      "type": "string",
+      "enum": [
+        "post"
       ]
     },
     "IntegrationIdentity": {

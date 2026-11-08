@@ -23,15 +23,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A workspace fragment under `.inferlab/workspace.d/*.toml`
-/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): the identifier-keyed sections of
-/// [`WorkspaceConfig`] and nothing else. It reuses the very same section
-/// definition types as the root, so the section shapes have one authority;
-/// this struct only re-lists which sections a fragment may carry. It omits
-/// `schema_version` (and any future workspace-global scalar) deliberately —
-/// those live only in the root file, and a fragment declaring one is rejected
-/// before deserialization here so the operator gets a message naming the
-/// fragment rather than a bare serde error.
+/// The identifier-keyed sections of [`WorkspaceConfig`] and nothing else
+/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): workspace-global scalars such as
+/// `schema_version` live only in the root file.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkspaceFragment {
@@ -54,18 +48,14 @@ struct WorkspaceFragment {
     #[serde(default)]
     external_images: BTreeMap<String, ExternalImageDefinition>,
 }
-/// Lightweight projection of the same Git revision and dirty authority used
-/// by resolved execution snapshots. Runtime records, observations, the local
-/// binding file, caches, and scratchpads remain outside source identity. The
-/// exclusion set comes from the shared constructor in `source` so this
-/// verdict can never diverge from the snapshot's.
+/// The same revision and dirty verdict as a resolved snapshot, without
+/// loading the workspace: the exclusion set comes from the shared constructor
+/// in `source` so the two can never diverge.
 pub(crate) fn workspace_identity(
     root: &Path,
     local: Option<&Path>,
 ) -> Result<WorkspaceIdentity, InferlabError> {
-    // The effective local bindings file, resolved as a run would resolve it:
-    // an explicit selection wins, otherwise the default in-root file. A
-    // missing file still yields its declared path for exclusion purposes.
+    // A missing local bindings file still yields its path for exclusion.
     let local_path = local
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.join(DEFAULT_LOCAL_FILE));
@@ -108,16 +98,14 @@ pub(crate) fn load_workspace(
     root: PathBuf,
     local: Option<&Path>,
 ) -> Result<LoadedWorkspace, InferlabError> {
-    // Resolved before the committed configuration loads: a fresh checkout
-    // missing this git-ignored file deserves that guidance as the first
-    // error a new operator sees, ahead of any workspace-config problem.
+    // Resolved before the committed configuration loads so a fresh checkout
+    // missing this git-ignored file sees that guidance first, ahead of any
+    // workspace-config problem.
     let local_path = local
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.join(DEFAULT_LOCAL_FILE));
     let local_path = match fs::canonicalize(&local_path) {
         Ok(path) => path,
-        // The first file a new operator is missing deserves guidance, not a
-        // bare OS error: name what the file is for and the alternative.
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             return Err(InferlabError::InvalidConfig {
                 message: format!(
@@ -149,15 +137,11 @@ pub(crate) fn load_workspace(
     })
 }
 
-/// Load and validate the committed workspace configuration alone, without
-/// the machine-private local bindings `load_workspace` also requires. Serves
-/// callers that only need declared facts — environment identifiers, for
-/// instance — before an operator has bound this machine's local facts
-/// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]).
+/// Without local bindings, for callers that need only declared facts before
+/// an operator has bound this machine ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]).
 pub(crate) fn load_workspace_config(root: &Path) -> Result<WorkspaceConfig, InferlabError> {
-    // The shared parent of WORKSPACE_FILE and WORKSPACE_FRAGMENT_DIR: a
-    // symlinked `.inferlab` would route every final-node guard below through
-    // the link, so the intermediate component is guarded first.
+    // A symlinked `.inferlab` would route every final-node guard below
+    // through the link, so the shared parent is guarded first.
     symlink_guard(&root.join(STATE_DIR), STATE_DIR)?;
     let workspace_path = root.join(WORKSPACE_FILE);
     symlink_guard(&workspace_path, WORKSPACE_FILE)?;
@@ -271,9 +255,8 @@ const fn topology_label(topology: ServeTopology) -> &'static str {
     }
 }
 
-/// Load the workspace for a workflow that composes local definitions —
-/// `serve start` and `recipe run` — after the committed workspace stands
-/// validated on its own, so no committed definition can depend on one
+/// Local definitions compose only after the committed workspace validates on
+/// its own, so no committed definition can depend on one
 /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
 pub(crate) fn load_workspace_with_local_definitions(
     root: PathBuf,
@@ -286,8 +269,6 @@ pub(crate) fn load_workspace_with_local_definitions(
     Ok(workspace)
 }
 
-/// The committed configuration plus local definitions, for a manual Bench,
-/// which resolves without local bindings.
 pub(crate) fn load_workspace_config_with_local_definitions(
     root: &Path,
 ) -> Result<(WorkspaceConfig, WorkspaceSnapshot), InferlabError> {
@@ -332,11 +313,10 @@ fn canonicalize_root(root: PathBuf) -> Result<PathBuf, InferlabError> {
     fs::canonicalize(&root).map_err(|source| InferlabError::Read { path: root, source })
 }
 
-/// Best-effort read of the machine-private local bindings for callers whose
-/// operation must not depend on them: absent, unreadable, or invalid bindings
-/// yield `None` instead of an error ([[RFC-0002:C-ADHOC-EXECUTION]]). A file
-/// that exists but fails to load or validate warns on stderr, so a broken
-/// binding never silently disables the ad-hoc device projection.
+/// For callers whose operation must not depend on local bindings
+/// ([[RFC-0002:C-ADHOC-EXECUTION]]). A file that exists but fails to load
+/// warns, so a broken binding never silently disables the ad-hoc device
+/// projection.
 pub(crate) fn soft_local_bindings(root: &Path) -> Option<LocalBindings> {
     let path = root.join(DEFAULT_LOCAL_FILE);
     if !path.exists() {
@@ -369,15 +349,9 @@ fn load_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, InferlabErr
     })
 }
 
-/// Compose fragments under `.inferlab/workspace.d/*.toml` into the root
-/// configuration as a disjoint union of identifier-keyed definitions
-/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). File organization creates no implicit
-/// precedence: the union is disjoint by construction, and an identifier
-/// declared by two files is a load error naming both. Fragments are visited in
-/// sorted filename order so a collision reports the same pair of files however
-/// the filesystem enumerates the directory. A workspace with no
-/// `workspace.d/` directory (or an empty one) composes to the root config
-/// unchanged.
+/// A disjoint union: file organization creates no implicit precedence, and an
+/// identifier declared by two files is a load error
+/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
 fn compose_workspace_fragments(
     root: &Path,
     config: &mut WorkspaceConfig,
@@ -385,11 +359,8 @@ fn compose_workspace_fragments(
     compose_fragment_dir(root, config, WORKSPACE_FRAGMENT_DIR, false).map(|_| ())
 }
 
-/// Compose the git-ignored local definitions under
-/// `.inferlab/workspace.local.d/*.toml` into an already composed and
-/// validated committed workspace: the same disjoint union, restricted to
-/// measurement and serving definitions, outside source identity, and named
-/// with its digests for the run's records ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+/// Local definitions stay outside source identity and are named with their
+/// digests in the run's records instead ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
 fn compose_local_definitions(
     root: &Path,
     config: &mut WorkspaceConfig,
@@ -426,9 +397,6 @@ fn compose_local_definitions(
     compose_fragment_dir(root, config, WORKSPACE_LOCAL_FRAGMENT_DIR, true)
 }
 
-/// Compose every regular `*.toml` fragment of one directory, in sorted name
-/// order. Local fragments may carry only models, servers, Evals, Benches,
-/// workload suites, and recipes, and each is returned with its digest.
 fn compose_fragment_dir(
     root: &Path,
     config: &mut WorkspaceConfig,
@@ -449,11 +417,9 @@ fn compose_fragment_dir(
         }
     };
 
-    // Only regular `*.toml` files are fragments; a subdirectory or any other
-    // extension under workspace.d is ignored, while a symlinked `*.toml` is
-    // rejected rather than followed or dropped
-    // ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). Sorting by file name makes the
-    // merge — and thus every collision error — order-independent.
+    // A symlinked `*.toml` is rejected rather than followed or dropped
+    // ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). Sorting makes every collision
+    // error independent of directory enumeration order.
     let mut fragments: Vec<PathBuf> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| InferlabError::Read {
@@ -482,11 +448,16 @@ fn compose_fragment_dir(
     }
     fragments.sort();
 
-    // (section, identifier) -> the workspace-relative path of the FRAGMENT
-    // that declared it; root declarations need no entry because the collision
-    // check consults the composed map and attributes unknown declarers to the
-    // root file. Load-local only; it never reaches the workspace struct or
-    // any record.
+    // (section, identifier) -> declaring fragment of this directory. An
+    // identifier composed before this directory was declared by the root file
+    // or, for the local pass, by whichever committed file the error looks up.
+    let earlier = |section: &'static str, id: &str| {
+        if local {
+            committed_declarer(root, section, id)
+        } else {
+            WORKSPACE_FILE.to_owned()
+        }
+    };
     let mut provenance: BTreeMap<(&'static str, String), String> = BTreeMap::new();
 
     for path in fragments {
@@ -498,10 +469,8 @@ fn compose_fragment_dir(
             path: PathBuf::from(&relative),
             source,
         })?;
-        // A fragment may not carry `schema_version` or any workspace-global
-        // scalar; those live only in the root file. Detect it on the parsed
-        // table so the operator sees the fragment named, not a serde error
-        // about an unknown field.
+        // Detected on the parsed table so the operator sees the root-only
+        // rule rather than a serde unknown-field error.
         let table: toml::Table =
             toml::from_str(&content).map_err(|source| InferlabError::ParseToml {
                 path: PathBuf::from(&relative),
@@ -540,97 +509,136 @@ fn compose_fragment_dir(
                 sha256: base16ct::lower::encode_string(&sha2::Sha256::digest(content.as_bytes())),
             });
         }
-        merge_fragment(config, &mut provenance, fragment, &relative)?;
+        merge_fragment(config, &mut provenance, fragment, &relative, &earlier)?;
     }
     Ok(composed)
 }
 
-/// Fold one parsed fragment into the composed config, rejecting any identifier
-/// already declared by an earlier-visited file (the root or a lower-sorted
-/// fragment) with an error naming both files, the section, and the identifier.
 fn merge_fragment(
     config: &mut WorkspaceConfig,
     provenance: &mut BTreeMap<(&'static str, String), String>,
     fragment: WorkspaceFragment,
     file: &str,
+    earlier: &dyn Fn(&'static str, &str) -> String,
 ) -> Result<(), InferlabError> {
     merge_section(
         &mut config.models,
         fragment.models,
-        "model",
+        ("model", "models"),
         file,
         provenance,
+        earlier,
     )?;
     merge_section(
         &mut config.stacks,
         fragment.stacks,
-        "stack",
+        ("stack", "stacks"),
         file,
         provenance,
+        earlier,
     )?;
     merge_section(
         &mut config.servers,
         fragment.servers,
-        "server",
+        ("server", "servers"),
         file,
         provenance,
+        earlier,
     )?;
-    merge_section(&mut config.evals, fragment.evals, "eval", file, provenance)?;
+    merge_section(
+        &mut config.evals,
+        fragment.evals,
+        ("eval", "evals"),
+        file,
+        provenance,
+        earlier,
+    )?;
     merge_section(
         &mut config.benches,
         fragment.benches,
-        "bench",
+        ("bench", "benches"),
         file,
         provenance,
+        earlier,
     )?;
     merge_section(
         &mut config.workload_suites,
         fragment.workload_suites,
-        "workload suite",
+        ("workload suite", "workload_suites"),
         file,
         provenance,
+        earlier,
     )?;
     merge_section(
         &mut config.recipes,
         fragment.recipes,
-        "recipe",
+        ("recipe", "recipes"),
         file,
         provenance,
+        earlier,
     )?;
     merge_section(
         &mut config.images,
         fragment.images,
-        "image",
+        ("image", "images"),
         file,
         provenance,
+        earlier,
     )?;
     merge_section(
         &mut config.external_images,
         fragment.external_images,
-        "external image",
+        ("external image", "external_images"),
         file,
         provenance,
+        earlier,
     )
 }
 
-/// Insert one section's definitions into the composed map, rejecting a
-/// collision against whichever file already declared the identifier. The
-/// check consults the composed map itself, so a root-declared identifier
-/// collides without any seeding step: an identifier present in the map but
-/// absent from `provenance` was necessarily declared by the root file.
+/// The committed file that declares `id` in `section`: the root file or the
+/// first `workspace.d` fragment in composition order.
+fn committed_declarer(root: &Path, section: &str, id: &str) -> String {
+    let declares = |path: &Path| {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .and_then(|table| table.get(section).and_then(toml::Value::as_table).cloned())
+            .is_some_and(|definitions| definitions.contains_key(id))
+    };
+    if declares(&root.join(WORKSPACE_FILE)) {
+        return WORKSPACE_FILE.to_owned();
+    }
+    let mut fragments = fs::read_dir(root.join(WORKSPACE_FRAGMENT_DIR))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    fragments.sort();
+    fragments
+        .into_iter()
+        .find(|path| declares(path))
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| format!("{WORKSPACE_FRAGMENT_DIR}/{}", name.to_string_lossy()))
+        })
+        .unwrap_or_else(|| "the committed workspace".to_owned())
+}
+
 fn merge_section<T>(
     target: &mut BTreeMap<String, T>,
     incoming: BTreeMap<String, T>,
-    label: &'static str,
+    (label, section): (&'static str, &'static str),
     file: &str,
     provenance: &mut BTreeMap<(&'static str, String), String>,
+    earlier: &dyn Fn(&'static str, &str) -> String,
 ) -> Result<(), InferlabError> {
     for (id, definition) in incoming {
         if target.contains_key(&id) {
             let existing = provenance
                 .get(&(label, id.clone()))
-                .map(String::as_str)
-                .unwrap_or(WORKSPACE_FILE);
+                .cloned()
+                .unwrap_or_else(|| earlier(section, &id));
             return invalid(format!(
                 "{label} {id:?} is declared by both {existing} and {file}"
             ));

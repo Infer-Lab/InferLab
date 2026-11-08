@@ -244,8 +244,9 @@ parallelism, replica counts, either frontend-backend identity, transfer,
 profiling, and readiness. A P/D server base must declare both backend fields;
 cases may replace either value but may not add or remove a component. Each
 integration validates the selected Gateway/P/D Router pair, so independently
-recorded fields do not imply that every cross-provider pair is supported. `kv_transfer` is a mechanism name of lowercase letters, digits, `-`,
-and `_`; each integration accepts its own names and rejects others before
+recorded fields do not imply that every cross-provider pair is supported.
+`kv_transfer` is a mechanism name of lowercase letters, digits, `-`, and `_`;
+each integration accepts its own names and rejects others before
 launch, except the Specialized Engine, which passes any name to its Engine.
 Frontend component presence is fixed by the server base for every topology: a
 direct `single` server cannot acquire a Gateway from a case or invocation
@@ -266,10 +267,8 @@ server, or both backend fields on a vLLM `prefill_decode` server with
 `kv_transfer = "nixl"` — runs the Dynamo frontend and `dynamo.vllm` workers,
 and InferLab also starts one etcd discovery process beside the Gateway for that
 server. The stack environment must provide the `ai-dynamo` distribution and an
-`etcd` executable. Dynamo and etcd listen only on IP addresses and advertise
-them to processes on other machines, so a machine bound by hostname renders as
-the first address that hostname resolves to other than loopback; a hostname
-that does not resolve, or resolves only to loopback, is rejected before launch.
+`etcd` executable. Dynamo and etcd listen on, and advertise, the machine
+address resolution looked up (see [Local bindings](#local-bindings)).
 Dynamo parses a worker's control port as a signed 16-bit value, so those
 machines must offer ports no higher than 32767. The vLLM `reasoning_parser`
 setting renders as Dynamo's reasoning parser. Because the Dynamo frontend
@@ -449,12 +448,13 @@ A machine's `host` is a name or an IP address. Resolution looks the name up
 once, on the machine running InferLab, and every process, Gateway, readiness
 check, and measurement client of the server then uses that one address, which
 `--dry-run` and the server record show under `placement.addresses` beside the
-declared `host`. A name with an IPv4 address uses its first IPv4 address;
-otherwise its first IPv6 address. A name that does not resolve fails
-resolution. A machine whose own hostname maps to a loopback address in
-`/etc/hosts` is served on that loopback address; when the server also uses an
-SSH machine, the start warns, because only processes on this machine reach
-it. Write the address other machines reach as `host` in that case.
+declared `host`. An IP address is used as written; a name with an IPv4
+address uses its first IPv4 address, otherwise its first IPv6 address. A name
+that does not resolve fails resolution. A name that resolves to loopback, such
+as a hostname mapped to a loopback address in `/etc/hosts`, is served on that
+loopback address; when the server also launches on an SSH machine, the start
+warns, because only processes on this machine reach it. Write the address
+other machines reach as `host` in that case.
 
 A workflow selects its placement from an explicit `--placement`, then, for a
 recipe run, the recipe's entry in the local `recipe_placements`, then the local
@@ -706,9 +706,9 @@ A local fragment uses the `workspace.d` fragment format but may declare only
   false, since the commit alone no longer reproduces the run.
 - `image build` and `run` never load local definitions, so an image validation
   recipe must be committed.
-- `workspace show`, the TUI, and the web console show and launch committed
-  definitions only; launch a local definition from the CLI, with `--detach`
-  when the run must outlive the session.
+- `workspace show`, the TUI, and the web console see committed definitions
+  only; launch a local definition from the CLI, with `--detach` when the run
+  must outlive the session.
 
 ## Workload suites and recipes
 

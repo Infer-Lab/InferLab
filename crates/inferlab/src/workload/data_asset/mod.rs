@@ -12,22 +12,4 @@ pub(crate) use model::{
 pub(crate) use planning::{attempt_id_for, attempts_from_plans, plan_measurement_data_assets};
 pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 
-/// Version 20 adds the optional image-decoration evidence member on random
-/// request-source evidence and the effective vision-mode selection on the
-/// built-in OpenAI smoke definition
-/// ([[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]], [[RFC-0004:C-MEASUREMENTS]]).
-/// Version 22 records every attempt of a public prefix-cache reset, including
-/// declined attempts retried within the case budget, and admits a boolean
-/// success-predicate value ([[RFC-0005:C-EVIDENCE]]).
-/// Version 23 records the effective `output_stop`, AIPerf public-dataset
-/// source materialization, and each SPEED-Bench acceptance value with the
-/// AIPerf source it came from in place of report invocations
-/// ([[RFC-0005:C-EVIDENCE]], [[RFC-0005:C-BENCH-REQUEST-SOURCE-EVIDENCE]]).
-/// Version 24 names the local workspace definition files composed into the
-/// run beside its workspace identity ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
-/// Version 25 records each client and command termination's exit wait in
-/// place of a fixed post-kill grace ([[RFC-0009:C-COMPLETION-WAITS]]).
-/// Version 27 records serve-state probe answers with each Engine's observed
-/// store access and publication bound, and Bench plans that apply serving
-/// facts observed at readiness ([[RFC-0005:C-EVIDENCE]]).
 pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 28;

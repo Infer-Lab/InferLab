@@ -158,7 +158,6 @@ impl Action {
         })
     }
 
-    /// The vector a launch runs.
     pub(super) fn launch_argv(&self) -> &[String] {
         &self.launch
     }
@@ -172,7 +171,6 @@ impl Action {
     }
 }
 
-/// The captured outcome of a dry run.
 pub(super) struct Preview {
     pub(super) success: bool,
     pub(super) status: String,

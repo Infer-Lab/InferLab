@@ -13,8 +13,7 @@ use std::process::Command;
 use inferlab_runtime::operation_bound::OperationBound;
 
 const INFERLAB_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Schema version written into `complete.json` and required when reading it
-/// back; the write and read gates share this one const.
+/// Written into `complete.json` and required when reading it back.
 const COMPLETION_SCHEMA_VERSION: u32 = 4;
 const MANIFEST: &str = include_str!("../resources/eval-toolchain/pixi.toml");
 const LOCK: &str = include_str!("../resources/eval-toolchain/pixi.lock");
@@ -623,7 +622,6 @@ fn verify_bench_runtime(path: &Path) -> Result<BenchHandshake, InferlabError> {
     Ok(handshake)
 }
 
-/// Run each image-packaging tool and require the release-pinned version.
 fn verify_image_runtime(
     path: &Path,
     platform: &str,

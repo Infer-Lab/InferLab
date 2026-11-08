@@ -81,7 +81,8 @@ manual Bench.
 [Evidence and diagnosis](evidence-and-diagnosis.md) owns record reading and
 comparison. For a Bench, also check the frozen request population, prefix
 schedule, warmup/profiling phase identity, and, for a cold or primed start,
-`cache_preparation` (reset attempts and per-rank conditioning).
+`cache_preparation` (reset attempts, absent for a namespaced generated
+population, and per-rank conditioning).
 
 For AgentX, also inspect source expected/observed revision and digest, the
 native scenario verdict and invalidity reasons, `context_overflow_count`,

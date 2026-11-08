@@ -271,7 +271,6 @@ impl ImageRecordStore {
         fs::write(&path, json).map_err(|source| InferlabError::RecordIo { path, source })
     }
 
-    /// Finalize the record and write the product manifest.
     pub(crate) fn finish(&mut self, status: ImageStatus) -> Result<ProductManifest, InferlabError> {
         self.record.status = status;
         self.record.finished_unix_ms = Some(now_unix_ms()?);

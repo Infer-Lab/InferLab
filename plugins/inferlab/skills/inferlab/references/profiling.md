@@ -17,8 +17,9 @@ inferlab bench <BENCH> --serve <SERVER_RECORD_ID> --capture
 Recipe `--capture` is repeatable. A server with `profiling = true` runs
 instrumented even when the run selects no capture; such a recipe run warns at
 start and at the end (`no capture taken`), naming `--capture` and the recipe's
-workloads. The server must have launched with capture targets prepared; a manual Bench cannot retrofit targets onto an ordinary
-running server. Image-backed server launches reject either capture mechanism
+workloads. The server must have launched with capture targets prepared; a
+manual Bench cannot retrofit targets onto an ordinary running server.
+Image-backed server launches reject either capture mechanism
 because InferLab does not claim host profiling of an in-container server
 process. Engine trace additionally requires a local, non-containerized
 placement.
@@ -27,10 +28,11 @@ placement.
 
 Under managed collection, each model-rank target owns one Nsight Systems
 session. Under engine trace there is no per-rank Nsight Systems session:
-InferLab assigns each engine-trace replica a persistent record-owned trace
-directory, the framework profiler writes one trace artifact per model-serving
-rank into it, and coverage verifies a storage delta of at least one new
-artifact per model device of the replica. The vLLM integration disables vLLM's
+InferLab assigns each engine-trace replica a persistent trace directory,
+`.inferlab/runtime/engine-trace/<server>/<replica>/`, reused across runs of
+that server; the framework profiler writes one trace artifact per
+model-serving rank into it, and coverage verifies a storage delta of at least
+one new artifact per model device of the replica. The vLLM integration disables vLLM's
 `profiler_out_*.txt` summary table, whose computation would block the engine
 for minutes after the window closes; derive summaries from the trace artifacts
 instead.
@@ -55,10 +57,11 @@ snapshot and cache-pressure warmup complete first. Warmup remains in native
 measurement artifacts but outside the trace window and normalized profiling
 metrics. A warmup failure leaves the window unopened.
 
-A delivery failure of the close — connection refusal, a dead engine process,
-or a prompt error status — remains window-closing control failure evidence
-adjudicated by coverage. A slow or absent stop response is instead neutral
-flush-pending evidence on the closing action record, not a deadline failure.
+Under engine trace, a delivery failure of the close — connection refusal, a
+dead engine process, or a prompt error status — remains window-closing control
+failure evidence adjudicated by coverage. A slow or absent stop response is
+instead neutral flush-pending evidence on the closing action record, not a
+deadline failure.
 Final report coverage decides capture success; missing coverage fails the
 profile and retains both control and coverage evidence.
 
@@ -76,9 +79,10 @@ server's:
 - The Bench or Eval record's `capture.status` is the capture outcome, and
   `capture.reports[]` lists every report with its `window_id`, `path`, and
   `verified` flag; `capture.finalization[]` is that workload's collection stop.
-- Reports are written under the server's runtime directory,
-  `.inferlab/runtime/<server record>/<process>/profiles/<workload record>/`.
-  InferLab never deletes runtime directories or records; keeping or sharing
+- Managed-collection reports are written under the server's runtime
+  directory, `.inferlab/runtime/<server record>/<process>/profiles/<workload record>/`;
+  engine-trace artifacts land in the replica's trace directory, and
+  `capture.engine_trace[]` records each replica's coverage verdict. InferLab never deletes runtime directories or records; keeping or sharing
   them is the operator's choice.
 - The server record's `process_evidence.<process>.profiler_finalization` is the
   teardown check of the collection session when the server stops. `inactive`

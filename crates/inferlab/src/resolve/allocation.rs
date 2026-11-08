@@ -21,11 +21,10 @@ use inferlab_serve_domain::{
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Engine-trace capture is confined to entirely local, non-containerized
-/// placements: InferLab defines no remote or in-container trace retrieval
+/// InferLab defines no remote or in-container trace retrieval
 /// ([[RFC-0004:C-WORKLOAD-PROFILING]]). The gate runs before render so an
-/// unsupported placement is rejected before launch rather than after the
-/// integration has rendered commands it cannot honor.
+/// unsupported placement fails before the integration renders commands it
+/// cannot honor.
 pub(super) fn gate_engine_trace_placement(
     workspace: &LoadedWorkspace,
     request: &super::ResolveRequest<'_>,
@@ -571,10 +570,11 @@ pub(super) fn allocate_processes(
                         if target.mechanism()
                             == inferlab_protocol::CaptureMechanism::EngineTrace =>
                     {
-                        // The record-owned persistent trace directory assigned
-                        // before render ([[RFC-0004:C-WORKLOAD-PROFILING]]);
-                        // every rank of the replica shares it and the engine
-                        // writes one trace artifact per device into it.
+                        // One trace directory per server definition and replica,
+                        // reused across runs, so coverage is judged by what a
+                        // capture adds to it ([[RFC-0004:C-WORKLOAD-PROFILING]]);
+                        // every rank of the replica writes one artifact per
+                        // device into it.
                         let root = machine
                             .workspace
                             .clone()
@@ -812,7 +812,6 @@ fn placement_machine_pool(placement: &PlacementBinding) -> Vec<String> {
         .collect()
 }
 
-/// The held pool devices a device shortage names ([[RFC-0002:C-LOCAL-PLACEMENT]]).
 fn held_devices_summary(usage: Option<&MachineAllocationUsage>) -> String {
     let held = usage
         .and_then(|usage| usage.unavailable_devices.as_ref())
@@ -830,7 +829,6 @@ fn held_devices_summary(usage: Option<&MachineAllocationUsage>) -> String {
     }
 }
 
-/// The held pool ports a port shortage names ([[RFC-0002:C-LOCAL-PLACEMENT]]).
 fn unavailable_summary(usage: Option<&MachineAllocationUsage>) -> String {
     let held = usage
         .map(|usage| {
@@ -852,11 +850,8 @@ fn unavailable_summary(usage: Option<&MachineAllocationUsage>) -> String {
 struct MachineAllocationUsage {
     devices: BTreeSet<u32>,
     ports: BTreeSet<u16>,
-    /// Pool ports observed held on the machine's launch path before
-    /// allocation ([[RFC-0002:C-LOCAL-PLACEMENT]]).
     unavailable: BTreeMap<u16, super::occupancy::Holder>,
-    /// Pool devices observed held on the machine's launch path, present once
-    /// a pool allocation considered the machine ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+    /// Observed only once a pool allocation considers the machine.
     unavailable_devices: Option<BTreeMap<u32, super::occupancy::Holder>>,
 }
 
@@ -1086,9 +1081,6 @@ pub(super) fn readiness_plan(
     }
 }
 
-/// Derives every rank-zero model-serving process a registry must list, with
-/// its role value and the allocated `host:port` of the named port
-/// ([[RFC-0006:C-INTEGRATIONS]]).
 fn registry_membership_plan(
     registry: &RegistryMembershipReadiness,
     allocations: &[ResolvedProcessAllocation],

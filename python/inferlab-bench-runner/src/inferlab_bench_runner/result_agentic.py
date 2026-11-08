@@ -1,4 +1,4 @@
-"""Validate the public AIPerf 0.12 AgentX evidence boundary."""
+"""Validate the pinned AIPerf AgentX evidence boundary."""
 
 from __future__ import annotations
 

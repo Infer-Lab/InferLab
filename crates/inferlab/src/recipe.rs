@@ -77,15 +77,8 @@ pub(crate) struct RecipeRecord {
 }
 
 impl RecipeRecord {
-    /// Bumped with `ServerRecord::SCHEMA_VERSION` on the protocol-v7 to v8
-    /// hard cut: version-3 records (products 0.10 and 0.11) embed a
-    /// pre-cut resolved execution and record references. Version 5 names
-    /// the local workspace definition files composed into the run
-    /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). Version 6 carries each role's
-    /// declared `devices` in the embedded resolved execution
-    /// ([[RFC-0003:C-SERVE-PARALLELISM]]). Version 7 embeds a resolved
-    /// execution whose Engines may report their layout and store access at
-    /// readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    /// Bumped whenever the embedded resolved execution changes shape, so the
+    /// version gate stops an older record before strict decode.
     pub(crate) const SCHEMA_VERSION: u32 = 8;
 }
 

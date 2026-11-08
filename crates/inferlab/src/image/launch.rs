@@ -85,9 +85,6 @@ pub(crate) fn select(
     })
 }
 
-/// The record's successful assembly for the launching host's platform, the
-/// shared precondition of every image-backed execution
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 fn host_assembly(record: &ImageRecord, record_id: &str) -> Result<(String, String), InferlabError> {
     let platform = host_platform();
     let Some(assembly) = record
@@ -228,11 +225,6 @@ fn gate_capture<'a>(
     Ok(())
 }
 
-/// Apply a validated external-image selection: gate the plan shapes the
-/// substitution cannot serve, observe the framework version inside the
-/// image, rewrite the server commands through an explicit command override,
-/// and preserve the not-qualified evidence
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub(crate) fn apply_external(
     execution: &mut ResolvedExecution,
     external: &ExternalImagePlan,
@@ -261,9 +253,6 @@ pub(crate) fn apply_external(
     Ok(())
 }
 
-/// Apply the validated selection to the resolved execution: gate the plan
-/// shapes the substitution cannot serve, rewrite the server commands, and
-/// preserve the selection as evidence ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub(crate) fn apply(
     execution: &mut ResolvedExecution,
     image: &ImageLaunchPlan,
@@ -318,13 +307,11 @@ fn reject(message: String) -> InferlabError {
 }
 
 fn load_record(root: &Path, record_id: &str) -> Result<ImageRecord, InferlabError> {
-    // The shared record discipline: the same id grammar as every record
-    // family, and the schema-version gate before the strict parse so a
-    // record from before a hard cut surfaces the version error rather than a
-    // bare serde variant error ([[RFC-0005:C-EVIDENCE]]).
-    // The shared grammar, remapped into the image-selection error class
-    // (E4003) the call site owns — the same remap the scratchpad applies
-    // ([[RFC-0001:C-ERROR-CODES]]).
+    // The shared id grammar is remapped into the image-selection error class
+    // (E4003) the call site owns ([[RFC-0001:C-ERROR-CODES]]). The
+    // schema-version gate precedes the strict parse so a record from before a
+    // hard cut surfaces the version error rather than a bare serde variant
+    // error ([[RFC-0005:C-EVIDENCE]]).
     crate::record::validate_record_id("image build record", record_id)
         .map_err(|error| reject(error.to_string()))?;
     let path = root
@@ -354,12 +341,10 @@ fn load_record(root: &Path, record_id: &str) -> Result<ImageRecord, InferlabErro
     serde_json::from_slice(&bytes).map_err(|source| InferlabError::RecordDecode { path, source })
 }
 
-/// The launching host's OCI platform. The container runs on the invoking
-/// host, so the process architecture is the architecture an assembly must
-/// declare to run here. This is the selection question — which recorded
-/// assembly runs here — answered without invoking a builder; the build-side
-/// key those assemblies are recorded under is the daemon-reported platform
-/// observed by `crate::image::tool::DockerBuilderTool::host_platform`.
+/// The launching host's OCI platform, derived from the process architecture
+/// without invoking a builder. Assemblies are recorded under the
+/// daemon-reported platform (`DockerBuilderTool::host_platform`), which this
+/// spelling must match.
 fn host_platform() -> String {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
@@ -613,9 +598,9 @@ pub(crate) fn containerize(
             }
         }
         if explicit_entrypoint {
-            // An external image fixes its own entrypoint; nothing about it
-            // is assumed, so the rendered command replaces it outright
-            // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+            // Nothing is assumed about an external image's own entrypoint
+            // under the `replace` declaration, so the rendered command
+            // replaces it outright ([[ADR-0052]]).
             container.push("--entrypoint".to_owned());
             container.push(inner[0].clone());
             container.push(image_id.to_owned());

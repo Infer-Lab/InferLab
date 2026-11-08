@@ -1628,6 +1628,38 @@ fn a_local_definition_cannot_redeclare_a_committed_one() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// The redeclaration error names the committed fragment that declares the
+/// identifier, not the root file, when that fragment is not the root.
+#[test]
+fn a_local_redeclaration_names_the_committed_fragment() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.split_workspace(
+        crate::dry_run_support::SPLIT_ROOT,
+        &[
+            ("serving.toml", crate::dry_run_support::SPLIT_SERVING),
+            (
+                "measurements.toml",
+                crate::dry_run_support::SPLIT_MEASUREMENTS,
+            ),
+        ],
+    )?;
+    workspace.write_local_definitions(
+        "[benches.c8k1k]\nrequest_source = { kind = \"random\", input_tokens = 1, output_tokens = 1 }\nconcurrency = [1]\nprompts_per_concurrency = 1\ntimeout_seconds = 60\n",
+    )?;
+    let output = workspace.run(&["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains(
+            "bench \"c8k1k\" is declared by both .inferlab/workspace.d/measurements.toml and \
+             .inferlab/workspace.local.d/experiment.toml"
+        ),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 /// Stacks shape the remote realization and images must come wholly from
 /// committed content, so neither may be local.
 #[test]

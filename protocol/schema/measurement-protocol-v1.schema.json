@@ -3129,12 +3129,9 @@
     },
     "EndpointProtocol": {
       "description": "The application protocol a workload endpoint speaks.",
-      "oneOf": [
-        {
-          "description": "HTTP.",
-          "type": "string",
-          "const": "http"
-        }
+      "type": "string",
+      "enum": [
+        "http"
       ]
     },
     "EvalClientRequest": {

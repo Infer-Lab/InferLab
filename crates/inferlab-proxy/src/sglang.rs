@@ -33,7 +33,6 @@ pub const PRIME_PREFIX_CACHE_PATH: &str = "/prime_prefix_cache";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
-/// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "SGLang proxy";
 
 #[derive(Clone, Debug)]
@@ -141,8 +140,6 @@ impl ProxyState {
         self.inner.room_seed.wrapping_add(counter) & ((1_u64 << 63) - 1)
     }
 
-    /// The readiness-wait and reset/flush sweep targets: every prefill
-    /// replica URL followed by every decode URL.
     fn fanout_target_urls(&self) -> Vec<String> {
         core::fanout_target_urls(
             self.inner.prefill.iter().map(|target| target.url.as_str()),
@@ -255,11 +252,6 @@ async fn request_route(
         } else if is_text_event_stream(&decode_response) {
             stream_sse_decode_response(decode_response, prefill_task)
         } else {
-            // Detach policy: the SGLang prefill/decode pair is coordinated over
-            // a bootstrap room, so aborting the prefill HTTP request mid-flight
-            // (on client disconnect) risks leaving the decode-side engine
-            // request waiting for KV that never arrives. Draining the detached
-            // prefill to completion lets both engine requests conclude cleanly.
             core::stream_decode_response(decode_response, prefill_task, OnClientDrop::Detach)
         }
     } else {
@@ -564,8 +556,6 @@ async fn await_prefill(task: JoinHandle<Result<(), ProxyHttpError>>) -> Result<(
         .map_err(|error| ProxyHttpError::internal(format!("prefill task failed: {error}")))?
 }
 
-// Prefill replicas carry a config-issued static data-parallel size, so the
-// conditioning fan-out enumerates (replica, rank) targets over it.
 impl core::PrimeReplica for PrefillTarget {
     fn url(&self) -> &str {
         &self.url

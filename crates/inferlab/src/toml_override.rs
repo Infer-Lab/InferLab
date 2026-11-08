@@ -1,10 +1,8 @@
 use crate::InferlabError;
 
-/// One ordered `--set PATH=<TOML-value>` declaration from an invocation.
-///
-/// CLI entry points parse this stream once. Product domains then select the
-/// declarations addressed to one definition and apply them through the same
-/// exact TOML assignment semantics.
+/// One ordered `--set PATH=<TOML-value>` declaration. CLI entry points parse
+/// the stream once; product domains select the declarations addressed to one
+/// definition and apply them through the same exact TOML assignment semantics.
 #[derive(Clone)]
 pub(crate) struct InvocationOverride {
     index: usize,
@@ -56,10 +54,8 @@ impl InvocationOverride {
         })
     }
 
-    /// The path parsed as TOML key segments, so a quoted dotted key is one
-    /// segment. The sentinel value keeps this a path-only parse; the TOML
-    /// parser, rather than an Inferlab path parser, owns dotted and
-    /// quoted-key semantics.
+    /// A quoted dotted key is one segment: the TOML parser, rather than an
+    /// Inferlab path parser, owns dotted and quoted-key semantics.
     pub(crate) fn path_segments(&self) -> Result<Vec<String>, InferlabError> {
         let mut document: toml::Table =
             toml::from_str(&format!("{} = 0", self.path)).map_err(|error| {
@@ -147,9 +143,8 @@ impl ExactTomlOverride {
             ));
         }
 
-        // Let the TOML parser, rather than an Inferlab path parser, own dotted
-        // and quoted-key semantics. The sentinel parse classifies path errors
-        // separately from value errors before the actual assignment is parsed.
+        // The sentinel parse classifies path errors separately from value
+        // errors before the actual assignment is parsed.
         let path_document: toml::Table =
             toml::from_str(&format!("{path} = 0")).map_err(|error| {
                 invalid_override(raw_override, format!("invalid TOML key path: {error}"))

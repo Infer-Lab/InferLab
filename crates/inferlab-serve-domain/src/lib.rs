@@ -105,13 +105,10 @@ pub enum ProcessIdentityPlan {
         process_role: FrontendProcessRole,
         components: FrontendComponents,
     },
-    /// The discovery service a Gateway backend requires
-    /// ([[RFC-0003:C-SERVE-TOPOLOGY]]).
     Discovery {
         process_role: DiscoveryProcessRole,
         components: DiscoveryBinding,
     },
-    /// The server's external KV store ([[RFC-0003:C-SERVE-KV-STORE]]).
     KvStore {
         process_role: KvStoreProcessRole,
     },
@@ -168,8 +165,6 @@ pub struct AllocationPlan {
     pub model_locator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_locator_source: Option<ModelLocatorSource>,
-    /// The machine-resolved auxiliary weight locators with their resolution
-    /// provenance ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auxiliary_model_locators: Vec<AuxiliaryModelLocatorPlan>,
     pub ports: BTreeMap<String, EndpointAssignment>,
@@ -178,8 +173,6 @@ pub struct AllocationPlan {
     pub communication_interface: Option<String>,
 }
 
-/// One machine-resolved auxiliary weight locator with its resolution
-/// provenance ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AuxiliaryModelLocatorPlan {
     pub kind: AuxiliaryModelKind,
@@ -531,8 +524,6 @@ impl ResolvedProcessAllocation {
     pub fn wire(&self) -> &ServeProcessAllocation {
         &self.wire
     }
-    /// Hands every model rank the KV store's endpoint once the store is
-    /// placed ([[RFC-0003:C-SERVE-KV-STORE]]).
     pub fn bind_kv_store(&mut self, store: &EndpointAssignment) {
         if let ServeProcessAllocation::ModelRank { kv_store, .. } = &mut self.wire {
             *kv_store = Some(Box::new(store.clone()));

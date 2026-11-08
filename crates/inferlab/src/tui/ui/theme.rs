@@ -153,7 +153,6 @@ pub(super) fn panel(p: Palette, focused: bool) -> Block<'static> {
     }
 }
 
-/// The frames an active operation's glyph cycles through.
 pub(super) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// A bar that fills `fraction` of `width` cells in eighth-cell steps, padded

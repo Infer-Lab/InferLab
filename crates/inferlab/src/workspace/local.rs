@@ -111,18 +111,14 @@ pub(crate) struct MachineBinding {
     pub kv_tier_directory: Option<PathBuf>,
 }
 
-/// The variable that selects a process's devices.
 pub(crate) const CUDA_VISIBLE_DEVICES: &str = "CUDA_VISIBLE_DEVICES";
 
-/// The variable that fixes the order in which a process enumerates its
-/// visible devices.
 pub(crate) const CUDA_DEVICE_ORDER: &str = "CUDA_DEVICE_ORDER";
 
-/// The environment that gives a process `devices`. Device ordinals in
-/// machine bindings are nvidia-smi indices, which follow PCI bus order, and
-/// the CUDA runtime enumerates fastest-first unless told otherwise; every
-/// process InferLab gives devices runs in PCI bus order so it opens the
-/// devices InferLab checked ([[RFC-0002:C-LOCAL-PLACEMENT]]).
+/// Device ordinals in machine bindings are nvidia-smi indices, which follow
+/// PCI bus order, while the CUDA runtime enumerates fastest-first unless told
+/// otherwise; pinning PCI bus order makes a process open the devices InferLab
+/// checked ([[RFC-0002:C-LOCAL-PLACEMENT]]).
 pub(crate) fn device_env(devices: &str) -> [(&'static str, String); 2] {
     [
         (CUDA_VISIBLE_DEVICES, devices.to_owned()),
@@ -131,10 +127,10 @@ pub(crate) fn device_env(devices: &str) -> [(&'static str, String); 2] {
 }
 
 /// Container environment variables Inferlab itself manages: injected at
-/// validation launch (HOME, USER, LOGNAME, CUDA_VISIBLE_DEVICES) or owned by
-/// the baked image entrypoint (CONDA_PREFIX). One authority for both the
-/// pass_env validator and the entrypoint projection, so the two cannot drift
-/// ([[RFC-0007:C-IMAGE-BUILD]]).
+/// container launch (HOME, USER, LOGNAME, and the [`device_env`] pair) or
+/// owned by the baked image entrypoint (CONDA_PREFIX). One authority for both
+/// the pass_env validator and the entrypoint projection, so the two cannot
+/// drift ([[RFC-0007:C-IMAGE-BUILD]]).
 pub(crate) const MANAGED_CONTAINER_ENV: &[&str] = &[
     "CONDA_PREFIX",
     CUDA_DEVICE_ORDER,
@@ -152,15 +148,13 @@ pub(crate) const MANAGED_CONTAINER_ENV: &[&str] = &[
 /// ([[RFC-0007:C-IMAGE-BUILD]]).
 pub(crate) const KNOWN_CONTAINER_CAPABILITIES: &[&str] = &["IPC_LOCK", "SYS_NICE", "SYS_PTRACE"];
 
-/// Container launch facts for one machine ([[RFC-0007:C-IMAGE-BUILD]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContainerBinding {
-    /// Environment variable names passed into validation containers by name
+    /// Environment variable names passed into server containers by name
     /// reference only (`--env NAME`), so values never enter the launch
     /// command line or the image content. This is the runtime credential
-    /// channel. Entries are validated at load: bare names only (no `=`), no
-    /// duplicates, and no names Inferlab itself manages in the container.
+    /// channel.
     #[serde(default)]
     pub pass_env: Vec<String>,
     /// Host device paths granted to every server container on this machine
@@ -173,9 +167,8 @@ pub(crate) struct ContainerBinding {
     /// (`--ulimit memlock=-1`); RDMA memory registration needs it.
     #[serde(default)]
     pub memlock_unlimited: bool,
-    /// Linux capabilities granted to server containers (`--cap-add`),
-    /// validated against [`KNOWN_CONTAINER_CAPABILITIES`]. Privileged mode
-    /// is never requested.
+    /// Linux capabilities granted to server containers (`--cap-add`).
+    /// Privileged mode is never requested.
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
@@ -308,11 +301,9 @@ pub(crate) enum LaunchBinding {
 }
 
 impl LocalBindings {
-    /// The locator of one `model_weights` binding for the locally launching
-    /// machine ([[RFC-0002:C-LOCAL-PLACEMENT]]): its machine locator when the
-    /// locally launching machines name one, otherwise the fallback locator.
-    /// Locally launching machines that name different locators are
-    /// ambiguous.
+    /// A machine locator named by the locally launching machines wins over
+    /// the fallback locator; locally launching machines that name different
+    /// locators are ambiguous ([[RFC-0002:C-LOCAL-PLACEMENT]]).
     pub(crate) fn local_model_locator(&self, id: &str) -> Result<String, InferlabError> {
         let binding = self
             .model_weights
@@ -356,10 +347,8 @@ impl LocalBindings {
 
     /// The device set the default placement assigns to local work, projected
     /// by ad-hoc local execution ([[RFC-0002:C-ADHOC-EXECUTION]]): rank-level
-    /// devices plus the full inventories of machines referenced by the
-    /// placement or role machine pools. Returns `None` when there is no
-    /// default placement, a referenced machine is missing or launches over
-    /// SSH, or the resolved set is empty.
+    /// devices plus the full inventories of pooled machines. `None` when any
+    /// referenced machine is missing or launches over SSH.
     pub(crate) fn default_local_devices(&self) -> Option<Vec<u32>> {
         let placement = self.placements.get(self.default_placement.as_ref()?)?;
         let mut pool_machines: Vec<&str> = placement.machines.iter().map(String::as_str).collect();

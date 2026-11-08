@@ -132,8 +132,9 @@ pub(crate) struct ServerPlan {
     /// not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontend: Option<FrontendPlan>,
-    /// The discovery service a Gateway backend requires; spawned first and
-    /// stopped last ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
+    /// The discovery service a Gateway backend requires; spawned after any KV
+    /// store and before every other process, and stopped in reverse order
+    /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<ProcessPlan>,
     /// The server's external KV store: its plan and its one process, spawned
@@ -264,8 +265,8 @@ pub(crate) struct CommonDeclarationPlan {
     pub kv_store: Option<KvStoreDeclarationPlan>,
 }
 
-/// What one serve-state probe sends: every model-serving rank-zero process,
-/// the store address the Engines were rendered with, the bound of one read,
+/// What one serve-state probe sends: the rank-zero process of every role the
+/// probe covers, the store address the Engines were rendered with, the bound of one read,
 /// and the adapter invocation deadline frozen from local bindings
 /// ([[RFC-0006:C-INTEGRATIONS]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -309,7 +310,6 @@ where
 }
 
 impl ServeStateProbePlan {
-    /// The role of a probed process.
     pub(crate) fn role_of(&self, process: &str) -> Option<&str> {
         self.processes
             .iter()
@@ -541,7 +541,6 @@ pub(crate) struct MachineAddressPlan {
     pub address: String,
 }
 
-/// Each used machine's declared host and resolved address, keyed by machine.
 pub(crate) type MachineAddresses = BTreeMap<String, MachineAddressPlan>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

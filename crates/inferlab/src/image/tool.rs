@@ -80,7 +80,6 @@ pub(crate) trait BuilderTool {
     ) -> Result<ExportOutcome, InferlabError>;
 }
 
-/// The local Docker daemon builder ([[RFC-0007:C-IMAGE-BUILD]]).
 pub(crate) struct DockerBuilderTool;
 
 impl DockerBuilderTool {

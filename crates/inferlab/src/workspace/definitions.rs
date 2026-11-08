@@ -21,11 +21,9 @@ pub(super) const DEFAULT_LOCAL_FILE: &str = concat!(state_dir!(), "/local.toml")
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkspaceConfig {
     pub schema_version: u32,
-    // Every identifier-keyed section defaults to empty so a section may be
-    // supplied entirely by workspace.d fragments; the root file need not
-    // declare it ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). Referential integrity
-    // is still enforced after composition by validate_workspace, so an
-    // accidentally undeclared definition surfaces as an unresolved reference.
+    // Sections default to empty so workspace.d fragments may supply them
+    // entirely ([[RFC-0002:C-WORKSPACE-AUTHORITY]]); referential integrity is
+    // enforced after composition.
     #[serde(default)]
     pub models: BTreeMap<String, ModelDefinition>,
     #[serde(default)]
@@ -73,7 +71,6 @@ pub(crate) enum ExternalImageEntrypoint {
 }
 
 impl ExternalImageEntrypoint {
-    /// Whether the command replaces the image entrypoint.
     pub(crate) fn overrides(self) -> bool {
         self == Self::Replace
     }
@@ -208,22 +205,16 @@ pub(crate) struct ServerDefinition {
 /// The outcome of implicit case selection when an invocation names no case
 /// ([[RFC-0003:C-RESOLUTION]]).
 pub(crate) enum ImplicitCaseSelection<'a> {
-    /// The declared `default_case`.
     Default(&'a str),
-    /// The one declared case selects itself.
     Sole(&'a str),
-    /// No cases declared: the base server definition runs as-is.
     Base,
     /// Multiple cases and no default; resolution rejects this selection.
     Ambiguous,
 }
 
 impl ServerDefinition {
-    /// Implicit case-selection precedence: the declared default wins, a sole
-    /// declared case selects itself, no cases means the base server, and
-    /// multiple cases without a default are ambiguous. Resolution turns the
-    /// ambiguous outcome into an error, so display surfaces consuming this
-    /// never claim a selection resolution would reject.
+    /// Shared by resolution and display, so display never claims a selection
+    /// resolution would reject.
     pub(crate) fn implicit_case_selection(&self) -> ImplicitCaseSelection<'_> {
         if let Some(default) = &self.default_case {
             return ImplicitCaseSelection::Default(default.as_str());
@@ -667,7 +658,7 @@ pub(crate) enum BenchDefinition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agentic_source: Option<BenchAgenticSource>,
         /// Omitted resolves to the agentic profile's default seed, or 0 for
-        /// other sources (RFC-0004:C-BENCH-AGENTIC-TRACE-REPLAY).
+        /// other sources ([[RFC-0004:C-BENCH-AGENTIC-TRACE-REPLAY]]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seed: Option<u64>,
         #[serde(default)]

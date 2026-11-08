@@ -146,8 +146,6 @@ pub(super) fn cleanup_failed_local_launch(
     evidence
 }
 
-/// Wait until every thread of `processes` has exited on the launch machine
-/// ([[RFC-0009:C-COMPLETION-WAITS]]).
 pub(super) fn wait_for_exit(
     target: Option<&str>,
     processes: Processes,
@@ -303,9 +301,10 @@ pub(super) fn terminate_ssh(
 /// The remote termination script: it signals the group — SIGTERM, the
 /// termination grace, SIGKILL to what remains — and returns; whether the
 /// group exited is the exit wait's judgment. The leader-missing branch
-/// replicates the local cohort check — every live member must start at or after the recorded
-/// leader ticks, else the pgid reads as recycled and the script declines to
-/// signal, naming the offending members in the detail field.
+/// replicates the local cohort check: every live member must start at or
+/// after the recorded leader ticks, else the pgid reads as recycled and the
+/// script declines to signal, naming the offending members in the detail
+/// field.
 pub(super) fn remote_cleanup_script(handle: &SshProcessHandle) -> String {
     format!(
         "set +e; pgid={}; pid={}; expected={}; if [ -r /proc/$pid/stat ]; then actual=$(awk '{{print $22}}' /proc/$pid/stat); if [ $? -ne 0 ]; then printf '{marker}unknown\\t-\\t0\\t-\\tstat-unreadable\\n'; exit 0; fi; if [ \"$actual\" != \"$expected\" ]; then printf '{marker}stale\\t-\\t0\\t-\\t%s\\n' \"$actual\"; exit 0; fi; elif {}; then bad=\"\"; for mpid in $(ps -eo pid=,pgid=,stat= | awk -v pgid=\"$pgid\" '$2 == pgid && $3 !~ /^Z/ {{print $1}}'); do mticks=$(awk '{{print $22}}' /proc/$mpid/stat 2>/dev/null) || mticks=\"\"; if [ -n \"$mticks\" ] && [ \"$mticks\" -lt \"$expected\" ]; then bad=\"$bad $mpid:$mticks\"; fi; done; if [ -n \"$bad\" ]; then printf '{marker}unknown\\t-\\t0\\t-\\tleader-missing; cohort members%s predate recorded leader start %s\\n' \"$bad\" \"$expected\"; exit 0; fi; else printf '{marker}already\\t-\\t0\\t-\\t-\\n'; exit 0; fi; if ! {}; then printf '{marker}already\\t-\\t0\\t-\\t-\\n'; exit 0; fi; kill -TERM -- -$pgid; term_code=$?; i=0; while {} && [ $i -lt {term_limit} ]; do sleep {poll}; i=$((i+1)); done; forced=0; kill_code=-; if {}; then forced=1; kill -KILL -- -$pgid; kill_code=$?; fi; printf '{marker}cleanup\\t%s\\t%s\\t%s\\t-\\n' \"$term_code\" \"$forced\" \"$kill_code\"",
@@ -413,8 +412,6 @@ pub(super) fn terminate_ssh_under(
     }
 }
 
-/// Confirm a server container is gone from its launch machine
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]], [[RFC-0009:C-COMPLETION-WAITS]]).
 pub(super) fn remove_server_container(
     target: Option<&str>,
     container: &str,
@@ -443,8 +440,6 @@ pub(super) fn marked_process_sweep_script(marker: &str) -> String {
     )
 }
 
-/// Run the marked-process sweep on a launch machine — locally, or over SSH
-/// to `target` — then wait until every found process has exited.
 pub(super) fn sweep_marked_processes(
     target: Option<&str>,
     marker: &str,

@@ -332,7 +332,6 @@ pub(crate) enum ResolvedBenchRequestSource {
     },
 }
 
-/// One resolved corpus binding on a random request source.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ResolvedBenchCorpus {
     /// Workspace-relative corpus path as declared.
@@ -354,7 +353,6 @@ pub(crate) struct ResolvedBenchCorpus {
 pub(crate) struct ResolvedBenchImages {
     pub width: u32,
     pub height: u32,
-    /// The effective per-request image count.
     pub count: u32,
     /// The image supply; absent selects the measurement runtime's synthetic
     /// noise image supply.
@@ -362,7 +360,6 @@ pub(crate) struct ResolvedBenchImages {
     pub source: Option<ResolvedBenchImageSource>,
 }
 
-/// One resolved operator image directory binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ResolvedBenchImageSource {
     /// Workspace-relative directory path as declared.
@@ -374,7 +371,6 @@ pub(crate) struct ResolvedBenchImageSource {
     /// directory was missing, unreadable, or held no regular file, never
     /// fabricated. Preparation owns the typed failure.
     pub observed_sha256: Option<String>,
-    /// The effective source-image sampling policy.
     pub sampling: crate::workspace::BenchImageSampling,
 }
 

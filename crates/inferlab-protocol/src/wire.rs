@@ -26,7 +26,6 @@ pub enum ProtocolVersion {
 }
 
 impl ProtocolVersion {
-    /// The current adapter protocol version.
     pub const CURRENT: Self = Self::V16;
 
     /// The protocol version as spelled on the wire, projected for surfaces
@@ -138,7 +137,6 @@ pub struct EndpointAssignment {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndpointProtocol {
-    /// HTTP.
     Http,
 }
 
@@ -146,7 +144,6 @@ pub enum EndpointProtocol {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpMethod {
-    /// HTTP POST.
     Post,
 }
 
@@ -178,7 +175,6 @@ pub enum AdapterRequest {
 }
 
 impl AdapterRequest {
-    /// The protocol version carried by this request, regardless of operation.
     #[must_use]
     pub const fn protocol_version(&self) -> ProtocolVersion {
         match self {
@@ -389,7 +385,6 @@ pub enum AdapterResponse {
 }
 
 impl AdapterResponse {
-    /// The protocol version carried by this response, regardless of outcome.
     #[must_use]
     pub const fn protocol_version(&self) -> ProtocolVersion {
         match self {
@@ -498,18 +493,14 @@ impl ServeRoleKind {
 pub struct KvTransferMechanism(#[schemars(regex(pattern = r"^[a-z0-9_-]+$"))] String);
 
 impl KvTransferMechanism {
-    /// Mooncake KV-cache transfer.
     pub const MOONCAKE: &'static str = "mooncake";
-    /// NIXL KV-cache transfer.
     pub const NIXL: &'static str = "nixl";
 
-    /// The Mooncake mechanism.
     #[must_use]
     pub fn mooncake() -> Self {
         Self(Self::MOONCAKE.to_owned())
     }
 
-    /// The NIXL mechanism.
     #[must_use]
     pub fn nixl() -> Self {
         Self(Self::NIXL.to_owned())
@@ -529,19 +520,16 @@ impl KvTransferMechanism {
         }
     }
 
-    /// The mechanism name as declared.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Whether this is the Mooncake mechanism.
     #[must_use]
     pub fn is_mooncake(&self) -> bool {
         self.0 == Self::MOONCAKE
     }
 
-    /// Whether this is the NIXL mechanism.
     #[must_use]
     pub fn is_nixl(&self) -> bool {
         self.0 == Self::NIXL
@@ -561,7 +549,6 @@ impl<'de> Deserialize<'de> for KvTransferMechanism {
     }
 }
 
-/// A KV-transfer mechanism name outside the name grammar.
 #[derive(Debug)]
 pub struct InvalidKvTransferMechanism(String);
 
@@ -1197,7 +1184,6 @@ impl JsonScalar {
 }
 
 impl std::fmt::Display for JsonScalar {
-    /// The scalar in its JSON spelling.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Boolean(value) => write!(formatter, "{value}"),

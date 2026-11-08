@@ -301,9 +301,6 @@ fn file_sha256(path: &Path) -> Result<String, ServerLaunchError> {
     Ok(base16ct::lower::encode_string(&digest.finalize()))
 }
 
-/// A one-line human summary of a structured removal outcome for the launch
-/// failure message; the structured evidence itself rides
-/// [`LaunchFailure::container_removal`].
 pub(super) fn spawn_ssh(
     target: &str,
     spec: ProcessSpec<'_>,

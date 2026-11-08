@@ -1,9 +1,9 @@
 //! Machine-pool occupancy observed before allocation
 //! ([[RFC-0002:C-LOCAL-PLACEMENT]], [[ADR-0065]]): a pool port is unavailable
 //! when a TCP socket already listens on it on the machine's launch path, a
-//! pool device when it reports a compute application, and either when a
-//! starting or running record of the workspace allocated it on that launch
-//! path. Each launch path is observed once per resolution.
+//! pool device when it reports a compute application, and either when a live
+//! workspace record holds it on that launch path (see `reserved_resources`).
+//! Each launch path is observed once per resolution.
 
 use crate::error::InferlabError;
 use crate::workspace::MachineBinding;
@@ -81,7 +81,6 @@ pub(crate) struct UnavailablePort {
     pub holder: Holder,
 }
 
-/// Each used machine's unavailable pool ports, keyed by machine identifier.
 pub(crate) type UnavailablePorts = BTreeMap<String, Vec<UnavailablePort>>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -91,7 +90,6 @@ pub(crate) struct UnavailableDevice {
     pub holder: Holder,
 }
 
-/// Each used machine's unavailable pool devices, keyed by machine identifier.
 pub(crate) type UnavailableDevices = BTreeMap<String, Vec<UnavailableDevice>>;
 
 /// What resolution observed held on the machines that received processes.
@@ -108,10 +106,8 @@ enum Resource {
     Device(u32),
 }
 
-/// The workspace allocation lock a launching workflow holds from port
-/// observation until its server record exists, so two launches in one
-/// workspace cannot allocate the same port; dropping it releases the lock
-/// once a record carrying the allocation exists.
+/// Held from port observation until the launch's server record exists, so two
+/// launches in one workspace cannot allocate the same port.
 #[derive(Debug)]
 pub(crate) struct AllocationLock {
     _file: File,
@@ -149,7 +145,6 @@ impl<'a> Occupancy<'a> {
         }
     }
 
-    /// The machine's pool ports that are unavailable on its launch path.
     pub(super) fn unavailable(
         &mut self,
         machine_id: &str,
@@ -181,9 +176,7 @@ impl<'a> Occupancy<'a> {
         Ok(unavailable)
     }
 
-    /// The machine's pool devices that are unavailable on its launch path:
-    /// those reporting a compute application to the same probe the
-    /// launch-time device check runs, and those a live record allocated.
+    /// Uses the same probe as the launch-time device check.
     pub(super) fn unavailable_devices(
         &mut self,
         machine_id: &str,

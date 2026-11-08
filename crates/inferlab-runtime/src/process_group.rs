@@ -253,7 +253,6 @@ impl LocalProcessGroup {
         Ok(violations)
     }
 
-    /// Live (non-defunct) member pids of the group.
     fn live_member_pids(&self, bound: &OperationBound) -> Result<Vec<u32>, ProcessGroupError> {
         let output = cleanup_output(&["ps", "-eo", "pid=,pgid=,stat="], bound)?;
         if !output.status.success() {
@@ -383,7 +382,6 @@ impl TreeProcess {
         }
     }
 
-    /// The executable this process runs, when readable.
     pub fn executable(&self) -> Option<std::path::PathBuf> {
         std::fs::read_link(format!("/proc/{}/exe", self.pid)).ok()
     }

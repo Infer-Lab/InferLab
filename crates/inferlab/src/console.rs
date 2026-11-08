@@ -16,7 +16,6 @@ use std::path::PathBuf;
 
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
-/// The four top-level views both surfaces present.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum View {
     #[default]
@@ -331,8 +330,6 @@ impl DisplayTone {
 }
 
 impl DisplayEntry {
-    /// The row's kind and name: a `kind / name` title splits; other entries
-    /// take a short label of their entry kind.
     pub(crate) fn kind_and_name(&self) -> (&str, &str) {
         if let Some((kind, name)) = self.title.split_once(" / ") {
             let kind = match kind {

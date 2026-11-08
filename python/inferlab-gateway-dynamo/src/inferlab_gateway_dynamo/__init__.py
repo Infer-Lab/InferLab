@@ -86,13 +86,10 @@ __all__ = [
 ]
 
 BACKEND = "dynamo"
-"""The backend name a workspace selects for a Dynamo Gateway or P/D Router."""
 
 IMPLEMENTATION = "dynamo"
-"""The implementation identity recorded for every Dynamo frontend component."""
 
 DISTRIBUTION = "ai-dynamo"
-"""The distribution that installs the Dynamo frontend and worker modules."""
 
 NAMESPACE = "inferlab"
 """The Dynamo namespace of every process of one server. Each server owns its
@@ -168,7 +165,6 @@ def require_backend(selected: str | None, *, component: str) -> None:
 
 
 def installed_version() -> str:
-    """The installed Dynamo distribution version, or `unavailable`."""
     try:
         return version(DISTRIBUTION)
     except PackageNotFoundError:
@@ -308,7 +304,6 @@ def prefill_decode_frontends(
         policies=PdRoutingPolicies(prefill=_ROUTER_MODE, decode=_ROUTER_MODE),
         prefill_role=prefill_role,
         decode_role=decode_role,
-        # Workers are reached over Dynamo's TCP request plane.
         target_scheme=TargetEndpointScheme.tcp,
         gateway_settings=_gateway_settings(),
         gateway_ports=[RESPONSE_STREAM_PORT],
@@ -378,7 +373,6 @@ def worker_env(
 
 
 def render_discovery(allocation: ServeProcessAllocationDiscovery) -> RenderedServeProcess:
-    """One single-member etcd on the allocated client and peer listeners."""
     client = f"http://{authority(allocation.endpoint.host, allocation.endpoint.port)}"
     peer_port = allocation.ports.get(_PEER_PORT)
     if peer_port is None:

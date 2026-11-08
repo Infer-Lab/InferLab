@@ -129,10 +129,8 @@ fn validate_registry_readiness(
     Ok(())
 }
 
-/// Protocol-12 members ([[RFC-0006:C-INTEGRATIONS]]): action success
-/// predicates, registry-membership readiness, the Gateway discovery
-/// requirement, and per-target prefix-cache reset declared by every
-/// model-serving role or none, never beside a public reset action.
+/// Per-target prefix-cache reset is declared by every model-serving role or
+/// none, never beside a public reset action ([[RFC-0006:C-INTEGRATIONS]]).
 fn validate_discovery_and_registry_members(
     integration: &str,
     plan: &PlanServeResult,
@@ -618,7 +616,7 @@ pub(super) fn expand_replica_requirements(
                     target.mechanism,
                     capture_window_control_endpoint_plan(target.window_control.endpoint),
                     primary_id.clone(),
-                    // Baseline rationale: see the profiler record's `expected_artifacts` field.
+                    // Baseline rationale: see `EngineTraceCoverageRecord::expected_artifacts`.
                     replica.device_count,
                     capture_window_action_plan(&target.window_control.start),
                     capture_window_action_plan(&target.window_control.stop),
@@ -696,10 +694,6 @@ fn public_endpoint_declaration<'a>(
     })
 }
 
-/// The accepted endpoint declaration resolved into evidence: the control
-/// plane fills both pinned path values
-/// ([[RFC-0006:C-OPENAI-ENDPOINT-CONTRACT]]); no integration-supplied path
-/// ever reaches the resolved requirement.
 pub(super) fn public_endpoint_requirement(
     integration: &str,
     topology: ServeTopology,
@@ -1224,11 +1218,6 @@ pub(super) fn validate_integration_identity(
     }
 }
 
-/// [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]: the accepted plan must return
-/// the effective acceptance length whenever the request carried the
-/// declaration — a finite value of at least one — and must not return the
-/// outcome when the request carried none. The curve form additionally
-/// requires the determined draft count; the explicit form must not carry one.
 pub(super) fn validate_synthetic_acceptance_outcome(
     integration: &str,
     request: Option<&SyntheticAcceptanceInput>,

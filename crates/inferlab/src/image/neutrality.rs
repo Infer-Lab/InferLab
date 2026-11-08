@@ -19,7 +19,6 @@ pub(super) const WORKSPACE_TARGET: &str = "/opt/inferlab-workspace";
 /// Where Cargo registry and git dependency sources appear in built packages.
 pub(super) const CARGO_TARGET: &str = "/opt/inferlab-cargo";
 
-/// One compiler path map.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PathMap {
@@ -217,7 +216,6 @@ pub(super) fn rewrite_search_paths(entries: &[String], paths: &BuildPaths) -> Ve
         .collect()
 }
 
-/// The first leaked path in `bytes`, by label.
 fn leak(needles: &[(&'static str, String)], bytes: &[u8]) -> Option<&'static str> {
     needles
         .iter()
@@ -459,7 +457,6 @@ fn has_fatbin(bytes: &[u8], wheel: &Path, member: &str) -> Result<bool, Inferlab
     Ok(file.section_by_name(".nv_fatbin").is_some())
 }
 
-/// Extract every device code image of one ELF file into `into`.
 fn extract_device_code(
     member: &Path,
     tools: &InstalledImageToolchain,

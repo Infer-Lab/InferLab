@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.5] - 2026-11-08
+
+### Fixed
+
+- A local workspace definition that redeclares an id already declared in a
+  committed `.inferlab/workspace.d/` fragment now names that fragment as the
+  earlier declarer, instead of `workspace.toml`.
+- An lm-eval task YAML path that passes through a symbolic link is now
+  rejected with a message naming the eval and its task YAML, instead of a
+  stack source.
+- `inferlab agent update --help` now describes what the command does: it
+  reinstalls the plugin from the package embedded in the binary through each
+  selected agent runtime. It does not compare plugin versions.
+- A post-cleanup device residual probe that does not answer in time now
+  reports its attempt bound, instead of the settle window that the cleanup
+  completion waits replaced.
+
+### Changed
+
+- Code comments and the operator guides were proofread against the code;
+  statements that no longer matched the behavior were corrected or removed.
+
 ## [0.23.4] - 2026-11-08
 
 ### Changed

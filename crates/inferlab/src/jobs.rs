@@ -34,7 +34,7 @@ const SCHEMA_VERSION: u32 = 2;
 const START_DEADLINE: Duration = Duration::from_secs(30);
 const SIGINT: i32 = 2;
 
-/// What the service records before the supervisor starts.
+/// What a launch records before the supervisor starts.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JobSpec {
@@ -102,7 +102,6 @@ pub(crate) struct Job {
     pub(crate) spec: Option<JobSpec>,
     pub(crate) producer: Option<ProducerIdentity>,
     pub(crate) state: JobState,
-    /// The first record the job's command created, once it exists.
     pub(crate) record: Option<JobRecord>,
 }
 
@@ -255,7 +254,6 @@ fn start(directory: &Path, spec: &JobSpec) -> Result<(), String> {
     let started = matches!(&handshake, Ok(line) if line.trim() == "started")
         || directory.join(PROCESS_FILE).is_file();
     if !started {
-        // Not confirmed: stop the supervisor and report what it said.
         let _ = supervisor.kill();
     }
     // The supervisor outlives this request; reap it whenever it ends.

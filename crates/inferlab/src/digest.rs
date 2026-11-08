@@ -1,5 +1,3 @@
-//! Content digests of local files.
-
 use crate::InferlabError;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -27,8 +25,6 @@ pub(crate) fn hash_file(path: &Path) -> Result<String, InferlabError> {
 pub(crate) fn hash_directory_entries(directory: &Path) -> Result<String, InferlabError> {
     let mut files = Vec::new();
     collect_regular_files(directory, directory, &mut files)?;
-    // Byte-wise ordering over the `/`-joined relative path keeps the digest
-    // stable across filesystems and platforms.
     files.sort_by(|left, right| left.0.cmp(&right.0));
     if files.is_empty() {
         return Err(InferlabError::DatasetPreparation {
@@ -53,8 +49,6 @@ pub(crate) fn hash_directory_entries(directory: &Path) -> Result<String, Inferla
     Ok(base16ct::lower::encode_string(&digest.finalize()))
 }
 
-/// Collect each regular file under `current` as its `/`-joined
-/// `root`-relative byte rendering paired with its full path.
 fn collect_regular_files(
     root: &Path,
     current: &Path,

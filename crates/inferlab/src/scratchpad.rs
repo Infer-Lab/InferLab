@@ -96,9 +96,8 @@ pub(crate) fn note_with_progress(
     progress.phase(Phase::named("journal-lock waiting").lock(&path))?;
     file.lock_exclusive()
         .map_err(|source| io_fail(&path, source))?;
-    // The shared clock helpers construct ServerLifecycle; a broken clock on
-    // the note path is a scratchpad failure, remapped like the record
-    // references above.
+    // The shared clock helpers report ServerLifecycle; a broken clock on the
+    // note path is a scratchpad failure.
     let timestamp =
         now_unix_ms()
             .and_then(utc_timestamp)

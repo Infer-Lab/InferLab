@@ -84,17 +84,21 @@ storage holds the image; InferLab does not distribute a built image between
 machines.
 
 `--external-image <ID>` selects a workspace-declared digest-pinned artifact
-whose integration claim matches the server stack's integration; its commands
-are lowered with the workspace's `adapter` Pixi environment (see
-[External images](execution-authoring.md#runtime-images-and-ad-hoc-execution)).
-InferLab verifies the image in builder storage on the controller and every
-launch machine and never pulls it automatically. An external-image placement
-may span SSH machines, and a remote machine then needs no workspace
-realization: its `workspace` path is only a launch directory. Resolution
-probes the framework version inside the image, and the record marks the launch
-as not qualified by the workspace, carrying that observed version. Built and
-external selections are mutually exclusive. Image-backed launches reject
-workload capture; see [Profiling](profiling.md#run-a-capture).
+whose integration claim matches the server stack's integration. InferLab
+verifies the image in builder storage on the controller and every launch
+machine and never pulls it automatically. An external-image placement may span
+SSH machines, and a remote machine then needs no workspace realization: its
+`workspace` path is only a launch directory. Resolution probes the framework
+version inside the image, and the record marks the launch as not qualified by
+the workspace, carrying that observed version.
+
+For either selection, lowering runs in a container of the selected image with
+the adapter packages of the workspace's `adapter` Pixi environment mounted
+ahead of the image's site-packages, so the workspace-pinned adapter lowers and
+adapter packages inside the image are never used (see
+[Runtime image authoring](execution-authoring.md#runtime-images-and-ad-hoc-execution)).
+Built and external selections are mutually exclusive. Image-backed launches
+reject workload capture; see [Profiling](profiling.md#run-a-capture).
 
 ## Ad-Hoc Probes
 

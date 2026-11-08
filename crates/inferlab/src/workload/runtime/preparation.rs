@@ -427,7 +427,6 @@ pub(super) fn finish_population_preparation(
     Ok(())
 }
 
-/// The replayed request source, when the Bench replays a file.
 fn replay_source(plan: &BenchPlan) -> Option<&ResolvedBenchRequestSource> {
     match &plan.client.effective_definition.source {
         ResolvedBenchSource::Requests {
@@ -437,7 +436,6 @@ fn replay_source(plan: &BenchPlan) -> Option<&ResolvedBenchRequestSource> {
     }
 }
 
-/// The plan's view of one materialized population.
 fn bench_population(
     population: &inferlab_protocol::BenchPopulationInput,
     evidence_path: &std::path::Path,

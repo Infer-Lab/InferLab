@@ -13,10 +13,8 @@ use crate::ssh::{SSH_ENV_REMOVE, ssh_argv};
 
 const PROGRESS_MARKER: &str = "INFERLAB_EXIT_PROGRESS\t";
 
-/// Which processes a wait follows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Processes {
-    /// Every process in the group.
     Group(u32),
     /// These exact processes, each named by pid and start time so a reused
     /// pid never stands in for one that exited.
@@ -121,7 +119,6 @@ impl CompletionTarget for ProcessExit {
     }
 }
 
-/// Parse the exit observation script's result line.
 pub fn parse_exit_observation(stdout: &str) -> Result<(u64, u64, String), String> {
     let line = stdout
         .lines()
@@ -194,8 +191,6 @@ fn observe_local(processes: &Processes) -> (u64, u64, String) {
     (live, ticks, left.join(" "))
 }
 
-/// Run one observation or action script on the launch machine under its
-/// attempt bound, returning stdout of a successful run.
 pub(crate) fn run_script(
     target: Option<&str>,
     script: &str,

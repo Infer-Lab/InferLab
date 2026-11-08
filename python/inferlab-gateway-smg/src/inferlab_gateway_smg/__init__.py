@@ -72,13 +72,10 @@ __all__ = [
 ]
 
 BACKEND = "smg"
-"""The backend name a workspace selects for an SMG Gateway or P/D Router."""
 
 IMPLEMENTATION = "smg"
-"""The implementation identity recorded for every SMG frontend component."""
 
 DISTRIBUTION = "tokenspeed-smg"
-"""The distribution that installs the SMG Gateway and its `smg` command."""
 
 Policy = Literal[
     "least_load",
@@ -98,7 +95,6 @@ BOOTSTRAP_PORT = "bootstrap"
 which hands it to each paired decode worker."""
 
 PROMETHEUS_PORT = "prometheus"
-"""The logical port SMG serves Prometheus metrics on."""
 
 _FORMER_BACKEND = "tokenspeed-smg"
 
@@ -125,7 +121,6 @@ def require_backend(selected: str | None, *, component: str) -> None:
 
 
 def installed_version() -> str:
-    """The installed SMG Gateway distribution version, or `unavailable`."""
     try:
         return version(DISTRIBUTION)
     except PackageNotFoundError:
@@ -133,7 +128,6 @@ def installed_version() -> str:
 
 
 def gateway_settings() -> dict[str, SettingValue]:
-    """Settings every SMG frontend launches with."""
     return {
         "retries": SettingValue(root=False),
         "circuit_breaker": SettingValue(root=False),
@@ -216,7 +210,6 @@ def routed_single_readiness(*, observe_data_parallel_size: bool = False) -> Read
 def pd_router_readiness(
     *, prefill_bootstrap_port: str, observe_data_parallel_size: bool = False
 ) -> ReadinessProbe:
-    """Readiness through SMG's `/workers` registry of gRPC targets."""
     return ReadinessProbe(
         root=ReadinessProbeHttpTargetRegistry(
             readiness_path="/readiness",
@@ -283,14 +276,12 @@ _OWNED_OPTIONS = frozenset(
         "--disable-circuit-breaker",
     }
 )
-"""The SMG options InferLab renders from the allocation and the typed
-settings; operator arguments may not name them."""
 
 
 def validate_extra_args(extra_args: Sequence[str], *, component: str) -> None:
     """Reject operator arguments that would replace an option InferLab
-    renders, or end option parsing before the managed ones
-    ([[RFC-0003:C-GATEWAY-PD-ROUTER]])."""
+    renders, or a bare `--`: they are appended after every rendered option
+    ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
     for argument in extra_args:
         if argument == "--":
             raise AdapterOperationError(

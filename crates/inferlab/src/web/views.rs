@@ -118,7 +118,6 @@ fn seconds(duration: Duration) -> String {
     format!("{:.1}s", duration.as_secs_f64())
 }
 
-/// Which tab of a workspace page is open.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Tab {
     View(View),

@@ -260,10 +260,10 @@ class AiperfAgenticProfileBarrierStrategy:
         _warmup_checkpoint = None
         if checkpoint is None:
             raise RuntimeError("AIPerf AgentX profiling reached the barrier without warmup")
-        # AgentX cache-pressure warmup request failures are recorded evidence,
-        # not a barrier failure input (ADR-0044); snapshot-warmup failure
-        # aborts natively before profiling setup, so only the drain invariants
-        # that capture safety depends on are enforced here.
+        # AgentX warmup request failures are recorded evidence, not a barrier
+        # failure input (ADR-0044); AIPerf aborts natively before profiling
+        # setup on any failed or cancelled root-stream warmup request, so only
+        # the drain invariants that capture safety depends on are enforced here.
         error = warmup_completion_error(
             checkpoint.expectation,
             _counter_values(checkpoint.progress.counter),

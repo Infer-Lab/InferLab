@@ -74,10 +74,7 @@ pub struct ProcessCapturePlan {
     pub capture_storage: Option<PathBuf>,
     pub window_control_endpoint: CaptureWindowControlEndpointPlan,
     pub control_process_id: String,
-    /// The target replica's declared whole-replica device count: engine-trace
-    /// coverage verification expects one new trace artifact per device
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Older records predate the field
-    /// and default to 1.
+    /// Older records predate the field and default to 1.
     #[serde(default = "default_one")]
     pub device_count: u32,
     pub start: CaptureWindowActionPlan,

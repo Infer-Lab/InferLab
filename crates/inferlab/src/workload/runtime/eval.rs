@@ -407,7 +407,6 @@ enum OpenAiSmokeRequestBody<'a> {
     ChatVision(OpenAiChatVisionRequest<'a>),
 }
 
-/// The data URI embedding the release-owned fixed test image.
 fn vision_smoke_image_data_uri() -> std::borrow::Cow<'static, str> {
     use base64::Engine;
     std::borrow::Cow::Owned(format!(

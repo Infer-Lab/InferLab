@@ -193,8 +193,6 @@ def _resolve_synthetic_acceptance(
     form = synthetic.root
     if not isinstance(form, SyntheticAcceptanceInput2):
         return SyntheticAcceptanceOutcome(acceptance_length=form.explicit.acceptance_length)
-    # The golden curve's lookup key is the draft length, exposed by the
-    # operator's speculative_config as max_draft_len.
     draft_length: object = None
     if isinstance(speculative, dict):
         draft_length = _yaml_mapping(speculative, "speculative_config").get("max_draft_len")

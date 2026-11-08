@@ -247,7 +247,7 @@ pub(super) enum ResetCapability<'a> {
 }
 
 impl<'a> ResetCapability<'a> {
-    /// The capability a Bench plan selected, absent for an uncontrolled start.
+    /// The plan's per-target reset when it carries one, else its public action.
     pub(super) fn of(
         public: Option<&'a WorkloadHttpAction>,
         per_target: &'a [WorkloadReplicaReset],

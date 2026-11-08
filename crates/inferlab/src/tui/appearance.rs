@@ -1,7 +1,6 @@
 //! The terminal's appearance, read once at startup ([[ADR-0055]]): the TUI
 //! asks the terminal for its colors within a bound, then falls back to
-//! `COLORFGBG`, and otherwise assumes a dark background — today's palette, so
-//! a terminal that does not answer loses nothing.
+//! `COLORFGBG`, and otherwise assumes a dark background.
 
 use std::time::Duration;
 

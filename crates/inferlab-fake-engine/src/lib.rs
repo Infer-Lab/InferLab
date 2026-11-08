@@ -10,14 +10,12 @@ use thiserror::Error;
 #[cfg(feature = "smg-transport")]
 pub mod smg;
 
-/// The complete input understood by the deterministic fake execution core.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenerateRequest {
     pub prompt_token_ids: Vec<u32>,
     pub max_output_tokens: u32,
 }
 
-/// Why the fake Engine stopped producing token IDs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FinishReason {
     Length,
@@ -32,14 +30,12 @@ impl FinishReason {
     }
 }
 
-/// The terminal token result returned by the fake execution core.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenerateOutput {
     pub token_ids: Vec<u32>,
     pub finish_reason: FinishReason,
 }
 
-/// A request rejected at the token execution boundary.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum EngineError {
     #[error("prompt_token_ids must not be empty")]

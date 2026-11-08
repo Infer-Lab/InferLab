@@ -47,7 +47,6 @@ pub enum ReadinessPlan {
     ProcessAlive,
 }
 
-/// A JSON Pointer and the string value expected at it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JsonValueMatchPlan {
     pub pointer: String,

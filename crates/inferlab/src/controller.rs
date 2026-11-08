@@ -30,7 +30,6 @@ const STOP_REQUEST: &str = "stop.request";
 /// ([[RFC-0009:C-OPERATION-BUDGETS]]).
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Who holds a lock, as its holder recorded it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LockHolder {
@@ -85,8 +84,6 @@ fn open_lock(path: &Path) -> Result<File, InferlabError> {
         })
 }
 
-/// Try to take a lock without waiting: `Some` holds it, `None` means another
-/// process holds it.
 fn try_lock(path: &Path) -> Result<Option<File>, InferlabError> {
     let file = open_lock(path)?;
     match file.try_lock_exclusive() {
@@ -122,7 +119,6 @@ pub(crate) fn lock_waiting(
             || "a holder that recorded no identity".to_owned(),
             |holder| holder.to_string(),
         );
-        // The wait reports its holder once, and again only when it changes.
         if reported.as_ref() != Some(&current) {
             progress
                 .phase(Phase::named(format!("waiting for {waiting_for}")).current_item(&current))?;
@@ -182,11 +178,9 @@ impl Drop for ControllerGuard {
     }
 }
 
-/// Whether a record's controller is still driving it.
 pub(crate) enum Controller {
     /// The controller is gone; the stopper now holds its lock.
     Gone(File),
-    /// A controller holds the lock.
     Running(Option<LockHolder>),
 }
 
@@ -223,7 +217,6 @@ pub(crate) fn wait_for_release(
     )
 }
 
-/// Describe a controller for an operator.
 pub(crate) fn describe(holder: Option<&LockHolder>) -> String {
     holder.map_or_else(
         || "a controller that recorded no identity".to_owned(),

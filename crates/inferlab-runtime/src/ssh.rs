@@ -17,8 +17,6 @@ const SSH_OPTIONS: &[&str] = &["-o", "BatchMode=yes", "--"];
 /// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
 pub const SSH_ENV_REMOVE: &[&str] = &["LD_LIBRARY_PATH", "LD_PRELOAD"];
 
-/// The full SSH argv for bounded execution through an owning operation or
-/// cleanup deadline.
 pub fn ssh_argv(target: &str, script: &str) -> Vec<String> {
     // Keep the remote account's interactive login initialization, which owns
     // tool discovery and declared pass-through values, but replace that shell

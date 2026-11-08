@@ -302,7 +302,6 @@ pub(crate) enum BenchRequestSourceEvidence {
     Replay {
         /// Workspace-relative population path as declared.
         path: String,
-        /// Declared expected content digest when present.
         #[serde(default)]
         expected_sha256: Option<String>,
         /// Observed content digest of the replayed file at preparation.
@@ -326,7 +325,6 @@ pub(crate) enum BenchRequestSourceEvidence {
 pub(crate) struct BenchCorpusSourceEvidence {
     /// Workspace-relative corpus path as declared.
     pub path: String,
-    /// Declared expected content digest when present.
     #[serde(default)]
     pub expected_sha256: Option<String>,
     /// Observed content digest of the corpus at preparation.
@@ -341,7 +339,6 @@ pub(crate) struct BenchCorpusSourceEvidence {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BenchImagesEvidence {
-    /// The effective per-request image count.
     pub count: u32,
     pub width: u32,
     pub height: u32,
@@ -359,7 +356,6 @@ pub(crate) struct BenchImagesEvidence {
 pub(crate) struct BenchImageSourceEvidence {
     /// Workspace-relative directory path as declared.
     pub path: String,
-    /// Declared expected enumeration digest when present.
     #[serde(default)]
     pub expected_sha256: Option<String>,
     /// Observed enumeration digest of the directory at preparation.

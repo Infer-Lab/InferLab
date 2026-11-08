@@ -1,6 +1,6 @@
 """The Mooncake Store backend ([[RFC-0003:C-SERVE-KV-STORE]]).
 
-This package owns what is a fact of the Mooncake master: its backend name, its
+This module owns what is a fact of the Mooncake master: its backend name, its
 recorded identity, its typed settings, its launch command, and its readiness.
 Integrations keep each framework's connection to the store and the memory each
 Engine contributes, because those differ by framework.
@@ -44,10 +44,8 @@ __all__ = [
 ]
 
 BACKEND = "mooncake"
-"""The backend name a workspace selects for a Mooncake Store."""
 
 IMPLEMENTATION = "mooncake"
-"""The implementation identity recorded for the Mooncake master."""
 
 DISTRIBUTIONS = (
     "mooncake-transfer-engine-cuda13",
@@ -116,7 +114,6 @@ def _settings(store: KvStoreInput) -> StoreSettings:
 
 
 def plan(store: KvStoreInput) -> KvStorePlan:
-    """The KV store plan for a declared Mooncake Store."""
     require_backend(store)
     settings = _settings(store)
     return KvStorePlan(
@@ -158,7 +155,6 @@ def master_command(
 
 
 def render(allocation: ServeProcessAllocationKvStore) -> RenderedServeProcess:
-    """Render the master for its allocation; the admin port carries `/health`."""
     admin = allocation.ports.get(ADMIN_PORT)
     if admin is None:
         raise AdapterOperationError(

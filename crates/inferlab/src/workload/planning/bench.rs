@@ -140,7 +140,7 @@ pub(super) fn build_bench_plan(
             });
         }
     }
-    // A generated population separates reuse by namespace and needs no reset;
+    // A Bench that namespaces its population needs no reset;
     // every other cold or primed start resets through the public action or
     // the per-target reset of every model-serving replica
     // ([[RFC-0004:C-BENCH-CACHE-STATE]]).

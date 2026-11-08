@@ -209,10 +209,6 @@ pub(super) fn require_nonempty(label: &str, id: &str, value: &str) -> Result<(),
     }
 }
 
-// One shared locator rule for operator-supplied workspace files: the bench
-// replay population file, the random source's corpus
-// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]), and the synthetic-acceptance golden
-// curve ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
 pub(super) fn validate_workspace_relative_source_path(
     owner: &str,
     field: &str,

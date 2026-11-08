@@ -241,7 +241,6 @@ def prepare_replay_population(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     population_path = artifact_dir / "population.jsonl"
     evidence_path = artifact_dir / "population-evidence.jsonl"
-    # The artifact is the replayed file byte for byte.
     population_path.write_bytes(source_bytes)
     population_sha256 = hashlib.sha256(source_bytes).hexdigest()
     with evidence_path.open("wb") as evidence_file:

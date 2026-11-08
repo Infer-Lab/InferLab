@@ -842,8 +842,6 @@ def _rendered_prompt_with_geometry(
 
 @dataclass
 class _CanonicalStreams:
-    """The canonical streams of one content key."""
-
     ids_by_group: list[list[int] | None]
     offset_by_group: list[int | None]
     targeting_by_group: list[SyntheticPromptTargeting | None]

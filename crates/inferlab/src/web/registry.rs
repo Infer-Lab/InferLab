@@ -95,7 +95,6 @@ pub(super) enum RegisterError {
     Persist(InferlabError),
 }
 
-/// The registered roots in the file; a missing file registers none.
 fn read(path: &Path) -> Result<Vec<PathBuf>, InferlabError> {
     Ok(match std::fs::read(path) {
         Ok(bytes) => {

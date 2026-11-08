@@ -8,7 +8,6 @@ from typing import cast
 
 from ._generated import ClientEndpointInput, ProtocolVersion, SettingValue
 
-# The measurement protocol version this SDK speaks, from the generated wire model.
 PROTOCOL_VERSION: str = ProtocolVersion().root
 
 type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
@@ -56,7 +55,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def endpoint_url(endpoint: ClientEndpointInput, path: str) -> str:
-    """The endpoint's URL; an IPv6 address is bracketed."""
     try:
         host = (
             f"[{endpoint.host}]"

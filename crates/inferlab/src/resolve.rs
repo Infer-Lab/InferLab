@@ -433,8 +433,9 @@ pub(crate) fn current_environment() -> Result<BTreeMap<String, String>, Inferlab
         .collect()
 }
 
-/// Freeze the serve-state probe the integration declared: every model-serving
-/// rank-zero process and the store endpoint it was rendered with
+/// Freeze the serve-state probe the integration declared: the rank-zero
+/// process of every role that uses the store (every model-serving role when
+/// access is observed) and the store endpoint it was rendered with
 /// ([[RFC-0003:C-SERVE-KV-STORE]]). The probe runs through the workspace
 /// adapter environment, so an image-launched server cannot declare one yet.
 fn serve_state_probe_plan(

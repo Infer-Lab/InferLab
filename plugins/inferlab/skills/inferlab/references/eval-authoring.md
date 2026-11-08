@@ -66,10 +66,12 @@ definition controls `request_body`, `limit` (samples), `few_shot`, `seed`,
 `trials`, `max_tokens`, request `concurrency`, `metric` and optional
 `metric_filter`, `threshold`, and `timeout_seconds`.
 
-Workspace YAML paths must be workspace-relative tracked `.yaml` or `.yml`
-files. InferLab resolves their include closure, records the effective task
-configuration and dataset selection, and includes that closure in source
-identity. Release-bundled tasks are addressed only by catalog name and carry a
+Workspace YAML paths must be workspace-relative `.yaml` or `.yml` regular
+files (no symbolic links or parent traversal) outside InferLab's state
+directories. InferLab resolves their include closure, records the effective
+task configuration and dataset selection, and includes that closure in source
+identity; keep the files out of Git-ignored paths, which the source digest
+does not cover. Release-bundled tasks are addressed only by catalog name and carry a
 release-owned closure digest.
 
 `timeout_seconds` is one budget for the whole Eval case: task and tokenizer
@@ -194,7 +196,7 @@ interruption:
 - Before generation, one `instance` entry per request with its `task_name`,
   `doc_id`, and `context_sha256`.
 - Then one `attempt` entry per HTTP attempt, retries included, with the
-  `context_sha256` it carried, send and completion times, HTTP status or
+  `context_sha256` list of the contexts it carried, send and completion times, HTTP status or
   transport error, the returned `choices` (text, reasoning content, finish
   reason) without log-probabilities, and the endpoint's `usage`.
 

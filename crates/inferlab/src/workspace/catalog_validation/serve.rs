@@ -188,9 +188,8 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
     Ok(())
 }
 
-/// Settings maps cross the adapter boundary as structured JSON, where a
-/// non-finite float would collapse to null; finiteness is checked for every
-/// layer before the extra_args segmentation gate.
+/// Settings cross the adapter boundary as JSON, where a non-finite float
+/// would collapse to null.
 fn validate_settings(
     context: &str,
     settings: &BTreeMap<String, JsonValue>,
@@ -201,10 +200,8 @@ fn validate_settings(
     validate_extra_args(context, settings)
 }
 
-/// [[RFC-0003:C-RESOLUTION]] extra_args segmentation is a workspace-load
-/// obligation, not only a composition-time one: a value token preceding any
-/// flag and a second bare `--` fail validation even when no overriding layer
-/// ever touches the array.
+/// Segmentation is a workspace-load obligation ([[RFC-0003:C-RESOLUTION]]),
+/// so it fails here even when no overriding layer ever touches the array.
 fn validate_extra_args(
     context: &str,
     settings: &BTreeMap<String, JsonValue>,
@@ -227,13 +224,6 @@ fn validate_extra_args(
         .map_err(|message| InferlabError::InvalidConfig { message })
 }
 
-/// [[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]] declaration shape: exactly one
-/// of the explicit and curve forms, a finite acceptance length of at least
-/// one, and well-formed curve coordinates. When the curve file is readable
-/// and digest-matched, its two-shape contract, entry values, and the
-/// thinking-mode-vs-flat rule also fail here at workspace validation; a
-/// missing or unreadable file, a digest mismatch, and the lookup itself
-/// belong to resolution.
 fn validate_synthetic_acceptance(
     root: &Path,
     context: &str,
@@ -331,13 +321,12 @@ fn validate_parallelism(
     Ok(())
 }
 
-/// The managed and dedicated-field option names of the profiler escape gate
-/// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Attached short-option forms are
-/// rejected alongside the long names because nsys 2026.3.1 parses them
-/// (-tnone is --trace=none), as are strict-prefix abbreviations of a managed
-/// name; launch's -w (--show-output) and -e (--env-var) stay allowed. The
-/// surface was checked against nsys 2026.3.1 at qualification; re-check by
-/// hand when the qualified nsys version changes ([[ADR-0006]]).
+/// Options InferLab manages or exposes as dedicated fields
+/// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Attached short forms are rejected
+/// too because nsys 2026.3.1 parses them (-tnone is --trace=none); launch's
+/// -w (--show-output) and -e (--env-var) stay allowed. Checked by hand against
+/// nsys 2026.3.1; re-check when the qualified nsys version changes
+/// ([[ADR-0006]]).
 const MANAGED_ESCAPE_OPTIONS: &[&str] = &[
     "--session",
     "--session-new",
@@ -357,10 +346,6 @@ const MANAGED_ESCAPE_OPTIONS: &[&str] = &[
     "--cpuctxsw",
 ];
 
-/// The short-option subset of the managed escape vocabulary: the
-/// single-dash entries of [`MANAGED_ESCAPE_OPTIONS`], so adding a short form
-/// to the parent list extends the attached-form rejection without a second
-/// hand-synced list.
 fn managed_short_options() -> impl Iterator<Item = &'static str> {
     MANAGED_ESCAPE_OPTIONS
         .iter()

@@ -91,8 +91,6 @@ def resolve_synthetic_acceptance(
         )
     form = synthetic.root
     if isinstance(form, SyntheticAcceptanceInput2):
-        # The golden curve's lookup key is the speculative step count
-        # (num-steps semantics) from the operator's flags.
         draft_count = _draft_count(extra_args, role_id)
         acceptance_length = resolve_golden_acceptance_length(
             curve_text=form.curve.text,
@@ -108,7 +106,6 @@ def resolve_synthetic_acceptance(
 
 
 def synthetic_acceptance_env(acceptance_length: float) -> dict[str, str]:
-    """The per-process environment carrying the overlay into the engine."""
     return {
         "SGLANG_SIMULATE_ACC_LEN": f"{acceptance_length:g}",
         "SGLANG_SIMULATE_ACC_METHOD": "match-expected",

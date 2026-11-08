@@ -76,8 +76,6 @@ def splice_draft_model(
     allocation: ServeProcessAllocationModelRank,
     declared: list[AuxiliaryModelInput] | None,
 ) -> None:
-    """Splice the allocation's resolved draft-model locator into the role's
-    extra_args as ``--speculative-draft-model-path``."""
     locator = resolve_draft_model_locator(allocation, declared)
     if locator is None:
         return

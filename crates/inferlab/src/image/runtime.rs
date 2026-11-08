@@ -151,9 +151,6 @@ pub(crate) fn run<T: BuilderTool>(
     })
 }
 
-/// Persists each native command into the durable record before it executes
-/// ([[RFC-0007:C-IMAGE-BUILD]]), so a build killed mid-command still shows
-/// exactly what was launched.
 fn record_command(
     store: &mut ImageRecordStore,
     index: usize,
@@ -675,13 +672,8 @@ fn image_check_evidence_from_log(
     evidence
 }
 
-/// Load declared scripts by bytes and require the content the closure was
-/// keyed on ([[RFC-0002:C-ENVIRONMENT-CHECKS]]): a script edited after
-/// resolution must fail the assembly rather than build an image the closure
-/// does not describe.
-/// Load the projected activation scripts for the context, failing when the
-/// composition or any script content moved after resolution: the content
-/// closure was derived from the planned list.
+/// Fails when the composition or any script content moved after resolution:
+/// the content closure was derived from the planned list.
 fn load_activation_scripts(
     root: &Path,
     composed: &entrypoint::ComposedActivation,
@@ -728,6 +720,10 @@ fn load_activation_scripts(
     Ok(loaded)
 }
 
+/// Requires the content the closure was keyed on
+/// ([[RFC-0002:C-ENVIRONMENT-CHECKS]]): a script edited after resolution must
+/// fail the assembly rather than build an image the closure does not
+/// describe.
 fn load_environment_scripts<'a>(
     root: &Path,
     scripts: impl Iterator<Item = (&'a String, &'a PathBuf, &'a String)>,
@@ -841,16 +837,14 @@ fn validate(
     }
 }
 
-/// The wheel cache key covers every fact that can change built wheel content:
-/// the committed identity of every stack source path (build-time inputs such as
-/// DeepGEMM feed sibling builds through the activation environment), the
-/// wheel subpath, the selected environment's locked package closure and
-/// projected activation environment (derived facts — unrelated manifest and
-/// lock churn leaves keys stable), the environment selection, the
-/// build-procedure identity, and the target platform (the cache directory
-/// may live on a workspace shared across architectures). A clean workspace
-/// is enforced before resolution, so committed identities are exact
-/// ([[RFC-0007:C-IMAGE-BUILD]]).
+/// The wheel cache key covers every fact that can change built wheel content
+/// ([[RFC-0007:C-IMAGE-BUILD]]). Every stack source path's identity enters,
+/// not only the wheel's own, because build-time inputs such as DeepGEMM feed
+/// sibling builds through the activation environment. The closure and
+/// activation are derived facts, so unrelated manifest and lock churn leaves
+/// keys stable. The platform enters because the cache directory may live on a
+/// workspace shared across architectures. A clean workspace is enforced
+/// before resolution, so committed identities are exact.
 fn wheel_cache_key(
     workspace: &LoadedWorkspace,
     image: &super::ImagePlan,
@@ -1346,8 +1340,6 @@ fn build_wheel(
     })
 }
 
-/// A freshly built wheel with the record-relative path of the environment
-/// its build received.
 struct BuiltPackage {
     wheel: materialization::BuiltWheel,
     activation_environment: PathBuf,

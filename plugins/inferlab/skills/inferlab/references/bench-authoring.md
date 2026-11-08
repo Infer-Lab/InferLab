@@ -72,13 +72,15 @@ per-token timing covers fewer tokens, and results are not comparable with
 ## Load: concurrency, rate, and adaptive
 
 A static `serving` Bench sends either independent requests or dependent
-sessions. One definition uses one load authority:
+sessions. Its case matrix holds concurrency cases, request-rate cases, or
+both:
 
 - Concurrency cases: `concurrency` with `prompts_per_concurrency` (or
   `sessions_per_concurrency` for sessions).
-- Request-rate cases: `request_rates` (positive numbers or `"inf"`) with
-  exactly one of `request_count` or `duration_seconds`. An `"inf"` rate cannot
-  be combined with `duration_seconds`. `burstiness` shapes stochastic arrival.
+- Request-rate cases (independent requests only): `request_rates` (positive
+  numbers or `"inf"`) with exactly one of `request_count` or
+  `duration_seconds`. An `"inf"` rate cannot be combined with
+  `duration_seconds`. `burstiness` shapes stochastic arrival.
 
 ```toml
 [benches.rate-sweep]
@@ -88,9 +90,10 @@ request_count = 64
 timeout_seconds = 900
 ```
 
-An `adaptive-serving` Bench declares positive `initial_request_rates`, at
-least one aggregate or request SLO, `max_search_steps`, and optionally
-`min_rate_resolution`; see [SLOs](#slos) for an example and the search policy.
+An `adaptive-serving` Bench declares positive finite `initial_request_rates`,
+at least one aggregate or request SLO, `max_search_steps`, exactly one of
+`request_count` or `duration_seconds`, and optionally `min_rate_resolution`;
+see [SLOs](#slos) for an example and the search policy.
 
 ## Warmup
 
@@ -142,8 +145,8 @@ on who owns the content:
   reset action or a per-target reset of every model-serving replica), and
   profiling starts right after a successful reset.
 
-`primed` additionally requires a `flat` or `rendered_chat` source with
-`prefix_sharing`. After the reset, or directly for a namespaced case,
+`primed` additionally requires a `flat` or `rendered_chat` source with a
+positive `prefix_sharing` length. After the reset, or directly for a namespaced case,
 InferLab sends the canonical shared prefix through the maximum resolved shared
 length — the case's profiling-namespace prefix when namespaced — with one
 output token and the profiling route, model, and `request_body`, then releases

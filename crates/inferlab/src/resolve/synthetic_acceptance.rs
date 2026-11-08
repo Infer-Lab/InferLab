@@ -1,11 +1,8 @@
-//! Digest-verified golden-curve resolution for the synthetic acceptance
-//! overlay ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]). The control plane owns
-//! declaration composition, curve integrity (digest verification and shape
-//! validation, shared with workspace-load validation through
-//! [`crate::workspace::synthetic_acceptance`]), and the effective thinking
-//! mode; the keyed acceptance-length lookup belongs to the selected
-//! integration, where the operator's speculative configuration supplies the
-//! draft count ([[ADR-0043]]).
+//! Synthetic acceptance resolution ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+//! The control plane owns curve integrity and the effective thinking mode;
+//! the keyed acceptance-length lookup belongs to the selected integration,
+//! where the operator's speculative configuration supplies the draft count
+//! ([[ADR-0043]]).
 
 use crate::InferlabError;
 use crate::workspace::synthetic_acceptance::{
@@ -16,24 +13,20 @@ use inferlab_protocol::{SyntheticAcceptanceCurveInput, SyntheticAcceptanceInput}
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// The thinking mode a matrix-shape curve entry falls back to when the
-/// declaration omits `thinking_mode`
+/// Matrix-shape fallback when `thinking_mode` is omitted
 /// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
 const DEFAULT_THINKING_MODE: &str = "thinking_on";
 
-/// The resolved synthetic acceptance request material: the effective
-/// declaration after case composition plus the wire input carrying, for the
-/// curve form, the digest-verified curve text and the effective thinking
-/// mode. The acceptance length itself is resolved and returned by the
-/// integration ([[ADR-0043]]).
+/// The acceptance length itself is resolved and returned by the integration
+/// ([[ADR-0043]]).
 pub(super) struct ResolvedSyntheticAcceptance {
     pub declared: SyntheticAcceptanceDefinition,
     pub input: SyntheticAcceptanceInput,
 }
 
 impl ResolvedSyntheticAcceptance {
-    /// The effective thinking mode of a matrix-shape curve entry; `None` for
-    /// the explicit form and for flat entries, where no mode applies.
+    /// `None` for the explicit form and for flat entries, where no mode
+    /// applies.
     pub(super) fn effective_thinking_mode(&self) -> Option<&str> {
         match &self.input {
             SyntheticAcceptanceInput::Explicit { .. } => None,
@@ -42,13 +35,9 @@ impl ResolvedSyntheticAcceptance {
     }
 }
 
-/// Resolve the synthetic acceptance request material for the composed server
-/// definition. Declaration shape was validated at workspace load; resolution
-/// digest-verifies the curve file before it is used and shape-validates it
-/// again (resolution must not depend on load-time findings), failing with a
-/// typed error that names the missing or mismatched element. The keyed curve
-/// lookup is the integration's planning-stage obligation, so an unknown
-/// model key or a missing thinking-mode entry does not fail here.
+/// Re-verifies and re-validates the curve rather than relying on load-time
+/// findings. An unknown model key or a missing thinking-mode entry does not
+/// fail here: the keyed lookup is the integration's planning-stage obligation.
 pub(super) fn resolve_synthetic_acceptance(
     workspace_root: &Path,
     server_id: &str,

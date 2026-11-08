@@ -14,13 +14,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// [[RFC-0002:C-WORKSPACE-AUTHORITY]]: every symbolic link in the digested
-/// worktree must resolve to identity-covered workspace content. The digest
-/// sees link text, not target content, so every digested-worktree link is
-/// enumerated and judged on its own, whatever its git tracking state.
+/// Every symbolic link in the digested worktree must resolve to
+/// identity-covered content, whatever its git tracking state, because the
+/// digest sees link text, not target content ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
 /// Resolution stays lexical because physical resolution would depend on
-/// machine state; a target resolving through an enumerated link is judged
-/// against its link-resolved destination.
+/// machine state.
 pub(super) fn reject_uncovered_worktree_links(
     root: &Path,
     config: &WorkspaceConfig,
@@ -221,15 +219,12 @@ pub(super) fn link_is_git_ignored(root: &Path, link: &Path) -> Result<bool, Infe
     Ok(!tracked)
 }
 
-/// Every symlink effectively present in the digested worktree, collected by
-/// `lstat` without following links, skipping `.git` entries, the workspace
-/// source exclusions, and git-ignored directories — machine-local trees the
-/// digest cannot see and digest-visible links cannot target
-/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]). The walk proceeds level by level so
-/// ignored directories are pruned in one batched judgment per owning repo
-/// before their (possibly enormous) contents are read; entries are sorted
-/// per directory so rejection order is stable; unreadable directories are
-/// the shape checks' problem, not this walk's.
+/// Git-ignored directories are skipped: machine-local trees the digest cannot
+/// see and digest-visible links cannot target ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+/// The walk is level by level so ignored directories are pruned in one
+/// batched judgment per owning repo before their (possibly enormous) contents
+/// are read. Unreadable directories are the shape checks' problem, not this
+/// walk's.
 pub(super) fn collect_digested_worktree_symlinks(
     root: &Path,
     exclusions: &[PathBuf],
@@ -394,8 +389,8 @@ pub(super) fn git_check_ignore_batch(
     }
 }
 
-/// `target` resolved lexically against the root-relative `base` directory,
-/// or `None` when any step climbs above the workspace root.
+/// `None` when `target` is absolute or any step climbs above the workspace
+/// root.
 pub(super) fn lexical_resolution(base: &Path, target: &Path) -> Option<PathBuf> {
     let mut resolved = base.components().collect::<Vec<_>>();
     for component in target.components() {
@@ -517,11 +512,9 @@ pub(super) fn owning_repo(root: &Path, resolved: &Path) -> PathBuf {
 }
 
 /// The single authority for the source-identity exclusion set
-/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): the resolved local bindings file when
-/// it lives safely inside the workspace, plus the machine-local state
-/// directories. Both the execution snapshot and the lightweight identity used
-/// by the TUI derive their dirty verdict from this set, so the two can never
-/// disagree about what counts as a source mutation.
+/// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]), so the execution snapshot and
+/// `workspace_identity` can never disagree about what counts as a source
+/// mutation.
 pub(crate) fn source_exclusions(root: &Path, local_path: &Path) -> Vec<PathBuf> {
     let mut exclusions = local_path
         .strip_prefix(root)
@@ -565,24 +558,19 @@ pub(super) fn inspect_workspace(
     })
 }
 
-/// The `git status` flags that define workspace dirtiness: the porcelain
-/// format the mutation scan parses, plus the two flags that widen the scan to
-/// untracked files and submodule state. The remote preflight's dirty check
-/// and the source-digest scripts derive their script text from the same set
-/// so every scan of the effective source state agrees byte-for-byte.
+/// The flags that define workspace dirtiness. The remote preflight and the
+/// source-digest script derive their text from this set so every scan of the
+/// effective source state agrees byte-for-byte.
 pub(super) const GIT_STATUS_FLAGS: [&str; 3] = [
     "--porcelain=v1",
     "--untracked-files=all",
     "--ignore-submodules=none",
 ];
 
-/// The dirty-check `git status` flags joined for embedding in a shell script.
 pub(crate) fn git_status_flags() -> String {
     GIT_STATUS_FLAGS.join(" ")
 }
 
-/// The dirty-check flags with git's NUL output selector interspersed, as the
-/// source-digest scripts embed them.
 pub(super) fn git_status_flags_z() -> String {
     format!(
         "{} -z {} {}",
@@ -590,10 +578,6 @@ pub(super) fn git_status_flags_z() -> String {
     )
 }
 
-/// Workspace paths that differ from the committed source state, under the
-/// same exclusions the snapshot uses. The dirty gate consumes this at
-/// resolution; package builds consume it afterwards to detect mutation by
-/// external build tooling ([[RFC-0007:C-IMAGE-BUILD]]).
 pub(crate) fn workspace_mutations(
     root: &Path,
     exclusions: &[PathBuf],
@@ -622,10 +606,10 @@ pub(crate) fn workspace_mutations(
         .collect())
 }
 
-/// Build one canonical byte stream for local snapshots and remote preflight.
+/// One canonical byte stream for local snapshots and remote preflight.
 /// `git submodule status` is deliberately not an identity input: it appends a
-/// local-ref-dependent `git describe` label. The existing recursive `foreach`
-/// traversal instead frames each checked-out submodule path and effective HEAD.
+/// local-ref-dependent `git describe` label. The recursive `foreach` instead
+/// frames each checked-out submodule path and effective HEAD.
 pub(crate) fn source_digest_script(exclusions: &[PathBuf]) -> String {
     let pathspecs = source_pathspecs(exclusions);
     let status_flags_z = git_status_flags_z();
@@ -778,15 +762,15 @@ pub(super) fn is_safe_relative(path: &Path) -> bool {
             .all(|component| !matches!(component, Component::ParentDir | Component::RootDir))
 }
 
-/// Reject a symbolic link anywhere along a declared stack source path
+/// Reject a symbolic link anywhere along a declared workspace-relative path
 /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): the source digest walks git's view
 /// of the tree, which records link text rather than target content, so a
-/// linked component would let the served source drift under an unchanged
-/// digest. Symlinks buried deeper inside a source tree share git's own
-/// link-text semantics and stay out of scope here.
+/// linked component would let the content drift under an unchanged digest.
+/// Links deeper inside a declared tree are judged by
+/// `reject_uncovered_worktree_links`.
 pub(super) fn reject_symlink_components(
     root: &Path,
-    stack: &str,
+    owner: &str,
     path: &Path,
 ) -> Result<(), InferlabError> {
     let mut absolute = root.to_path_buf();
@@ -796,10 +780,7 @@ pub(super) fn reject_symlink_components(
         relative.push(component);
         symlink_guard(
             &absolute,
-            &format!(
-                "stack {stack:?} source path component {}",
-                relative.display()
-            ),
+            &format!("{owner} path component {}", relative.display()),
         )?;
     }
     Ok(())
@@ -808,8 +789,8 @@ pub(super) fn reject_symlink_components(
 /// Reject a symbolic link where shareable workspace content must live
 /// ([[RFC-0002:C-WORKSPACE-AUTHORITY]]): the source digest records link text
 /// rather than target content, so a followed link would let the loaded
-/// configuration drift under an unchanged digest. Absence passes — the
-/// callers own their missing-file handling.
+/// configuration drift under an unchanged digest. Absence passes: callers own
+/// their missing-file handling.
 pub(super) fn symlink_guard(absolute: &Path, described: &str) -> Result<(), InferlabError> {
     match fs::symlink_metadata(absolute) {
         Ok(metadata) if metadata.file_type().is_symlink() => invalid(format!(

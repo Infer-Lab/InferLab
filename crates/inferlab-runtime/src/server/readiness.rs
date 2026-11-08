@@ -15,7 +15,6 @@ use std::time::Duration;
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Readiness probes back off by doubling from `POLL_INTERVAL` to a cap.
 pub fn next_probe_interval(interval: Duration) -> Duration {
     (interval * 2).min(MAX_PROBE_INTERVAL)
 }
@@ -325,8 +324,6 @@ fn attempt_remaining(attempt: &AttemptBound) -> Result<Duration, ReadinessProbeE
     }
 }
 
-/// One readiness probe attempt: the attempt evidence it produced and either
-/// its ready result or the error that keeps the process unready.
 struct PolledAttempt<T> {
     evidence: Vec<ReadinessAttemptEvidence>,
     outcome: Result<T, String>,

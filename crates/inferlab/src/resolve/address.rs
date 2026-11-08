@@ -9,14 +9,12 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::process::Command;
 
-/// The addresses looked up so far, one per used machine.
 #[derive(Default)]
 pub(super) struct MachineAddresses {
     resolved: BTreeMap<String, MachineAddressPlan>,
 }
 
 impl MachineAddresses {
-    /// The address of `machine`, looked up the first time it is asked for.
     pub(super) fn address(
         &mut self,
         machine_id: &str,
@@ -36,7 +34,6 @@ impl MachineAddresses {
         Ok(address)
     }
 
-    /// Every looked-up address, keyed by machine.
     pub(super) fn finish(self) -> crate::execution::MachineAddresses {
         self.resolved
     }

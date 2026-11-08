@@ -24,7 +24,6 @@ pub const HEALTHCHECK_PATH: &str = "/healthcheck";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
-/// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "TensorRT-LLM proxy";
 
 const MIN_REQUEST_ID: u64 = 1_u64 << 42;

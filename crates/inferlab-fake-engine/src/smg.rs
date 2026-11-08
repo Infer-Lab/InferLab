@@ -71,7 +71,6 @@ where
         .await
 }
 
-/// Thin SMG worker service around [`EchoEngine`].
 #[derive(Clone, Debug)]
 pub struct SmgService {
     config: Arc<SmgServiceConfig>,
@@ -130,7 +129,6 @@ impl TokenSpeedScheduler for SmgService {
                         cached_tokens: 0,
                         output_logprobs: None,
                         index: 0,
-                        // The fake loads no weights to version.
                         weight_version: None,
                     })),
                 }));
@@ -249,7 +247,6 @@ impl TokenSpeedScheduler for SmgService {
                 max_total_num_tokens: MAX_TOTAL_TOKENS,
                 max_running_requests: 1,
                 token_usage: 0.0,
-                // The fake holds no KV cache.
                 active_token_usage: Some(0.0),
                 gen_throughput: 0.0,
                 cache_hit_rate: 0.0,

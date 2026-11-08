@@ -75,8 +75,6 @@ impl CaptureSession {
     fn arm_targets(&mut self, bound: &OperationBound) -> Result<(), String> {
         let mut armed_engine_trace_replicas = BTreeSet::new();
         for index in 0..self.targets.len() {
-            // The per-target helpers mutate the record, so the shared target
-            // and plan facts are cloned out of the borrow first.
             let target = self.targets[index].clone();
             let plan = self.plan.targets[index].clone();
             if plan.mechanism == CaptureMechanism::EngineTrace {
@@ -254,10 +252,8 @@ impl CaptureSession {
 
     /// Window closing splits by mechanism
     /// ([[RFC-0004:C-WORKLOAD-PROFILING]]): managed-collection targets keep
-    /// the per-action control budget, while engine-trace targets dispatch the
-    /// close into the one global finalization budget, where a delivery
-    /// failure is window-closing control failure evidence and a slow or
-    /// absent response is neutral flush-pending evidence.
+    /// the per-action control budget, while engine-trace closes draw the one
+    /// global finalization budget.
     fn stop_window(&mut self, start: &[CaptureActionRecord]) -> Vec<CaptureActionRecord> {
         let started = start
             .iter()
@@ -281,8 +277,6 @@ impl CaptureSession {
                 self.plan.deadlines.capture_control_deadline_seconds,
             )
         };
-        // Cloned out of the session borrow so the finalization budget can
-        // start under a mutable borrow.
         let engine_trace = self
             .targets
             .iter()
@@ -300,10 +294,6 @@ impl CaptureSession {
         actions
     }
 
-    /// Start the one global finalization budget at the first engine-trace
-    /// window-close dispatch ([[RFC-0004:C-WORKLOAD-PROFILING]]); later
-    /// dispatches, response consumption, flush waiting, and coverage
-    /// verification draw the same budget without restarting it.
     fn start_finalization_budget(&mut self) -> &OperationBound {
         self.finalization.get_or_insert_with(|| {
             OperationBound::finite(Duration::from_secs(
@@ -334,10 +324,6 @@ impl CaptureSession {
         self.record
     }
 
-    /// Take the one global finalization budget, starting it now when no
-    /// engine-trace window-close dispatch already started it: stop-response
-    /// consumption, flush waiting, and coverage verification draw the same
-    /// budget without restarting it ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     fn finalization_budget(&mut self) -> OperationBound {
         self.finalization.take().unwrap_or_else(|| {
             OperationBound::finite(Duration::from_secs(
@@ -368,12 +354,6 @@ impl CaptureSession {
         }
     }
 
-    /// The window-closing control receipt for an engine-trace target:
-    /// confirmed when every window this target's control process opened also
-    /// recorded a successful closing response for it. Receipt acknowledges
-    /// the close only; artifact flush completion is judged by coverage
-    /// verification alone, and a flush-pending close is neutral evidence
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     fn engine_trace_close_confirmed(&self, target: &ProfilerTargetRecord) -> bool {
         if target.finalization != ProfilerFinalization::EngineTraceFlush {
             return false;

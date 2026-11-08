@@ -6,7 +6,6 @@ use std::path::Path;
 
 const STYLE: &str = include_str!("console.css");
 
-/// One registered workspace and whether it can be read.
 pub(super) struct WorkspaceSummary<'a> {
     pub(super) root: &'a Path,
     pub(super) id: String,
@@ -166,12 +165,10 @@ pub(super) fn problem(title: &str, message: &str) -> Markup {
     )
 }
 
-/// Percent-encode a path for a query parameter.
 pub(super) fn encode_path(path: &Path) -> String {
     encode(&path.to_string_lossy())
 }
 
-/// Percent-encode a value for a query parameter.
 pub(super) fn encode(value: &str) -> String {
     value
         .bytes()

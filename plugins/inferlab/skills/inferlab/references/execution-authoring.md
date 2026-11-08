@@ -155,9 +155,11 @@ integration = "vllm"
 
 The `integration` claim must equal the integration of every server stack the
 image is selected for. An image supplies only the engine: for external and
-built images alike, InferLab lowers commands with the workspace's own
-integration packages, mounted read-only into the image, so an image keeps
-working across adapter protocol changes. The workspace must commit and
+built images alike, InferLab lowers commands inside the image with the
+workspace's own integration packages, mounted read-only ahead of the image's
+site-packages, never adapter packages baked into the image, so an image keeps
+working across adapter protocol changes. (A local launch without an image
+lowers in the stack's own Pixi environment.) The workspace must commit and
 install a framework-free Pixi environment named `adapter` that contains
 `inferlab-integration-<integration>`; its InferLab dependencies, such as the
 adapter SDK and a shared Gateway package, are mounted with it. The image

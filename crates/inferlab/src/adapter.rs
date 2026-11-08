@@ -14,11 +14,11 @@ use inferlab_runtime::operation_bound::{
     OperationBound, OperationTerminalCause, OperationTimingEvidence,
 };
 
-/// The committed framework-free Pixi environment an external-image launch
+/// The committed framework-free Pixi environment every image-adapter launch
 /// lowers from ([[RFC-0006:C-INTEGRATIONS]]).
 const ADAPTER_ENVIRONMENT: &str = "adapter";
-/// The neutral in-container base the external-image adapter packages mount
-/// under, pointed at by PYTHONPATH.
+/// The neutral in-container base the workspace adapter packages mount under,
+/// pointed at by PYTHONPATH.
 const ADAPTER_MOUNT_BASE: &str = "/inferlab-adapter";
 
 pub(crate) trait AdapterClient {
@@ -174,16 +174,12 @@ impl AdapterClient for ProcessAdapterClient {
     }
 }
 
-/// Runs the integration inside the selected image through its container,
-/// so lowering consumes the serving stack that will actually run and never
-/// touches the locally installed serving environment
-/// ([[RFC-0003:C-RUNTIME-WORKFLOWS]]). A built image bakes the workspace-pinned
-/// adapter packages into its locked closure, so `python -m <module>` resolves
-/// them with no mount; an external image carries no workspace-side packages, so
-/// lowering runs from the workspace's committed framework-free `adapter` Pixi
-/// environment ([[RFC-0006:C-INTEGRATIONS]]) — the adapter version the
-/// workspace pins is the one that lowers. The one-shot stdin/stdout JSON
-/// contract is unchanged.
+/// Runs the integration inside a container of the selected image, so lowering
+/// sees the framework that will actually serve. The adapter packages are never
+/// the image's own: for a built and an external image alike, the workspace's
+/// framework-free `adapter` Pixi environment supplies them, mounted ahead of
+/// the image's site-packages, so the adapter version the workspace pins is the
+/// one that lowers ([[RFC-0003:C-RUNTIME-WORKFLOWS]], [[RFC-0006:C-INTEGRATIONS]]).
 #[derive(Clone, Debug)]
 pub(crate) struct ImageAdapterClient {
     pub image_id: String,
@@ -235,10 +231,6 @@ impl ImageAdapterClient {
                 &device.to_string(),
             ));
         }
-        // Every image lowers through the workspace adapter packages, never
-        // packages baked into it: the image supplies the engine, and lowering
-        // follows this InferLab and the workspace pins
-        // ([[RFC-0003:C-RUNTIME-WORKFLOWS]]).
         for mount in adapter_environment_mounts(workspace_root, integration)? {
             launcher.extend(inferlab_runtime::container::docker_bind_mount_readonly(
                 &mount.source.display().to_string(),
@@ -262,9 +254,6 @@ impl ImageAdapterClient {
                 module,
             ]);
         } else {
-            // A built image bakes the pinned adapter packages into its locked
-            // closure ([[RFC-0003:C-RUNTIME-WORKFLOWS]]), so the generated
-            // entrypoint's `python -m <module>` resolves them with no mount.
             launcher.extend([
                 self.image_id.clone(),
                 "python".to_owned(),
@@ -602,11 +591,9 @@ fn invoke_adapter(
         });
     }
     // A cross-version combination is governed solely by the protocol version
-    // ([[RFC-0006:C-INTEGRATIONS]]). The versioned `AdapterResponse` accepts
-    // only its current value, so an answer from another version would otherwise
-    // surface as an opaque deserialize failure; pre-parse the raw
-    // `protocol_version` and fail with
-    // the actionable both-versions-plus-remedy shape instead.
+    // ([[RFC-0006:C-INTEGRATIONS]]). `AdapterResponse` accepts only the current
+    // version, so another version would surface as an opaque deserialize
+    // failure; pre-parse the raw field to report both versions and the remedy.
     ensure_adapter_active(&bound, integration, timeout)?;
     let answered = raw_protocol_version(&stdout);
     ensure_adapter_active(&bound, integration, timeout)?;
@@ -720,8 +707,6 @@ fn raw_protocol_version(stdout: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The operator-facing protocol-version mismatch message: both versions and the
-/// remedy ([[RFC-0006:C-INTEGRATIONS]]).
 fn protocol_version_remedy(integration: &str, answered: &str, supported: &str) -> String {
     format!(
         "integration {integration} answered with protocol version {answered}; this inferlab \
@@ -746,8 +731,6 @@ fn adapter_executable(integration: &str) -> Result<String, InferlabError> {
     Ok(executable_name(integration))
 }
 
-/// The integration's Python module, invocable as `python -m` against the
-/// adapter packages the image realization exposes.
 fn integration_module(integration: &str) -> Result<String, InferlabError> {
     validate_integration_id(integration)?;
     Ok(format!(
@@ -756,23 +739,18 @@ fn integration_module(integration: &str) -> Result<String, InferlabError> {
     ))
 }
 
-/// One workspace-side adapter package resolved to its host import directory,
-/// bound to the neutral in-container name it mounts under.
 struct AdapterMount {
     target_name: String,
     source: std::path::PathBuf,
 }
 
-/// Resolve the adapter SDK and the integration's import directories — and
-/// each package's `.dist-info` metadata directory — by running the committed
-/// `adapter` Pixi environment's own interpreter, so editable and regular
-/// installs resolve uniformly ([[RFC-0006:C-INTEGRATIONS]]). The metadata
-/// directory mounts beside the module under the same PYTHONPATH base: the
-/// integration reports its wheel version through `importlib.metadata`, which
-/// only discovers distributions adjacent to a `sys.path` entry. A missing
-/// interpreter, a failed import, or missing distribution metadata is a launch
-/// error; a failed import or metadata lookup names the adapter environment
-/// and the package that could not resolve.
+/// Resolves the integration's InferLab distribution closure through the
+/// committed `adapter` Pixi environment's own interpreter, so editable and
+/// regular installs resolve uniformly ([[RFC-0006:C-INTEGRATIONS]]). Each
+/// package's `.dist-info` directory mounts beside its module under the same
+/// PYTHONPATH base: the integration reports its wheel version through
+/// `importlib.metadata`, which only discovers distributions adjacent to a
+/// `sys.path` entry.
 fn adapter_environment_mounts(
     workspace_root: &Path,
     integration: &str,
@@ -782,11 +760,6 @@ fn adapter_environment_mounts(
     let distribution = format!("inferlab-integration-{integration}");
     let python = environment::pixi_environment_prefix(workspace_root, ADAPTER_ENVIRONMENT)
         .join("bin/python");
-    // The integration and every InferLab distribution it requires,
-    // transitively, from package metadata: one `import<TAB>module
-    // directory<TAB>.dist-info directory` row each. `PathDistribution._path`
-    // is the only spelling of that directory importlib exposes; the adapter
-    // environment pins the interpreter, so the private attribute is stable.
     let script = adapter_closure_script(&distribution);
     let launch_error = |source| InferlabError::LaunchAdapter {
         integration: integration.to_owned(),
@@ -849,8 +822,10 @@ fn adapter_environment_mounts(
 }
 
 /// The integration and every InferLab distribution it requires, transitively,
-/// from package metadata, as `import<TAB>module directory<TAB>.dist-info
-/// directory` rows.
+/// as `import<TAB>module directory<TAB>.dist-info directory` rows.
+/// `PathDistribution._path` is the only spelling of that directory importlib
+/// exposes; the adapter environment pins the interpreter, so the private
+/// attribute is stable.
 fn adapter_closure_script(distribution: &str) -> String {
     format!(
         "import importlib, importlib.metadata, re\n\
@@ -871,9 +846,8 @@ fn adapter_closure_script(distribution: &str) -> String {
     )
 }
 
-/// The traversal-safe charset an integration identifier (and the framework
-/// identity an integration reports) must draw from: non-empty, and only
-/// lowercase ASCII, digits, and `-`. Callers render their own rejection.
+/// Traversal-safe charset shared by integration identifiers and the framework
+/// identity an integration reports.
 fn is_valid_integration_identifier(value: &str) -> bool {
     !value.is_empty()
         && value

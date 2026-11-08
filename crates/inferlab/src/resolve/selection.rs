@@ -70,9 +70,8 @@ pub(super) struct ServerRoleOverridePatch {
     pub(super) settings: BTreeMap<String, JsonValue>,
 }
 
-/// Selected public definitions and local bindings. `LoadedWorkspace` already
-/// owns loading, semantic validation, and source identity; this stage only
-/// selects the exact workflow inputs and never reconstructs those facts.
+/// `LoadedWorkspace` owns loading, validation, and source identity; this
+/// stage only selects workflow inputs and never reconstructs those facts.
 pub(super) struct WorkflowSelection<'a> {
     pub(super) server_id: String,
     pub(super) recipe: Option<RecipePlan>,
@@ -85,16 +84,13 @@ pub(super) struct WorkflowSelection<'a> {
     pub(super) case: Option<&'a ServerCaseDefinition>,
     pub(super) case_selection: Option<CaseSelectionSource>,
     pub(super) weight: &'a ModelWeightBinding,
-    /// The resolved auxiliary weight bindings declared by the server, in
-    /// declaration order ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
+    /// Ordered by kind ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
     pub(super) auxiliary_weights: Vec<ResolvedAuxiliaryWeight<'a>>,
     pub(super) placement_id: String,
     pub(super) placement_selection: PlacementSelectionSource,
     pub(super) placement: &'a PlacementBinding,
 }
 
-/// One declared auxiliary weight artifact with its selected model definition
-/// and machine-local weight binding ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]).
 pub(super) struct ResolvedAuxiliaryWeight<'a> {
     pub(super) kind: crate::workspace::auxiliary_models::AuxiliaryModelKind,
     pub(super) model_id: String,
@@ -111,39 +107,26 @@ pub(super) struct EffectiveServerInput {
     pub(super) gateway_backend: Option<String>,
     pub(super) pd_router_backend: Option<String>,
     pub(super) kv_transfer: Option<KvTransferMechanism>,
-    /// The effective capture request: the mechanism selected for a profiled
-    /// server, or `None` when profiling is off
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    /// `None` when profiling is off ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     pub(super) profiling: Option<CaptureMechanism>,
-    /// The resolved synthetic acceptance request material: the composed
-    /// declaration plus, for the curve form, the digest-verified curve text
-    /// and effective thinking mode ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]);
-    /// `None` when the composed server declaration carries none.
     pub(super) synthetic_acceptance: Option<ResolvedSyntheticAcceptance>,
-    /// The logical auxiliary weight identities declared by the server
-    /// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]); empty when undeclared.
     pub(super) auxiliary_models: Vec<inferlab_protocol::AuxiliaryModelInput>,
     pub(super) capture_arm_deadline_seconds: u64,
     pub(super) capture_control_deadline_seconds: u64,
     pub(super) capture_finalization_deadline_seconds: u64,
     pub(super) override_patches: Vec<IndexedServerOverride>,
     pub(super) roles: Vec<ServeRoleInput>,
-    /// The resolved Gateway settings, typed by the integration
-    /// ([[RFC-0006:C-INTEGRATIONS]]); empty when none are declared.
     pub(super) gateway_settings: BTreeMap<String, SettingValue>,
-    /// The resolved P/D Router settings, typed by the integration
-    /// ([[RFC-0006:C-INTEGRATIONS]]); empty when none are declared.
     pub(super) pd_router_settings: BTreeMap<String, SettingValue>,
-    /// The resolved KV store declaration ([[RFC-0003:C-SERVE-KV-STORE]]).
     pub(super) kv_store: Option<inferlab_protocol::KvStoreInput>,
     pub(super) declarations: Vec<ServerDeclarationPlan>,
 }
 
 impl EffectiveServerInput {
-    /// Names a role's declared `devices` and the declaration layer it came
-    /// from, for failures that the operator-declared count caused
-    /// ([[RFC-0003:C-SERVE-PARALLELISM]]). A role value at any layer wins
-    /// over a common value, as in [`resolve_role_inputs`].
+    /// Names the declaration layer behind a role's `devices`, for failures
+    /// the operator-declared count caused ([[RFC-0003:C-SERVE-PARALLELISM]]).
+    /// A role value at any layer wins over a common value, as in
+    /// [`resolve_role_inputs`].
     pub(super) fn devices_origin(&self, role_id: &str) -> Option<String> {
         let role_value = self.declarations.iter().rev().find_map(|declaration| {
             declaration
@@ -170,8 +153,6 @@ impl EffectiveServerInput {
         ))
     }
 
-    /// The declared-device origin of every role that declares `devices`,
-    /// keyed by role id, for placement failures.
     pub(super) fn devices_origins(&self) -> BTreeMap<String, String> {
         self.roles
             .iter()
@@ -266,9 +247,8 @@ fn resolve_role_inputs(
         .collect()
 }
 
-/// One declaration layer (server base, case, or invocation override) rendered
-/// into a [`ServerDeclarationPlan`]; the three layers share field layout and
-/// differ only in source identity and settings scope label.
+/// Server base, case, or invocation override; the layers differ only in
+/// source identity and settings scope label.
 struct DeclarationLayer<'a> {
     source: DeclarationSource,
     scope: &'a str,
@@ -844,9 +824,7 @@ pub(super) fn resolve_effective_server_input(
         .unwrap_or(DEFAULT_CAPTURE_CONTROL_DEADLINE_SECONDS);
     let capture_mechanism = resolve_capture_mechanism(&effective_server, topology)?;
     // The finalization default follows the resolved capture mechanism
-    // ([[RFC-0003:C-RESOLUTION]]): an engine-trace close dispatch, its
-    // response consumption, and the artifact flush wait share this one
-    // budget ([[RFC-0004:C-WORKLOAD-PROFILING]]).
+    // ([[RFC-0003:C-RESOLUTION]]).
     let capture_finalization_deadline_seconds = effective_server
         .capture_finalization_deadline_seconds
         .unwrap_or(match capture_mechanism {
@@ -861,8 +839,7 @@ pub(super) fn resolve_effective_server_input(
     let profiling_enabled =
         effective_server.profiling.unwrap_or(false) || !request.captures.is_empty();
     // Profiler declarations must not silently drop when profiling resolves
-    // off ([[RFC-0004:C-WORKLOAD-PROFILING]]): name what was declared and how
-    // to enable it.
+    // off ([[RFC-0004:C-WORKLOAD-PROFILING]]).
     if !profiling_enabled {
         let mut declared = Vec::new();
         if capture_mechanism.is_some() {

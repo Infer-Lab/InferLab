@@ -20,7 +20,7 @@ pub(super) fn validate(root: &Path, config: &WorkspaceConfig) -> Result<(), Infe
                     path.display()
                 ));
             }
-            reject_symlink_components(root, id, path)?;
+            reject_symlink_components(root, &format!("stack {id:?} source"), path)?;
             if !root.join(path).exists() {
                 return invalid(format!(
                     "stack {id:?} source path {} does not exist",

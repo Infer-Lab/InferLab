@@ -9,8 +9,6 @@ use crate::workspace::definitions::WorkspaceConfig;
 use crate::workspace::invalid;
 use inferlab_protocol::AuxiliaryModelKind as WireKind;
 
-/// The governed auxiliary weight kinds, parsed from the server declaration's
-/// `auxiliary_models` keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AuxiliaryModelKind {
     /// Separate weights the operator's framework speculative decoding
@@ -19,18 +17,14 @@ pub(crate) enum AuxiliaryModelKind {
 }
 
 impl AuxiliaryModelKind {
-    /// The declaration spelling of the kind.
     pub(crate) const DRAFT_MODEL: &'static str = "draft-model";
 
-    /// The governed spelling of this kind, for diagnostics.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::DraftModel => Self::DRAFT_MODEL,
         }
     }
 
-    /// Parse a declared kind; unknown kinds fail naming the declared value
-    /// and the governed vocabulary.
     pub(crate) fn parse(context: &str, declared: &str) -> Result<Self, InferlabError> {
         match declared {
             Self::DRAFT_MODEL => Ok(Self::DraftModel),
@@ -41,7 +35,6 @@ impl AuxiliaryModelKind {
         }
     }
 
-    /// The wire projection of the kind.
     pub(crate) const fn to_wire(self) -> WireKind {
         match self {
             Self::DraftModel => WireKind::DraftModel,
@@ -49,11 +42,6 @@ impl AuxiliaryModelKind {
     }
 }
 
-/// Validate one server's `auxiliary_models` declaration
-/// ([[RFC-0003:C-SERVE-AUXILIARY-MODELS]]): known kinds only, each referenced
-/// model must be declared, and the referenced model must differ from the
-/// server's own model. Case-level declarations never reach here — the case
-/// definition rejects unknown fields.
 pub(crate) fn validate_auxiliary_models(
     context: &str,
     server_model: &str,

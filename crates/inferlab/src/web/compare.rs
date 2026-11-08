@@ -55,7 +55,6 @@ impl Selection {
     }
 }
 
-/// The comparison link that starts from one record.
 pub(super) fn href(workspace_id: &str, record: &str) -> String {
     format!("/compare?r={}:{}", encode(workspace_id), encode(record))
 }
@@ -75,7 +74,6 @@ struct Candidate<'a> {
     key: &'a str,
 }
 
-/// One selected record's points for the selected metric.
 struct Series {
     color: usize,
     workspace: String,

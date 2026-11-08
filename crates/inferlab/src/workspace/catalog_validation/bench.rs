@@ -712,9 +712,6 @@ fn validate_bench_common(
     Ok(())
 }
 
-// A `random` source's image decoration ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]):
-// fixed positive dimensions, a positive count, the chat-completions prompt
-// authority, and a well-formed optional directory binding.
 fn validate_random_images(
     id: &str,
     prompt: &BenchPromptSelection,

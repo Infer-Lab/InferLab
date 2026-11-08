@@ -55,7 +55,6 @@ pub(super) fn wrap(value: &str, width: usize) -> Vec<String> {
                 lines.push(std::mem::take(&mut line));
                 continue;
             }
-            // A word wider than the line: split it at the width.
             let mut head = take_width(&word, width, false);
             if head.is_empty() {
                 // A grapheme wider than the whole line still has to go somewhere.

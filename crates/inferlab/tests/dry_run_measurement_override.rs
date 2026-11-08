@@ -453,6 +453,37 @@ fn workspace_lm_eval_yaml_resolves_as_the_effective_task_source() -> Result<(), 
     Ok(())
 }
 
+/// A symlinked task YAML is rejected naming the Eval that declares it, not a
+/// stack ([[RFC-0002:C-WORKSPACE-AUTHORITY]]).
+#[test]
+fn a_symlinked_lm_eval_task_yaml_names_its_eval() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    let task_dir = workspace.root.path().join("evals");
+    fs::create_dir_all(&task_dir)?;
+    fs::write(task_dir.join("real.yaml"), "task: custom_eval\n")?;
+    std::os::unix::fs::symlink("real.yaml", task_dir.join("custom.yaml"))?;
+    let path = workspace.root.path().join(".inferlab/workspace.toml");
+    let config = fs::read_to_string(&path)?.replace(
+        "task = \"gsm8k\"",
+        "task = { yaml = \"evals/custom.yaml\" }",
+    );
+    fs::write(path, config)?;
+
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("lm-eval \"gsm8k\" task YAML path component evals/custom.yaml must be a regular filesystem entry"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("stack \"gsm8k\""), "{stderr}");
+    Ok(())
+}
+
 #[test]
 fn workspace_lm_eval_yml_extension_uses_the_pinned_yaml_loader() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;

@@ -67,7 +67,6 @@ pub struct Observation {
     pub remaining: String,
 }
 
-/// What a completion wait waits for.
 pub trait CompletionTarget {
     /// The awaited state, for diagnostics and evidence.
     fn awaited(&self) -> String;

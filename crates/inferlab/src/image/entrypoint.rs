@@ -196,15 +196,15 @@ pub(super) fn render_entrypoint(
     for (name, value) in activation {
         if crate::workspace::MANAGED_CONTAINER_ENV.contains(&name.as_str()) {
             // Inferlab-managed container variables never project from
-            // activation: CONDA_PREFIX is owned by the baked prefix,
-            // CUDA_VISIBLE_DEVICES is a runtime placement fact, and
-            // HOME/USER/LOGNAME are injected at validation launch.
+            // activation: CONDA_PREFIX is owned by the baked prefix, the CUDA
+            // device variables are runtime placement facts, and
+            // HOME/USER/LOGNAME are injected at container launch.
             skipped.push(name.clone());
             continue;
         }
         if credential_name(name) {
             // Credential material must never enter portable artifacts;
-            // runtime credentials reach validation containers through the
+            // runtime credentials reach launched containers through the
             // per-machine `container.pass_env` binding (`--env NAME`), which
             // a non-empty starting value lets win.
             skipped.push(name.clone());
@@ -325,7 +325,7 @@ fn single_quoted(text: &str) -> String {
 /// ([[RFC-0007:C-IMAGE-BUILD]]). Matched on `_`-separated name segments so
 /// `HF_TOKEN` is excluded while `TOKENIZERS_PARALLELISM` projects. This is
 /// best-effort protection for committed workspace content, not a secret
-/// scanner; runtime credentials reach validation containers through the
+/// scanner; runtime credentials reach launched containers through the
 /// per-machine `container.pass_env` binding instead.
 fn credential_name(name: &str) -> bool {
     name.split('_').any(|segment| {

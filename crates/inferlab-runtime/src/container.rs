@@ -39,7 +39,6 @@ pub fn docker_bind_mount_readonly(source: &str, target: &str) -> [String; 2] {
     ]
 }
 
-/// A bounded invocation that ran to an observable end.
 pub enum BoundedWait {
     Exited {
         status: ExitStatus,
@@ -97,11 +96,9 @@ pub enum BoundedError {
     },
 }
 
-/// Spawn `argv`, optionally write `stdin_payload`, and wait under the
-/// operation's remaining budget and optional attempt cap while draining
-/// stdout and stderr concurrently: a child whose
-/// output exceeds the pipe capacity would otherwise block writing and
-/// never exit, turning a large response or traceback into a timeout.
+/// Drains stdout and stderr concurrently: a child whose output exceeds the
+/// pipe capacity would otherwise block writing and never exit, turning a
+/// large response or traceback into a timeout.
 /// `env_remove` names inherited environment variables the child must not
 /// see (for example [`crate::ssh::SSH_ENV_REMOVE`] for a host SSH client).
 pub fn run_with_bound<S: AsRef<std::ffi::OsStr>>(
@@ -355,8 +352,6 @@ fn terminate_group_and_finish_io(
     (result, evidence)
 }
 
-/// SIGKILL the command's process group, wait until every thread of it has
-/// exited, and reap the command, the group's leader.
 fn terminate_process_group(
     child: &mut std::process::Child,
 ) -> (

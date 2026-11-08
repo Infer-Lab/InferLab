@@ -22,7 +22,6 @@ pub const PRIME_PREFIX_CACHE_PATH: &str = "/prime_prefix_cache";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
-/// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "vLLM NIXL proxy";
 
 #[derive(Clone, Debug)]
@@ -126,8 +125,6 @@ impl ProxyState {
         core::next_request_id(&self.inner.request_counter)
     }
 
-    /// The readiness-wait and reset sweep targets: every prefill replica URL
-    /// followed by every decode URL.
     fn fanout_target_urls(&self) -> Vec<String> {
         core::fanout_target_urls(
             self.inner.prefill.iter().map(|target| target.url.as_str()),
@@ -309,8 +306,6 @@ fn prefill_kv_transfer_params(body: &Value) -> Option<Value> {
     body.get("kv_transfer_params").cloned()
 }
 
-// Prefill replicas carry a config-issued static data-parallel size, so the
-// conditioning fan-out enumerates (replica, rank) targets over it.
 impl core::PrimeReplica for PrefillTarget {
     fn url(&self) -> &str {
         &self.url

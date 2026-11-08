@@ -21,7 +21,7 @@ use inferlab_runtime::server::{
 use preflight::{HardwareProbeError, PreflightObserver, RemoteCheckRequest};
 use record::{FailureEvidence, FailurePhase, LogSyncEvidence, ServerRecordSession};
 use residual::{
-    DeviceRelease, ProbedDevice, RESIDUAL_SETTLE_INTERVAL, ResidualProbe, probe_device_residual,
+    DEVICE_WAIT_PROBE_INTERVAL, DeviceRelease, ProbedDevice, ResidualProbe, probe_device_residual,
     residual_held,
 };
 use serde::Serialize;
@@ -875,15 +875,13 @@ fn probe_hardware<R: ServerRuntime + PreflightObserver + ResidualProbe>(
             reported_occupants = Some(occupants);
         }
         fail_if_startup_interrupted(session, runtime, &[], None)?;
-        std::thread::sleep(RESIDUAL_SETTLE_INTERVAL);
+        std::thread::sleep(DEVICE_WAIT_PROBE_INTERVAL);
         fail_if_startup_interrupted(session, runtime, &[], None)?;
     }
     session.rewrite()?;
     Ok(())
 }
 
-/// Spawns the processes in `range` of the canonical process order,
-/// appending their handles to `spawned`.
 fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
     session: &mut ServerRecordSession,
     runtime: &R,
@@ -1033,10 +1031,6 @@ fn spawn_processes<'a, R: ServerRuntime + ResidualProbe>(
     Ok(())
 }
 
-/// One readiness owner starts only after every process has spawned and
-/// remains authoritative across every process readiness wait. Capture-
-/// armed startup is intentionally unbounded; ordinary startup uses the
-/// server's one resolved readiness budget.
 /// The server's single readiness budget ([[RFC-0003:C-RESOLUTION]]). A
 /// capture-armed server's readiness wait is unbounded
 /// ([[RFC-0004:C-WORKLOAD-PROFILING]]): instrumentation multiplies startup
@@ -1052,9 +1046,8 @@ fn readiness_bound(resolved: &ResolvedExecution) -> OperationBound {
     }
 }
 
-/// Waits for the processes in `range` under the one readiness owner. The
-/// budget starts after every process spawned, or, when a discovery process
-/// exists, before its own wait, and later waits continue it.
+/// The readiness budget starts before the first spawn, so every wait,
+/// leading processes' included, draws on the same budget.
 fn wait_until_ready<R: ServerRuntime + ResidualProbe>(
     resolved: &ResolvedExecution,
     session: &mut ServerRecordSession,
@@ -1527,10 +1520,11 @@ fn stop_with_runtime<R: ProcessCleanup + ProcessObserver + ResidualProbe>(
 /// unverified entry is already honest and is not probed: while its process
 /// group may still live, residual memory says nothing about a leak. Driver
 /// teardown of a killed process lags its exit, so held devices are probed
-/// again until they free or the settle window closes; every probe consumes
-/// that window, so a wedged driver or host cannot hang cleanup. A device
-/// still holding memory at the deadline flips the entry to unverified naming
-/// machine and device. A machine without the probe tool, or a probe that
+/// again in a completion wait until they free
+/// ([[RFC-0009:C-COMPLETION-WAITS]]); each probe is one bounded attempt, so a
+/// wedged driver or host cannot hang cleanup. A device still holding memory
+/// when the wait ends flips the entry to unverified naming machine and
+/// device. A machine without the probe tool, or a probe that
 /// cannot answer in time, records probe-unavailable without failing the
 /// cleanup. Returns the first residual error for the caller's
 /// failure message.

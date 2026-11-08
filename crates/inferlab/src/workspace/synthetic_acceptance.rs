@@ -3,9 +3,8 @@
 //! integrity — digest verification and the two-shape contract — while the
 //! keyed acceptance-length lookup belongs to the selected integration, where
 //! the operator's speculative configuration supplies the draft count
-//! ([[ADR-0043]]). Workspace-load validation and serve resolution share this
-//! one parser so both stages reject the same document shapes with the same
-//! diagnostics.
+//! ([[ADR-0043]]). Workspace load and serve resolution share this parser so
+//! both stages reject the same shapes with the same diagnostics.
 
 use crate::InferlabError;
 use crate::workspace::definitions::SyntheticAcceptanceCurveDefinition;
@@ -13,23 +12,17 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// One model's shape-validated curve entry kind: the flat list shape or the
-/// thinking-mode matrix shape. The values are validated but not consumed by
-/// the control plane — the keyed lookup belongs to the integration
-/// ([[ADR-0043]]).
+/// Only the shape is retained: the control plane validates the values but the
+/// keyed lookup belongs to the integration ([[ADR-0043]]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CurveModelEntry {
     Flat,
     Matrix,
 }
 
-/// Load-time curve shape validation ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
-/// When the curve file is readable and its digest matches the declaration,
-/// every model entry must satisfy the two-shape contract with finite values,
-/// and a declared thinking mode against the declared model key's flat entry
-/// fails because no mode applies. A missing or unreadable file and a digest
-/// mismatch are assigned to workspace resolution and defer; an unknown model
-/// key belongs to the integration's planning-stage lookup and also defers.
+/// A missing or unreadable file and a digest mismatch are assigned to
+/// workspace resolution, so load silently defers them
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
 pub(crate) fn validate_curve_shape_at_load(
     workspace_root: &Path,
     context: &str,
@@ -46,12 +39,8 @@ pub(crate) fn validate_curve_shape_at_load(
     Ok(())
 }
 
-/// Parse and shape-validate the complete curve document: every model key is
-/// a string, and every model entry is exactly one of the two shapes with
-/// positive integer draft lengths and finite acceptance-length values
-/// throughout. A declared thinking mode against the declared model key's flat
-/// entry fails at both stages; an unknown model key does not fail here — the
-/// integration owns the keyed lookup.
+/// An unknown model key does not fail here: the integration owns the keyed
+/// lookup.
 pub(crate) fn validate_curve_document(
     resolved_path: &Path,
     bytes: &[u8],
@@ -99,10 +88,8 @@ pub(crate) fn validate_curve_document(
     Ok(entries)
 }
 
-/// Validate the complete shape of one model entry: exactly one of the flat
-/// list and thinking-mode matrix shapes, positive integer draft lengths, and
-/// finite acceptance-length values throughout — not only at the lookup
-/// coordinates ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
+/// Validates every value, not only those at the lookup coordinates
+/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
 fn shape_validate_entry(
     context: &str,
     curve: &SyntheticAcceptanceCurveDefinition,
@@ -148,9 +135,6 @@ fn shape_validate_entry(
     }
 }
 
-/// The flat shape: a list of single-entry mappings from a positive integer
-/// draft length to a mean acceptance length
-/// ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
 fn validate_flat_entries(
     context: &str,
     curve: &SyntheticAcceptanceCurveDefinition,
@@ -182,8 +166,6 @@ fn validate_flat_entries(
     Ok(())
 }
 
-/// The matrix shape's per-mode mapping from a positive integer draft length
-/// to a mean acceptance length ([[RFC-0003:C-SERVE-SYNTHETIC-ACCEPTANCE]]).
 fn validate_matrix_entries(
     context: &str,
     curve: &SyntheticAcceptanceCurveDefinition,
@@ -226,8 +208,6 @@ fn acceptance(
     }
 }
 
-/// The shared curve diagnostic: the synthetic-acceptance context and the
-/// declared workspace-relative path frame every shape and integrity failure.
 pub(crate) fn invalid_curve(
     context: &str,
     curve: &SyntheticAcceptanceCurveDefinition,

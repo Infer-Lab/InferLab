@@ -54,8 +54,6 @@ _RUNTIME_CACHE_EXTRA_SUBDIRS = {
     "TILELANG_TMP_DIR": "tilelang/tmp",
 }
 
-# The Dynamo worker parses vLLM engine arguments only; the API-server options
-# below have no Dynamo spelling or are realized by the Dynamo frontend.
 _DYNAMO_OWNED_OPTIONS = {
     *_INFERLAB_OWNED_OPTIONS,
     *inferlab_gateway_dynamo.OWNED_OPTIONS,

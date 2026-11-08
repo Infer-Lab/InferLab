@@ -46,8 +46,8 @@ pub(crate) fn conditioning_shape_of(server: &ServerRecord) -> ConditioningServin
             )
         }),
     );
-    // Observed store access decides sharing from the engaged readiness
-    // probe; without one the sharing stays pending.
+    // Without a probe that observes store access the declared sharing
+    // applies; with one, sharing stays pending until the Engines report it.
     if !recorded
         .server
         .serve_state_probe

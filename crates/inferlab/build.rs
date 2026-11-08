@@ -171,9 +171,8 @@ fn collect_source_tree(
     Ok(sources)
 }
 
-/// Recursively collects every file under `dir`, as paths relative to
-/// `root`. The caller sorts the result; traversal order here does not
-/// matter for the final archive's determinism.
+/// The caller sorts the result; traversal order does not affect the archive's
+/// determinism.
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

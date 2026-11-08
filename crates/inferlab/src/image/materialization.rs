@@ -42,12 +42,10 @@ pub(super) struct ContextInputs<'a> {
     pub context_dir: &'a Path,
     pub base_image: &'a str,
     pub base_image_digest: &'a str,
-    /// The rendered activation entrypoint script.
     pub entrypoint: &'a str,
-    /// Wheels built from the stack sources, copied by bytes.
     pub built_wheels: &'a [BuiltWheel],
-    /// Declared environment checks, copied by bytes and executed as RUN
-    /// layers through the entrypoint ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
+    /// Declared environment checks, executed through the entrypoint by one
+    /// generated runner layer ([[RFC-0002:C-ENVIRONMENT-CHECKS]]).
     pub checks: &'a [ContextScript],
     /// Declared image-realization postprocess steps, executed before the
     /// checks.
@@ -83,9 +81,6 @@ pub(super) struct PreparedContext {
     pub rendered: Vec<(String, String)>,
 }
 
-/// Generate the reproducible build context: `Dockerfile`, entrypoint,
-/// `conda-explicit.txt`, `pip-requirements.txt`, and `wheelhouse/`.
-///
 /// Fails closed when a source-backed package is neither replaced by a built
 /// wheel nor resolved in the locked environment, so an image cannot silently
 /// omit a required component.

@@ -100,7 +100,6 @@ _RUNTIME_CACHE_SUBDIRS = {
 
 
 def runtime_cache_env(root: str, extra_subdirs: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Map the shared JIT/runtime cache variables under one cache root."""
     cache_root = Path(root)
     subdirs = dict(_RUNTIME_CACHE_SUBDIRS)
     subdirs.update(extra_subdirs or {})
@@ -110,7 +109,6 @@ def runtime_cache_env(root: str, extra_subdirs: Mapping[str, str] | None = None)
 def rank_zero_allocations(
     allocations: list[ServeProcessAllocationModelRank], kind: ServeRoleKind
 ) -> list[ServeProcessAllocationModelRank]:
-    """Select one role's rank-0 allocations in replica order."""
     return sorted(
         [
             allocation
@@ -244,7 +242,6 @@ def fused_pd_frontend_plans(
 def split_serve_allocations(
     allocations: list[ServeProcessAllocation],
 ) -> tuple[list[ServeAllocation], list[ServeProcessAllocationModelRank]]:
-    """Unwrap allocations once and retain the ordered model-rank subset."""
     unwrapped: list[ServeAllocation] = [allocation.root for allocation in allocations]
     model_allocations = [
         allocation
@@ -408,10 +405,8 @@ def validate_extra_args(extra_args: list[str], owned_options: Collection[str]) -
 
 
 MOONCAKE = "mooncake"
-"""The Mooncake KV-transfer mechanism name."""
 
 NIXL = "nixl"
-"""The NIXL KV-transfer mechanism name."""
 
 
 def require_kv_transfer(
@@ -730,8 +725,6 @@ def _effective_stack_settings(
     if stack_settings is not None:
         return stack_settings(declared)
     if declared:
-        # An integration that defines no stack setting rejects every declared
-        # one ([[RFC-0006:C-INTEGRATIONS]]).
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
             f"this integration defines no stack settings; the stack declares {sorted(declared)}",
@@ -750,8 +743,8 @@ def handle_request(
     # Validate the request protocol version before request-shape validation
     # ([[RFC-0006:C-INTEGRATIONS]]): a cross-version request also fails shape
     # checks, and a field-error flood would bury the one actionable fact. A
-    # declared-but-unsupported version is the mismatch; malformed JSON and an
-    # absent version fall through to ordinary shape validation.
+    # declared-but-unsupported version is the mismatch; an absent version
+    # falls through to ordinary shape validation.
     try:
         raw = json.loads(payload)
     except (json.JSONDecodeError, ValueError) as error:

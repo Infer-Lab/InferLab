@@ -17,7 +17,6 @@ pub enum BuiltinProxyKind {
     Trtllm,
 }
 
-/// One built-in proxy implementation's identity and proxy-owned facts.
 pub struct BuiltinProxySpec {
     pub kind: BuiltinProxyKind,
     /// The plan-declaration vocabulary: the frontend `implementation` value an

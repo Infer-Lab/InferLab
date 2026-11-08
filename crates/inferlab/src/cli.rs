@@ -38,8 +38,6 @@ pub struct Cli {
     command: Command,
 }
 
-/// The `--version` output: the product version plus the adapter protocol
-/// version this control plane speaks ([[RFC-0006:C-INTEGRATIONS]]).
 fn version_with_protocol() -> String {
     format!(
         "{} (adapter protocol v{})",
@@ -125,7 +123,7 @@ enum AgentCommand {
     /// `--from-checkout` overrides the source.
     #[command(long_about = help::AGENT_INSTALL)]
     Install(AgentInstallArgs),
-    /// Update the installed plugin through its marketplace.
+    /// Reinstall the plugin from this binary's embedded package.
     #[command(long_about = help::AGENT_UPDATE)]
     Update(AgentSelectArgs),
     /// Uninstall the plugin.
@@ -240,7 +238,7 @@ struct InternalArgs {
 enum InternalCommand {
     /// Run a built-in HTTP proxy.
     Proxy(InternalProxyArgs),
-    /// Supervise one web console job ([[RFC-0012:C-ACTIONS]]).
+    /// Supervise one detached job ([[RFC-0012:C-ACTIONS]]).
     JobSupervise(JobSuperviseArgs),
 }
 

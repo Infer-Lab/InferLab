@@ -3,9 +3,6 @@
 
 use std::net::Ipv6Addr;
 
-/// The `host:port` authority of an endpoint: an IPv6 address is bracketed, as
-/// URLs and `host:port` options require, and every other host is written as
-/// it is.
 pub fn authority(host: &str, port: u16) -> String {
     if host.parse::<Ipv6Addr>().is_ok() {
         format!("[{host}]:{port}")

@@ -24,7 +24,6 @@ pub const PRIME_PREFIX_CACHE_PATH: &str = "/prime_prefix_cache";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
-/// Display name used in lifecycle/validation error messages.
 const PROXY_NAME: &str = "vLLM Mooncake proxy";
 
 #[derive(Clone, Debug)]

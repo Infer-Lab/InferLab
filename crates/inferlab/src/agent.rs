@@ -29,12 +29,9 @@ const PLUGIN: PluginRef<'static> = PluginRef {
 const MARKETPLACE: &str = "inferlab";
 const INFERLAB_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The plugin package this binary carries, packed reproducibly by
-/// `build.rs` from the canonical repo-root package (`LICENSE`,
-/// `.claude-plugin/`, `.agents/`, `plugins/inferlab/`), or from its generated
-/// crate staging projection. Installed
-/// by default; `--from-checkout` overrides the source entirely and never
-/// touches this payload ([[RFC-0008:C-AGENT-PLUGIN]]).
+/// Packed reproducibly by `build.rs` from the members listed in
+/// `scripts/plugin-package-members.txt`. `--from-checkout` overrides the
+/// source entirely and never touches this payload ([[RFC-0008:C-AGENT-PLUGIN]]).
 const EMBEDDED_PLUGIN_TAR_GZ: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/inferlab-plugin.tar.gz"));
 
@@ -44,8 +41,8 @@ pub(crate) struct AgentReport {
 }
 
 impl AgentReport {
-    /// The first failed row's message, if any — the caller emits the report
-    /// and then still fails loudly ([[RFC-0008:C-AGENT-PLUGIN]]).
+    /// The caller emits the report and then still fails loudly
+    /// ([[RFC-0008:C-AGENT-PLUGIN]]).
     pub(crate) fn failure(&self) -> Option<String> {
         self.rows
             .iter()
@@ -327,11 +324,9 @@ fn render_agent_command(argv: &[String]) -> String {
         .join(" ")
 }
 
-/// Installs the plugin package. `checkout` overrides the source with a
-/// local checkout or unpacked release tarball, operating on it identically
-/// to before; when omitted, the package embedded in this binary is
-/// materialized under InferLab's versioned data directory and that durable
-/// directory takes the checkout's place
+/// `checkout` overrides the source with a local checkout or unpacked release
+/// tarball; when omitted, the embedded package is materialized under
+/// InferLab's versioned data directory and installed from there
 /// ([[RFC-0008:C-AGENT-PLUGIN]]).
 pub(crate) fn install(selector: AgentSelector, checkout: Option<&Path>) -> AgentReport {
     let runtimes = selector.runtimes();
@@ -590,11 +585,9 @@ fn embedded_package_path() -> Result<PathBuf, String> {
         .join(format!("{INFERLAB_VERSION}-{digest}")))
 }
 
-/// Refresh the plugin from this binary's embedded package. Each release has a
-/// new persistent local marketplace path, so native Git-marketplace update
-/// commands cannot perform this transition. Reuse the validated local install
-/// path to replace the registration and refresh the plugin, then expose the
-/// operator-requested update semantics in the report.
+/// Each release has a new persistent local marketplace path, so native
+/// Git-marketplace update commands cannot perform this transition; update
+/// reuses the local install path and relabels its report rows.
 pub(crate) fn update(selector: AgentSelector) -> AgentReport {
     let runtimes = selector.runtimes();
     let source = match materialize_embedded_package(runtimes) {
@@ -727,8 +720,7 @@ fn validate_package(runtime: AgentRuntime, checkout: &Path) -> Result<(), String
     Ok(())
 }
 
-/// Read one required package file, rejecting a missing, empty, non-UTF-8, or
-/// (for JSON) unparsable one.
+/// Rejects a missing, empty, non-UTF-8, or (for JSON) unparsable file.
 fn read_package_file(
     runtime: AgentRuntime,
     required: &Path,

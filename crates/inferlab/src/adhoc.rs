@@ -26,7 +26,6 @@ pub(crate) struct AdHocRequest<'a> {
     pub command: &'a [String],
 }
 
-/// Execute the request and return the command's exit code.
 pub(crate) fn execute(
     root: &Path,
     config: &WorkspaceConfig,
@@ -141,7 +140,6 @@ fn execute_local(
     Ok(exit_code(status))
 }
 
-/// The selected stack, defaulting to the only declared one.
 fn select_stack<'a>(
     config: &'a WorkspaceConfig,
     stack: Option<&'a str>,
@@ -176,11 +174,10 @@ fn select_stack<'a>(
     }
 }
 
-/// The local-realization launcher ([[RFC-0002:C-ADHOC-EXECUTION]]): the
-/// usability gate prices lock drift before execution, then activation runs
-/// exactly as adapter invocations do — no install, no task resolution. The
-/// manifest path pins the workspace authority while the command keeps the
-/// operator's working directory.
+/// Activation runs exactly as adapter invocations do — no install, no task
+/// resolution ([[RFC-0002:C-ADHOC-EXECUTION]]). The manifest path pins the
+/// workspace authority while the command keeps the operator's working
+/// directory.
 fn local_argv(
     root: &Path,
     definition: &crate::workspace::StackDefinition,

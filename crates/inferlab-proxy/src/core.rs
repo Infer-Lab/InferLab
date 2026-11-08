@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-/// Build a multi-threaded Tokio runtime and drive `run_async` to completion.
 pub fn run<F, Fut>(run_async: F) -> Result<(), ProxyLifecycleError>
 where
     F: FnOnce() -> Fut,
@@ -34,7 +33,6 @@ where
     runtime.block_on(run_async())
 }
 
-/// Healthcheck response body shared by the proxies.
 #[derive(Serialize)]
 pub struct ProxyHealthcheckResponse {
     pub ready: bool,
@@ -42,7 +40,6 @@ pub struct ProxyHealthcheckResponse {
     pub decode_instances: usize,
 }
 
-/// The shared `/healthcheck` payload: 200 once ready, 503 before, with the configured instance counts.
 pub(crate) fn healthcheck_response(
     ready: bool,
     prefill_instances: usize,
@@ -63,7 +60,6 @@ pub(crate) fn healthcheck_response(
     )
 }
 
-/// Validate that both role endpoint lists are non-empty, naming the proxy in the validation message.
 pub(crate) fn require_endpoints(
     proxy_name: &'static str,
     prefill_is_empty: bool,
@@ -82,7 +78,6 @@ pub(crate) fn require_endpoints(
     Ok(())
 }
 
-/// Build the shared pooled client, naming the proxy in the failure message.
 pub(crate) fn pooled_client(
     proxy_name: &'static str,
 ) -> Result<reqwest::Client, ProxyLifecycleError> {
@@ -91,7 +86,6 @@ pub(crate) fn pooled_client(
     })
 }
 
-/// Bind `host:port` and serve `router`, naming the proxy in bind/serve failure messages.
 pub(crate) async fn serve_router(
     proxy_name: &'static str,
     host: &str,
@@ -110,7 +104,6 @@ pub(crate) async fn serve_router(
         })
 }
 
-/// Poll every backend `url` at `path` once per second until each answers with a success status.
 pub(crate) async fn await_backends(client: reqwest::Client, urls: Vec<String>, path: &'static str) {
     let waits = urls
         .into_iter()
@@ -136,8 +129,6 @@ async fn await_backend(client: reqwest::Client, url: String, path: &'static str)
 /// yet; the owning server readiness budget ends the wait.
 pub(crate) const BACKEND_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Collect the fan-out target URLs shared by the reset/flush sweeps and the
-/// readiness wait: every prefill replica URL followed by every decode URL.
 pub(crate) fn fanout_target_urls<'a>(
     prefill_urls: impl IntoIterator<Item = &'a str>,
     decode_urls: impl IntoIterator<Item = &'a str>,
@@ -149,8 +140,6 @@ pub(crate) fn fanout_target_urls<'a>(
         .collect()
 }
 
-/// Start a proxy response builder that mirrors the upstream response's
-/// status and (when present) content-type.
 pub(crate) fn upstream_response_builder(
     response: &reqwest::Response,
 ) -> Result<axum::http::response::Builder, ProxyHttpError> {
@@ -165,7 +154,6 @@ pub(crate) fn upstream_response_builder(
     Ok(builder)
 }
 
-/// Finish a proxy response builder with `body`.
 pub(crate) fn response_body(
     builder: axum::http::response::Builder,
     body: Body,
@@ -175,8 +163,6 @@ pub(crate) fn response_body(
     })
 }
 
-/// Forward an upstream response body verbatim, preserving status and
-/// content-type.
 pub async fn forward_response(
     response: reqwest::Response,
 ) -> Result<Response<Body>, ProxyHttpError> {
@@ -188,8 +174,6 @@ pub async fn forward_response(
     response_body(builder, Body::from(bytes))
 }
 
-/// Convert an unsuccessful upstream response into a `502 Bad Gateway`
-/// [`ProxyHttpError`] that captures the upstream status and body.
 pub async fn upstream_status_error(context: &str, response: reqwest::Response) -> ProxyHttpError {
     let status = response.status();
     let body = match response.text().await {
@@ -216,30 +200,19 @@ pub fn outbound_authorization(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-/// Join a base URL with a path, normalizing a single trailing slash on the
-/// base.
 pub fn join_path(base: &str, path: &str) -> String {
     format!("{}{}", base.trim_end_matches('/'), path)
 }
 
-/// Convert a `reqwest` status code into an `axum`/`http` status code.
 pub fn status_code(status: reqwest::StatusCode) -> Result<StatusCode, ProxyHttpError> {
     StatusCode::from_u16(status.as_u16())
         .map_err(|error| ProxyHttpError::internal(format!("invalid upstream status code: {error}")))
 }
 
-/// Advance a round-robin cursor and return the selected index into a non-empty
-/// target list. Shared by all proxies' prefill/decode selection; each proxy
-/// keeps its own cursor and target list (which stay local).
 pub(crate) fn round_robin_index(cursor: &AtomicUsize, len: usize) -> usize {
     cursor.fetch_add(1, Ordering::SeqCst) % len
 }
 
-/// Build and send a JSON POST to `url` with an optional `X-Request-Id`, any
-/// `extra_headers`, and an optional `Authorization`, returning the response or a
-/// [`ProxyHttpError`] on transport or non-success status. `context` names the
-/// call in error messages (e.g. "decode request"). Owns the transport for every
-/// built-in proxy POST. Proxy-specific request ids and headers are optional.
 pub(crate) async fn send_json_post(
     client: reqwest::Client,
     url: String,
@@ -295,23 +268,17 @@ pub(crate) async fn send_json_post_status(
         .map_err(|error| ProxyHttpError::upstream(&format!("{context} failed"), error))
 }
 
-/// A per-process monotonic request id, `"{pid}-{n}"`, drawn from a proxy-owned
-/// counter. Shared by the vLLM proxies so the id scheme has one home.
 pub(crate) fn next_request_id(counter: &AtomicUsize) -> String {
     let value = counter.fetch_add(1, Ordering::SeqCst);
     format!("{}-{value}", std::process::id())
 }
 
-/// Build the outbound HTTP client shared by the proxies, with the pool tuning
-/// (unbounded idle connections per host) both require. Returns the raw
-/// `reqwest` error so each proxy keeps its own construction-failure message.
 pub(crate) fn build_pooled_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .pool_max_idle_per_host(usize::MAX)
         .build()
 }
 
-/// Failure detail of one reset/flush fan-out target.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FanoutFailure {
     pub url: String,
@@ -332,7 +299,6 @@ pub struct ResetPrefixCacheResponse {
     pub failed: Vec<FanoutFailure>,
 }
 
-/// How a reset/flush target's answer is judged.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum SweepSuccess {
     /// Any 2xx other than 206 succeeds.
@@ -351,8 +317,6 @@ pub struct PrimePrefixCacheResponse {
     pub targets: Vec<PrimePrefixCacheTarget>,
 }
 
-/// One fanned-out conditioning flow: the prefill replica URL and the pinned
-/// data-parallel rank, with the observed status or the failure detail.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PrimePrefixCacheTarget {
     pub url: String,
@@ -362,8 +326,6 @@ pub struct PrimePrefixCacheTarget {
     pub error: Option<String>,
 }
 
-/// Failure of one fanned-out conditioning flow: the upstream status when a
-/// response was observed, plus the failure detail.
 pub(crate) struct PrimeFlowFailure {
     pub http_status: Option<u16>,
     pub error: String,
@@ -385,10 +347,6 @@ impl PrimeFlowFailure {
     }
 }
 
-/// Read a fanned-out conditioning response to text, requiring a 2xx status.
-/// The body is captured either way so a non-2xx status reports it as the
-/// failure detail; a body read failure is a transport failure. Returns the
-/// upstream status and body on success.
 pub(crate) async fn expect_2xx(
     context: &'static str,
     response: reqwest::Response,
@@ -409,8 +367,6 @@ pub(crate) async fn expect_2xx(
     Ok((status, text))
 }
 
-/// Identity of one prime fan-out target: the prefill replica URL and the
-/// data-parallel rank the flow pins.
 pub(crate) trait PrimeFanoutTarget {
     fn url(&self) -> &str;
     fn rank(&self) -> u32;
@@ -423,8 +379,6 @@ pub(crate) trait PrimeReplica {
     fn data_parallel_size(&self) -> u32;
 }
 
-/// One prime fan-out target over a static-size replica: the replica and the
-/// pinned data-parallel rank.
 pub(crate) struct RankedPrimeTarget<R> {
     pub replica: R,
     pub rank: u32,
@@ -440,8 +394,6 @@ impl<R: PrimeReplica> PrimeFanoutTarget for RankedPrimeTarget<R> {
     }
 }
 
-/// Enumerate the prime fan-out targets for static-size replicas, expanding
-/// each replica over its data-parallel ranks (at least one).
 pub(crate) fn ranked_prime_targets<R: PrimeReplica + Clone>(
     replicas: &[R],
 ) -> Vec<RankedPrimeTarget<R>> {
@@ -457,15 +409,11 @@ pub(crate) fn ranked_prime_targets<R: PrimeReplica + Clone>(
     targets
 }
 
-/// Run the reset/flush fan-out skeleton: the engine module enumerates the
-/// target base URLs, names its endpoint (`path`) and operation, and says how
-/// a target's answer is judged; target execution and the response
-/// aggregation live here. The answer is 200 when every target succeeded or
-/// every failed target only declined — `success` then tells them apart — and
-/// 206 when any target failed otherwise ([[RFC-0003:C-GATEWAY-PD-ROUTER]]). The caller's measurement-case request
-/// deadline bounds the whole fan-out; the proxy adds no shorter cap
-/// ([[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]]). An empty target set is a 502 —
-/// "no targets" must not be conflated with success.
+/// The answer is 200 when every target succeeded or every failed target only
+/// declined — `success` then tells them apart — and 206 when any target
+/// failed otherwise ([[RFC-0003:C-GATEWAY-PD-ROUTER]]). The caller's
+/// measurement-case request deadline bounds the whole fan-out; the proxy adds
+/// no shorter cap ([[RFC-0009:C-MEASUREMENT-CASE-BUDGETS]]).
 pub(crate) async fn run_sweep_fanout(
     client: reqwest::Client,
     operation: &'static str,
@@ -577,12 +525,8 @@ async fn sweep_target(
     }
 }
 
-/// Run the prefix-cache conditioning fan-out skeleton: the engine module
-/// enumerates the (replica, rank) targets and supplies the per-target
-/// conditioning flow; sequential target execution and the response
-/// aggregation (200 when every flow succeeded, 206 on partial failure) live
-/// here, bounded by the caller's request deadline like the sweep. An empty
-/// target set is a 502 — "no targets" must not be conflated with success.
+/// Targets run sequentially; the caller's request deadline bounds the whole
+/// fan-out, as for the sweep.
 pub(crate) async fn run_prime_fanout<T, F, Fut>(
     operation: &'static str,
     targets: Vec<T>,
@@ -638,7 +582,6 @@ fn empty_fanout_failure(operation: &str) -> Response<Body> {
     .into_response()
 }
 
-/// Per-request error of the HTTP handlers: an HTTP status plus a message.
 #[derive(Debug)]
 pub struct ProxyHttpError {
     status: StatusCode,
@@ -688,24 +631,15 @@ pub struct ProxyErrorResponse {
 /// response stream before prefill completes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OnClientDrop {
-    /// Abort the prefill task (via [`AbortOnDrop`]). The default: once the
-    /// client is gone, the orphaned prefill request is cancelled.
     Abort,
-    /// Leave the prefill task running: it drains to completion in the
-    /// background. Required when aborting prefill mid-flight would strand
-    /// the paired decode-side engine request (for example the SGLang
-    /// prefill/decode bootstrap room, where the decode engine waits for KV
-    /// that a cancelled prefill would never deliver).
+    /// Required when aborting prefill mid-flight would strand the paired
+    /// decode-side engine request, e.g. the SGLang bootstrap room, where the
+    /// decode engine waits for KV that a cancelled prefill would never deliver.
     Detach,
 }
 
 /// Stream a decode response body while a concurrently-running prefill task
-/// completes. Used by proxies whose backend protocol starts both roles
-/// together; the vLLM NIXL proxy instead forwards them sequentially.
-/// `on_client_drop` selects the prefill task's fate when the client drops
-/// the response before prefill finishes (see [`OnClientDrop`]); once prefill
-/// completes any armed abort is disarmed, and a prefill failure surfaces as
-/// a stream error.
+/// completes; a prefill failure surfaces as a stream error.
 pub(crate) fn stream_decode_response(
     response: reqwest::Response,
     prefill_task: JoinHandle<Result<(), ProxyHttpError>>,
@@ -716,7 +650,6 @@ pub(crate) fn stream_decode_response(
     response_body(builder, Body::from_stream(stream))
 }
 
-/// Stream one successful upstream response without waiting for another role.
 pub(crate) fn stream_response(
     response: reqwest::Response,
 ) -> Result<Response<Body>, ProxyHttpError> {
@@ -727,12 +660,9 @@ pub(crate) fn stream_response(
     response_body(builder, Body::from_stream(stream))
 }
 
-/// The decode byte stream, generic over the decode stream and its error type so
-/// it can be exercised without a live `reqwest::Response`. Yields decode bytes
-/// in arrival order; concurrently drives `prefill_task` to completion and, per
-/// `on_client_drop`, aborts or detaches it if the consumer drops the stream
-/// before prefill finishes. On decode EOF before prefill completes, prefill is
-/// awaited and its error (if any) surfaces.
+/// Generic over the decode stream so it can be exercised without a live
+/// `reqwest::Response`. On decode EOF before prefill completes, prefill is
+/// still awaited and its error surfaces.
 pub(crate) fn decode_response_stream<S, E>(
     decode_stream: S,
     prefill_task: JoinHandle<Result<(), ProxyHttpError>>,
@@ -746,9 +676,6 @@ where
     try_stream! {
         let mut decode_stream = decode_stream;
         let mut prefill_task = prefill_task;
-        // Under `OnClientDrop::Detach` no abort guard is armed at all: dropping
-        // the stream (client disconnect) leaves the prefill task draining to
-        // completion in the background.
         let mut prefill_abort = match on_client_drop {
             OnClientDrop::Abort => Some(AbortOnDrop::new(prefill_abort)),
             OnClientDrop::Detach => None,
@@ -758,14 +685,11 @@ where
             match next_stream_event(&mut prefill_task, &mut decode_stream, prefill_done).await {
                 StreamEvent::Prefill(prefill) => {
                     prefill_done = true;
-                    // One-time tie-break: if a decode item was already ready at the
-                    // instant prefill completed, handle that single item before
-                    // surfacing the prefill outcome. `now_or_never()` polls (and so
-                    // consumes) the item, so it must be matched exhaustively: deliver
-                    // a ready chunk, and PROPAGATE a ready decode error (an Ok-only
-                    // match would drop it and truncate the response into a clean 200).
-                    // EOF / not-ready fall through to the
-                    // prefill outcome; decode is never indefinitely preferred.
+                    // One-time tie-break: a decode item already ready when prefill
+                    // completed is handled before the prefill outcome.
+                    // `now_or_never()` consumes the item, so a ready decode error
+                    // must propagate too: an Ok-only match would drop it and
+                    // truncate the response into a clean 200.
                     match decode_stream.next().now_or_never() {
                         Some(Some(Ok(bytes))) => yield bytes,
                         Some(Some(Err(error))) => {
@@ -812,20 +736,13 @@ async fn next_stream_event<S, E>(
 where
     S: Stream<Item = std::result::Result<Bytes, E>> + Unpin,
 {
-    // Surface the prefill outcome promptly once the prefill task has COMPLETED, so
-    // a continuously-ready decode stream cannot defer (and thereby suppress) a
-    // prefill failure indefinitely. The caller delivers one already-ready decode
-    // chunk before propagating a prefill error (a one-time tie-break), so a chunk
-    // that was ready at the instant prefill finished is not dropped — but decode
-    // is NOT permanently prioritized.
+    // Check completion first so a continuously-ready decode stream cannot defer
+    // (and thereby suppress) a prefill failure indefinitely.
     if !prefill_done && prefill_task.is_finished() {
         return StreamEvent::Prefill(prefill_task.await);
     }
-    // Prefill is still running: deliver decode bytes as they arrive, and otherwise
-    // await the prefill task's completion (picked up by the `is_finished` check on
-    // the next call). An unbiased race is fine here — there is no completed prefill
-    // outcome to drop, and a ready decode chunk taken by its own branch is yielded,
-    // not lost.
+    // An unbiased race is fine here: there is no completed prefill outcome to
+    // drop, and a decode chunk taken by its own branch is yielded, not lost.
     tokio::select! {
         prefill = prefill_task, if !prefill_done => StreamEvent::Prefill(prefill),
         chunk = decode_stream.next() => StreamEvent::Decode(chunk),
@@ -840,7 +757,6 @@ fn stream_error(message: String) -> std::io::Error {
     std::io::Error::other(message)
 }
 
-/// Aborts the held task when dropped unless [`disarm`](AbortOnDrop::disarm)ed.
 struct AbortOnDrop {
     handle: tokio::task::AbortHandle,
     armed: bool,

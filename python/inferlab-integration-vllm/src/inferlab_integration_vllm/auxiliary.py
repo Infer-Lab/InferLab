@@ -28,7 +28,6 @@ _PURPOSE = "the draft-model auxiliary splice"
 
 
 def _target_config(settings: VllmServeSettings, context: str) -> dict[str, object]:
-    """Locate and parse the splice-target speculative-config JSON object."""
     return _speculative_config_target(settings, context, purpose=_PURPOSE)
 
 
@@ -60,8 +59,6 @@ def splice_draft_model(
     allocation: ServeProcessAllocationModelRank,
     declared: list[AuxiliaryModelInput] | None,
 ) -> None:
-    """Splice the allocation's resolved draft-model locator into the effective
-    speculative-config JSON carried by the role's extra_args."""
     locator = resolve_draft_model_locator(allocation, declared)
     if locator is None:
         return

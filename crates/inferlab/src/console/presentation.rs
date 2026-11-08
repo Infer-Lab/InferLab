@@ -75,7 +75,6 @@ impl ViewIndex {
         self.items.len()
     }
 
-    /// Place an explicit child reference beneath the item at `parent`.
     fn push_child(&mut self, entry: usize, display: &DisplayEntry, parent: usize) {
         let group = self.items.get(parent).and_then(|item| item.group.clone());
         self.push_with(entry, display, None, group);
@@ -473,7 +472,6 @@ impl Presentation {
             .collect()
     }
 
-    /// The explicit child references placed beneath the item at `position`.
     pub(crate) fn children(&self, source: EntrySource, position: usize) -> Vec<usize> {
         let index = self.index(source);
         index

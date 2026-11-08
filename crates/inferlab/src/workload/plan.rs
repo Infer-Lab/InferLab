@@ -359,7 +359,7 @@ impl RoleDataParallel {
 
 impl ConditioningServingShape {
     /// `roles` yields `(serves_public_endpoint, kind, effective replica count,
-    /// effective attention data-parallel size)` per model-serving role. A
+    /// data-parallel source)` per model-serving role. A
     /// Gateway frontend makes every prefill-side role relevant because its
     /// targets force the fan-out capability requirement; a direct endpoint
     /// conditions the role that serves it.

@@ -152,10 +152,7 @@ pub(crate) fn stop_windows(
 /// Engine-trace window closing is a dispatch into the one global finalization
 /// budget ([[RFC-0004:C-WORKLOAD-PROFILING]]): the close request is
 /// dispatched when the measured phase ends and its response consumption draws
-/// the shared budget rather than a per-action control budget. A delivery
-/// failure (transport error or a prompt error status) is window-closing
-/// control failure evidence; a slow or absent response is neutral
-/// flush-pending evidence.
+/// the shared budget rather than a per-action control budget.
 pub(crate) fn close_engine_trace_windows(
     targets: &[&ProfilerTargetRecord],
     process_ids: &BTreeSet<&str>,
@@ -356,11 +353,8 @@ fn http_action(
     }
 }
 
-/// The one window-control request construction shared by the per-action
-/// control budget and the engine-trace close dispatch: build a client under
-/// the caller's timeout classification, POST with an optional JSON body, then
-/// consume the complete response body so the deadline covers the full
-/// response wait. A `None` timeout leaves the client unbounded.
+/// Consumes the complete response body so the deadline covers the full
+/// response wait. A `None` client timeout leaves the client unbounded.
 fn send_control_request(
     action: &CaptureWindowActionPlan,
     client_timeout: Option<Duration>,
@@ -414,8 +408,6 @@ fn send_control_request(
     })
 }
 
-/// A received window-control response: its status, the value observed at
-/// a declared success pointer, and whether the declared predicate holds.
 struct ControlResponse {
     status: reqwest::StatusCode,
     observed: Option<serde_json::Value>,

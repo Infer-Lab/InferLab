@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The context contract version carried by [`CONTEXT`].
 pub(super) const CONTEXT_VERSION: &str = "1";
 
 const NAMESPACE: &str = "INFERLAB_";
@@ -93,7 +92,6 @@ pub(super) struct ModelContext {
     pub locator: String,
 }
 
-/// The variables provided to one command, in name order.
 pub(super) fn variables(
     root: &Path,
     record: Option<(&str, &Path)>,

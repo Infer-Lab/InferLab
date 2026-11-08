@@ -84,8 +84,6 @@ struct ExitEvidence {
     signal: Option<i32>,
 }
 
-/// Termination evidence ([[RFC-0009:C-CLEANUP-GRACE]]): trigger, the shared
-/// graces, the signaled groups, elapsed time, and verification.
 #[derive(Debug, Deserialize, Serialize)]
 struct CleanupEvidence {
     trigger: String,
@@ -377,7 +375,7 @@ fn wait(
 
 /// SIGTERM every process group of the command's process tree, then SIGKILL
 /// the tree's processes that are still alive. A nested `inferlab run` is
-/// spared SIGKILL while the grace lasts: the SIGKILL of the processes it
+/// spared SIGKILL unless the exit wait fails: the SIGKILL of the processes it
 /// started ends its command, and it then finalizes its own record
 /// ([[RFC-0005:C-EVIDENCE]]). Every signal targets a process identified by
 /// pid and start time, so a reused pid is never signaled.

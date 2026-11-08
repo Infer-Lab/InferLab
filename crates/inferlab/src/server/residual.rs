@@ -17,11 +17,11 @@ const RESIDUAL_MARKER: &str = "INFERLAB_DEVICE_RESIDUAL\t";
 
 /// The cadence between device probes while a launch waits for its devices:
 /// polling, not a bound.
-pub(super) const RESIDUAL_SETTLE_INTERVAL: Duration = Duration::from_secs(1);
+pub(super) const DEVICE_WAIT_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) trait ResidualProbe {
     /// Residual compute memory in bytes on one assigned device, probed on its
-    /// launch machine after process cleanup within the settle window.
+    /// launch machine after process cleanup within `bound`.
     fn residual_bytes(
         &self,
         launch: &LaunchPlan,
@@ -40,7 +40,7 @@ pub(super) enum ResidualProbeError {
         source: std::io::Error,
     },
     #[error(
-        "device residual probe on machine {machine:?} did not answer within the settle window ({elapsed_ms} ms)"
+        "device residual probe on machine {machine:?} did not answer within its attempt bound ({elapsed_ms} ms)"
     )]
     Expired { machine: String, elapsed_ms: u64 },
     #[error("device residual probe on machine {machine:?} exited with {status}: {stderr}")]

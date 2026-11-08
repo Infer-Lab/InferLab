@@ -549,8 +549,6 @@ pub(super) fn realize_runtime(
     })
 }
 
-/// The resolved process hierarchy: model roles, the frontend boundary, and
-/// the discovery process a Gateway backend may require.
 pub(super) struct ProcessHierarchy {
     pub(super) roles: Vec<RolePlan>,
     pub(super) frontend: Option<FrontendPlan>,

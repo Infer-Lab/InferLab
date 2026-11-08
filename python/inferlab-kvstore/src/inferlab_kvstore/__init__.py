@@ -21,11 +21,9 @@ from . import filesystem, mooncake
 __all__ = ["BACKENDS", "filesystem", "mooncake", "plan", "render"]
 
 BACKENDS = (mooncake.BACKEND, filesystem.BACKEND)
-"""Every KV store backend a server may declare."""
 
 
 def plan(store: KvStoreInput) -> KvStorePlan:
-    """The KV store plan for the declared backend."""
     if store.backend == mooncake.BACKEND:
         return mooncake.plan(store)
     if store.backend == filesystem.BACKEND:

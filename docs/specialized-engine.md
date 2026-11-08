@@ -20,9 +20,9 @@ rest of the serving system:
 ## A served Engine
 
 1. InferLab resolves the server into Engine replicas, each one rank process
-   owning its devices — `serve` replicas, or `prefill` and `decode` replicas
-   for a prefill/decode server; and one zero-device Gateway process, which
-   also routes prefill and decode.
+   owning its devices on every machine it spans — `serve` replicas, or
+   `prefill` and `decode` replicas for a prefill/decode server; and one
+   zero-device Gateway process, which also routes prefill and decode.
 2. It starts every Engine with the stack's `engine_command`, the role's Engine
    arguments, and the contract arguments below, then the Gateway.
 3. The server is ready when the Gateway lists every Engine healthy with its
@@ -153,7 +153,9 @@ claim.
 ## Layout and devices
 
 Each replica is one rank process that owns all of its allocated devices and
-serves every data-parallel rank behind its one listen address. A role declares
+serves every data-parallel rank behind its one listen address; a replica that
+spans machines runs one such process per machine (see
+[Replicas across machines](#replicas-across-machines)). A role declares
 its device count as `devices` and no parallelism component; a declared
 component, or a role without `devices`, fails planning. The layout within the
 replica is the Engine's: it takes its devices from `CUDA_VISIBLE_DEVICES` and

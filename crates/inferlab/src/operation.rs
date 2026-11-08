@@ -1,4 +1,4 @@
-//! Producer-owned, command-scoped observations for the view-only TUI.
+//! Producer-owned, command-scoped observations for the console read model.
 
 use crate::InferlabError;
 use crate::atomic_json::AtomicJsonError;

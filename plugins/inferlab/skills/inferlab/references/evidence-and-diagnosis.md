@@ -30,11 +30,13 @@ diagnostic progress for results.
   data-parallel rank count under
   `process_evidence.<process>.readiness.matched_targets[].data_parallel_size`,
   and, with a KV tier, each process's reported `access` and
-  `publication_bound_ms` under `serve_state_probes[].processes[]`. A pool
-  placement lists what it skipped under
-  `resolved.server.placement.unavailable_ports` and `unavailable_devices`, each
-  with its holder; a launch that waited for its devices keeps `device_wait`
-  (`waited_ms` and the first `occupants`).
+  `publication_bound_ms` under `serve_state_probes[].processes[]`.
+  `resolved.server.placement.addresses` keeps each used machine's declared
+  `host` and the `address` it was looked up to once on the InferLab machine,
+  which every rendered endpoint of that machine carries. A pool placement lists
+  what it skipped under `resolved.server.placement.unavailable_ports` and
+  `unavailable_devices`, each with its holder; a launch that waited for its
+  devices keeps `device_wait` (`waited_ms` and the first `occupants`).
 - Recipe and image records preserve child references and partial outcomes rather
   than flattening or discarding a failed branch.
 
@@ -107,7 +109,8 @@ families include configuration/environment/toolchain (`E1xxx`),
 integration/protocol (`E2xxx`), placement and network resolution (`E3xxx`),
 closed-loop failure, lifecycle, profiling, image, and data-asset preparation
 (`E4xxx`), record/operation observation (`E5xxx`), scratchpad (`E6xxx`), agent
-plugin (`E7xxx`), ad-hoc execution (`E8xxx`), and command output (`E9xxx`).
+plugin (`E7xxx`), ad-hoc execution (`E8xxx`), and command output, the web
+console, and detached jobs (`E9xxx`).
 
 A failed launch or closed-loop run still finalizes its record and attempts
 cleanup. Inspect the record before retrying. For a suspected manual server leak:

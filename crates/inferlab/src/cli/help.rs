@@ -151,9 +151,9 @@ pub(super) const AGENT_INSTALL: &str = "Install the versioned InferLab agent plu
 
 Installation defaults to the package embedded in this binary and needs no checkout or network access. --from-checkout selects an explicit repository checkout or unpacked release archive instead. The package is validated before any native agent CLI runs. The command emits one JSON report with a row per selected runtime and every native command attempted in order.";
 
-pub(super) const AGENT_UPDATE: &str = "Update the installed InferLab plugin through each selected agent runtime's registered marketplace.
+pub(super) const AGENT_UPDATE: &str = "Reinstall the InferLab plugin from the package embedded in this binary through each selected native agent runtime, so the plugin matches this binary.
 
-An older InferLab marketplace source is repaired from the package embedded in this binary before refresh when needed. The operation does not read experiment workspace facts or records and emits one JSON report with every native command attempted in order.";
+It runs the same native commands as install and reports each row as updated. The operation does not read experiment workspace facts or records and emits one JSON report with every native command attempted in order.";
 
 pub(super) const AGENT_UNINSTALL: &str = "Uninstall the InferLab plugin through each selected native agent runtime.
 

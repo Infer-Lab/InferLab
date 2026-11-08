@@ -8,7 +8,6 @@ mod ui;
 
 use app::{App, AppAction, InputMode};
 
-// The workspace read model is shared with the web console ([[ADR-0056]]).
 #[cfg(test)]
 use crate::console::{
     CaseLoad, CaseView, DefinitionView, FactSection, JournalView, ObjectState, OperationView,

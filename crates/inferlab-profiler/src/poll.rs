@@ -6,7 +6,6 @@ use std::time::Duration;
 pub(crate) const ARTIFACT_POLL_INITIAL_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const ARTIFACT_POLL_MAX_INTERVAL: Duration = Duration::from_secs(2);
 
-/// One probe outcome inside a budget-aware polling loop.
 pub(crate) enum Poll<T> {
     /// The polled condition is decided; polling stops with this outcome.
     Done(T),

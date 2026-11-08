@@ -1,5 +1,3 @@
-//! Read-only local stack readiness reporting.
-
 use super::{
     CheckOutcome, CheckRealization, CompletedLocalCheck, EnvironmentCheck, LocalCheckConclusion,
     PlannedEnvironmentCheck, check_environment, run_local_checks,

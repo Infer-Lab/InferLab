@@ -683,7 +683,6 @@ impl App {
         true
     }
 
-    /// The tree mark of a visible Records row.
     pub(super) fn visible_tree_mark(&self, visible: usize) -> Option<TreeMark> {
         if self.view != View::Records || self.input == InputMode::GlobalFind {
             return None;

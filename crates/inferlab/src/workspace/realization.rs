@@ -39,11 +39,10 @@ pub(super) fn validate_pixi(root: &Path, config: &WorkspaceConfig) -> Result<(),
         }
     }
 
-    // A selected integration absent from the workspace's committed dependency
-    // set can never lower, since the adapter packages come from that set now
-    // ([[RFC-0006:C-INTEGRATIONS]]): reject the external image at load naming
-    // the missing package. Any pypi-dependencies declaration in any feature or
-    // workspace table counts — an exact pin or a path source both lower.
+    // External images lower through the workspace's own adapter packages
+    // ([[RFC-0006:C-INTEGRATIONS]]), so an integration missing from the
+    // committed dependency set can never lower. A pypi declaration in any
+    // table counts, whether pinned or path-sourced.
     for (id, external) in &config.external_images {
         let package = format!("inferlab-integration-{}", external.integration);
         if !manifest_declares_pypi_dependency(&manifest, &package) {
@@ -132,9 +131,6 @@ pub(super) fn dependency_tables_contain(table: &toml::Table, package: &str) -> b
     })
 }
 
-/// Whether the manifest declares `package` as a pypi dependency in any table,
-/// scanning the whole tree so a workspace-table, feature, or nested
-/// declaration all count ([[RFC-0006:C-INTEGRATIONS]]).
 pub(super) fn manifest_declares_pypi_dependency(manifest: &toml::Value, package: &str) -> bool {
     let Some(table) = manifest.as_table() else {
         return false;

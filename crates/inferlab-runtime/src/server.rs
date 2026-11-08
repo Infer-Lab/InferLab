@@ -294,7 +294,6 @@ pub struct TargetRegistryMatchEvidence {
     /// one ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_parallel_size: Option<u32>,
-    /// The model-serving process the target is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
 }
@@ -318,7 +317,6 @@ pub enum ReadinessEvidence {
         timing: OperationTimingEvidence,
         diagnostic_attempts: Vec<ReadinessAttemptEvidence>,
     },
-    /// Registry-membership readiness ([[RFC-0006:C-INTEGRATIONS]]).
     RegistryMembership {
         registry_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

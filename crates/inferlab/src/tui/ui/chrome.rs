@@ -561,7 +561,6 @@ fn hint_spans(p: Palette, hints: &[(&str, &str)], gap: &str) -> Vec<Span<'static
         if index > 0 {
             spans.push(Span::raw(gap.to_owned()));
         }
-        // Keys render as keycaps.
         spans.push(Span::styled(format!(" {key} "), p.keycap()));
         spans.push(Span::styled(
             format!(" {action}"),

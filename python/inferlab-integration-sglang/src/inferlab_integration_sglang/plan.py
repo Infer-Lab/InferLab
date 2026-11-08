@@ -69,7 +69,7 @@ def _identity() -> IntegrationIdentity:
 
 
 def _effective_parallelism(declared: Parallelism, role_kind: ServeRoleKind) -> Parallelism:
-    """The v1-proven SGLang algebra: `outer.tensor_parallel_size` is the
+    """The SGLang algebra: `outer.tensor_parallel_size` is the
     total world size (`--tensor-parallel-size`), which attention data and
     context parallelism divide (`--enable-dp-attention`), and which expert
     and expert-data parallelism divide independently.

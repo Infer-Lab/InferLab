@@ -22,7 +22,6 @@ from inferlab_adapter_sdk import (
 __all__ = ["BACKEND", "IMPLEMENTATION", "plan"]
 
 BACKEND = "filesystem"
-"""The backend name a workspace selects for a bound tier directory."""
 
 IMPLEMENTATION = "filesystem"
 """The implementation identity recorded for a bound tier directory. The
@@ -31,7 +30,6 @@ package defining the backend."""
 
 
 def plan(store: KvStoreInput) -> KvStorePlan:
-    """The KV store plan for a declared `filesystem` store."""
     if store.settings:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,

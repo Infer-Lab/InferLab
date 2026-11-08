@@ -45,7 +45,6 @@ struct Console {
 }
 
 impl Console {
-    /// Keep one refresh worker per registered workspace.
     fn track(&self) {
         if let Ok(registry) = self.registry.lock() {
             self.hub.track(registry.roots());
@@ -55,7 +54,6 @@ impl Console {
 
 type Shared = Arc<Console>;
 
-/// The hidden supervisor of one launched job.
 pub(crate) fn supervise_job(directory: &Path) -> Result<(), InferlabError> {
     jobs::supervise(directory)
 }
@@ -68,7 +66,7 @@ pub(crate) fn run(options: WebOptions) -> Result<(), InferlabError> {
         match registry.register(workspace) {
             Ok(()) => {}
             Err(RegisterError::Persist(error)) => return Err(error),
-            // A selected workspace whose manifest disappeared is reported but
+            // A selected workspace that cannot be registered is reported but
             // does not prevent observing the others.
             Err(RegisterError::Rejected(reason)) => eprintln!("warning: {reason}"),
         }
@@ -761,7 +759,6 @@ async fn jobs_view(
         .into_response()
 }
 
-/// Why an action was not accepted.
 enum Refusal {
     NoExecutable,
     Invalid(String),
@@ -780,7 +777,6 @@ impl IntoResponse for Refusal {
     }
 }
 
-/// Build the action from its typed fields.
 fn action_of(
     console: &Console,
     feed: &hub::Feed,

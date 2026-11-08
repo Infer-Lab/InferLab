@@ -11,7 +11,6 @@ use crate::workspace::source::{is_safe_relative, reject_symlink_components};
 use std::ffi::OsStr;
 use std::path::Path;
 
-/// One pass threshold: finite, and a pass rate when trials repeat.
 fn validate_threshold(id: &str, field: &str, value: f64, trials: u32) -> Result<(), InferlabError> {
     if !value.is_finite() {
         return invalid(format!("eval {id:?} {field} must be finite"));
@@ -115,7 +114,7 @@ pub(crate) fn validate_eval_task_source(
             yaml.display()
         ));
     }
-    reject_symlink_components(root, id, yaml)?;
+    reject_symlink_components(root, &format!("lm-eval {id:?} task YAML"), yaml)?;
     let path = root.join(yaml);
     if !path.is_file() {
         return invalid(format!(

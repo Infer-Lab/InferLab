@@ -115,7 +115,6 @@ pub(crate) struct AssemblyPlan {
     pub validations: Vec<usize>,
 }
 
-/// One projected activation script resolved to its content identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PlannedActivationScript {
     pub script: PathBuf,
@@ -173,8 +172,6 @@ impl ResolvedImageBuild {
     }
 }
 
-/// The installed image-packaging runtime, or the rejection naming its
-/// installation.
 pub(crate) fn require_image_packaging()
 -> Result<crate::toolchain::InstalledImageToolchain, InferlabError> {
     crate::toolchain::require_image().map_err(|error| InferlabError::ImageBuild {

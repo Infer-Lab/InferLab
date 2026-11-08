@@ -205,16 +205,8 @@ impl ServerRecord {
     }
 
     /// Evidence shapes MUST NOT be encoded under an earlier server record
-    /// version, so the version gate stops older records before serde does.
-    /// Version 15 records cleanup completion waits — process exit, container
-    /// disappearance, device-memory release — in place of fixed post-kill,
-    /// removal, and settle deadlines ([[RFC-0005:C-EVIDENCE]],
-    /// [[RFC-0009:C-COMPLETION-WAITS]]). Version 16 records each role's
-    /// declared `devices` in the resolved declarations
-    /// ([[RFC-0003:C-SERVE-PARALLELISM]]). Version 17 records each role's
-    /// observed data-parallel rank counts in place of an absent effective
-    /// shape, each Engine's observed KV store access and publication bound,
-    /// and each Engine's bound tier directory ([[RFC-0005:C-EVIDENCE]]).
+    /// version, so the version gate stops older records before serde does
+    /// ([[RFC-0005:C-EVIDENCE]]).
     pub(crate) const SCHEMA_VERSION: u32 = 18;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {

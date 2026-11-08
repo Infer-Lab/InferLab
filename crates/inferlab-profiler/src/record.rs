@@ -244,9 +244,6 @@ pub struct EngineTraceCoverageRecord {
     pub error: Option<String>,
 }
 
-/// The capture plan as recorded plan evidence
-/// ([[RFC-0004:C-WORKLOAD-PROFILING]]): the deadlines, window identities, and
-/// per-target expectations the capture session was executed against.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePlanRecord {
@@ -272,10 +269,7 @@ pub struct CaptureTargetPlan {
     pub rank: u32,
     #[serde(default = "default_one")]
     pub rank_count: u32,
-    /// The replica's declared whole-replica device count: engine-trace
-    /// coverage verification expects one new trace artifact per device
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]). Older records predate the field
-    /// and default to 1.
+    /// Older records predate the field and default to 1.
     #[serde(default = "default_one")]
     pub device_count: u32,
     /// Records written before workload schema version 16 predate the field
@@ -288,9 +282,6 @@ pub struct CaptureTargetPlan {
     pub reports: Vec<PathBuf>,
 }
 
-/// One profiled target process as recorded in the server record's per-process
-/// evidence: the effective launch, control, and finalization facts the
-/// profiler acted on ([[RFC-0004:C-WORKLOAD-PROFILING]]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfilerTargetRecord {
@@ -301,15 +292,11 @@ pub struct ProfilerTargetRecord {
     pub rank: u32,
     #[serde(default = "default_one")]
     pub rank_count: u32,
-    /// The target replica's declared whole-replica device count
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]); engine-trace coverage verification
-    /// expects one new trace artifact per device. Older records predate the
-    /// field and default to 1.
+    /// Older records predate the field and default to 1.
     #[serde(default = "default_one")]
     pub device_count: u32,
-    /// The effective capture mechanism of this target
-    /// ([[RFC-0004:C-WORKLOAD-PROFILING]]); server records written before
-    /// schema version 7 predate the field and are managed collection.
+    /// Server records written before schema version 7 predate the field and
+    /// are managed collection.
     #[serde(default)]
     pub mechanism: CaptureMechanism,
     /// The record-owned trace directory assigned to an engine-trace target.

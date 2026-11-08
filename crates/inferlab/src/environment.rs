@@ -18,9 +18,6 @@ pub(crate) const PIXI_MANIFEST: &str = "pixi.toml";
 pub(crate) const PIXI_LOCK: &str = "pixi.lock";
 pub(crate) const PIXI_ENVS_DIR: &str = ".pixi/envs";
 
-/// The on-disk prefix Pixi installs `environment` into — the same
-/// convention `adapter_environment_mounts` already assumes for the adapter
-/// environment's interpreter path.
 pub(crate) fn pixi_environment_prefix(root: &Path, environment: &str) -> PathBuf {
     root.join(PIXI_ENVS_DIR).join(environment)
 }
@@ -355,7 +352,7 @@ pub(crate) struct LockResult {
 
 /// The outcome of resolving one environment's usability
 /// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]): shared by the launch-time
-/// gate and the standalone `env status` query, so the two can never observe
+/// gate and the standalone `stack status` query, so the two can never observe
 /// a different answer for the same environment.
 pub(crate) enum EnvironmentCheck {
     Confirmed,
@@ -381,7 +378,7 @@ pub(crate) fn ensure_usable(root: &Path, environment: &str) -> Result<(), Inferl
 
 /// The ad-hoc usability check ([[RFC-0002:C-ADHOC-EXECUTION]]): presence and
 /// a fresh lock-freshness probe only. It never reads or writes the
-/// confirmation marker [`ensure_usable`] shares with `env status`, so
+/// confirmation marker [`ensure_usable`] shares with `stack status`, so
 /// running it neither trusts qualification evidence another workflow
 /// produced nor produces evidence a later launch would trust.
 pub(crate) fn ensure_usable_without_confirmation(
@@ -408,9 +405,6 @@ fn unavailable(environment: &str, diagnostics: String) -> InferlabError {
     }
 }
 
-/// Resolve one environment's usability, backed by the content-confirmation
-/// record a prior successful check left behind
-/// ([[RFC-0002:C-PIXI-ENVIRONMENT-LIFECYCLE]]).
 pub(crate) fn check_environment(
     root: &Path,
     environment: &str,
@@ -461,9 +455,8 @@ pub(crate) fn pixi_usability_probe_words(environment: &str) -> [&str; 8] {
     ]
 }
 
-/// The raw pixi usability probe, with no confirmation-marker involvement:
-/// `None` on success, `Some(diagnostics)` on failure. The one place either
-/// usability path actually shells out to pixi.
+/// `None` on success, `Some(diagnostics)` on failure. Never consults the
+/// confirmation marker.
 fn probe_pixi_usable(root: &Path, environment: &str) -> Result<Option<String>, InferlabError> {
     let output = Command::new("pixi")
         .current_dir(root)

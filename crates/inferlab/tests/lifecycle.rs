@@ -452,7 +452,7 @@ fn stop_ignores_device_memory_held_by_a_live_process() -> Result<(), Box<dyn Err
 }
 
 /// Driver teardown of a killed process lags its exit: memory the driver
-/// releases within the settle window is freed evidence, not a failed
+/// releases before the release wait ends is freed evidence, not a failed
 /// cleanup, and only the still-held devices are probed again.
 #[test]
 fn stop_waits_for_device_memory_the_driver_releases_after_cleanup() -> Result<(), Box<dyn Error>> {
@@ -469,7 +469,7 @@ fn stop_waits_for_device_memory_the_driver_releases_after_cleanup() -> Result<()
     let output = command.output()?;
     assert!(
         output.status.success(),
-        "memory released within the settle window must not fail the stop: {}",
+        "memory released before the release wait ends must not fail the stop: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stopped: Value = serde_json::from_slice(&output.stdout)?;

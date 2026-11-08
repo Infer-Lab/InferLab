@@ -549,7 +549,6 @@ fn prepares_cache(case: &BenchCasePlan) -> bool {
     })
 }
 
-/// The reset the case issues; none when it separates reuse by namespace.
 /// Prepare the case's prefix cache: reset it when the case resets, then
 /// condition it for a primed start ([[RFC-0004:C-BENCH-CACHE-STATE]]).
 fn prepare_case_cache(

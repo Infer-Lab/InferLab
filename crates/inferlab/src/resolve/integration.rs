@@ -26,13 +26,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-/// The process id of the derived discovery process ([[RFC-0003:C-SERVE-TOPOLOGY]]).
 pub(crate) const DISCOVERY_PROCESS_ID: &str = "discovery";
-/// The process id of the derived KV store process ([[RFC-0003:C-SERVE-KV-STORE]]).
 pub(crate) const KV_STORE_PROCESS_ID: &str = "kv-store";
 
-/// The built-in proxy serving a framework and KV-transfer mechanism, resolved
-/// through the proxy crate's registry ([[RFC-0006:C-INTEGRATIONS]]).
 fn builtin_proxy_spec(
     framework: &str,
     transport: Option<&KvTransferMechanism>,
@@ -171,7 +167,7 @@ fn render_builtin_frontend(
                 BuiltinProxyKind::VllmNixl | BuiltinProxyKind::Trtllm => {}
             }
         }
-        // The NIXL and SGLang proxies have no rank discovery: the control
+        // The vLLM NIXL and SGLang proxies have no rank discovery: the control
         // plane issues each prefill replica's effective attention
         // data-parallel size so the conditioning fan-out can pin every rank
         // ([[RFC-0004:C-BENCH-CACHE-STATE]]). The Mooncake proxy discovers
@@ -677,9 +673,6 @@ pub(super) fn plan_integration<C: AdapterClient>(
                 ),
             })?
     };
-    // The KV store follows every Engine and the Gateway in requirement order
-    // so its machine is known when it is placed beside them; launch staging
-    // spawns it first ([[RFC-0003:C-SERVE-KV-STORE]]).
     if let Some(store) = &planned.kv_store
         && let Some(role) = store
             .role_access
@@ -694,7 +687,9 @@ pub(super) fn plan_integration<C: AdapterClient>(
         });
     }
     // An externally operated store is infrastructure the control plane runs
-    // no process for ([[RFC-0003:C-SERVE-KV-STORE]]).
+    // no process for. A managed store follows every Engine and the Gateway in
+    // requirement order so its machine is known when it is placed beside
+    // them; launch staging spawns it first ([[RFC-0003:C-SERVE-KV-STORE]]).
     if let Some(store) = validate_kv_store_plan(
         &stack.integration,
         effective.kv_store.as_ref(),

@@ -986,14 +986,12 @@ pub(super) fn validate_serve_graph(
             None,
         )?;
     }
-    if kv_transfer.is_some()
-        && !plan.links.iter().any(|link| {
-            matches!(
-                link,
-                ServeRoleLink::KvTransfer { mechanism, .. } if Some(*mechanism) == kv_transfer
-            )
-        })
-    {
+    if kv_transfer.is_some() && !plan.links.iter().any(|link| {
+        matches!(
+            link,
+            ServeRoleLink::KvTransfer { mechanism, .. } if Some(mechanism) == kv_transfer.as_ref()
+        )
+    }) {
         return Err(InferlabError::AdapterSemantics {
             message: format!(
                 "integration {integration:?} did not link the planned KV-transfer mechanism"
@@ -1014,7 +1012,7 @@ pub(super) fn validate_serve_graph(
             } => {
                 graph_nodes.contains(source)
                     && graph_nodes.contains(target)
-                    && Some(*mechanism) == kv_transfer
+                    && Some(mechanism) == kv_transfer.as_ref()
             }
             ServeRoleLink::Bootstrap {
                 source,
@@ -1097,7 +1095,7 @@ pub(super) fn validate_serve_graph(
                     ServeRoleLink::KvTransfer { source, target, mechanism }
                         if source == &pd_router.prefill_role
                             && target == &pd_router.decode_role
-                            && Some(*mechanism) == kv_transfer
+                            && Some(mechanism) == kv_transfer.as_ref()
                 )
             });
             if !gateway_handoff || !request_routing || !kv_link {
@@ -1107,8 +1105,11 @@ pub(super) fn validate_serve_graph(
                     ),
                 });
             }
-            let transport_link = match (integration, kv_transfer) {
-                ("tensorrt-llm", Some(KvTransferMechanism::Nixl)) => {
+            let transport_link = match (
+                integration,
+                kv_transfer.as_ref().map(KvTransferMechanism::as_str),
+            ) {
+                ("tensorrt-llm", Some(KvTransferMechanism::NIXL)) => {
                     if plan.links.iter().any(|link| {
                         matches!(
                             link,
@@ -1123,8 +1124,8 @@ pub(super) fn validate_serve_graph(
                     }
                     true
                 }
-                ("sglang", Some(KvTransferMechanism::Mooncake | KvTransferMechanism::Nixl))
-                | (_, Some(KvTransferMechanism::Mooncake)) => plan.links.iter().any(|link| {
+                ("sglang", Some(KvTransferMechanism::MOONCAKE | KvTransferMechanism::NIXL))
+                | (_, Some(KvTransferMechanism::MOONCAKE)) => plan.links.iter().any(|link| {
                     matches!(
                         link,
                         ServeRoleLink::Bootstrap { source, target, port }
@@ -1137,7 +1138,7 @@ pub(super) fn validate_serve_graph(
                                 )
                     )
                 }),
-                (_, Some(KvTransferMechanism::Nixl)) => plan.links.iter().any(|link| {
+                (_, Some(KvTransferMechanism::NIXL)) => plan.links.iter().any(|link| {
                     matches!(
                         link,
                         ServeRoleLink::SideChannel { source, target, port }
@@ -1155,6 +1156,10 @@ pub(super) fn validate_serve_graph(
                                 )
                     )
                 }),
+                // A mechanism the control plane does not know carries the
+                // links its integration declares, each validated above
+                // ([[ADR-0075]]).
+                (_, Some(_)) => true,
                 (_, None) => false,
             };
             if !transport_link {
@@ -1640,7 +1645,7 @@ mod tests {
                 ServeRoleLink::KvTransfer {
                     source: "prefill".to_owned(),
                     target: "decode".to_owned(),
-                    mechanism: KvTransferMechanism::Nixl,
+                    mechanism: KvTransferMechanism::nixl(),
                 },
                 ServeRoleLink::Bootstrap {
                     source: "pd_router".to_owned(),
@@ -1734,7 +1739,7 @@ mod tests {
                 roles,
                 Some("trtllm-disaggregated"),
                 Some("trtllm-disaggregated"),
-                Some(KvTransferMechanism::Nixl),
+                Some(KvTransferMechanism::nixl()),
                 plan,
             )
         };
@@ -1821,7 +1826,7 @@ mod tests {
                 &roles,
                 Some("gateway-provider"),
                 Some("pd-provider"),
-                Some(KvTransferMechanism::Nixl),
+                Some(KvTransferMechanism::nixl()),
                 &plan,
             )
             .is_ok()
@@ -1833,7 +1838,7 @@ mod tests {
                 &roles,
                 Some("pd-provider"),
                 Some("gateway-provider"),
-                Some(KvTransferMechanism::Nixl),
+                Some(KvTransferMechanism::nixl()),
                 &plan,
             )
             .is_err()
@@ -1898,7 +1903,7 @@ mod tests {
                 &sglang_roles,
                 Some("builtin"),
                 Some("builtin"),
-                Some(KvTransferMechanism::Nixl),
+                Some(KvTransferMechanism::nixl()),
                 &sglang_plan,
             )
             .is_ok()
@@ -1911,7 +1916,7 @@ mod tests {
             &vllm_roles,
             Some("builtin"),
             Some("builtin"),
-            Some(KvTransferMechanism::Nixl),
+            Some(KvTransferMechanism::nixl()),
             &vllm_plan,
         );
         assert!(result.is_err());
@@ -1929,7 +1934,7 @@ mod tests {
                 &trtllm_roles,
                 Some("trtllm-disaggregated"),
                 Some("trtllm-disaggregated"),
-                Some(KvTransferMechanism::Nixl),
+                Some(KvTransferMechanism::nixl()),
                 &trtllm_plan,
             )
             .is_ok()
@@ -1948,10 +1953,37 @@ mod tests {
             &trtllm_roles,
             Some("trtllm-disaggregated"),
             Some("trtllm-disaggregated"),
-            Some(KvTransferMechanism::Nixl),
+            Some(KvTransferMechanism::nixl()),
             &endpoint_link_plan,
         );
         assert!(result.is_err_and(|error| error.to_string().contains("in-band NIXL")));
+        Ok(())
+    }
+
+    /// A mechanism name the control plane does not know carries the links its
+    /// integration declares ([[ADR-0075]]).
+    #[test]
+    fn an_unknown_mechanism_name_keeps_the_links_its_integration_declares() -> Result<(), String> {
+        let (roles, mut plan) = bootstrap_prefill_decode_plan("sglang");
+        let engine_owned =
+            KvTransferMechanism::new("example-transport").map_err(|error| error.to_string())?;
+        for link in &mut plan.links {
+            if let ServeRoleLink::KvTransfer { mechanism, .. } = link {
+                *mechanism = engine_owned.clone();
+            }
+        }
+
+        let result = validate_serve_graph(
+            "sglang",
+            ServeTopology::PrefillDecode,
+            &roles,
+            Some("builtin"),
+            Some("builtin"),
+            Some(engine_owned),
+            &plan,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
         Ok(())
     }
 
@@ -1972,7 +2004,7 @@ mod tests {
             &roles,
             Some("builtin"),
             Some("builtin"),
-            Some(KvTransferMechanism::Nixl),
+            Some(KvTransferMechanism::nixl()),
             &plan,
         );
 
@@ -2004,7 +2036,7 @@ mod tests {
                 &roles,
                 Some("builtin"),
                 Some("builtin"),
-                Some(KvTransferMechanism::Nixl),
+                Some(KvTransferMechanism::nixl()),
                 &plan,
             );
 

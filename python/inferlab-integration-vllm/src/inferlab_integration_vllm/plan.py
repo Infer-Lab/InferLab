@@ -1,5 +1,7 @@
 import inferlab_gateway_dynamo
 from inferlab_adapter_sdk import (
+    MOONCAKE,
+    NIXL,
     AdapterErrorCode,
     AdapterOperationError,
     CaptureTargetRequirement,
@@ -47,6 +49,7 @@ from inferlab_adapter_sdk import (
     integration_identity,
     replica_id,
     require_declared_devices,
+    require_kv_transfer,
     require_role,
 )
 from inferlab_kvstore import mooncake
@@ -411,12 +414,7 @@ def _plan_dynamo_single(input: PlanServeInput, role: ServeRoleInput) -> PlanServ
 
 
 def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
-    transport = input.kv_transfer
-    if transport is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "prefill_decode topology requires a KV-transfer mechanism",
-        )
+    transport = require_kv_transfer(input.kv_transfer, (MOONCAKE, NIXL), "vLLM")
     backend_pair = (input.gateway_backend, input.pd_router_backend)
     if backend_pair not in {
         ("builtin", "builtin"),
@@ -435,15 +433,15 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             "vLLM prefill_decode requires both frontend backends",
         )
     dynamo = gateway_backend == inferlab_gateway_dynamo.BACKEND
-    if dynamo and transport != KvTransferMechanism.nixl:
+    if dynamo and transport != NIXL:
         raise AdapterOperationError(
             AdapterErrorCode.invalid_settings,
-            f"Dynamo prefill_decode supports only NIXL KV transfer, not {transport.value!r}",
+            f"Dynamo prefill_decode supports only NIXL KV transfer, not {transport!r}",
         )
     prefill = require_role(input, ServeRoleKind.prefill)
     decode = require_role(input, ServeRoleKind.decode)
-    prefill_ports = ["bootstrap" if transport == KvTransferMechanism.mooncake else "side_channel"]
-    decode_ports = [] if transport == KvTransferMechanism.mooncake else ["side_channel"]
+    prefill_ports = ["bootstrap" if transport == MOONCAKE else "side_channel"]
+    decode_ports = [] if transport == MOONCAKE else ["side_channel"]
     prefill_result, prefill_replicas, prefill_outcome = _plan_role(
         input, prefill, prefill_ports, dynamo=dynamo
     )
@@ -470,11 +468,11 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             root=ServeRoleLinkKvTransfer(
                 source=prefill.id,
                 target=decode.id,
-                mechanism=transport,
+                mechanism=KvTransferMechanism(transport),
             )
         ),
     ]
-    if transport == KvTransferMechanism.mooncake:
+    if transport == MOONCAKE:
         links.append(
             ServeRoleLink(
                 root=ServeRoleLinkBootstrap(
@@ -507,9 +505,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             synthetic_acceptance=outcome,
         )
     if backend_pair == ("builtin", "builtin"):
-        implementation = (
-            "vllm_mooncake" if transport == KvTransferMechanism.mooncake else "vllm_nixl"
-        )
+        implementation = "vllm_mooncake" if transport == MOONCAKE else "vllm_nixl"
         implementation_version = "1"
         render_source = RenderSource.control_plane
         frontend_readiness = ReadinessProbe(root=ReadinessProbeHttp(path="/healthcheck"))

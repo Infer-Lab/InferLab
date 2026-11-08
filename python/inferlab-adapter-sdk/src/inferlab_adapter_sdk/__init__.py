@@ -104,6 +104,8 @@ from ._generated import (
     TargetEndpointScheme,
 )
 from .runtime import (
+    MOONCAKE,
+    NIXL,
     ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterOperationError,
     JsonValue,
@@ -126,6 +128,7 @@ from .runtime import (
     replica_id,
     require_declared_devices,
     require_integration_fused_frontend,
+    require_kv_transfer,
     require_role,
     resolve_draft_model_locator,
     resolve_golden_acceptance_length,
@@ -137,6 +140,8 @@ from .runtime import (
 )
 
 __all__ = [
+    "MOONCAKE",
+    "NIXL",
     "ROUTER_WORKER_STARTUP_TIMEOUT_SECS",
     "AdapterErrorCode",
     "AdapterOperationError",
@@ -262,6 +267,7 @@ __all__ = [
     "replica_id",
     "require_declared_devices",
     "require_integration_fused_frontend",
+    "require_kv_transfer",
     "require_role",
     "resolve_draft_model_locator",
     "resolve_golden_acceptance_length",

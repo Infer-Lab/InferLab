@@ -866,13 +866,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['15']]):
+class ProtocolVersion(RootModel[Literal['16']]):
     root: Annotated[
-        Literal['15'],
+        Literal['16'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `"15"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `16` (serialized as the\nstring `"16"`); a mismatch is rejected before lowering.'
         ),
-    ] = '15'
+    ] = '16'
 
 
 class RawArtifact(BaseModel):

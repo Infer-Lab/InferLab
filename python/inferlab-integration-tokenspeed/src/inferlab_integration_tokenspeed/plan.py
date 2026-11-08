@@ -1,5 +1,6 @@
 import inferlab_gateway_smg
 from inferlab_adapter_sdk import (
+    MOONCAKE,
     AdapterErrorCode,
     AdapterOperationError,
     EndpointDeclaration,
@@ -30,6 +31,7 @@ from inferlab_adapter_sdk import (
     integration_identity,
     replica_id,
     require_declared_devices,
+    require_kv_transfer,
     require_role,
     validate_settings,
 )
@@ -238,11 +240,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "the TokenSpeed integration does not support a KV store on a prefill/decode server",
         )
-    if input.kv_transfer != KvTransferMechanism.mooncake:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "TokenSpeed prefill/decode only supports Mooncake KV transfer",
-        )
+    require_kv_transfer(input.kv_transfer, (MOONCAKE,), "TokenSpeed")
     inferlab_gateway_smg.require_backend(input.gateway_backend, component="Gateway")
     inferlab_gateway_smg.require_backend(input.pd_router_backend, component="P/D Router")
     prefill = require_role(input, ServeRoleKind.prefill)
@@ -287,7 +285,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             root=ServeRoleLinkKvTransfer(
                 source=prefill.id,
                 target=decode.id,
-                mechanism=KvTransferMechanism.mooncake,
+                mechanism=KvTransferMechanism(MOONCAKE),
             )
         ),
         bootstrap_link,

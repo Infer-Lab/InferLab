@@ -30,6 +30,8 @@ from inferlab_adapter_sdk import (
 )
 from inferlab_integration_tokenspeed import plan_serve, render_serve
 
+MOONCAKE_TRANSFER = KvTransferMechanism("mooncake")
+
 ROOT = Path(__file__).parents[3]
 FIXTURES = ROOT / "protocol" / "fixtures"
 
@@ -161,7 +163,7 @@ def test_plan_tp_only_shape_fills_every_component() -> None:
 def _prefill_decode_plan_input(
     *,
     frontend_backend: str = "smg",
-    transport: KvTransferMechanism = KvTransferMechanism.mooncake,
+    transport: KvTransferMechanism = MOONCAKE_TRANSFER,
     extra_args: list[str] | None = None,
     prefill_replicas: int = 2,
     decode_replicas: int = 3,
@@ -229,7 +231,7 @@ def test_plan_prefill_decode_keeps_smg_routing_and_mooncake_transfer_separate() 
     ]
     transfer = result.links[2].root
     assert isinstance(transfer, ServeRoleLinkKvTransfer)
-    assert transfer.mechanism == KvTransferMechanism.mooncake
+    assert transfer.mechanism == KvTransferMechanism("mooncake")
 
     assert result.gateway is not None
     assert result.pd_router is not None
@@ -283,7 +285,7 @@ def test_frontend_evidence_records_the_installed_smg_distribution_version(
 
 def test_plan_rejects_unsupported_workflows_and_parallelism() -> None:
     with pytest.raises(AdapterOperationError):
-        plan_serve(_prefill_decode_plan_input(transport=KvTransferMechanism.nixl))
+        plan_serve(_prefill_decode_plan_input(transport=KvTransferMechanism("nixl")))
     with pytest.raises(AdapterOperationError):
         plan_serve(_prefill_decode_plan_input(frontend_backend="builtin"))
     with pytest.raises(AdapterOperationError):

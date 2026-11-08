@@ -244,7 +244,9 @@ parallelism, replica counts, either frontend-backend identity, transfer,
 profiling, and readiness. A P/D server base must declare both backend fields;
 cases may replace either value but may not add or remove a component. Each
 integration validates the selected Gateway/P/D Router pair, so independently
-recorded fields do not imply that every cross-provider pair is supported.
+recorded fields do not imply that every cross-provider pair is supported. `kv_transfer` is a mechanism name of lowercase letters, digits, `-`,
+and `_`; each integration accepts its own names and rejects others before
+launch, except the Specialized Engine, which passes any name to its Engine.
 Frontend component presence is fixed by the server base for every topology: a
 direct `single` server cannot acquire a Gateway from a case or invocation
 patch, while a routed `single` server declares `gateway_backend` on its base

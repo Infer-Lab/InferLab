@@ -1,4 +1,5 @@
 from inferlab_adapter_sdk import (
+    NIXL,
     AdapterErrorCode,
     AdapterOperationError,
     EndpointDeclaration,
@@ -37,6 +38,7 @@ from inferlab_adapter_sdk import (
     integration_identity,
     replica_id,
     require_declared_devices,
+    require_kv_transfer,
     require_role,
     resolve_golden_acceptance_length,
     validate_extra_args,
@@ -321,11 +323,7 @@ def _plan_single(input: PlanServeInput) -> PlanServeResult:
 
 
 def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
-    if input.kv_transfer != KvTransferMechanism.nixl:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "TensorRT-LLM prefill_decode requires NIXL KV transfer",
-        )
+    require_kv_transfer(input.kv_transfer, (NIXL,), "TensorRT-LLM")
     backend_pair = (input.gateway_backend, input.pd_router_backend)
     if backend_pair not in {
         ("builtin", "builtin"),
@@ -377,7 +375,7 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             root=ServeRoleLinkKvTransfer(
                 source=prefill.id,
                 target=decode.id,
-                mechanism=KvTransferMechanism.nixl,
+                mechanism=KvTransferMechanism(NIXL),
             )
         ),
     ]

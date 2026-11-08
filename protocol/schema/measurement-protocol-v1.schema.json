@@ -4352,12 +4352,12 @@
       ]
     },
     "ProtocolVersion": {
-      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `\"15\"`); a mismatch is rejected before lowering.",
+      "description": "The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `16` (serialized as the\nstring `\"16\"`); a mismatch is rejected before lowering.",
       "oneOf": [
         {
-          "description": "Protocol version 15.",
+          "description": "Protocol version 16.",
           "type": "string",
-          "const": "15"
+          "const": "16"
         }
       ]
     },

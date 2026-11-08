@@ -33,6 +33,8 @@ from inferlab_adapter_sdk import (
 )
 from inferlab_integration_tensorrt_llm import plan_serve, render_serve
 
+NIXL_TRANSFER = KvTransferMechanism("nixl")
+
 
 def _plan_input(**overrides: object) -> PlanServeInput:
     parallelism = cast(
@@ -247,7 +249,7 @@ def _prefill_decode_roles(
 def _prefill_decode_plan_input(
     *,
     frontend_backend: str = "builtin",
-    transport: KvTransferMechanism = KvTransferMechanism.nixl,
+    transport: KvTransferMechanism = NIXL_TRANSFER,
     settings: dict[str, SettingValue] | None = None,
     prefill_replicas: int = 2,
     decode_replicas: int = 3,
@@ -284,7 +286,7 @@ def test_plan_prefill_decode_uses_nixl_without_control_plane_transfer_ports() ->
     ]
     transfer = result.links[2].root
     assert isinstance(transfer, ServeRoleLinkKvTransfer)
-    assert transfer.mechanism == KvTransferMechanism.nixl
+    assert transfer.mechanism == KvTransferMechanism("nixl")
     assert result.gateway is not None
     assert result.gateway.backend == "builtin"
     assert result.gateway.render_source == RenderSource.control_plane
@@ -318,7 +320,7 @@ def test_plan_prefill_decode_declares_the_native_router() -> None:
 
 def test_plan_prefill_decode_rejects_non_nixl_and_unknown_routing() -> None:
     with pytest.raises(AdapterOperationError):
-        plan_serve(_prefill_decode_plan_input(transport=KvTransferMechanism.mooncake))
+        plan_serve(_prefill_decode_plan_input(transport=KvTransferMechanism("mooncake")))
     with pytest.raises(AdapterOperationError):
         plan_serve(_prefill_decode_plan_input(frontend_backend="unknown"))
 
@@ -457,7 +459,7 @@ def _prefill_decode_render_input(
         state_dir=".inferlab",
         gateway_backend=frontend_backend,
         pd_router_backend=frontend_backend,
-        kv_transfer=KvTransferMechanism.nixl,
+        kv_transfer=KvTransferMechanism("nixl"),
         profiling=None,
         allocations=allocations,
     )
@@ -994,7 +996,7 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
                 topology=ServeTopology.prefill_decode,
                 gateway_backend="builtin",
                 pd_router_backend="builtin",
-                kv_transfer=KvTransferMechanism.nixl,
+                kv_transfer=KvTransferMechanism("nixl"),
                 roles=roles,
                 synthetic_acceptance={"curve": curve},
             )

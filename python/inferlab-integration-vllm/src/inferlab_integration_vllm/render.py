@@ -5,6 +5,8 @@ from pathlib import Path
 import inferlab_gateway_dynamo
 import inferlab_kvstore
 from inferlab_adapter_sdk import (
+    MOONCAKE,
+    NIXL,
     ROUTER_WORKER_STARTUP_TIMEOUT_SECS,
     AdapterErrorCode,
     AdapterOperationError,
@@ -112,10 +114,7 @@ def _render_process(
         process_env["MOONCAKE_CONFIG_PATH"] = store_path
     if input.topology == ServeTopology.prefill_decode:
         process_env.update(_kv_transfer_env(input.kv_transfer, settings))
-        if (
-            input.kv_transfer == KvTransferMechanism.mooncake
-            and allocation.role_kind == ServeRoleKind.prefill
-        ):
+        if _name(input.kv_transfer) == MOONCAKE and allocation.role_kind == ServeRoleKind.prefill:
             bootstrap = allocation.ports.get("bootstrap")
             if bootstrap is None:
                 raise AdapterOperationError(
@@ -123,7 +122,7 @@ def _render_process(
                     f"prefill process {allocation.process!r} is missing its bootstrap port",
                 )
             process_env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(bootstrap.port)
-        if input.kv_transfer == KvTransferMechanism.nixl:
+        if _name(input.kv_transfer) == NIXL:
             process_env.update(_nixl_side_channel_env(allocation))
     node_count = len(role_allocations)
     if node_count != allocation.rank_count:
@@ -380,7 +379,7 @@ def _kv_transfer_args(
             AdapterErrorCode.invalid_request,
             "prefill_decode render is missing its KV-transfer mechanism",
         )
-    if transport == KvTransferMechanism.mooncake:
+    if _name(transport) == MOONCAKE:
         # vLLM owns the sender-worker default: each of its twice-`num_workers`
         # sender tasks is held until its request finishes prefill, so a lower
         # value serializes prefill-side transfers.
@@ -418,9 +417,9 @@ def _kv_transfer_env(
         return {}
     if settings.kv_transfer_protocol.lower() != "tcp":
         return {}
-    if transport == KvTransferMechanism.mooncake:
+    if _name(transport) == MOONCAKE:
         return {"MC_FORCE_TCP": "1"}
-    if transport == KvTransferMechanism.nixl:
+    if _name(transport) == NIXL:
         # tcp names the wire; cuda_copy is the orthogonal staging lane UCX
         # needs to register and move GPU memory through host bounce buffers
         # (a bare "tcp" fails KV-buffer registration with NIXL_ERR_BACKEND,
@@ -470,7 +469,7 @@ def _render_router(
                 f"prefill allocation {item.process!r} has no endpoint",
             )
         argv.extend(["--prefill", f"http://{authority(item_endpoint.host, item_endpoint.port)}"])
-        if input.kv_transfer == KvTransferMechanism.mooncake:
+        if _name(input.kv_transfer) == MOONCAKE:
             bootstrap = item.ports.get("bootstrap")
             if bootstrap is None:
                 raise AdapterOperationError(
@@ -483,7 +482,7 @@ def _render_router(
     argv.extend(
         [
             "--kv-connector",
-            input.kv_transfer.value,
+            input.kv_transfer.root,
             "--policy",
             "round_robin",
         ]
@@ -550,3 +549,7 @@ def _render_dynamo_process(
             "vLLM on Dynamo does not consume a KV store",
         )
     return inferlab_gateway_dynamo.render_discovery(allocation)
+
+
+def _name(mechanism: KvTransferMechanism | None) -> str | None:
+    return None if mechanism is None else mechanism.root

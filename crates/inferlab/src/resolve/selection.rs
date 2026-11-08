@@ -372,7 +372,7 @@ fn server_declarations(
         capture_arm_deadline_seconds: server.capture_arm_deadline_seconds,
         gateway_backend: &server.gateway_backend,
         pd_router_backend: &server.pd_router_backend,
-        kv_transfer: server.kv_transfer,
+        kv_transfer: server.kv_transfer.clone(),
         profiling: server.profiling,
         capture_control_deadline_seconds: server.capture_control_deadline_seconds,
         capture_finalization_deadline_seconds: server.capture_finalization_deadline_seconds,
@@ -416,7 +416,7 @@ fn server_declarations(
             capture_arm_deadline_seconds: case.capture_arm_deadline_seconds,
             gateway_backend: &case.gateway_backend,
             pd_router_backend: &case.pd_router_backend,
-            kv_transfer: case.kv_transfer,
+            kv_transfer: case.kv_transfer.clone(),
             profiling: case.profiling,
             capture_control_deadline_seconds: case.capture_control_deadline_seconds,
             capture_finalization_deadline_seconds: case.capture_finalization_deadline_seconds,
@@ -458,7 +458,7 @@ fn server_declarations(
             capture_arm_deadline_seconds: patch.capture_arm_deadline_seconds,
             gateway_backend: &patch.gateway_backend,
             pd_router_backend: &patch.pd_router_backend,
-            kv_transfer: patch.kv_transfer,
+            kv_transfer: patch.kv_transfer.clone(),
             profiling: patch.profiling,
             capture_control_deadline_seconds: patch.capture_control_deadline_seconds,
             capture_finalization_deadline_seconds: patch.capture_finalization_deadline_seconds,
@@ -857,7 +857,7 @@ pub(super) fn resolve_effective_server_input(
         });
     let gateway_backend = effective_server.gateway_backend.clone();
     let pd_router_backend = effective_server.pd_router_backend.clone();
-    let kv_transfer = effective_server.kv_transfer;
+    let kv_transfer = effective_server.kv_transfer.clone();
     let profiling_enabled =
         effective_server.profiling.unwrap_or(false) || !request.captures.is_empty();
     // Profiler declarations must not silently drop when profiling resolves

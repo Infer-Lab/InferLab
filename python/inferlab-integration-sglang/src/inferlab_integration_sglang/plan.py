@@ -1,4 +1,6 @@
 from inferlab_adapter_sdk import (
+    MOONCAKE,
+    NIXL,
     AdapterErrorCode,
     AdapterOperationError,
     CaptureMechanism,
@@ -12,6 +14,7 @@ from inferlab_adapter_sdk import (
     HttpMethod,
     IntegrationIdentity,
     KvStorePlan,
+    KvTransferMechanism,
     Parallelism,
     ParallelismAttention,
     ParallelismExperts,
@@ -45,6 +48,7 @@ from inferlab_adapter_sdk import (
     integration_identity,
     replica_id,
     require_declared_devices,
+    require_kv_transfer,
     require_role,
     validate_extra_args,
 )
@@ -366,12 +370,9 @@ def _plan_prefill_decode(input: PlanServeInput) -> PlanServeResult:
             AdapterErrorCode.invalid_settings,
             "the SGLang integration does not support a KV store on a prefill/decode server",
         )
-    transport = input.kv_transfer
-    if transport is None:
-        raise AdapterOperationError(
-            AdapterErrorCode.invalid_settings,
-            "prefill_decode topology requires a KV-transfer mechanism",
-        )
+    transport = KvTransferMechanism(
+        require_kv_transfer(input.kv_transfer, (MOONCAKE, NIXL), "SGLang")
+    )
     backend_pair = (input.gateway_backend, input.pd_router_backend)
     if backend_pair not in {
         ("builtin", "builtin"),

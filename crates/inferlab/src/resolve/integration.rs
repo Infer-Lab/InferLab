@@ -35,23 +35,23 @@ pub(crate) const KV_STORE_PROCESS_ID: &str = "kv-store";
 /// through the proxy crate's registry ([[RFC-0006:C-INTEGRATIONS]]).
 fn builtin_proxy_spec(
     framework: &str,
-    transport: Option<KvTransferMechanism>,
+    transport: Option<&KvTransferMechanism>,
 ) -> Result<&'static BuiltinProxySpec, InferlabError> {
-    match (framework, transport) {
-        ("vllm", Some(KvTransferMechanism::Mooncake)) => {
-            Ok(&inferlab_proxy::registry::VLLM_MOONCAKE)
-        }
-        ("vllm", Some(KvTransferMechanism::Nixl)) => Ok(&inferlab_proxy::registry::VLLM_NIXL),
-        ("sglang", Some(KvTransferMechanism::Mooncake | KvTransferMechanism::Nixl)) => {
+    let Some(transport) = transport else {
+        return Err(InferlabError::InvalidConfig {
+            message: "built-in prefill/decode proxy requires a KV-transfer mechanism".to_owned(),
+        });
+    };
+    match (framework, transport.as_str()) {
+        ("vllm", KvTransferMechanism::MOONCAKE) => Ok(&inferlab_proxy::registry::VLLM_MOONCAKE),
+        ("vllm", KvTransferMechanism::NIXL) => Ok(&inferlab_proxy::registry::VLLM_NIXL),
+        ("sglang", KvTransferMechanism::MOONCAKE | KvTransferMechanism::NIXL) => {
             Ok(&inferlab_proxy::registry::SGLANG)
         }
-        ("tensorrt-llm", Some(KvTransferMechanism::Nixl)) => Ok(&inferlab_proxy::registry::TRTLLM),
-        (_, None) => Err(InferlabError::InvalidConfig {
-            message: "built-in prefill/decode proxy requires a KV-transfer mechanism".to_owned(),
-        }),
+        ("tensorrt-llm", KvTransferMechanism::NIXL) => Ok(&inferlab_proxy::registry::TRTLLM),
         _ => Err(InferlabError::InvalidConfig {
             message: format!(
-                "framework {framework:?} does not support the built-in prefill/decode proxy"
+                "framework {framework:?} does not support the built-in prefill/decode proxy over KV-transfer mechanism {transport:?}"
             ),
         }),
     }
@@ -104,7 +104,7 @@ fn render_builtin_frontend(
             message: "built-in proxy requires prefill and decode replica entry points".to_owned(),
         });
     }
-    let proxy_spec = builtin_proxy_spec(framework, transport)?;
+    let proxy_spec = builtin_proxy_spec(framework, transport.as_ref())?;
     let declared = builtin_proxy_by_wire_name(&gateway.implementation).ok_or_else(|| {
         InferlabError::AdapterSemantics {
             message: format!(
@@ -381,7 +381,7 @@ pub(super) fn plan_integration<C: AdapterClient>(
             state_dir: STATE_DIR.to_owned(),
             gateway_backend: effective.gateway_backend.clone(),
             pd_router_backend: effective.pd_router_backend.clone(),
-            kv_transfer: effective.kv_transfer,
+            kv_transfer: effective.kv_transfer.clone(),
             gateway_settings: effective.gateway_settings.clone(),
             pd_router_settings: effective.pd_router_settings.clone(),
             kv_store: effective.kv_store.clone(),
@@ -411,7 +411,7 @@ pub(super) fn plan_integration<C: AdapterClient>(
         &effective.roles,
         effective.gateway_backend.as_deref(),
         effective.pd_router_backend.as_deref(),
-        effective.kv_transfer,
+        effective.kv_transfer.clone(),
         &planned,
     )?;
     for role_input in &effective.roles {
@@ -839,7 +839,7 @@ pub(super) fn render_integration<C: AdapterClient>(
             state_dir: STATE_DIR.to_owned(),
             gateway_backend: effective.gateway_backend.clone(),
             pd_router_backend: effective.pd_router_backend.clone(),
-            kv_transfer: effective.kv_transfer,
+            kv_transfer: effective.kv_transfer.clone(),
             stack_settings: planned.stack_settings.clone(),
             allocations: render_allocations,
             profiling: effective.profiling,
@@ -921,7 +921,7 @@ pub(super) fn render_integration<C: AdapterClient>(
             gateway,
             pd_router,
             &planned.integration.framework,
-            effective.kv_transfer,
+            effective.kv_transfer.clone(),
             prefill_data_parallel_size,
             &allocations,
         )?;

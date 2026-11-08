@@ -234,7 +234,8 @@ ranks = [
 ]
 ```
 
-Each rank runs one Engine on its machine, with that machine's devices as its
+The server's `devices` counts the whole replica across every host: 16 for two
+8-device machines, not 8. Each rank runs one Engine on its machine, with that machine's devices as its
 `CUDA_VISIBLE_DEVICES` and that machine's model locator. Rank 0 is host 0, the
 replica's only endpoint:
 
@@ -371,7 +372,12 @@ from each request. A `decode` Engine must also admit a request that finishes on 
 prefill Engine's first token: a primed Bench warms the cache with a single
 output token. An Engine that does not support a mode or the declared
 mechanism exits before it reports `SERVING`, naming the option, so the
-recorded mechanism is one the Engine accepted. Transfer and bootstrap
+recorded mechanism is one the Engine accepted. `kv_transfer` is the Engine's own
+name for its transport — `mooncake`, or a transport the Engine implements
+itself — written in lowercase letters, digits, `-`, and `_`. The integration
+passes any name through unchanged, so a misspelled name is caught only when
+the Engine refuses it after launch; check the rendered
+`--disaggregation-transfer-backend` with `--dry-run` first. Transfer and bootstrap
 timeouts are the Engine's own options and go in `extra_args`.
 
 The server is ready when the Gateway's `/workers` registry lists every

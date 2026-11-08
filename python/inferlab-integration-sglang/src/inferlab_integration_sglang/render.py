@@ -170,7 +170,7 @@ def _render_process(
                 "--disaggregation-mode",
                 mode,
                 "--disaggregation-transfer-backend",
-                transport.value,
+                transport.root,
             ]
         )
         if allocation.role_kind == ServeRoleKind.prefill:

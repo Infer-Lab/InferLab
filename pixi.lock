@@ -1654,60 +1654,60 @@ packages:
   name: inferlab-bench-runner
   requires_dist:
   - huggingface-hub>=0.25,<2
-  - inferlab-measurement-sdk==0.23.3
+  - inferlab-measurement-sdk==0.23.4
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-eval-runner
   name: inferlab-eval-runner
   requires_dist:
-  - inferlab-measurement-sdk==0.23.3
+  - inferlab-measurement-sdk==0.23.4
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-gateway-dynamo
   name: inferlab-gateway-dynamo
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
+  - inferlab-adapter-sdk==0.16.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-gateway-smg
   name: inferlab-gateway-smg
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
+  - inferlab-adapter-sdk==0.16.0
   - smg-grpc-proto>=0.4.27,<0.5
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-sglang
   name: inferlab-integration-sglang
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
-  - inferlab-kvstore==0.2.0
+  - inferlab-adapter-sdk==0.16.0
+  - inferlab-kvstore==0.3.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-specialized-engine
   name: inferlab-integration-specialized-engine
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
-  - inferlab-gateway-smg==0.5.0
-  - inferlab-kvstore==0.2.0
+  - inferlab-adapter-sdk==0.16.0
+  - inferlab-gateway-smg==0.6.0
+  - inferlab-kvstore==0.3.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-tensorrt-llm
   name: inferlab-integration-tensorrt-llm
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
+  - inferlab-adapter-sdk==0.16.0
   - pyyaml>=6,<7
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-tokenspeed
   name: inferlab-integration-tokenspeed
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
-  - inferlab-gateway-smg==0.5.0
+  - inferlab-adapter-sdk==0.16.0
+  - inferlab-gateway-smg==0.6.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-integration-vllm
   name: inferlab-integration-vllm
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
-  - inferlab-gateway-dynamo==0.4.0
-  - inferlab-kvstore==0.2.0
+  - inferlab-adapter-sdk==0.16.0
+  - inferlab-gateway-dynamo==0.5.0
+  - inferlab-kvstore==0.3.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-kvstore
   name: inferlab-kvstore
   requires_dist:
-  - inferlab-adapter-sdk==0.15.0
+  - inferlab-adapter-sdk==0.16.0
   requires_python: '>=3.12'
 - pypi: ./python/inferlab-measurement-sdk
   name: inferlab-measurement-sdk

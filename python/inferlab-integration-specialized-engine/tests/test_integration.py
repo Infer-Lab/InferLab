@@ -877,7 +877,7 @@ def test_prefill_decode_plans_engines_behind_one_fused_smg_frontend() -> None:
     assert plan.pd_router.policies.decode == "round_robin"
     assert plan.pd_router.effective_settings["prefill_policy"].root == "cache_aware"
     kv_links = [link.root for link in plan.links if link.root.kind == "kv_transfer"]
-    assert [(link.source, link.target, link.mechanism.value) for link in kv_links] == [
+    assert [(link.source, link.target, link.mechanism.root) for link in kv_links] == [
         ("prefill", "decode", "mooncake")
     ]
     assert plan.gateway is not None
@@ -988,6 +988,20 @@ def test_prefill_decode_renders_role_mode_transfer_and_bootstrap_arguments() -> 
     assert "--prefill grpc://engine.example:50052 8999" in gateway
     assert "--decode grpc://engine.example:50053" in gateway
     assert "--prefill-policy cache_aware --decode-policy round_robin" in gateway
+
+
+def test_an_engine_owned_transfer_mechanism_passes_through_unchanged() -> None:
+    # Mechanism names are open; the Engine owns its transport and rejects a
+    # name it does not implement ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
+    plan_input = _pd_plan_input(kv_transfer="example-transport")
+    plan = plan_serve(plan_input)
+    kv_links = [link.root for link in plan.links if link.root.kind == "kv_transfer"]
+    assert [link.mechanism.root for link in kv_links] == ["example-transport"]
+    rendered = render_serve(_pd_render_input(plan_input, plan))
+    argv = {process.root.process: process.root.command.argv for process in rendered.processes}
+    for process in ("prefill-001", "decode"):
+        transfer = argv[process][argv[process].index("--disaggregation-transfer-backend") + 1]
+        assert transfer == "example-transport"
 
 
 def test_prefill_decode_with_a_kv_tier_probes_both_roles_for_their_access() -> None:

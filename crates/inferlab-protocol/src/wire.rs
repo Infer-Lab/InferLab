@@ -16,18 +16,18 @@ use std::path::PathBuf;
 // Shared base types.
 
 /// The shared protocol version used by framework integrations and release-owned
-/// measurement clients. The only accepted value is `15` (serialized as the
-/// string `"15"`); a mismatch is rejected before lowering.
+/// measurement clients. The only accepted value is `16` (serialized as the
+/// string `"16"`); a mismatch is rejected before lowering.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub enum ProtocolVersion {
-    /// Protocol version 15.
-    #[serde(rename = "15")]
-    V15,
+    /// Protocol version 16.
+    #[serde(rename = "16")]
+    V16,
 }
 
 impl ProtocolVersion {
     /// The current adapter protocol version.
-    pub const CURRENT: Self = Self::V15;
+    pub const CURRENT: Self = Self::V16;
 
     /// The protocol version as spelled on the wire, projected for surfaces
     /// such as the control plane version output ([[RFC-0006:C-INTEGRATIONS]]).
@@ -35,7 +35,7 @@ impl ProtocolVersion {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::V15 => "15",
+            Self::V16 => "16",
         }
     }
 }
@@ -489,15 +489,93 @@ impl ServeRoleKind {
     }
 }
 
-/// The KV-transfer mechanism connecting prefill and decode.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KvTransferMechanism {
+/// The name of the KV-transfer mechanism connecting prefill and decode: a
+/// non-empty string of lowercase ASCII letters, digits, `-`, and `_`. The set
+/// is open; each integration accepts its own names
+/// ([[RFC-0003:C-SERVE-TOPOLOGY]], [[ADR-0075]]).
+#[derive(Clone, Debug, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct KvTransferMechanism(#[schemars(regex(pattern = r"^[a-z0-9_-]+$"))] String);
+
+impl KvTransferMechanism {
     /// Mooncake KV-cache transfer.
-    Mooncake,
+    pub const MOONCAKE: &'static str = "mooncake";
     /// NIXL KV-cache transfer.
-    Nixl,
+    pub const NIXL: &'static str = "nixl";
+
+    /// The Mooncake mechanism.
+    #[must_use]
+    pub fn mooncake() -> Self {
+        Self(Self::MOONCAKE.to_owned())
+    }
+
+    /// The NIXL mechanism.
+    #[must_use]
+    pub fn nixl() -> Self {
+        Self(Self::NIXL.to_owned())
+    }
+
+    /// The mechanism named `name`, when it follows the name grammar.
+    pub fn new(name: impl Into<String>) -> Result<Self, InvalidKvTransferMechanism> {
+        let name = name.into();
+        if !name.is_empty()
+            && name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+            })
+        {
+            Ok(Self(name))
+        } else {
+            Err(InvalidKvTransferMechanism(name))
+        }
+    }
+
+    /// The mechanism name as declared.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether this is the Mooncake mechanism.
+    #[must_use]
+    pub fn is_mooncake(&self) -> bool {
+        self.0 == Self::MOONCAKE
+    }
+
+    /// Whether this is the NIXL mechanism.
+    #[must_use]
+    pub fn is_nixl(&self) -> bool {
+        self.0 == Self::NIXL
+    }
 }
+
+impl std::fmt::Display for KvTransferMechanism {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for KvTransferMechanism {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::new(name).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A KV-transfer mechanism name outside the name grammar.
+#[derive(Debug)]
+pub struct InvalidKvTransferMechanism(String);
+
+impl std::fmt::Display for InvalidKvTransferMechanism {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "KV-transfer mechanism {:?} is not a name of lowercase ASCII letters, digits, '-', and '_'",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidKvTransferMechanism {}
 
 /// Framework-neutral component-aware parallelism ([[RFC-0003:C-SERVE-PARALLELISM]]).
 /// Every component is optional so an operator can override one without
@@ -2970,4 +3048,17 @@ fn is_zero(value: &u64) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KvTransferMechanism;
+
+    #[test]
+    fn a_mechanism_name_follows_the_name_grammar() {
+        assert!(KvTransferMechanism::new("example-transport").is_ok());
+        assert!(KvTransferMechanism::new("Mooncake").is_err());
+        assert!(KvTransferMechanism::new("").is_err());
+        assert!(serde_json::from_str::<KvTransferMechanism>("\"mooncak e\"").is_err());
+    }
 }

@@ -643,7 +643,7 @@ def _render_engine(
                 "--disaggregation-mode",
                 mode,
                 "--disaggregation-transfer-backend",
-                input.kv_transfer.value,
+                input.kv_transfer.root,
             ]
         )
         if allocation.role_kind == ServeRoleKind.prefill:

@@ -35,6 +35,7 @@ from ._generated import (
     GatewayTarget,
     GatewayTargetPdRouter,
     IntegrationIdentity,
+    KvTransferMechanism,
     LaunchFileDeclaration,
     Parallelism,
     ParallelismOuter,
@@ -404,6 +405,33 @@ def validate_extra_args(extra_args: list[str], owned_options: Collection[str]) -
                 "set it through the typed serve settings instead, or place it "
                 "after a '--' sentinel for a deliberate verbatim override",
             )
+
+
+MOONCAKE = "mooncake"
+"""The Mooncake KV-transfer mechanism name."""
+
+NIXL = "nixl"
+"""The NIXL KV-transfer mechanism name."""
+
+
+def require_kv_transfer(
+    mechanism: KvTransferMechanism | None, accepted: Collection[str], integration: str
+) -> str:
+    """The declared KV-transfer mechanism name, which must be one `integration`
+    supports: mechanism names are open, so each integration rejects every name
+    outside its own set before it plans anything ([[RFC-0003:C-SERVE-TOPOLOGY]])."""
+    if mechanism is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            "prefill_decode topology requires a KV-transfer mechanism",
+        )
+    if mechanism.root not in accepted:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"{integration} does not support KV-transfer mechanism {mechanism.root!r}; "
+            f"select one of {', '.join(repr(name) for name in sorted(accepted))}",
+        )
+    return mechanism.root
 
 
 def authority(host: str, port: int) -> str:

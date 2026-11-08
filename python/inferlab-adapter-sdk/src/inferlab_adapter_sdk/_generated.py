@@ -220,9 +220,14 @@ class KvStoreProcessRole(RootModel[Literal['kv_store']]):
     ] = 'kv_store'
 
 
-class KvTransferMechanism(StrEnum):
-    mooncake = 'mooncake'
-    nixl = 'nixl'
+class KvTransferMechanism(RootModel[str]):
+    root: Annotated[
+        str,
+        Field(
+            description='The name of the KV-transfer mechanism connecting prefill and decode: a\nnon-empty string of lowercase ASCII letters, digits, `-`, and `_`. The set\nis open; each integration accepts its own names\n([[RFC-0003:C-SERVE-TOPOLOGY]], [[ADR-0075]]).',
+            pattern='^[a-z0-9_-]+$',
+        ),
+    ]
 
 
 class LaunchFileDeclaration(BaseModel):
@@ -316,13 +321,13 @@ class PromptCacheReadZeroRepresentation(StrEnum):
     omitted = 'omitted'
 
 
-class ProtocolVersion(RootModel[Literal['15']]):
+class ProtocolVersion(RootModel[Literal['16']]):
     root: Annotated[
-        Literal['15'],
+        Literal['16'],
         Field(
-            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `15` (serialized as the\nstring `"15"`); a mismatch is rejected before lowering.'
+            description='The shared protocol version used by framework integrations and release-owned\nmeasurement clients. The only accepted value is `16` (serialized as the\nstring `"16"`); a mismatch is rejected before lowering.'
         ),
-    ] = '15'
+    ] = '16'
 
 
 class ReadinessProbeHttp(BaseModel):

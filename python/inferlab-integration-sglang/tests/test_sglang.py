@@ -36,6 +36,8 @@ from inferlab_adapter_sdk import (
 )
 from inferlab_integration_sglang import plan_serve, render_serve
 
+MOONCAKE_TRANSFER = KvTransferMechanism("mooncake")
+
 
 def _plan_input(**overrides: object) -> PlanServeInput:
     parallelism = cast(
@@ -168,7 +170,7 @@ def _prefill_decode_roles(
 def _prefill_decode_plan_input(
     *,
     frontend_backend: str = "builtin",
-    transport: KvTransferMechanism = KvTransferMechanism.mooncake,
+    transport: KvTransferMechanism = MOONCAKE_TRANSFER,
     prefill_replicas: int = 2,
     decode_replicas: int = 3,
     profiling: CaptureMechanism | None = None,
@@ -183,7 +185,9 @@ def _prefill_decode_plan_input(
     )
 
 
-@pytest.mark.parametrize("transport", [KvTransferMechanism.mooncake, KvTransferMechanism.nixl])
+@pytest.mark.parametrize(
+    "transport", [KvTransferMechanism("mooncake"), KvTransferMechanism("nixl")]
+)
 def test_plan_prefill_decode_uses_the_shared_bootstrap_shape(
     transport: KvTransferMechanism,
 ) -> None:
@@ -259,7 +263,7 @@ def test_plan_builtin_prefill_decode_declares_cache_read_when_both_roles_report(
             topology=ServeTopology.prefill_decode,
             gateway_backend="builtin",
             pd_router_backend="builtin",
-            kv_transfer=KvTransferMechanism.mooncake,
+            kv_transfer=KvTransferMechanism("mooncake"),
             roles=roles,
         )
     )
@@ -278,7 +282,7 @@ def test_plan_builtin_prefill_decode_declares_cache_read_when_both_roles_report(
             topology=ServeTopology.prefill_decode,
             gateway_backend="builtin",
             pd_router_backend="builtin",
-            kv_transfer=KvTransferMechanism.mooncake,
+            kv_transfer=KvTransferMechanism("mooncake"),
             roles=roles,
         )
     )
@@ -461,7 +465,7 @@ def _prefill_decode_with_decode_parallelism(parallelism: Parallelism) -> PlanSer
         topology=ServeTopology.prefill_decode,
         gateway_backend="builtin",
         pd_router_backend="builtin",
-        kv_transfer=KvTransferMechanism.mooncake,
+        kv_transfer=KvTransferMechanism("mooncake"),
         roles=[
             ServeRoleInput(
                 id="prefill",
@@ -491,7 +495,7 @@ def _decode_render_input(
             "state_dir": ".inferlab",
             "gateway_backend": "builtin",
             "pd_router_backend": "builtin",
-            "kv_transfer": KvTransferMechanism.mooncake,
+            "kv_transfer": KvTransferMechanism("mooncake"),
             "profiling": None,
             "allocations": [
                 {
@@ -817,7 +821,7 @@ def _render_input(**overrides: object) -> RenderServeInput:
 def _prefill_decode_render_input(
     *,
     frontend_backend: str = "builtin",
-    transport: KvTransferMechanism = KvTransferMechanism.mooncake,
+    transport: KvTransferMechanism = MOONCAKE_TRANSFER,
     profiling: CaptureMechanism | None = None,
 ) -> RenderServeInput:
     plan = plan_serve(
@@ -1048,7 +1052,9 @@ def test_render_enables_cache_report_when_declared() -> None:
     )
 
 
-@pytest.mark.parametrize("transport", [KvTransferMechanism.mooncake, KvTransferMechanism.nixl])
+@pytest.mark.parametrize(
+    "transport", [KvTransferMechanism("mooncake"), KvTransferMechanism("nixl")]
+)
 def test_render_prefill_decode_lowers_transport_independently_from_routing(
     transport: KvTransferMechanism,
 ) -> None:
@@ -1058,13 +1064,13 @@ def test_render_prefill_decode_lowers_transport_independently_from_routing(
         process = wrapped.root
         argv = process.command.argv
         assert argv[argv.index("--disaggregation-mode") + 1] == "prefill"
-        assert argv[argv.index("--disaggregation-transfer-backend") + 1] == transport.value
+        assert argv[argv.index("--disaggregation-transfer-backend") + 1] == transport.root
         assert argv[argv.index("--disaggregation-bootstrap-port") + 1] in {"9000", "9001"}
     for wrapped in result.processes[2:]:
         process = wrapped.root
         argv = process.command.argv
         assert argv[argv.index("--disaggregation-mode") + 1] == "decode"
-        assert argv[argv.index("--disaggregation-transfer-backend") + 1] == transport.value
+        assert argv[argv.index("--disaggregation-transfer-backend") + 1] == transport.root
         assert "--disaggregation-bootstrap-port" not in argv
 
 
@@ -1364,7 +1370,7 @@ def test_plan_rejects_roles_resolving_different_curve_draft_counts() -> None:
                 topology=ServeTopology.prefill_decode,
                 gateway_backend="builtin",
                 pd_router_backend="builtin",
-                kv_transfer=KvTransferMechanism.mooncake,
+                kv_transfer=KvTransferMechanism("mooncake"),
                 roles=roles,
                 synthetic_acceptance={"curve": _CURVE},
             )

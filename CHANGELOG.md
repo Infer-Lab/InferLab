@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.4] - 2026-11-07
+
+### Changed
+
+- **Breaking:** the adapter protocol is version 16. `kv_transfer` is a
+  mechanism name rather than a choice between `mooncake` and `nixl`
+  ([[ADR-0075]]): lowercase letters, digits, `-`, and `_`. Each integration
+  accepts its own names and rejects any other before launch, so vLLM, SGLang,
+  TensorRT-LLM, TokenSpeed, and Dynamo accept exactly what they did. The
+  Specialized Engine passes any name to its Engine as
+  `--disaggregation-transfer-backend`, so an Engine with its own transport runs
+  prefill/decode under its true name and records state it; a misspelled name
+  there fails only when the Engine refuses it. The Adapter SDK is 0.16.0; the
+  vLLM, SGLang, and TensorRT-LLM integrations 0.15.0; TokenSpeed and the
+  Specialized Engine 0.16.0; `inferlab-gateway-smg` 0.6.0,
+  `inferlab-gateway-dynamo` 0.5.0, and `inferlab-kvstore` 0.3.0. Stop servers
+  and recipes started by an earlier InferLab before upgrading.
+
 ## [0.23.3] - 2026-11-07
 
 ### Changed

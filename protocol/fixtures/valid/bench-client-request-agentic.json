@@ -60,7 +60,7 @@
         "inferencex_revision": "8ba71d026e866e7792074a3fd3f896fe6d1ad099",
         "inferencex_reference": "inferencex-e2e/benchmarks/benchmark_lib.sh",
         "aiperf_revision": "89b21867872a5bbc4b0676bf5005c404da5e9f94",
-        "aiperf_version": "0.13.0+inferlab.3"
+        "aiperf_version": "0.14.0+inferlab.1"
       }
     },
     "prompt": {

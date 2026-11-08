@@ -1120,6 +1120,72 @@ def test_concurrent_generation_outcomes_keep_each_request_context(
     }
 
 
+def test_a_failed_concurrent_request_keeps_its_status_and_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """lm-eval 0.4.13's ``amodel_call`` reads ``ok``, ``text()``, ``status``,
+    ``raise_for_status()``, and ``json()`` on the response; a non-OK answer
+    must reach its retry path as an HTTP error and be recorded with its status
+    and body ([[RFC-0005:C-LM-EVAL-EVIDENCE]])."""
+
+    class FakeContext:
+        async def __aenter__(self) -> SimpleNamespace:
+            async def text() -> str:
+                return '{"error": "engine unavailable"}'
+
+            def raise_for_status() -> None:
+                raise RuntimeError("HTTP 503")
+
+            return SimpleNamespace(
+                ok=False, status=503, text=text, raise_for_status=raise_for_status
+            )
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self, connector: object = None, timeout: object = None) -> None:
+            self.timeout = timeout
+
+        def post(self, url: str, *, json: dict[str, object], headers: object) -> FakeContext:
+            del url, json, headers
+            return FakeContext()
+
+    api_models = fake_api_models(object, FakeSession)
+    logged: list[str] = []
+
+    async def amodel_call(
+        client: object, session: FakeSession, sem: object, messages: list[str], **kwargs: object
+    ) -> object:
+        # lm-eval 0.4.13 api_models.amodel_call, failure path.
+        del client, sem, kwargs
+        async with session.post("http://127.0.0.1", json={"prompt": messages}, headers={}) as r:
+            if not r.ok:
+                error_text = await r.text()
+                logged.append(f"Status code: {r.status}, {error_text}")
+            r.raise_for_status()
+            return await r.json()
+
+    api_models.TemplateAPI.amodel_call = amodel_call
+    monkeypatch.setattr(
+        "inferlab_eval_runner.lm_eval_entry.importlib.import_module", lambda name: api_models
+    )
+    path = tmp_path / "generation-outcomes.jsonl"
+    install_generation_capture(GenerationOutcomeLog(path))
+
+    async def run() -> None:
+        session = api_models.ClientSession(timeout={"total": 30})
+        await api_models.TemplateAPI().amodel_call(session, None, ["q"], generate=True)
+
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        asyncio.run(run())
+
+    assert logged == ['Status code: 503, {"error": "engine unavailable"}']
+    (attempt,) = outcome_entries(path)
+    assert attempt["http_status"] == 503
+    assert "engine unavailable" in json.dumps(attempt)
+
+
 def test_sample_projection_drops_documents_and_contexts_but_keeps_hashes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

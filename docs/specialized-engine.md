@@ -241,21 +241,22 @@ replica's only endpoint:
 
 ```text
 host 0 : … --listen <host:port> --model <locator> --served-model-name <name> \
-           --host-count 2 --rendezvous-listen <host:port>
+           --nnodes 2 --node-rank 0 --dist-init-addr <host 0 rendezvous>
 host 1 : … --model <locator> --served-model-name <name> \
-           --host-count 2 --host-index 1 --rendezvous <host 0 rendezvous>
+           --nnodes 2 --node-rank 1 --dist-init-addr <host 0 rendezvous>
 ```
 
 With a KV tier, every host also receives the tier arguments for its own machine.
 The rendezvous port comes from host 0's port list and must be reachable from
-every other host. Members get no `--listen`; the endpoint port the placement
+every other host: host 0 binds `--dist-init-addr`, and every other host
+connects to it. Members get no `--listen`; the endpoint port the placement
 reserves for them stays unused.
 
 Host 0 speaks for the whole replica. It reports `SERVING` only after every
 member has joined, its `data_parallel_size` counts the ranks of every host, its
 `FlushCache` clears every host, and with a tier its tier report covers every
 host. Each host's Engine exits before `SERVING` when its layout's world differs
-from its visible devices times `--host-count`. The Gateway, readiness, and every
+from its visible devices times `--nnodes`. The Gateway, readiness, and every
 observation address host 0; the other hosts are ready while their processes
 run.
 

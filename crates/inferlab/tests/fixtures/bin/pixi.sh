@@ -48,7 +48,7 @@ PYTHON
   cat > "$prefix/.pixi/envs/bench/bin/python" <<'PYTHON'
 #!/bin/sh
 if [ "$2" = --handshake ]; then
-  printf '{"aiperf_version":"0.13.0+inferlab.3","transformers_version":"5.12.1"}\n'
+  printf '{"aiperf_version":"0.14.0+inferlab.1","transformers_version":"5.12.1"}\n'
   exit 0
 fi
 if [ "$1" = -m ] && [ "$2" = inferlab_bench_runner.bench_client ]; then

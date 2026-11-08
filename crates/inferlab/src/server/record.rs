@@ -215,7 +215,7 @@ impl ServerRecord {
     /// observed data-parallel rank counts in place of an absent effective
     /// shape, each Engine's observed KV store access and publication bound,
     /// and each Engine's bound tier directory ([[RFC-0005:C-EVIDENCE]]).
-    pub(crate) const SCHEMA_VERSION: u32 = 17;
+    pub(crate) const SCHEMA_VERSION: u32 = 18;
 
     pub(crate) fn process(&self, id: &str) -> Result<&ServerProcessEvidence, InferlabError> {
         self.process_evidence

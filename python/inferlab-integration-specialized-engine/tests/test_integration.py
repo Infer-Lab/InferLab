@@ -449,14 +449,17 @@ def test_a_replica_spanning_machines_renders_one_engine_per_host() -> None:
     host_zero = " ".join(argv["server-rank-000"])
     member = argv["server-rank-001"]
     assert "--listen engine.example:50051" in host_zero
-    assert "--host-count 2 --rendezvous-listen host-a.example:50060" in host_zero
-    assert "--host-index" not in host_zero
+    # Every rank names the same rendezvous address; its node rank decides
+    # whether it binds or connects ([[ADR-0077]]).
+    assert "--nnodes 2 --node-rank 0 --dist-init-addr host-a.example:50060" in host_zero
     assert "--listen" not in member
     assert member[member.index("--model") + 1] == "/models/fixture-model-on-host-b"
     assert member[member.index("--served-model-name") + 1] == "fixture-model"
     assert " ".join(member).endswith(
-        "--host-count 2 --host-index 1 --rendezvous host-a.example:50060"
+        "--nnodes 2 --node-rank 1 --dist-init-addr host-a.example:50060"
     )
+    for former in ("--host-count", "--host-index", "--rendezvous", "--rendezvous-listen"):
+        assert former not in argv["server-rank-000"] and former not in member
     # The Gateway routes only to host 0.
     assert "grpc://host-b.example" not in " ".join(argv["gateway"])
     assert "grpc://engine.example:50051" in " ".join(argv["gateway"])

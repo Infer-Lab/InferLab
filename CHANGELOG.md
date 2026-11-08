@@ -7,10 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.23.4] - 2026-11-07
+## [0.23.4] - 2026-11-08
 
 ### Changed
 
+- The measurement toolchain moves to AIPerf `0.14.0+inferlab.1` ([[ADR-0076]]):
+  upstream AIPerf main plus the one fix upstream has not merged, the
+  heartbeat-watchdog shutdown fix; the other commits the previous build
+  carried are upstream now. It brings upstream's fixes to server-metrics
+  collection at the warmup boundary and on long runs, failing a stalled
+  benchmark instead of waiting, chat-template input token counts, zero-step
+  speculative acceptance records, request timestamps, and AgentX child
+  scheduling. On real hardware the Bench outputs InferLab reads are unchanged
+  in shape, and serving and SPEED-Bench acceptance metrics against one server
+  matched the previous build within run-to-run variation; the SemiAnalysis
+  AgentX 256k replay was requalified under the new build.
+- **Breaking:** a Specialized Engine replica spanning machines receives the
+  common distributed-launch options ([[ADR-0077]]): every host gets `--nnodes`,
+  its own `--node-rank` (`0` on host 0), and `--dist-init-addr` with host 0's
+  rendezvous address, which host 0 binds and the others connect to. They
+  replace `--host-count`, `--host-index`, `--rendezvous-listen`, and
+  `--rendezvous`, with no aliases; an Engine switches in the same change that
+  moves to this release.
 - **Breaking:** the adapter protocol is version 16. `kv_transfer` is a
   mechanism name rather than a choice between `mooncake` and `nixl`
   ([[ADR-0075]]): lowercase letters, digits, `-`, and `_`. Each integration
@@ -22,8 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there fails only when the Engine refuses it. The Adapter SDK is 0.16.0; the
   vLLM, SGLang, and TensorRT-LLM integrations 0.15.0; TokenSpeed and the
   Specialized Engine 0.16.0; `inferlab-gateway-smg` 0.6.0,
-  `inferlab-gateway-dynamo` 0.5.0, and `inferlab-kvstore` 0.3.0. Stop servers
-  and recipes started by an earlier InferLab before upgrading.
+  `inferlab-gateway-dynamo` 0.5.0, and `inferlab-kvstore` 0.3.0. Server records
+  move to schema version 18, recipe records to 8, and workload records to 28.
+  This release cannot read, list, or stop a server or recipe started by an
+  earlier InferLab; it names the record's unsupported schema version. Stop
+  them with the release that started them before upgrading.
+
+### Fixed
+
+- An lm-eval Eval whose server answered a generation request with an HTTP
+  error no longer fails every request with `AttributeError: 'CapturedAsyncResponse'
+  object has no attribute 'status'`. The recording wrapper added in 0.23.3 did
+  not expose the response status that lm-eval reads on its retry path, which
+  also hid the server's own status and body; both are now logged by lm-eval and
+  kept in `generation-outcomes.jsonl`.
 
 ## [0.23.3] - 2026-11-07
 

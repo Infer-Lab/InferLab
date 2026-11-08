@@ -106,7 +106,7 @@ fn install_is_idempotent_and_replaces_an_incomplete_prefix() -> Result<(), Box<d
         Some(64)
     );
     assert_eq!(first["bench"]["platform"], host_platform());
-    assert_eq!(first["bench"]["aiperf_version"], "0.13.0+inferlab.3");
+    assert_eq!(first["bench"]["aiperf_version"], "0.14.0+inferlab.1");
     assert_eq!(first["bench"]["transformers_version"], "5.12.1");
     assert_eq!(first["image"]["platform"], host_platform());
     assert_eq!(first["image"]["patchelf_version"], "0.19.2");

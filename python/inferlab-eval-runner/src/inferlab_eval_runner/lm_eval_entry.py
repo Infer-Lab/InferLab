@@ -442,6 +442,10 @@ class AsyncResponse(Protocol):
 
 
 class CapturedAsyncResponse:
+    """The response lm-eval 0.4.13's ``amodel_call`` reads: ``ok``, ``status``,
+    ``text()``, ``raise_for_status()``, and ``json()``, each the wrapped
+    response's, with the attempt recorded as its body is read."""
+
     def __init__(self, response: AsyncResponse, attempt: ExchangeAttempt) -> None:
         self._response = response
         self._attempt = attempt
@@ -449,6 +453,10 @@ class CapturedAsyncResponse:
     @property
     def ok(self) -> bool:
         return self._response.ok
+
+    @property
+    def status(self) -> int:
+        return self._response.status
 
     async def text(self) -> str:
         text = await self._response.text()

@@ -30,4 +30,4 @@ pub(crate) use runtime::{observe_data_asset_dry_run, prepare_data_assets};
 /// Version 27 records serve-state probe answers with each Engine's observed
 /// store access and publication bound, and Bench plans that apply serving
 /// facts observed at readiness ([[RFC-0005:C-EVIDENCE]]).
-pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 27;
+pub(crate) const EVIDENCE_WORKLOAD_SCHEMA_VERSION: u32 = 28;

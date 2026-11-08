@@ -86,7 +86,7 @@ impl RecipeRecord {
     /// ([[RFC-0003:C-SERVE-PARALLELISM]]). Version 7 embeds a resolved
     /// execution whose Engines may report their layout and store access at
     /// readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-    pub(crate) const SCHEMA_VERSION: u32 = 7;
+    pub(crate) const SCHEMA_VERSION: u32 = 8;
 }
 
 pub(crate) fn run(

@@ -75,7 +75,7 @@ fn agentic_source() -> ResolvedBenchAgenticSource {
             inferencex_revision: "inferencex".to_owned(),
             inferencex_reference: "inferencex-e2e/benchmarks/benchmark_lib.sh".to_owned(),
             aiperf_revision: "aiperf".to_owned(),
-            aiperf_version: "0.13.0+inferlab.3".to_owned(),
+            aiperf_version: "0.14.0+inferlab.1".to_owned(),
         }),
     }
 }

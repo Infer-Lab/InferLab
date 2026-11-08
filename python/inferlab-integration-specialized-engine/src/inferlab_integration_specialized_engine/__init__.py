@@ -81,14 +81,13 @@ _CONTRACT_ARGUMENTS: frozenset[str] = frozenset(
         "--disaggregation-bootstrap-port",
         "--disaggregation-mode",
         "--disaggregation-transfer-backend",
-        "--host-count",
-        "--host-index",
+        "--dist-init-addr",
         "--kv-tier-backend",
         "--kv-tier-store",
         "--listen",
         "--model",
-        "--rendezvous",
-        "--rendezvous-listen",
+        "--nnodes",
+        "--node-rank",
         "--served-model-name",
     }
 )
@@ -602,8 +601,9 @@ def _render_engine(
     rendezvous: str | None,
 ) -> RenderedServeProcess:
     """One host's Engine. Rank zero is host 0 and the replica's endpoint; on a
-    replica spanning machines, the other ranks join host 0 at `rendezvous`
-    and listen nowhere ([[ADR-0073]])."""
+    replica spanning machines, every rank receives rank zero's `rendezvous`
+    address, which rank zero binds and the others join, and only rank zero
+    listens ([[ADR-0073]], [[ADR-0077]])."""
     reject_auxiliary_locators(allocation)
     endpoint = allocation.endpoint
     if endpoint is None:
@@ -619,11 +619,18 @@ def _render_engine(
         ["--model", allocation.model_locator, "--served-model-name", input.model.served_name]
     )
     if rendezvous is not None:
-        contract_args.extend(["--host-count", str(allocation.rank_count)])
-        if allocation.rank == 0:
-            contract_args.extend(["--rendezvous-listen", rendezvous])
-        else:
-            contract_args.extend(["--host-index", str(allocation.rank), "--rendezvous", rendezvous])
+        # Every rank names rank zero's address; its node rank decides whether
+        # it binds or connects ([[ADR-0077]]).
+        contract_args.extend(
+            [
+                "--nnodes",
+                str(allocation.rank_count),
+                "--node-rank",
+                str(allocation.rank),
+                "--dist-init-addr",
+                rendezvous,
+            ]
+        )
     tier = _tier_location(allocation.kv_store, allocation.kv_tier_directory)
     if tier is not None:
         backend, location = tier

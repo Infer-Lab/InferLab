@@ -151,7 +151,7 @@ mod tests {
             limited.policy.service_profile_configuration_timeout_seconds,
             1800
         );
-        assert_eq!(limited.qualification.aiperf_version, "0.13.0+inferlab.3");
+        assert_eq!(limited.qualification.aiperf_version, "0.14.0+inferlab.1");
         assert_eq!(
             limited.qualification.inferencex_repository,
             "SemiAnalysisAI/InferenceX"

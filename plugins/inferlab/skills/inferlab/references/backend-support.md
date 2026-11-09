@@ -39,7 +39,7 @@ states the adapter protocol version a binary speaks:
 | 0.20.0–0.22.1 | v13 | 0.13.0 | 0.12.0 (vLLM, TensorRT-LLM), SGLang 0.12.1, vLLM on `inferlab-gateway-dynamo` 0.2.0; TokenSpeed 0.13.0 and Specialized Engine 0.13.0, both on `inferlab-gateway-smg` 0.3.0 |
 | 0.23.0–0.23.2 | v14 | 0.14.0 | 0.13.0 (vLLM, SGLang, TensorRT-LLM), vLLM on `inferlab-gateway-dynamo` 0.3.0; TokenSpeed 0.14.0 and Specialized Engine 0.14.0, both on `inferlab-gateway-smg` 0.4.0; vLLM, SGLang, and Specialized Engine on `inferlab-kvstore` 0.1.0 |
 | 0.23.3 | v15 | 0.15.0 | 0.14.0 (vLLM, SGLang, TensorRT-LLM), vLLM on `inferlab-gateway-dynamo` 0.4.0; TokenSpeed 0.15.0 and Specialized Engine 0.15.0, both on `inferlab-gateway-smg` 0.5.0; vLLM, SGLang, and Specialized Engine on `inferlab-kvstore` 0.2.0 |
-| 0.23.4 | v16 | 0.16.0 | 0.15.0 (vLLM, SGLang, TensorRT-LLM), vLLM on `inferlab-gateway-dynamo` 0.5.0; TokenSpeed 0.16.0 and Specialized Engine 0.16.0, both on `inferlab-gateway-smg` 0.6.0; vLLM, SGLang, and Specialized Engine on `inferlab-kvstore` 0.3.0 |
+| 0.23.4–0.23.5 | v16 | 0.16.0 | 0.15.0 (vLLM, SGLang, TensorRT-LLM), vLLM on `inferlab-gateway-dynamo` 0.5.0; TokenSpeed 0.16.0 and Specialized Engine 0.16.0, 0.16.1, both on `inferlab-gateway-smg` 0.6.0; vLLM, SGLang, and Specialized Engine on `inferlab-kvstore` 0.3.0 |
 
 Each framework integration package pins its Adapter SDK exactly, the TokenSpeed
 and Specialized Engine integrations also pin the shared SMG gateway package,

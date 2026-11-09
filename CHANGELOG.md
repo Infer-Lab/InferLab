@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A Specialized Engine KV store can be judged engaged. The integration reads
+  each Engine's `kv_tier_publication_ms` from `GetServerInfo`
+  `scheduler_info`, a protobuf Struct whose numbers arrive as floats such as
+  `250.0`, but accepted only an integer, so every serve-state probe answer
+  omitted the publication bound and was judged not engaged ("reported no
+  store access and publication bound"). An integral, non-negative report is
+  now recorded. Published as `inferlab-integration-specialized-engine==0.16.1`;
+  the adapter protocol and the other integrations are unchanged. Workspaces
+  selecting the Specialized Engine integration update the pin and relock.
+
 ## [0.23.5] - 2026-11-08
 
 ### Fixed

@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inferlab-eval-runner"
-version = "0.23.5"
+version = "0.23.6"
 description = "Inferlab direct Eval runner for OpenAI-compatible endpoints and lm-eval"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-  "inferlab-measurement-sdk==0.23.5",
+  "inferlab-measurement-sdk==0.23.6",
 ]
 
 [project.scripts]

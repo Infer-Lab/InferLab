@@ -814,8 +814,9 @@ def _reported_access(value: object) -> KvStoreAccess | None:
 
 
 def _reported_publication_ms(value: object) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
+    # A protobuf Struct carries every number as a double.
+    if isinstance(value, float) and value.is_integer() and value >= 0:
+        return int(value)
     return None
 
 

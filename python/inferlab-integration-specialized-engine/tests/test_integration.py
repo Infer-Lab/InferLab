@@ -670,7 +670,7 @@ def test_probe_serve_engages_a_mooncake_tier_only_at_the_store_address(
                     "kv_tier_state": "available",
                     "kv_tier_store": store,
                     "kv_tier_access": "read_write",
-                    "kv_tier_publication_ms": 0,
+                    "kv_tier_publication_ms": 0.0,
                 }
             },
             None,
@@ -722,8 +722,9 @@ def test_probe_serve_engages_only_an_available_tier_at_the_rendered_directory(
 ) -> None:
     import inferlab_gateway_smg
 
+    # MessageToDict renders every Struct number as a float.
     def report(
-        state: str, store: str, access: str = "read_write", publication_ms: int = 1000
+        state: str, store: str, access: str = "read_write", publication_ms: float = 1000.0
     ) -> dict[str, object]:
         return {
             "scheduler_info": {
@@ -740,7 +741,8 @@ def test_probe_serve_engages_only_an_available_tier_at_the_rendered_directory(
         50053: (report("available", "/fixture/other-tier"), None),
         50054: (None, "GetServerInfo failed"),
         # An unreadable access or bound is left for the control plane to reject.
-        50055: (report("available", "/fixture/kv-tier", "read", -1), None),
+        50055: (report("available", "/fixture/kv-tier", "read", -1.0), None),
+        50056: (report("available", "/fixture/kv-tier", publication_ms=250.5), None),
     }
     monkeypatch.setattr(
         inferlab_gateway_smg,
@@ -765,14 +767,16 @@ def test_probe_serve_engages_only_an_available_tier_at_the_rendered_directory(
 
     result = probe_serve(probe_input)
 
-    assert [state.engaged for state in result.processes] == [True, False, False, False, True]
+    assert [state.engaged for state in result.processes] == [True, False, False, False, True, True]
     assert result.processes[0].access == KvStoreAccess.read_write
     assert result.processes[0].publication_bound_ms == 1000
+    assert result.processes[0].state["kv_tier_publication_ms"].root == 1000
     assert result.processes[1].state["kv_tier_state"].root == "unavailable"
     assert result.processes[3].error == "GetServerInfo failed"
     assert result.processes[3].access is None
     assert result.processes[4].access is None
     assert result.processes[4].publication_bound_ms is None
+    assert result.processes[5].publication_bound_ms is None
 
 
 def _plan_payload(stack_settings: dict[str, object]) -> str:

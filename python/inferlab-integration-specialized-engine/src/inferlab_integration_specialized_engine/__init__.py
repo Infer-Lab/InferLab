@@ -177,6 +177,9 @@ class StackSettings(BaseModel):
     # The leading argv of the store an Engine-provided KV store backend runs
     # ([[ADR-0078]]).
     kv_store_command: list[str] | None = None
+    # Whether the Engine opens a metrics listener on an allocated
+    # `--metrics-port` ([[ADR-0079]]).
+    engine_metrics: bool | None = None
 
     @model_validator(mode="after")
     def _bare_executable(self) -> "StackSettings":
@@ -207,6 +210,11 @@ _RETIRED_STACK_SETTINGS: frozenset[str] = frozenset({"kv_tier_publication_second
 _STORE_CONTRACT_ARGUMENTS: frozenset[str] = frozenset({"--listen", "--metrics-port"})
 _STORE_METRICS_PORT = "metrics"
 _STORE_BACKEND_NAME = re.compile(r"^[a-z0-9_-]+$")
+
+# The Engine's metrics port, declared and rendered only for a stack that
+# declares `engine_metrics` ([[ADR-0079]]).
+_METRICS_PORT = "metrics"
+_METRICS_ARGUMENT = "--metrics-port"
 
 
 def stack_settings(values: dict[str, SettingValue]) -> dict[str, SettingValue]:
@@ -351,6 +359,11 @@ def _plan_engine_role(
     """One Engine role: each replica is one rank process owning its devices on
     each machine its placement binds ([[ADR-0073]])."""
     settings = _settings(role.settings)
+    if validate_settings(StackSettings, input.stack_settings or {}).engine_metrics:
+        _reject_owned_options(
+            "extra_args", settings.extra_args or [], frozenset({_METRICS_ARGUMENT})
+        )
+        ports = [*ports, _METRICS_PORT]
     # The Engine owns its layout: a role declares only its device count, and
     # the Engine reports its data-parallel rank count at readiness
     # ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
@@ -688,6 +701,15 @@ def _render_engine(
     contract_args = (
         ["--listen", authority(endpoint.host, endpoint.port)] if allocation.rank == 0 else []
     )
+    stack = validate_settings(StackSettings, input.stack_settings or {})
+    if stack.engine_metrics and allocation.rank == 0:
+        metrics = allocation.ports.get(_METRICS_PORT)
+        if metrics is None:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_request,
+                f"Engine allocation {allocation.process!r} is missing its metrics port",
+            )
+        contract_args.extend([_METRICS_ARGUMENT, str(metrics.port)])
     contract_args.extend(
         ["--model", allocation.model_locator, "--served-model-name", input.model.served_name]
     )
@@ -740,8 +762,11 @@ def _render_engine(
                     f"prefill allocation {allocation.process!r} is missing its bootstrap port",
                 )
             contract_args.extend(["--disaggregation-bootstrap-port", str(bootstrap.port)])
-    argv = list(validate_settings(StackSettings, input.stack_settings or {}).engine_command)
-    argv.extend(merge_serve_args(settings.extra_args or [], contract_args, _CONTRACT_ARGUMENTS))
+    owned = (
+        _CONTRACT_ARGUMENTS | {_METRICS_ARGUMENT} if stack.engine_metrics else _CONTRACT_ARGUMENTS
+    )
+    argv = list(stack.engine_command)
+    argv.extend(merge_serve_args(settings.extra_args or [], contract_args, owned))
     return rendered_model_rank(
         allocation, ProcessSpec(argv=argv, env=dict(settings.extra_env or {}))
     )

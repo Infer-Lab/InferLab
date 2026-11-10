@@ -338,6 +338,20 @@ A backend without `kv_store_command`, with store settings, or outside the
 name grammar fails planning; a name the Engine does not implement fails when
 the Engine refuses it before `SERVING`.
 
+An Engine that keeps its own metrics, such as per-Engine tier hit counters,
+can have InferLab allocate their port. With `engine_metrics = true` in the
+stack settings, every replica is allocated a `metrics` port, recorded with
+its other ports, and rank zero receives it as a contract argument; the
+Engine serves its metrics there on the host of its listen address, and an
+`extra_args` `--metrics-port` fails planning:
+
+```text
+  --metrics-port <port>
+```
+
+InferLab does not scrape that port; a recorded `inferlab run` attached to the
+server reads it from the server record.
+
 For a `filesystem` tier, InferLab runs no store process and does not create, inspect,
 maintain, or clean the directory; the file system, its mounts, and any
 reclaimer are infrastructure. The directory is not reserved for one server:

@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Engine receives `--kv-tier-backend <name> --kv-tier-store <host:port>`.
   Published as `inferlab-integration-specialized-engine==0.17.0`; the adapter
   protocol and the other integrations are unchanged.
+- A Specialized Engine stack can declare `engine_metrics = true` to have
+  InferLab allocate each replica a `metrics` port, recorded with its other
+  ports and passed to rank zero as `--metrics-port` ([[ADR-0079]]), so a
+  recorded run can read per-Engine counters without a fixed port colliding
+  across replicas. Stacks that do not declare it are unchanged. Published as
+  `inferlab-integration-specialized-engine==0.18.0`.
 
 ### Fixed
 

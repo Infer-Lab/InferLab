@@ -467,6 +467,51 @@ def test_a_replica_spanning_machines_renders_one_engine_per_host() -> None:
     assert "grpc://engine.example:50051" in " ".join(argv["gateway"])
 
 
+METRICS_STACK: dict[str, object] = {
+    "engine_command": ["example-token-engine", "serve"],
+    "engine_metrics": True,
+}
+
+
+def test_engine_metrics_gives_each_replica_a_metrics_port_rendered_on_rank_zero() -> None:
+    # Per-replica counters at an allocated, recorded address ([[ADR-0079]]).
+    plan = plan_serve(_plan_input(stack_settings=_stack(METRICS_STACK)))
+    assert all("metrics" in replica.ports for replica in plan.replicas)
+
+    render_input = _two_host_render_input().model_copy(
+        update={"stack_settings": _stack(METRICS_STACK)}
+    )
+    for allocation in render_input.allocations[:2]:
+        rank = allocation.root
+        assert isinstance(rank, ServeProcessAllocationModelRank)
+        rank.ports["metrics"] = EndpointAssignment(
+            host=rank.endpoint.host if rank.endpoint else "host-b.example", port=50070 + rank.rank
+        )
+    argv = {
+        process.root.process: process.root.command.argv
+        for process in render_serve(render_input).processes
+    }
+
+    host_zero = argv["server-rank-000"]
+    assert host_zero[host_zero.index("--metrics-port") + 1] == "50070"
+    assert "--metrics-port" not in argv["server-rank-001"]
+
+
+def test_without_engine_metrics_no_engine_receives_a_metrics_port() -> None:
+    plan = plan_serve(_plan_input())
+    assert all("metrics" not in replica.ports for replica in plan.replicas)
+    assert "--metrics-port" not in render_serve(_render_input()).processes[0].root.command.argv
+
+
+def test_engine_metrics_rejects_a_metrics_port_in_extra_args() -> None:
+    plan_input = _plan_input(stack_settings=_stack(METRICS_STACK))
+    plan_input.roles[0].settings["extra_args"] = SettingValue.model_validate(
+        ["--metrics-port", "9100"]
+    )
+    with pytest.raises(AdapterOperationError, match="--metrics-port"):
+        plan_serve(plan_input)
+
+
 @pytest.mark.parametrize(
     ("render_input", "message"),
     [

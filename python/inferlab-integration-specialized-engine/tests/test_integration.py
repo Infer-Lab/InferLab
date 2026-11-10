@@ -691,8 +691,8 @@ def _stack(values: dict[str, object]) -> dict[str, SettingValue]:
 
 
 def test_an_engine_provided_store_runs_from_the_stack_command_and_reaches_every_engine() -> None:
-    # tenon's store is an index its Engines join; InferLab runs it like a
-    # Mooncake master and passes the declared name unchanged ([[ADR-0078]]).
+    # InferLab runs an Engine-provided store like a Mooncake master and passes
+    # the declared name unchanged ([[ADR-0078]]).
     plan = plan_serve(
         _plan_input(
             kv_store=KvStoreInput(backend="example-store", settings={}),

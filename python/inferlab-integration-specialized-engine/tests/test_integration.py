@@ -15,12 +15,14 @@ from inferlab_adapter_sdk import (
     GatewayTargetEngine,
     KvStoreAccess,
     KvStoreInput,
+    KvStorePlan,
     Parallelism,
     PlanServeInput,
     PlanServeResult,
     ProbeServeInput,
     ProbeServeTarget,
     PromptCacheReadZeroRepresentation,
+    ReadinessProbeHttp,
     ReadinessProbeHttpTargetRegistry,
     RenderServeInput,
     ServeModelInput,
@@ -635,6 +637,29 @@ def test_a_filesystem_tier_leaves_access_to_the_engine_report() -> None:
     assert not plan.kv_store.role_access
 
 
+def _with_store(render_input: RenderServeInput, store_plan: KvStorePlan) -> RenderServeInput:
+    """The render input of a server whose Engine reaches the store InferLab
+    runs beside the Gateway."""
+    engine = render_input.allocations[0].root
+    assert isinstance(engine, ServeProcessAllocationModelRank)
+    engine.kv_store = EndpointAssignment(host="store.example", port=50100)
+    store = ServeProcessAllocation.model_validate(
+        {
+            "kind": "kv_store",
+            "process": "kv-store",
+            "process_role": "kv_store",
+            "machine": "gateway-node",
+            "devices": [],
+            "endpoint": {"host": "store.example", "port": 50100},
+            "ports": {port: {"host": "store.example", "port": 50101} for port in store_plan.ports},
+            "cache": "/cache/kv-store",
+            "launch": {"kind": "local"},
+            "kv_store": store_plan,
+        }
+    )
+    return render_input.model_copy(update={"allocations": [*render_input.allocations, store]})
+
+
 def test_a_mooncake_tier_runs_its_store_and_reaches_the_engine_at_its_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -647,15 +672,92 @@ def test_a_mooncake_tier_runs_its_store_and_reaches_the_engine_at_its_address(
     assert plan.kv_store.access_observed
     assert not plan.kv_store.role_access
 
-    render_input = _render_input()
-    engine = render_input.allocations[0].root
-    assert isinstance(engine, ServeProcessAllocationModelRank)
-    engine.kv_store = EndpointAssignment(host="store.example", port=50100)
-
-    argv = render_serve(render_input).processes[0].root.command.argv
+    processes = render_serve(_with_store(_render_input(), plan.kv_store)).processes
+    argv = processes[0].root.command.argv
 
     assert argv[argv.index("--kv-tier-backend") + 1] == "mooncake"
     assert argv[argv.index("--kv-tier-store") + 1] == "store.example:50100"
+    assert processes[-1].root.command.argv[0] == "mooncake_master"
+
+
+ENGINE_STORE_STACK: dict[str, object] = {
+    "engine_command": ["example-token-engine", "serve"],
+    "kv_store_command": ["example-token-engine", "kv-store"],
+}
+
+
+def _stack(values: dict[str, object]) -> dict[str, SettingValue]:
+    return {name: SettingValue.model_validate(value) for name, value in values.items()}
+
+
+def test_an_engine_provided_store_runs_from_the_stack_command_and_reaches_every_engine() -> None:
+    # tenon's store is an index its Engines join; InferLab runs it like a
+    # Mooncake master and passes the declared name unchanged ([[ADR-0078]]).
+    plan = plan_serve(
+        _plan_input(
+            kv_store=KvStoreInput(backend="example-store", settings={}),
+            stack_settings=_stack(ENGINE_STORE_STACK),
+        )
+    )
+    store_plan = plan.kv_store
+    assert store_plan is not None
+    assert (store_plan.backend, store_plan.implementation) == ("example-store", "example-store")
+    assert not store_plan.externally_operated
+    assert store_plan.access_observed
+    assert store_plan.ports == ["metrics"]
+    readiness = store_plan.readiness.root
+    assert isinstance(readiness, ReadinessProbeHttp)
+    assert (readiness.path, readiness.port) == ("/health", "metrics")
+
+    render_input = _with_store(_render_input(), store_plan).model_copy(
+        update={"stack_settings": _stack(ENGINE_STORE_STACK)}
+    )
+    processes = render_serve(render_input).processes
+    engine = processes[0].root.command.argv
+
+    assert engine[engine.index("--kv-tier-backend") + 1] == "example-store"
+    assert engine[engine.index("--kv-tier-store") + 1] == "store.example:50100"
+    assert processes[-1].root.command.argv == [
+        "example-token-engine",
+        "kv-store",
+        "--listen",
+        "store.example:50100",
+        "--metrics-port",
+        "50101",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("backend", "settings", "stack", "message"),
+    [
+        ("example-store", {}, {}, "kv_store_command"),
+        ("example-store", {"lease_ms": 1}, ENGINE_STORE_STACK, "takes no settings"),
+        ("Example Store", {}, ENGINE_STORE_STACK, "lowercase"),
+    ],
+)
+def test_an_engine_provided_store_is_rejected_at_planning_unless_fully_declared(
+    backend: str, settings: dict[str, object], stack: dict[str, object], message: str
+) -> None:
+    store = KvStoreInput(
+        backend=backend,
+        settings={name: SettingValue.model_validate(value) for name, value in settings.items()},
+    )
+    with pytest.raises(AdapterOperationError, match=message):
+        plan_serve(_plan_input(kv_store=store, stack_settings=_stack(stack)))
+
+
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        (["/opt/store/bin/example-store"], "not a path"),
+        (["example-token-engine", "kv-store", "--listen=0.0.0.0:1"], "--listen"),
+    ],
+)
+def test_a_kv_store_command_is_a_bare_command_that_cannot_restate_its_allocation(
+    command: list[str], message: str
+) -> None:
+    with pytest.raises(AdapterOperationError, match=message):
+        stack_settings(_stack({"kv_store_command": command}))
 
 
 def test_probe_serve_engages_a_mooncake_tier_only_at_the_store_address(

@@ -363,6 +363,11 @@ backend = "filesystem"
 kv_tier_directory = "/path/to/shared-fs/kv-tier"
 ```
 
+A Specialized Engine server may also name a store its Engine implementation
+ships, under any other backend name. The stack declares the store executable
+in `kv_store_command`, and InferLab runs it like the Mooncake master; see the
+[Specialized Engine guide](https://github.com/Infer-Lab/InferLab/blob/main/docs/specialized-engine.md#kv-tier).
+
 A cold start that resets must read nothing from the store, so a prefix-cache
 reset also clears it: vLLM resets with `reset_external=true`, which wipes the
 store, while SGLang's `/flush_cache` leaves its HiCache storage backend

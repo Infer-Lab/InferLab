@@ -1,6 +1,8 @@
 """Planning and rendering for the shared token-only Specialized Engine contract."""
 
+import re
 from concurrent.futures import ThreadPoolExecutor
+from importlib.metadata import version
 
 import inferlab_gateway_smg
 import inferlab_kvstore
@@ -37,6 +39,7 @@ from inferlab_adapter_sdk import (
     ProcessSpec,
     PromptCacheReadZeroRepresentation,
     ReadinessProbe,
+    ReadinessProbeHttp,
     ReadinessProbeProcessAlive,
     RenderedServeProcess,
     RenderServeInput,
@@ -60,6 +63,7 @@ from inferlab_adapter_sdk import (
     integration_identity,
     merge_serve_args,
     rendered_frontend,
+    rendered_kv_store,
     rendered_model_rank,
     replica_id,
     require_role,
@@ -170,23 +174,39 @@ class StackSettings(BaseModel):
         default_factory=lambda: ["inferlab-token-engine", "smg-worker"]
     )
 
+    # The leading argv of the store an Engine-provided KV store backend runs
+    # ([[ADR-0078]]).
+    kv_store_command: list[str] | None = None
+
     @model_validator(mode="after")
     def _bare_executable(self) -> "StackSettings":
-        if not self.engine_command or not self.engine_command[0]:
-            raise ValueError("engine_command must name the Engine executable")
-        if "/" in self.engine_command[0]:
-            # A path is a machine-local fact; the executable resolves on the
-            # stack environment's PATH.
-            raise ValueError(
-                f"engine_command executable {self.engine_command[0]!r} must be a bare "
-                "command name resolved on the stack environment's PATH, not a path"
-            )
+        for field, command in (
+            ("engine_command", self.engine_command),
+            ("kv_store_command", self.kv_store_command),
+        ):
+            if command is None:
+                continue
+            if not command or not command[0]:
+                raise ValueError(f"{field} must name its executable")
+            if "/" in command[0]:
+                # A path is a machine-local fact; the executable resolves on
+                # the stack environment's PATH.
+                raise ValueError(
+                    f"{field} executable {command[0]!r} must be a bare command name "
+                    "resolved on the stack environment's PATH, not a path"
+                )
         return self
 
 
 # Stack settings this contract no longer takes: the Engine reports its tier
 # publication bound at readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
 _RETIRED_STACK_SETTINGS: frozenset[str] = frozenset({"kv_tier_publication_seconds"})
+
+# What InferLab renders for an Engine-provided store: its listen address and
+# the port that serves `/health` ([[ADR-0078]]).
+_STORE_CONTRACT_ARGUMENTS: frozenset[str] = frozenset({"--listen", "--metrics-port"})
+_STORE_METRICS_PORT = "metrics"
+_STORE_BACKEND_NAME = re.compile(r"^[a-z0-9_-]+$")
 
 
 def stack_settings(values: dict[str, SettingValue]) -> dict[str, SettingValue]:
@@ -198,14 +218,17 @@ def stack_settings(values: dict[str, SettingValue]) -> dict[str, SettingValue]:
             "contract; the Engine reports kv_tier_publication_ms at readiness",
         )
     settings = validate_settings(StackSettings, values)
-    _reject_owned_options("engine_command", settings.engine_command)
+    _reject_owned_options("engine_command", settings.engine_command, _CONTRACT_ARGUMENTS)
+    _reject_owned_options(
+        "kv_store_command", settings.kv_store_command or [], _STORE_CONTRACT_ARGUMENTS
+    )
     return effective_settings(settings)
 
 
-def _reject_owned_options(field: str, arguments: list[str]) -> None:
+def _reject_owned_options(field: str, arguments: list[str], owned: frozenset[str]) -> None:
     for argument in arguments:
         name, _separator, _value = argument.partition("=")
-        if name in _CONTRACT_ARGUMENTS:
+        if name in owned:
             raise AdapterOperationError(
                 AdapterErrorCode.invalid_settings,
                 f"{field} entry {argument!r} names contract argument {name!r}, which "
@@ -224,7 +247,7 @@ def _settings(values: dict[str, SettingValue]) -> EngineContractSettings:
     settings = validate_settings(EngineContractSettings, values)
     # The sentinel overrides Engine options only; no declaration may redirect
     # an allocation ([[RFC-0003:C-SPECIALIZED-ENGINE]]).
-    _reject_owned_options("extra_args", settings.extra_args or [])
+    _reject_owned_options("extra_args", settings.extra_args or [], _CONTRACT_ARGUMENTS)
     for name in _DEVICE_VISIBILITY:
         if name in (settings.extra_env or {}):
             raise AdapterOperationError(
@@ -258,12 +281,65 @@ def _public_endpoint(worker_count: int) -> EndpointDeclaration:
 
 
 def _kv_store_plan(input: PlanServeInput) -> KvStorePlan | None:
-    """The declared tier — a `mooncake` store InferLab runs, or a `filesystem`
-    directory each machine binds — whose access and publication bound every
-    Engine reports at readiness ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
-    if input.kv_store is None:
+    """The declared tier — a `mooncake` store InferLab runs, a `filesystem`
+    directory each machine binds, or a store the Engine provides — whose access
+    and publication bound every Engine reports at readiness
+    ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
+    store = input.kv_store
+    if store is None:
         return None
-    return inferlab_kvstore.plan(input.kv_store).model_copy(update={"access_observed": True})
+    if store.backend in inferlab_kvstore.BACKENDS:
+        return inferlab_kvstore.plan(store).model_copy(update={"access_observed": True})
+    if not _STORE_BACKEND_NAME.match(store.backend):
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"KV store backend {store.backend!r} is not a name of lowercase ASCII letters, "
+            "digits, '-', and '_'",
+        )
+    if store.settings:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"Engine-provided KV store backend {store.backend!r} takes no settings; "
+            "put store options in the stack's kv_store_command",
+        )
+    if validate_settings(StackSettings, input.stack_settings or {}).kv_store_command is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_settings,
+            f"Engine-provided KV store backend {store.backend!r} requires the stack setting "
+            "kv_store_command, the store executable the Engine implementation provides",
+        )
+    return KvStorePlan(
+        backend=store.backend,
+        implementation=store.backend,
+        implementation_version=version(_ADAPTER_DISTRIBUTION),
+        effective_settings={},
+        access_observed=True,
+        ports=[_STORE_METRICS_PORT],
+        readiness=ReadinessProbe(root=ReadinessProbeHttp(path="/health", port=_STORE_METRICS_PORT)),
+    )
+
+
+def _render_store(
+    input: RenderServeInput, allocation: ServeProcessAllocationKvStore
+) -> RenderedServeProcess:
+    if allocation.kv_store.backend in inferlab_kvstore.BACKENDS:
+        return inferlab_kvstore.render(allocation)
+    command = validate_settings(StackSettings, input.stack_settings or {}).kv_store_command
+    metrics = allocation.ports.get(_STORE_METRICS_PORT)
+    if command is None or metrics is None:
+        raise AdapterOperationError(
+            AdapterErrorCode.invalid_request,
+            f"KV store allocation {allocation.process!r} lacks the stack's kv_store_command "
+            "or its metrics port",
+        )
+    argv = [
+        *command,
+        "--listen",
+        authority(allocation.endpoint.host, allocation.endpoint.port),
+        "--metrics-port",
+        str(metrics.port),
+    ]
+    return rendered_kv_store(allocation, ProcessSpec(argv=argv, env={}))
 
 
 def _plan_engine_role(
@@ -573,16 +649,12 @@ def _require_gateway(allocation: object, engine_role: str) -> ServeProcessAlloca
     return allocation
 
 
-def _tier_location(
-    store: EndpointAssignment | None, directory: str | None
-) -> tuple[str, str] | None:
-    """The tier backend and location rendered for an Engine: the `mooncake`
-    store's address, or the machine's bound `filesystem` directory."""
+def _tier_location(store: EndpointAssignment | None, directory: str | None) -> str | None:
+    """The tier location rendered for an Engine: the address of the store
+    InferLab runs, or the machine's bound `filesystem` directory."""
     if store is not None:
-        return mooncake.BACKEND, mooncake.client_address(store)
-    if directory is not None:
-        return filesystem.BACKEND, directory
-    return None
+        return mooncake.client_address(store)
+    return directory
 
 
 def _rendezvous(host_zero: ServeProcessAllocationModelRank) -> str:
@@ -599,6 +671,7 @@ def _render_engine(
     input: RenderServeInput,
     allocation: ServeProcessAllocationModelRank,
     rendezvous: str | None,
+    store_backend: str | None,
 ) -> RenderedServeProcess:
     """One host's Engine. Rank zero is host 0 and the replica's endpoint; on a
     replica spanning machines, every rank receives rank zero's `rendezvous`
@@ -631,9 +704,15 @@ def _render_engine(
                 rendezvous,
             ]
         )
-    tier = _tier_location(allocation.kv_store, allocation.kv_tier_directory)
-    if tier is not None:
-        backend, location = tier
+    location = _tier_location(allocation.kv_store, allocation.kv_tier_directory)
+    if location is not None:
+        backend = filesystem.BACKEND if allocation.kv_store is None else store_backend
+        if backend is None:
+            raise AdapterOperationError(
+                AdapterErrorCode.invalid_request,
+                f"Engine allocation {allocation.process!r} names a KV store the render "
+                "input does not allocate",
+            )
         contract_args.extend(["--kv-tier-backend", backend, "--kv-tier-store", location])
     # A prefill/decode Engine learns its role, the declared transfer
     # mechanism, and, on prefill, the bootstrap port its decode counterparts
@@ -740,8 +819,9 @@ def _render_prefill_decode(input: RenderServeInput) -> RenderServeResult:
             "the prefill/decode workflow requires Engine allocations, one fused frontend, "
             "and at most one KV store",
         )
-    processes = [inferlab_kvstore.render(store) for store in stores]
-    processes.extend(_render_engine(input, engine, None) for engine in engines)
+    processes = [_render_store(input, store) for store in stores]
+    backend = stores[0].kv_store.backend if stores else None
+    processes.extend(_render_engine(input, engine, None, backend) for engine in engines)
     processes.append(inferlab_gateway_smg.render_pd_frontend(frontends[0], engines))
     return RenderServeResult(integration=_identity(), processes=processes)
 
@@ -796,14 +876,17 @@ def render_serve(input: RenderServeInput) -> RenderServeResult:
         )
     _require_gateway(frontend_candidates[0], engines[0].role)
 
+    backend = stores[0].kv_store.backend if stores else None
     processes: list[RenderedServeProcess] = []
     for allocation in allocations:
         if isinstance(allocation, ServeProcessAllocationModelRank):
-            processes.append(_render_engine(input, allocation, rendezvous[allocation.process]))
+            processes.append(
+                _render_engine(input, allocation, rendezvous[allocation.process], backend)
+            )
         elif isinstance(allocation, ServeProcessAllocationFrontend):
             processes.append(_render_gateway(allocation, engines))
         elif isinstance(allocation, ServeProcessAllocationKvStore):
-            processes.append(inferlab_kvstore.render(allocation))
+            processes.append(_render_store(input, allocation))
     return RenderServeResult(integration=_identity(), processes=processes)
 
 
@@ -856,7 +939,7 @@ def probe_serve(input: ProbeServeInput) -> ProbeServeResult:
     location InferLab rendered for it, with the Engine's own access and
     publication bound ([[RFC-0003:C-SPECIALIZED-ENGINE]])."""
     tiers = [_tier_location(input.kv_store, target.kv_tier_directory) for target in input.processes]
-    locations = [tier[1] for tier in tiers if tier is not None]
+    locations = [tier for tier in tiers if tier is not None]
     if not input.processes or len(locations) != len(input.processes):
         raise AdapterOperationError(
             AdapterErrorCode.invalid_request,

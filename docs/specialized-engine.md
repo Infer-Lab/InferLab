@@ -269,7 +269,7 @@ policy belong in an `engine_command` wrapper on the stack environment's `PATH`.
 
 ## KV tier
 
-A server may declare a KV tier with one of two backends. A `mooncake` tier is
+A server may declare a KV tier with one of three kinds of backend. A `mooncake` tier is
 a Mooncake Store master that InferLab runs as its own zero-device process
 beside the Gateway: it starts before every Engine and stops after them, and
 each Engine receives its address:
@@ -307,15 +307,46 @@ Every Engine on the machine receives the directory unchanged:
   --kv-tier-store <kv_tier_directory>
 ```
 
-InferLab runs no store process for the tier and does not create, inspect,
+An Engine-provided tier is a store the Engine implementation ships, named by
+any backend other than `mooncake` or `filesystem` (lowercase ASCII letters,
+digits, `-`, and `_`). The stack names the store executable in
+`kv_store_command`, validated like `engine_command`, and the backend takes no
+settings; store options belong in the command:
+
+```toml
+[stacks.engine.settings]
+engine_command = ["example-token-engine", "serve"]
+kv_store_command = ["example-token-engine", "kv-store"]
+
+[servers.engine.kv_store]
+backend = "example-store"
+```
+
+InferLab runs the store exactly as it runs a Mooncake master — zero devices,
+beside the Gateway, started and ready before every Engine, stopped after
+them, and failing the server if it exits — as
+`kv_store_command --listen <host:port> --metrics-port <port>`, ready once
+`GET /health` on the metrics port answers 200. Each Engine receives the
+declared name unchanged with the store's address:
+
+```text
+  --kv-tier-backend example-store
+  --kv-tier-store <host:port>
+```
+
+A backend without `kv_store_command`, with store settings, or outside the
+name grammar fails planning; a name the Engine does not implement fails when
+the Engine refuses it before `SERVING`.
+
+For a `filesystem` tier, InferLab runs no store process and does not create, inspect,
 maintain, or clean the directory; the file system, its mounts, and any
 reclaimer are infrastructure. The directory is not reserved for one server:
 other servers, workspaces, or teams may share it, and keeping it undisturbed
 during a measurement is the responsibility of whoever runs the measurement. A
 server whose machine binds no directory fails resolution, naming the machine.
 Tier tuning, such as a capacity, snapshot interval, or timeout, is an Engine
-argument for either backend. An Engine that implements only one backend
-rejects the other before it reports `SERVING`, naming the option.
+argument for every backend. An Engine rejects a backend it does not implement
+before it reports `SERVING`, naming the option.
 
 An Engine given a tier may serve before it reaches the tier and keeps serving
 if it loses it, so readiness alone does not show the tier engaged. Its

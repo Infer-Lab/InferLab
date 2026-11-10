@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A Specialized Engine server can run a KV store its Engine implementation
+  ships ([[ADR-0078]]). Any KV store backend other than `mooncake` and
+  `filesystem` names such a store; the stack declares its executable in
+  `kv_store_command`, and the backend takes no settings. InferLab runs it like
+  the Mooncake master, as `kv_store_command --listen <host:port>
+  --metrics-port <port>`, ready on `GET /health` of the metrics port, and every
+  Engine receives `--kv-tier-backend <name> --kv-tier-store <host:port>`.
+  Published as `inferlab-integration-specialized-engine==0.17.0`; the adapter
+  protocol and the other integrations are unchanged.
+
 ### Fixed
 
 - A Specialized Engine KV store can be judged engaged. The integration reads

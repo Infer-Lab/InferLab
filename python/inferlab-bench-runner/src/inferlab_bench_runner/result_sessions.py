@@ -14,6 +14,7 @@ from inferlab_measurement_sdk import (
     BenchSessionTurnResult,
     ClientStatus,
     JsonObject,
+    read_json_lines,
 )
 
 from inferlab_bench_runner.aiperf import aiperf_session_population_layout
@@ -38,18 +39,8 @@ def _session_population(
     if request.population is None:
         return [], ["linear-session result has no frozen population"]
     rows: list[tuple[str, list[float]]] = []
-    try:
-        lines = Path(request.population.path).read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        return [], [f"linear-session population is unreadable: {error}"]
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as error:
-            errors.append(f"linear-session population line {line_number} is invalid: {error}")
-            continue
+    values, read_error = read_json_lines(Path(request.population.path), "linear-session population")
+    for line_number, value in values:
         if not isinstance(value, dict):
             errors.append(f"linear-session population line {line_number} is not an object")
             continue
@@ -86,6 +77,9 @@ def _session_population(
             delays.append(delay)
         if valid_turns:
             rows.append((identity, delays))
+    if read_error is not None:
+        errors.append(read_error)
+        return rows, errors
     summaries = request.population.session_templates
     if len(summaries) != len(rows):
         errors.append(

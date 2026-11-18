@@ -133,12 +133,15 @@ from .runtime import (
     PROTOCOL_VERSION,
     CaseBudgetExpired,
     CaseDeadline,
+    JsonLine,
     JsonObject,
     JsonValue,
     endpoint_url,
     load_json_object,
     parse_args,
+    parse_json_lines,
     plain_setting,
+    read_json_lines,
 )
 
 __all__ = [
@@ -239,6 +242,7 @@ __all__ = [
     "EvalTaskSourceInputWorkspaceYaml",
     "EvalTrialSummary",
     "GroupEntry",
+    "JsonLine",
     "JsonObject",
     "JsonValue",
     "MeasurementDataAssetAcquiredSource",
@@ -276,6 +280,8 @@ __all__ = [
     "failed_data_asset_preparation_result",
     "load_json_object",
     "parse_args",
+    "parse_json_lines",
     "plain_setting",
+    "read_json_lines",
     "write_result",
 ]

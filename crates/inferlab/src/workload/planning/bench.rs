@@ -787,44 +787,60 @@ fn resolve_bench_request_source(
             output_stop: *output_stop,
             prefix_sharing: prefix_sharing.clone(),
             shared_system_content: shared_system_content.clone(),
-            corpus: corpus.as_ref().map(|corpus| {
-                let resolved_path = workspace_root.join(&corpus.path);
-                // The corpus token length is tokenizer-owned and stays
-                // unresolved at plan time; only the byte digest is observed
-                // locally, absent when the file is unreadable.
-                let observed_sha256 = std::fs::read(&resolved_path)
-                    .ok()
-                    .map(|bytes| base16ct::lower::encode_string(&Sha256::digest(&bytes)));
-                ResolvedBenchCorpus {
-                    path: corpus.path.clone(),
-                    expected_sha256: corpus.expected_sha256.clone(),
-                    resolved_path,
-                    observed_sha256,
-                }
-            }),
-            images: images.as_ref().map(|images| {
-                ResolvedBenchImages {
-                    width: images.width,
-                    height: images.height,
-                    count: images.count,
-                    source: images.source.as_ref().map(|source| {
-                        let resolved_path = workspace_root.join(&source.path);
-                        // Plan time observes the enumeration digest
-                        // best-effort; a missing, unreadable, or empty
-                        // directory records no digest and preparation owns
-                        // the typed failure.
-                        let observed_sha256 =
-                            crate::digest::hash_directory_entries(&resolved_path).ok();
-                        ResolvedBenchImageSource {
-                            path: source.path.clone(),
-                            resolved_path,
-                            expected_sha256: source.expected_sha256.clone(),
-                            observed_sha256,
-                            sampling: source.sampling,
-                        }
-                    }),
-                }
-            }),
+            // The corpus token length is tokenizer-owned and stays
+            // unresolved at plan time; the declared local bytes are read here
+            // so a missing or altered corpus fails before anything launches
+            // ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+            corpus: corpus
+                .as_ref()
+                .map(|corpus| {
+                    let resolved_path = workspace_root.join(&corpus.path);
+                    let observed_sha256 = crate::digest::hash_file(&resolved_path)?;
+                    require_declared_digest(
+                        &resolved_path,
+                        corpus.expected_sha256.as_deref(),
+                        &observed_sha256,
+                    )?;
+                    Ok::<_, InferlabError>(ResolvedBenchCorpus {
+                        path: corpus.path.clone(),
+                        expected_sha256: corpus.expected_sha256.clone(),
+                        resolved_path,
+                        observed_sha256: Some(observed_sha256),
+                    })
+                })
+                .transpose()?,
+            images: images
+                .as_ref()
+                .map(|images| {
+                    let source = images
+                        .source
+                        .as_ref()
+                        .map(|source| {
+                            let resolved_path = workspace_root.join(&source.path);
+                            let observed_sha256 =
+                                crate::digest::hash_directory_entries(&resolved_path)?;
+                            require_declared_digest(
+                                &resolved_path,
+                                source.expected_sha256.as_deref(),
+                                &observed_sha256,
+                            )?;
+                            Ok::<_, InferlabError>(ResolvedBenchImageSource {
+                                path: source.path.clone(),
+                                resolved_path,
+                                expected_sha256: source.expected_sha256.clone(),
+                                observed_sha256: Some(observed_sha256),
+                                sampling: source.sampling,
+                            })
+                        })
+                        .transpose()?;
+                    Ok::<_, InferlabError>(ResolvedBenchImages {
+                        width: images.width,
+                        height: images.height,
+                        count: images.count,
+                        source,
+                    })
+                })
+                .transpose()?,
         }),
         BenchRequestSource::RandomMixture {
             prompt: _,
@@ -912,12 +928,17 @@ fn resolve_bench_request_source(
         } => {
             let resolved_path = workspace_root.join(path);
             let observation = observe_replay_population(&resolved_path)?;
+            require_declared_digest(
+                &resolved_path,
+                expected_sha256.as_deref(),
+                &observation.sha256,
+            )?;
             Ok(ResolvedBenchRequestSource::Replay {
                 path: path.clone(),
                 expected_sha256: expected_sha256.clone(),
                 prefix_sharing: prefix_sharing.clone(),
                 resolved_path,
-                observed_sha256: observation.sha256,
+                observed_sha256: Some(observation.sha256),
                 observed_entries: observation.entries,
                 observed_tpot_applicability: observation.tpot_applicability,
             })
@@ -925,24 +946,39 @@ fn resolve_bench_request_source(
     }
 }
 
-/// File facts observed while resolving a replay source. An unreadable or
-/// malformed file yields absent observations rather than fabricated facts;
-/// preparation owns the typed failure ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+/// A declared local source whose observed digest differs from its declared
+/// one fails resolution, before any process launches
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+fn require_declared_digest(
+    path: &Path,
+    expected: Option<&str>,
+    observed: &str,
+) -> Result<(), InferlabError> {
+    match expected {
+        Some(expected) if expected != observed => Err(InferlabError::DatasetDigest {
+            path: path.to_path_buf(),
+            expected: expected.to_owned(),
+            observed: observed.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// File facts observed while resolving a replay source. A missing or
+/// unreadable file fails resolution; a malformed file yields absent entry
+/// facts, and preparation owns its typed failure
+/// ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
 struct ReplayObservation {
-    sha256: Option<String>,
+    sha256: String,
     entries: Option<u32>,
     tpot_applicability: Option<BenchTpotApplicability>,
 }
 
 fn observe_replay_population(resolved_path: &Path) -> Result<ReplayObservation, InferlabError> {
-    let unavailable = ReplayObservation {
-        sha256: None,
-        entries: None,
-        tpot_applicability: None,
-    };
-    let Ok(bytes) = std::fs::read(resolved_path) else {
-        return Ok(unavailable);
-    };
+    let bytes = std::fs::read(resolved_path).map_err(|source| InferlabError::Read {
+        path: resolved_path.to_path_buf(),
+        source,
+    })?;
     let sha256 = base16ct::lower::encode_string(&Sha256::digest(&bytes));
     let mut entries = 0_u32;
     let mut saw_output_one = false;
@@ -963,7 +999,7 @@ fn observe_replay_population(resolved_path: &Path) -> Result<ReplayObservation, 
             // A malformed entry fails preparation with the runner's typed
             // error; resolution only records the byte digest.
             return Ok(ReplayObservation {
-                sha256: Some(sha256),
+                sha256: sha256.clone(),
                 entries: None,
                 tpot_applicability: None,
             });
@@ -976,7 +1012,7 @@ fn observe_replay_population(resolved_path: &Path) -> Result<ReplayObservation, 
             Some(output) if output >= 2 => saw_output_many = true,
             _ => {
                 return Ok(ReplayObservation {
-                    sha256: Some(sha256),
+                    sha256: sha256.clone(),
                     entries: None,
                     tpot_applicability: None,
                 });
@@ -992,7 +1028,7 @@ fn observe_replay_population(resolved_path: &Path) -> Result<ReplayObservation, 
         });
     }
     Ok(ReplayObservation {
-        sha256: Some(sha256),
+        sha256,
         entries: Some(entries),
         tpot_applicability: Some(if saw_output_many {
             BenchTpotApplicability::Applicable
@@ -1312,8 +1348,7 @@ timeout_seconds = 60
     }
 
     #[test]
-    fn replay_resolution_reports_absent_facts_for_a_missing_file()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn replay_resolution_fails_for_a_missing_file() -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
         let definition = toml::from_str::<BenchDefinition>(
             r#"
@@ -1325,19 +1360,14 @@ timeout_seconds = 60
 "#,
         )?;
 
-        let resolved = resolve_bench_definition(&definition, &definition, workspace.path())?;
-        let ResolvedBenchSource::Requests {
-            request_source:
-                ResolvedBenchRequestSource::Replay {
-                    observed_sha256: None,
-                    observed_entries: None,
-                    observed_tpot_applicability: None,
-                    ..
-                },
-        } = &resolved.source
+        let Err(error) = resolve_bench_definition(&definition, &definition, workspace.path())
         else {
-            return Err(std::io::Error::other("missing replay file fabricated facts").into());
+            return Err(std::io::Error::other("a missing replay file resolved").into());
         };
+        assert!(
+            error.to_string().contains("populations/missing.jsonl"),
+            "{error}"
+        );
         Ok(())
     }
 
@@ -1469,21 +1499,12 @@ timeout_seconds = 60
 "#,
         )?;
         validate_bench("corpus-missing", &missing)?;
-        let resolved = resolve_bench_definition(&missing, &missing, workspace.path())?;
-        let ResolvedBenchSource::Requests {
-            request_source:
-                ResolvedBenchRequestSource::Random {
-                    corpus:
-                        Some(ResolvedBenchCorpus {
-                            observed_sha256: None,
-                            ..
-                        }),
-                    ..
-                },
-        } = &resolved.source
-        else {
-            return Err(std::io::Error::other("missing corpus file fabricated facts").into());
+        // A missing corpus fails resolution, before any process launches
+        // ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+        let Err(error) = resolve_bench_definition(&missing, &missing, workspace.path()) else {
+            return Err(std::io::Error::other("a missing corpus resolved").into());
         };
+        assert!(error.to_string().contains("corpus/missing.txt"), "{error}");
         Ok(())
     }
 
@@ -1534,7 +1555,7 @@ timeout_seconds = 60
     }
 
     #[test]
-    fn random_images_resolve_observed_digest_and_observe_missing_directories()
+    fn random_images_resolve_observed_digest_and_reject_missing_directories()
     -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
         let pool = workspace.path().join("images/pool");
@@ -1596,25 +1617,10 @@ timeout_seconds = 60
 "#,
         )?;
         validate_bench("images-missing", &missing)?;
-        let resolved = resolve_bench_definition(&missing, &missing, workspace.path())?;
-        let ResolvedBenchSource::Requests {
-            request_source:
-                ResolvedBenchRequestSource::Random {
-                    images:
-                        Some(ResolvedBenchImages {
-                            source:
-                                Some(ResolvedBenchImageSource {
-                                    observed_sha256: None,
-                                    ..
-                                }),
-                            ..
-                        }),
-                    ..
-                },
-        } = &resolved.source
-        else {
-            return Err(std::io::Error::other("missing image directory fabricated facts").into());
+        let Err(error) = resolve_bench_definition(&missing, &missing, workspace.path()) else {
+            return Err(std::io::Error::other("a missing image directory resolved").into());
         };
+        assert!(error.to_string().contains("images/missing"), "{error}");
         Ok(())
     }
 

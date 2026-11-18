@@ -7,7 +7,6 @@ directory, and never selected, filtered, or transformed
 """
 
 import hashlib
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +27,7 @@ from inferlab_measurement_sdk import (
     BenchRequestSourceInputReplay,
     ClientStatus,
     JsonObject,
+    parse_json_lines,
 )
 
 from inferlab_bench_runner.chat_tokens import required_messages_content_tokens
@@ -131,17 +131,10 @@ def prepare_replay_population(
     source_bytes = source_path.read_bytes()
     prompt = request.prompt.root
     flat_prompt = isinstance(prompt, (BenchPromptInputFlat, BenchPromptInputRenderedChat))
-    entries: list[ReplayEntry] = []
-    for line_number, raw_line in enumerate(source_bytes.split(b"\n"), start=1):
-        if not raw_line.strip():
-            continue
-        try:
-            value = json.loads(raw_line)
-        except json.JSONDecodeError as error:
-            raise ValueError(
-                f"replay population line {line_number}: invalid JSON ({error})"
-            ) from None
-        entries.append(_parse_entry(value, line_number, flat_prompt))
+    rows, read_error = parse_json_lines(source_bytes.decode("utf-8"), "replay population")
+    entries = [_parse_entry(value, line_number, flat_prompt) for line_number, value in rows]
+    if read_error is not None:
+        raise ValueError(read_error)
     if len(entries) < required:
         return BenchPopulationPreparationResult(
             schema_version=SCHEMA_VERSION,

@@ -10,6 +10,7 @@ from inferlab_bench_runner.population import prepare_population
 from inferlab_bench_runner.population_sharegpt import (
     effective_inter_turn_delay,
 )
+from inferlab_bench_runner.population_types import json_line
 from inferlab_bench_runner.result_sessions import session_result_evidence
 from inferlab_measurement_sdk import (
     PROTOCOL_VERSION,
@@ -459,10 +460,7 @@ def test_session_result_preserves_native_continuation_after_a_failed_turn(
     assert evidence.turns[1].inter_turn_delay_reconciled is None
 
 
-def test_performance_session_result_reads_normalized_records_and_marks_raw_dimensions(
-    tmp_path: Path,
-) -> None:
-    value = session_request(tmp_path, artifact_level="performance")
+def write_performance_session_records(tmp_path: Path) -> Path:
     records_path = tmp_path / "session-records.jsonl"
     record_lines: list[str] = []
     timing_sequence = 0
@@ -503,6 +501,14 @@ def test_performance_session_result_reads_normalized_records_and_marks_raw_dimen
                 timing_sequence += 1
                 previous_end = request_end
     records_path.write_text("\n".join(record_lines) + "\n", encoding="utf-8")
+    return records_path
+
+
+def test_performance_session_result_reads_normalized_records_and_marks_raw_dimensions(
+    tmp_path: Path,
+) -> None:
+    value = session_request(tmp_path, artifact_level="performance")
+    records_path = write_performance_session_records(tmp_path)
 
     evidence, error = session_result_evidence(
         value, records_path, tmp_path / "session-raw.jsonl", FakeTokenizer()
@@ -530,3 +536,44 @@ def test_performance_session_result_reads_normalized_records_and_marks_raw_dimen
         "preceding_live_response_pairwise_history",
         "raw_native_request_reconciliation",
     ]
+
+
+def test_session_result_reads_a_population_row_holding_a_line_separator_whole(
+    tmp_path: Path,
+) -> None:
+    value = session_request(tmp_path, artifact_level="performance")
+    assert value.population is not None
+    population_path = Path(value.population.path)
+    rows = [json.loads(line) for line in population_path.read_bytes().split(b"\n") if line]
+    rows[1]["turns"][1]["text"] = "first line\u2028second line"
+    population_path.write_bytes(b"".join(json_line(row) for row in rows))
+    records_path = write_performance_session_records(tmp_path)
+
+    evidence, error = session_result_evidence(
+        value, records_path, tmp_path / "session-raw.jsonl", FakeTokenizer()
+    )
+
+    assert error is None
+    assert evidence.population_slice_reconciled is True
+    assert evidence.warmup.succeeded_sessions == 2
+    assert evidence.profiling.succeeded_sessions == 6
+
+
+def test_session_result_reports_an_invalid_population_row_once(tmp_path: Path) -> None:
+    value = session_request(tmp_path, artifact_level="performance")
+    assert value.population is not None
+    population_path = Path(value.population.path)
+    lines = population_path.read_text(encoding="utf-8").split("\n")
+    lines[1] = lines[1][: len(lines[1]) // 2]
+    population_path.write_text("\n".join(lines), encoding="utf-8")
+    records_path = write_performance_session_records(tmp_path)
+
+    evidence, error = session_result_evidence(
+        value, records_path, tmp_path / "session-raw.jsonl", FakeTokenizer()
+    )
+
+    assert evidence.population_slice_reconciled is False
+    assert error is not None
+    assert "linear-session population line 2 is invalid JSON" in error
+    assert "summar" not in error
+    assert "line 3" not in error

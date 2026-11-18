@@ -321,6 +321,19 @@ def test_request_counts_preserve_complete_records_before_a_partial_line(
     assert "line 2" in error
 
 
+def test_request_counts_read_a_record_holding_a_line_separator_whole(tmp_path: Path) -> None:
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        '{"metadata":{"benchmark_phase":"profiling"},"text":"a\u2028b","error":null}\n'
+        '{"metadata":{"benchmark_phase":"profiling"},"error":null}\n',
+        encoding="utf-8",
+    )
+
+    completed, failed, error = request_counts(records)
+
+    assert (completed, failed, error) == (2, 0, None)
+
+
 def test_warmup_counts_use_the_phase_tagged_normalized_records(tmp_path: Path) -> None:
     records = tmp_path / "raw.jsonl"
     records.write_text(

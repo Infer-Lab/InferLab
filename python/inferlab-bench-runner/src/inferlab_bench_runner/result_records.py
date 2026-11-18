@@ -1,31 +1,32 @@
 """Read the pinned AIPerf normalized-record artifacts by benchmark phase."""
 
-import json
 from pathlib import Path
 from typing import cast
 
-from inferlab_measurement_sdk import JsonObject
+from inferlab_measurement_sdk import JsonObject, read_json_lines
+
+
+def _append_phase_records(
+    path: Path, artifact: str, phase: str, records: list[JsonObject]
+) -> str | None:
+    rows, error = read_json_lines(path, artifact)
+    for line_number, record in rows:
+        if not isinstance(record, dict):
+            return f"{artifact} line {line_number} is not a JSON object"
+        metadata = record.get("metadata")
+        if not isinstance(metadata, dict):
+            return f"{artifact} line {line_number} has no metadata"
+        if metadata.get("benchmark_phase") == phase:
+            records.append(cast(JsonObject, record))
+    return error
 
 
 def phase_records(path: Path, phase: str) -> tuple[list[JsonObject], str | None]:
     if not path.is_file():
         return [], None
     records: list[JsonObject] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as error:
-            return records, f"invalid AIPerf records JSONL line {line_number}: {error}"
-        if not isinstance(record, dict):
-            return records, f"invalid AIPerf records JSONL object at line {line_number}"
-        metadata = record.get("metadata")
-        if not isinstance(metadata, dict):
-            return records, f"AIPerf records JSONL line {line_number} has no metadata"
-        if metadata.get("benchmark_phase") == phase:
-            records.append(cast(JsonObject, record))
-    return records, None
+    error = _append_phase_records(path, "AIPerf records", phase, records)
+    return records, error
 
 
 def profiling_records(path: Path) -> tuple[list[JsonObject], str | None]:
@@ -36,22 +37,11 @@ def raw_phase_records(path: Path, phase: str) -> tuple[list[JsonObject], str | N
     records: list[JsonObject] = []
     record_paths = [path] if path.is_file() else sorted(path.glob("raw_records_*.jsonl"))
     for record_path in record_paths:
-        for line_number, line in enumerate(
-            record_path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as error:
-                return records, f"invalid AIPerf raw records JSONL line {line_number}: {error}"
-            if not isinstance(record, dict):
-                return records, f"invalid AIPerf raw records JSONL object at line {line_number}"
-            metadata = record.get("metadata")
-            if not isinstance(metadata, dict):
-                return records, f"AIPerf raw records JSONL line {line_number} has no metadata"
-            if metadata.get("benchmark_phase") == phase:
-                records.append(cast(JsonObject, record))
+        error = _append_phase_records(
+            record_path, f"AIPerf raw records {record_path.name}", phase, records
+        )
+        if error is not None:
+            return records, error
     return records, None
 
 

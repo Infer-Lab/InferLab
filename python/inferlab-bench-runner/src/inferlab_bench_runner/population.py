@@ -2,7 +2,6 @@
 
 import importlib
 import importlib.metadata
-import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -14,6 +13,7 @@ from inferlab_measurement_sdk import (
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
     BenchRequestSourceInputReplay,
+    read_json_lines,
 )
 
 from inferlab_bench_runner.population_replay import prepare_replay_population
@@ -35,10 +35,11 @@ def _iter_parquet_rows(path: Path) -> Iterator[object]:
 
 def _iter_jsonl_rows(path: Path) -> Iterator[object]:
     """Rows of a materialized AIPerf public dataset, one JSON object per line."""
-    with path.open(encoding="utf-8") as rows:
-        for line in rows:
-            if line.strip():
-                yield json.loads(line)
+    rows, error = read_json_lines(path, "materialized public dataset")
+    if error is not None:
+        raise ValueError(error)
+    for _, row in rows:
+        yield row
 
 
 def prepare_population(

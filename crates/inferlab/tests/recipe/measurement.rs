@@ -221,6 +221,22 @@ impl TestWorkspace {
         Ok(())
     }
 
+    // A declared local source that is missing or altered fails resolution, so
+    // the run exits non-zero naming it, and no server launches or record
+    // exists ([[RFC-0004:C-BENCH-REQUEST-SOURCES]]).
+    fn assert_run_fails_before_launch(&self, needles: &[&str]) -> Result<(), Box<dyn Error>> {
+        let output = self.run()?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for needle in needles {
+            assert!(stderr.contains(needle), "{stderr}");
+        }
+        let records = self.root().join(".inferlab/records");
+        assert!(!records.exists() || fs::read_dir(&records)?.next().is_none());
+        assert!(!self.bench_marker().exists());
+        Ok(())
+    }
+
     // One workspace-local text corpus whose first two words let the fixture
     // server recognize the canonical conditioning prompt; returns the file's
     // content digest.
@@ -643,46 +659,21 @@ fn replay_dry_run_reports_observed_facts_without_fabrication() -> Result<(), Box
 }
 
 #[test]
-fn replay_digest_mismatch_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+fn replay_digest_mismatch_fails_the_run_before_launch() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.write_replay_population("populations/replay.jsonl", 40, false)?;
     workspace.configure_replay_bench("populations/replay.jsonl", Some(&"0".repeat(64)), false)?;
 
-    let output = workspace.run()?;
-    let recipe: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(recipe["benches"][0]["status"], "failed");
-    let bench_id = recipe["benches"][0]["id"]
-        .as_str()
-        .ok_or("recipe omitted its replay Bench record id")?;
-    let bench = workspace.load_record(bench_id)?;
-    assert_eq!(bench["status"], "failed");
-    let error = bench["error"].as_str().ok_or("replay bench has no error")?;
-    assert!(error.contains("SHA-256"), "{error}");
-    assert!(error.contains(&"0".repeat(64)), "{error}");
-    assert!(
-        !workspace.bench_marker().exists(),
-        "a digest mismatch must fail before the first transport request"
-    );
+    workspace.assert_run_fails_before_launch(&["populations/replay.jsonl", &"0".repeat(64)])?;
     Ok(())
 }
 
 #[test]
-fn replay_missing_file_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+fn replay_missing_file_fails_the_run_before_launch() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.configure_replay_bench("populations/missing.jsonl", None, false)?;
 
-    let output = workspace.run()?;
-    let recipe: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(recipe["benches"][0]["status"], "failed");
-    let bench_id = recipe["benches"][0]["id"]
-        .as_str()
-        .ok_or("recipe omitted its replay Bench record id")?;
-    let bench = workspace.load_record(bench_id)?;
-    assert_eq!(bench["status"], "failed");
-    assert!(
-        !workspace.bench_marker().exists(),
-        "a missing replay file must fail before the first transport request"
-    );
+    workspace.assert_run_fails_before_launch(&["populations/missing.jsonl"])?;
     Ok(())
 }
 
@@ -876,26 +867,45 @@ fn corpus_dry_run_reports_observed_facts_without_fabrication() -> Result<(), Box
 }
 
 #[test]
-fn corpus_digest_mismatch_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+fn corpus_digest_mismatch_fails_dry_run_and_run_before_the_server_launches()
+-> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
-    workspace.write_corpus("corpus/shakespeare.txt", 64)?;
+    let observed = workspace.write_corpus("corpus/shakespeare.txt", 64)?;
     workspace.configure_corpus_bench("corpus/shakespeare.txt", Some(&"0".repeat(64)), false)?;
 
-    let output = workspace.run()?;
-    let recipe: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(recipe["benches"][0]["status"], "failed");
-    let bench_id = recipe["benches"][0]["id"]
-        .as_str()
-        .ok_or("recipe omitted its corpus Bench record id")?;
-    let bench = workspace.load_record(bench_id)?;
-    assert_eq!(bench["status"], "failed");
-    let error = bench["error"].as_str().ok_or("corpus bench has no error")?;
-    assert!(error.contains("SHA-256"), "{error}");
-    assert!(error.contains(&"0".repeat(64)), "{error}");
-    assert!(
-        !workspace.bench_marker().exists(),
-        "a corpus digest mismatch must fail before the first transport request"
-    );
+    let dry_run = workspace
+        .command()
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+    let run = workspace.run()?;
+
+    for output in [&dry_run, &run] {
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("corpus/shakespeare.txt"), "{stderr}");
+        assert!(stderr.contains(&"0".repeat(64)), "{stderr}");
+        assert!(stderr.contains(&observed), "{stderr}");
+    }
+    // Resolution failed, so no server launched and no record exists.
+    let records = workspace.root().join(".inferlab/records");
+    assert!(!records.exists() || fs::read_dir(&records)?.next().is_none());
+    assert!(!workspace.bench_marker().exists());
+    Ok(())
+}
+
+#[test]
+fn a_missing_corpus_fails_the_dry_run() -> Result<(), Box<dyn Error>> {
+    let workspace = TestWorkspace::new()?;
+    workspace.configure_corpus_bench("corpus/absent.txt", Some(&"0".repeat(64)), false)?;
+
+    let output = workspace
+        .command()
+        .args(["recipe", "run", "deepseek-v4-flash-qualify", "--dry-run"])
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("corpus/absent.txt"), "{stderr}");
     Ok(())
 }
 
@@ -1137,49 +1147,22 @@ fn images_dry_run_reports_the_observed_source_digest() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn images_digest_mismatch_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+fn images_digest_mismatch_fails_the_run_before_launch() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     workspace.write_image_pool("images/pool", &[("alpha.png", b"fixture-image-alpha")])?;
     workspace.configure_images_bench(Some(("images/pool", Some(&"0".repeat(64)))))?;
 
-    let output = workspace.run()?;
-    let recipe: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(recipe["benches"][0]["status"], "failed");
-    let bench_id = recipe["benches"][0]["id"]
-        .as_str()
-        .ok_or("recipe omitted its images Bench record id")?;
-    let bench = workspace.load_record(bench_id)?;
-    assert_eq!(bench["status"], "failed");
-    let error = bench["error"].as_str().ok_or("images bench has no error")?;
-    assert!(error.contains("SHA-256"), "{error}");
-    assert!(error.contains(&"0".repeat(64)), "{error}");
-    assert!(
-        !workspace.bench_marker().exists(),
-        "an image source digest mismatch must fail before the first transport request"
-    );
+    workspace.assert_run_fails_before_launch(&["images/pool", &"0".repeat(64)])?;
     Ok(())
 }
 
 #[test]
-fn images_empty_directory_fails_preparation_before_any_case() -> Result<(), Box<dyn Error>> {
+fn images_empty_directory_fails_the_run_before_launch() -> Result<(), Box<dyn Error>> {
     let workspace = TestWorkspace::new()?;
     fs::create_dir_all(workspace.root().join("images/pool"))?;
     workspace.configure_images_bench(Some(("images/pool", None)))?;
 
-    let output = workspace.run()?;
-    let recipe: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(recipe["benches"][0]["status"], "failed");
-    let bench_id = recipe["benches"][0]["id"]
-        .as_str()
-        .ok_or("recipe omitted its images Bench record id")?;
-    let bench = workspace.load_record(bench_id)?;
-    assert_eq!(bench["status"], "failed");
-    let error = bench["error"].as_str().ok_or("images bench has no error")?;
-    assert!(error.contains("enumerates no regular files"), "{error}");
-    assert!(
-        !workspace.bench_marker().exists(),
-        "an empty image source directory must fail before the first transport request"
-    );
+    workspace.assert_run_fails_before_launch(&["images/pool", "enumerates no regular files"])?;
     Ok(())
 }
 

@@ -71,3 +71,33 @@ def load_json_object(path: Path) -> JsonObject:
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return cast(JsonObject, value)
+
+
+type JsonLine = tuple[int, object]
+
+
+def parse_json_lines(text: str, artifact: str) -> tuple[list[JsonLine], str | None]:
+    """The rows of JSON Lines text with their line numbers, and why reading
+    stopped early, if it did.
+
+    Rows split at newline only: U+2028 and the other separators that
+    `str.splitlines` honors are legal inside a JSON string. Reading stops at
+    the first invalid row, so the rows before it stay available as evidence.
+    """
+    rows: list[JsonLine] = []
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        if not line.strip(" \t\r"):
+            continue
+        try:
+            rows.append((line_number, json.loads(line)))
+        except json.JSONDecodeError as error:
+            return rows, f"{artifact} line {line_number} is invalid JSON: {error}"
+    return rows, None
+
+
+def read_json_lines(path: Path, artifact: str) -> tuple[list[JsonLine], str | None]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return [], f"{artifact} is unreadable: {error}"
+    return parse_json_lines(text, artifact)

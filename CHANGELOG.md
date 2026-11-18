@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.6] - 2026-11-17
+
 ### Added
 
 - A Specialized Engine server can run a KV store its Engine implementation
@@ -26,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Bench population or other runner-read JSON Lines artifact holding U+2028,
+  U+2029, U+0085, or another Unicode line separator inside a value is read
+  whole. The runners split such text at every Unicode separator, so a
+  ShareGPT conversation containing U+2028 became two invalid rows, every
+  later row was misnumbered, and a linear-session case whose requests all
+  completed failed its population reconciliation. Every runner JSON Lines
+  read now splits at newline only and reports an invalid row once, naming
+  the artifact and line.
+- A Bench's declared local source — a `random` source's `corpus`, an
+  `images.source` directory, or a `replay` file — that is missing,
+  unreadable, or whose digest differs from its `expected_sha256` now fails
+  resolution, naming the path and the expected and observed digests. A
+  recipe or Bench `--dry-run` exits non-zero, and a run fails before the
+  server launches, instead of after the server reached readiness when the
+  first Bench case prepared.
 - A Specialized Engine KV store can be judged engaged. The integration reads
   each Engine's `kv_tier_publication_ms` from `GetServerInfo`
   `scheduler_info`, a protobuf Struct whose numbers arrive as floats such as

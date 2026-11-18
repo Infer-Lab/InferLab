@@ -1,6 +1,5 @@
 """Reconcile a frozen request population with AIPerf-assigned identities."""
 
-import json
 from pathlib import Path
 
 from inferlab_measurement_sdk import (
@@ -9,6 +8,7 @@ from inferlab_measurement_sdk import (
     BenchRenderingAuthorityInput,
     BenchRequestSourceInputRandom,
     BenchRequestSourceInputRandomMixture,
+    read_json_lines,
 )
 
 from inferlab_bench_runner.result_records import phase_records, profiling_records
@@ -32,14 +32,12 @@ def prompt_token_reconciliation(
         BenchRenderingAuthorityInput.local_template,
     ):
         return [], None
-    try:
-        evidence_rows = [
-            json.loads(line)
-            for line in Path(population.evidence_path).read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as error:
-        return [], f"synthetic population evidence is unreadable: {error}"
+    evidence_lines, evidence_error = read_json_lines(
+        Path(population.evidence_path), "synthetic population evidence"
+    )
+    if evidence_error is not None:
+        return [], evidence_error
+    evidence_rows = [row for _, row in evidence_lines]
     records, parse_error = profiling_records(profiling_path)
     if parse_error is not None:
         return [], parse_error
@@ -104,17 +102,12 @@ def population_identity_error(
     identity_field = "session_id"
     required_identities = request.case.warmup_request_count + request.case.request_count
     population_ids: list[str] = []
-    try:
-        population_lines = Path(request.population.path).read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        return f"Bench population identities are unreadable: {error}"
-    for line_number, line in enumerate(population_lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as error:
-            return f"Bench population line {line_number} is invalid JSON: {error}"
+    population_lines, read_error = read_json_lines(
+        Path(request.population.path), "Bench population"
+    )
+    if read_error is not None:
+        return read_error
+    for line_number, row in population_lines:
         identity = row.get(identity_field) if isinstance(row, dict) else None
         if not isinstance(identity, str) or not identity:
             return f"Bench population line {line_number} has no non-empty {identity_field}"
@@ -187,15 +180,12 @@ def shared_prefix_by_session(
         or source.prefix_sharing is None
     ):
         return None, None
-    evidence_path = Path(population.evidence_path)
-    try:
-        rows = [
-            json.loads(line)
-            for line in evidence_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    except (OSError, json.JSONDecodeError) as error:
-        return None, f"population evidence {evidence_path} is unreadable: {error}"
+    evidence_lines, evidence_error = read_json_lines(
+        Path(population.evidence_path), "population evidence"
+    )
+    if evidence_error is not None:
+        return None, evidence_error
+    rows = [row for _, row in evidence_lines]
     shared: dict[int, tuple[int, int | None]] = {}
     offset = request.case.warmup_request_count
     for population_index, row in enumerate(rows):

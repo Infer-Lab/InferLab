@@ -15,6 +15,7 @@ from inferlab_measurement_sdk import (
     EvalTrialSummary,
     JsonObject,
     load_json_object,
+    read_json_lines,
 )
 
 from inferlab_eval_runner.native_contract import TrialEvidenceWriter
@@ -55,18 +56,12 @@ def repeated_native_sample_reference(
     metric, separator, native_filter = native_key.partition(",")
     if not separator or metric != definition.metric:
         return unavailable(f"repeated lm-eval metric key {native_key!r} has no native filter")
-    try:
-        lines = [
-            line
-            for line in sample_paths[0].read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        records = [json.loads(line) for line in lines]
-    except (OSError, json.JSONDecodeError) as error:
-        return unavailable(
-            f"repeated lm-eval native sample for trial {native_trial_dir.name!r} "
-            f"is unreadable: {error}"
-        )
+    sample_lines, read_error = read_json_lines(
+        sample_paths[0], f"repeated lm-eval native sample for trial {native_trial_dir.name!r}"
+    )
+    if read_error is not None:
+        return unavailable(read_error)
+    records = [record for _, record in sample_lines]
     candidates = [
         (index, record)
         for index, record in enumerate(records, 1)

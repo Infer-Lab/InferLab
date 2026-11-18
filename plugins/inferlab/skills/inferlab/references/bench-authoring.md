@@ -510,8 +510,10 @@ timeout_seconds = 900
 ```
 
 - `path` is workspace-relative; absolute paths and `..` escapes are rejected.
-  `expected_sha256` is optional; when declared, preparation verifies the file
-  before any request runs.
+  `expected_sha256` is optional. A missing file, or one whose digest differs
+  from a declared `expected_sha256`, fails resolution: `--dry-run` and the run
+  alike exit before anything launches, naming the path and, for a
+  mismatch, both digests.
 - `prompt` is required: `flat` (or `rendered_chat`) entries carry a
   `text_input` string, `server_chat` entries carry structured `messages`.
 - The file is the sole population authority. InferLab does not select,
@@ -554,7 +556,9 @@ timeout_seconds = 900
 
 - `corpus.path` follows the replay path rules, and `expected_sha256` is
   optional. Pin it whenever corpus identity matters: an edited corpus
-  otherwise silently changes the workload. Corpus content cannot be inlined
+  otherwise silently changes the workload. A missing corpus, or a digest
+  mismatch, fails resolution, so `--dry-run` catches it before the server
+  starts. Corpus content cannot be inlined
   or fetched remotely, and overrides cannot change `path` or
   `expected_sha256`.
 - Corpus slicing requires `prompt = { kind = "flat" }` (the default), because
@@ -603,7 +607,7 @@ request_source = { kind = "random", input_tokens = 512, output_tokens = 128, ima
 The path follows the corpus rules; `expected_sha256` binds the directory
 through InferLab's recursive enumeration digest (regular files ordered by
 relative path). A missing or empty directory, or a digest mismatch, fails
-preparation. `sampling` is `random-with-replacement`, `shuffle-cycle`
+resolution, before anything launches. `sampling` is `random-with-replacement`, `shuffle-cycle`
 (default), or `sequential-cycle`. Overrides cannot change the source `path`,
 digest, or `sampling`; dimensions and `count` remain overridable. Images are
 attached at run time in a sequence the Bench seed determines; frozen

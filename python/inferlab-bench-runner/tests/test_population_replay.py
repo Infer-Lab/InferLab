@@ -192,7 +192,7 @@ def test_replay_rejects_malformed_lines(tmp_path: Path) -> None:
     source = tmp_path / "replay.jsonl"
     source.write_bytes(b'{"session_id": "x", "text_input": "a b", "output_length": 4}\nnot-json\n')
 
-    with pytest.raises(ValueError, match="line 2: invalid JSON"):
+    with pytest.raises(ValueError, match="replay population line 2 is invalid JSON"):
         prepare_population(preparation_request(tmp_path, source), tokenizer=FakeTokenizer())
 
 
